@@ -1,0 +1,11 @@
+[package]
+name = "gm-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine AI companions: behavior trees driving gm-core inputs."
+
+[dependencies]
+gm-core = { workspace = true }

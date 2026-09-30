@@ -1,0 +1,13 @@
+[package]
+name = "gm-bsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine Quake BSP loader: geometry, lightmaps, PVS, hull tracing."
+
+[dependencies]
+glam = { workspace = true }
+thiserror = { workspace = true }
+gm-core = { workspace = true }

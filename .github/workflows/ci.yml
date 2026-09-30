@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, tests, assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: sudo apt-get update -q && sudo apt-get install -y -q unzip
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Fetch ericw-tools (pinned)
+        run: scripts/fetch-ericw-tools.sh
+      - name: Rebuild the test map with the pinned compiler
+        run: cargo run -q -p gm-tools --locked -- map build assets/maps/src/test_room.map --out target/ci-maps
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Asset budgets
+        run: scripts/check-budgets.sh
+      - name: Asset budgets self-test (an over-budget asset must fail)
+        run: scripts/check-budgets.sh --self-test
+
+  gates:
+    name: binary size, RAM, software render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: System packages (software Vulkan)
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1
+      - name: Build release client
+        run: cargo build --release -p gm-client --locked
+      - name: Binary size gate
+        run: SKIP_BUILD=1 scripts/check-binary-size.sh
+      - name: Binary size self-test (a 1 MiB regression must fail)
+        run: SKIP_BUILD=1 scripts/check-binary-size.sh --self-test
+      - name: Headless render + RAM gate (software Vulkan; fps is not gated here)
+        run: SKIP_BUILD=1 FRAMES=120 scripts/check-perf.sh --software
+
+  # Frame time on a real integrated GPU (PLAN.md 2.7). Enabled once a self-hosted runner exists.
+  # perf-igpu:
+  #   runs-on: [self-hosted, igpu]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: scripts/check-perf.sh --gate-fps

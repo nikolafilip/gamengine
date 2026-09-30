@@ -1,0 +1,13 @@
+[package]
+name = "gm-hub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-or-later"
+description = "gamengine hub: accounts, characters, shard registry, escrow ledger, asset ingestion."
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

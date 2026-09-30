@@ -1,0 +1,19 @@
+[package]
+name = "gm-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine CLI: map build (ericw-tools wrapper), WAD generation, asset budget lint."
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+gltf = { workspace = true }
+image = { workspace = true, features = ["jpeg"] }
+walkdir = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+gm-bsp = { workspace = true }

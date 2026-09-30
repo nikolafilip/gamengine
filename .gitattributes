@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.bsp binary
+*.lit binary
+*.wad binary
+*.lmp binary
+*.glb binary
+*.png binary
+*.ktx2 binary

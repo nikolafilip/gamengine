@@ -1,0 +1,158 @@
+//! Offscreen rendering for CI and benchmarks: no window, same renderer, optional PPM screenshot.
+
+use gm_bsp::Bsp;
+use gm_core::movement::MoveInput;
+
+use crate::app::Sim;
+use crate::render::{Gpu, Renderer, view_proj};
+use crate::stats::{FrameStats, print_bench};
+use crate::world;
+use crate::{Error, Options};
+
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+pub fn run(opts: &Options) -> Result<(), Error> {
+    let bsp = Bsp::load(&opts.map).map_err(|e| format!("loading {}: {e}", opts.map.display()))?;
+    let palette = world::load_palette(&opts.palette);
+    let mesh = world::build(&bsp, &palette);
+    let faces_total = mesh
+        .face_ranges
+        .iter()
+        .filter(|r| r.index_count > 0)
+        .count();
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let gpu = Gpu::new(&instance, None, opts.software)?;
+    let (w, h) = (opts.width.max(1), opts.height.max(1));
+    let mut renderer = Renderer::new(&gpu, FORMAT, &mesh, (w, h));
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Let the player settle on the floor, then sweep the camera like the windowed bench does.
+    let mut sim = Sim::new(&bsp);
+    let idle = MoveInput {
+        yaw: sim.yaw,
+        ..Default::default()
+    };
+    sim.advance(&bsp, &idle, 2.0);
+    let frames = opts.bench_frames.unwrap_or(120);
+    let dt = 1.0 / 60.0;
+    let mut stats = FrameStats::new();
+    let mut leaf = None;
+    for _ in 0..frames {
+        sim.yaw += 20.0 * dt;
+        let eye = sim.eye();
+        let l = bsp.leaf_for_point(eye);
+        if leaf != Some(l) {
+            leaf = Some(l);
+            if l == 0 {
+                renderer.set_visible_faces(&gpu, None);
+            } else {
+                renderer.set_visible_faces(&gpu, Some(&bsp.visible_faces(l)));
+            }
+        }
+        renderer.render(
+            &gpu,
+            &view,
+            view_proj(eye, sim.yaw, sim.pitch, w as f32 / h as f32),
+        );
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| format!("poll: {e}"))?;
+        stats.frame();
+    }
+
+    if let Some(path) = &opts.screenshot {
+        write_ppm(&gpu, &target, w, h, path)?;
+        log::info!("screenshot written to {}", path.display());
+    }
+    print_bench(
+        &stats.report(),
+        &gpu.info,
+        "headless",
+        renderer.faces_drawn,
+        faces_total,
+    );
+    Ok(())
+}
+
+fn write_ppm(
+    gpu: &Gpu,
+    texture: &wgpu::Texture,
+    w: u32,
+    h: u32,
+    path: &std::path::Path,
+) -> Result<(), Error> {
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let bytes_per_row = (w * 4).div_ceil(align) * align;
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("screenshot"),
+        size: (bytes_per_row * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("screenshot"),
+        });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+        let _ = tx.send(r);
+    });
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("poll: {e}"))?;
+    rx.recv()??;
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    {
+        let data = buffer
+            .get_mapped_range(..)
+            .map_err(|e| format!("map range: {e}"))?;
+        for y in 0..h {
+            let row = &data[(y * bytes_per_row) as usize..(y * bytes_per_row + w * 4) as usize];
+            for px in row.chunks(4) {
+                out.extend_from_slice(&px[..3]);
+            }
+        }
+    }
+    buffer.unmap();
+    std::fs::write(path, out)?;
+    Ok(())
+}

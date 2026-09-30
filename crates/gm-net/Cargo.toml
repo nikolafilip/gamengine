@@ -1,0 +1,10 @@
+[package]
+name = "gm-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine wire protocol: bit packing, snapshot deltas, input frames, transport."
+
+[dependencies]

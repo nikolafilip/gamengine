@@ -1,0 +1,11 @@
+[package]
+name = "gm-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine shared simulation: entity vocabulary, movement, fixed-tick step. No I/O."
+
+[dependencies]
+glam = { workspace = true }

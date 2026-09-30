@@ -1,0 +1,13 @@
+[package]
+name = "gm-bot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine headless load-test client."
+
+[dependencies]
+tokio = { workspace = true }
+gm-core = { workspace = true }
+gm-net = { workspace = true }

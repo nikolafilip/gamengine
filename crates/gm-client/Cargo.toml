@@ -1,0 +1,18 @@
+[package]
+name = "gm-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine client: wgpu forward renderer, Quake movement, fixed-step loop."
+
+[dependencies]
+wgpu = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
+gm-core = { workspace = true }
+gm-bsp = { workspace = true }

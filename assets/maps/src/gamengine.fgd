@@ -1,0 +1,71 @@
+// gamengine entity definitions for TrenchBroom (Quake game profile, Standard or Valve map format).
+// Light keys are those of ericw-tools `light`; see docs/BUILDING.md.
+
+@SolidClass = worldspawn : "World" [
+    message(string) : "Map name"
+    wad(string) : "Texture WAD(s), semicolon separated; resolved via -wadpath" : "base.wad"
+    light(integer) : "Minimum light level on every surface" : 0
+    _minlight_color(color255) : "Minlight color" : "255 255 255"
+    _sunlight(integer) : "Sunlight brightness (0 = none)" : 0
+    _sunlight_mangle(string) : "Sunlight direction: yaw pitch roll" : "0 -90 0"
+    _sunlight_color(color255) : "Sunlight color" : "255 255 255"
+    _dirt(integer) : "Ambient occlusion in the lightmap (1 = on)" : 0
+    _bounce(integer) : "Bounce lighting passes" : 0
+]
+
+@baseclass = Targetname [
+    targetname(target_source) : "Name"
+]
+
+@baseclass = Target [
+    target(target_destination) : "Target"
+]
+
+@PointClass base(Targetname, Target) size(-8 -8 -8, 8 8 8) color(255 255 40) = light : "Point light. Set mangle to make it a spotlight." [
+    light(integer) : "Brightness" : 300
+    _color(color255) : "Color" : "255 255 255"
+    wait(float) : "Falloff scale (higher = shorter reach)" : 1
+    delay(choices) : "Attenuation" : 0 =
+    [
+        0 : "Linear"
+        1 : "1/x"
+        2 : "1/x^2"
+        3 : "No falloff"
+        4 : "Local minlight"
+        5 : "1/x^2 fixed scale"
+    ]
+    style(integer) : "Light style (0 = steady)" : 0
+    mangle(string) : "Spotlight direction: yaw pitch roll"
+    angle(integer) : "Spotlight cone angle" : 40
+    _deviance(float) : "Jitter radius for soft shadows" : 0
+    _samples(integer) : "Samples when _deviance is set" : 16
+]
+
+@PointClass size(-16 -16 -24, 16 16 32) color(0 255 0) = info_player_start : "Player spawn" [
+    angle(integer) : "Facing yaw" : 0
+]
+
+@SolidClass = func_detail : "Detail brushes: skipped by vis splitting, still solid" []
+@SolidClass = func_detail_wall : "Detail wall: like func_detail, and seals leaks" []
+@SolidClass = func_illusionary : "Visible, non-solid brushes" []
+@SolidClass base(Targetname) = func_wall : "Solid brush entity compiled as a separate model" []
+
+@PointClass size(-16 -16 -24, 16 16 32) color(255 0 0) = gm_spawn : "Monster/NPC spawn (Phase 3+)" [
+    archetype(choices) : "Archetype frame" : "striker" =
+    [
+        "colossus" : "Colossus"
+        "striker" : "Striker"
+        "caster" : "Caster"
+        "infiltrator" : "Infiltrator"
+    ]
+    angle(integer) : "Facing yaw" : 0
+]
+
+@SolidClass base(Targetname) = gm_zone : "Zone volume (Phase 3+): rules inside it" [
+    kind(choices) : "Kind" : 1 =
+    [
+        0 : "Safe"
+        1 : "Contested"
+        2 : "Danger"
+    ]
+]
