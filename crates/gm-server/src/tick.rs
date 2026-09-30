@@ -1,8 +1,9 @@
-//! Tick scheduling and timing metrics.
+//! Tick scheduling and timing metrics. Uses tokio's clock so turmoil's paused time works.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gm_core::tick::TickRate;
+use tokio::time::Instant;
 
 /// Absolute-timeline scheduler: tick `n` is due at `start + n * period`.
 pub struct TickScheduler {

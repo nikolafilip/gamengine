@@ -14,17 +14,18 @@ anti-cheat, and the phased implementation plan with acceptance criteria.
 Cargo.toml          workspace (crates/*)
 crates/gm-core      shared simulation: entity vocabulary, movement, fixed tick. No I/O.
 crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
-crates/gm-net       wire protocol and transport (Phase 2).
-crates/gm-client    wgpu forward renderer, Quake movement, fixed-step loop.
-crates/gm-server    authoritative tokio zone server (tick loop with metrics so far).
+crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
+crates/gm-client    wgpu forward renderer, Quake movement, fixed-step loop, zone connection.
+crates/gm-server    authoritative tokio zone server: tick loop, sessions, PVS snapshots, lag compensation.
 crates/gm-hub       accounts, characters, shard registry (Phase 4).
 crates/gm-ai        AI companions (Phase 7).
 crates/gm-tools     CLI: map build (ericw-tools wrapper), WAD generation, asset budget lint.
-crates/gm-bot       headless load-test client (Phase 4).
+crates/gm-bot       headless bots: the client's prediction code with scripted behaviour, for tests and load.
 assets/maps/src     TrenchBroom .map sources and gamengine.fgd
 assets/maps/built   compiled .bsp (+ .lit colored lightmaps)
 assets/textures     generated palette and WAD (gm-tools wad make)
 docs/               VOCABULARY.md, PROTOCOL.md, BUILDING.md
+ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
 ```
@@ -44,6 +45,17 @@ Controls: mouse look, `WASD`, `Space` jump, `Esc` releases the cursor (click to 
 exits. `--headless` renders offscreen (CI runs it under software Vulkan). All flags are listed
 in [`docs/BUILDING.md`](docs/BUILDING.md).
 
+Multiplayer (Phase 2): start a zone, add bots, join it.
+
+```sh
+cargo run --release -p gm-server -- --listen 127.0.0.1:4433 --cert-out zone-cert.der
+cargo run --release -p gm-bot -- --connect 127.0.0.1:4433 --cert zone-cert.der --bots 16 --secs 30
+cargo run --release -p gm-client -- --connect 127.0.0.1:4433 --cert zone-cert.der
+```
+
+Left click swings the sword, right click fires the crossbow, Shift dashes. The wire protocol,
+prediction and lag-compensation contract is [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
 ## CI gates
 
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then:
@@ -55,6 +67,9 @@ in [`docs/BUILDING.md`](docs/BUILDING.md).
   regression fails.
 - `scripts/check-perf.sh` — headless render under software Vulkan, RSS under
   the ceiling. Frame-time on a real iGPU needs the self-hosted runner.
+- `scripts/check-netcode.sh` — 16 bots on one zone in `turmoil` at 150 ms round
+  trip and 3% loss: under 30 KB/s per player each way, no unexplained prediction
+  corrections, melee and projectiles register; plus a real-UDP loopback test.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

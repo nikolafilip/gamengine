@@ -9,3 +9,10 @@ description = "gamengine shared simulation: entity vocabulary, movement, fixed-t
 
 [dependencies]
 glam = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "sim"
+harness = false

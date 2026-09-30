@@ -1,6 +1,6 @@
 # Entity Vocabulary
 
-Status: v0.1, Phase 0. This document is the contract for phases 2–7. `gm-core::vocab` mirrors it
+Status: v0.2, Phase 2 (section 13 added). This document is the contract for phases 2–7. `gm-core::vocab` mirrors it
 as plain data types; when the two disagree, this document wins and the code is wrong. Changes to
 either require changing both in the same commit.
 
@@ -208,3 +208,31 @@ that scales with level (there are no levels). No ability-specific server code.
 
 Final status list and stack rules. Which kits may parry projectiles. Whether `Stealth`
 distance is a status magnitude or a kit constant. The damage-type list (`MATRIX.md`).
+
+## 13. Phase 2 implementation notes
+
+`gm-core::sim` implements sections 5.1, 5.2 and 5.5 (`MeleeArc`, `Projectile`, `MoveSelf`
+dash/leap) and the tick order of section 7 for players and projectiles. `AreaEffect`,
+`ApplyStatus`, `Guard` and `Blink` are parsed and validated but do not resolve yet (Phase 3).
+
+Every player carries the same three-ability kit until point-buy exists (Phase 3). The numbers
+are placeholders for netcode work, not tuning:
+
+| Slot | Button | Script | Cooldown | Move scale |
+|---|---|---|---|---|
+| Sword | primary | at 0: `MeleeArc{reach 72, arc 90°, half_height 40, windup 90 ms, active 45 ms, recovery 160 ms, damage 35 slash, knockback 150, max_targets 3, cleave 0.7}` | 300 ms | 0.6 |
+| Crossbow | secondary | at 125 ms: `Projectile{speed 1800, gravity 0.3, radius 2, lifetime 3 s, damage 40 pierce, knockback 100, spread 0.3°, spawn Weapon(16, 4, −2)}` | 1.5 s | 0.7 |
+| Dash | ability 1 | at 0: `MoveSelf::Dash{900 u/s, 150 ms}`, 30 stamina | 1 s | 1.0 |
+
+Health 100, stamina 100 regenerating 15/s, respawn 3 s after death at a free spawn point.
+
+Timing rule: script clocks run in the **client's frame ticks** on both sides (the server passes
+each frame's tick to `step_mover`, never its own tick), so cooldowns and dash durations elapse
+identically even when the server runs two of a client's frames in one tick. The melee active
+window is re-anchored to server ticks when the swing is created.
+
+Animation states carried in snapshots (`sim::anim`): idle, run, air, windup, swing, recover,
+dash, dead. They are derived on the server and never simulated on the client.
+
+Damage never checks teams (section 8): the crossbow test in `sim.rs` fires through an ally and
+hits it.

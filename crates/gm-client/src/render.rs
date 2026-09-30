@@ -86,8 +86,120 @@ pub fn view_proj(eye: Vec3, yaw_deg: f32, pitch_deg: f32, aspect: f32) -> Mat4 {
     proj * glam::camera::rh::view::look_to_mat4(eye, forward, Vec3::Z)
 }
 
+/// A solid box drawn for an entity (players, projectiles). Hand-painted meshes arrive in Phase 6.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EntityDraw {
+    pub mins: Vec3,
+    pub maxs: Vec3,
+    pub color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EntityVertex {
+    pos: [f32; 3],
+    color: [f32; 4],
+}
+
+const ENTITY_SHADER: &str = r#"
+struct Globals { view_proj: mat4x4<f32>, params: vec4<f32> };
+@group(0) @binding(0) var<uniform> globals: Globals;
+struct VsIn { @location(0) pos: vec3<f32>, @location(1) color: vec4<f32> };
+struct VsOut { @builtin(position) clip: vec4<f32>, @location(0) color: vec4<f32> };
+@vertex fn vs_main(in: VsIn) -> VsOut {
+    var out: VsOut;
+    out.clip = globals.view_proj * vec4<f32>(in.pos, 1.0);
+    out.color = in.color;
+    return out;
+}
+@fragment fn fs_main(in: VsOut) -> @location(0) vec4<f32> { return in.color; }
+"#;
+
+/// 36 vertices of a box, faces shaded by orientation so edges read without lighting.
+fn box_vertices(out: &mut Vec<EntityVertex>, d: &EntityDraw) {
+    let (a, b) = (d.mins, d.maxs);
+    let c = |p: Vec3| [p.x, p.y, p.z];
+    let shade = |f: f32| [d.color[0] * f, d.color[1] * f, d.color[2] * f, d.color[3]];
+    // Each face: 4 corners counter-clockwise seen from outside, and a shade.
+    let faces: [([Vec3; 4], f32); 6] = [
+        // +z top
+        (
+            [
+                Vec3::new(a.x, a.y, b.z),
+                Vec3::new(b.x, a.y, b.z),
+                Vec3::new(b.x, b.y, b.z),
+                Vec3::new(a.x, b.y, b.z),
+            ],
+            1.0,
+        ),
+        // -z bottom
+        (
+            [
+                Vec3::new(a.x, b.y, a.z),
+                Vec3::new(b.x, b.y, a.z),
+                Vec3::new(b.x, a.y, a.z),
+                Vec3::new(a.x, a.y, a.z),
+            ],
+            0.35,
+        ),
+        // +x
+        (
+            [
+                Vec3::new(b.x, a.y, a.z),
+                Vec3::new(b.x, b.y, a.z),
+                Vec3::new(b.x, b.y, b.z),
+                Vec3::new(b.x, a.y, b.z),
+            ],
+            0.8,
+        ),
+        // -x
+        (
+            [
+                Vec3::new(a.x, b.y, a.z),
+                Vec3::new(a.x, a.y, a.z),
+                Vec3::new(a.x, a.y, b.z),
+                Vec3::new(a.x, b.y, b.z),
+            ],
+            0.6,
+        ),
+        // +y
+        (
+            [
+                Vec3::new(b.x, b.y, a.z),
+                Vec3::new(a.x, b.y, a.z),
+                Vec3::new(a.x, b.y, b.z),
+                Vec3::new(b.x, b.y, b.z),
+            ],
+            0.7,
+        ),
+        // -y
+        (
+            [
+                Vec3::new(a.x, a.y, a.z),
+                Vec3::new(b.x, a.y, a.z),
+                Vec3::new(b.x, a.y, b.z),
+                Vec3::new(a.x, a.y, b.z),
+            ],
+            0.5,
+        ),
+    ];
+    for (corners, f) in faces {
+        let col = shade(f);
+        for &i in &[0usize, 1, 2, 0, 2, 3] {
+            out.push(EntityVertex {
+                pos: c(corners[i]),
+                color: col,
+            });
+        }
+    }
+}
+
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    entity_pipeline: wgpu::RenderPipeline,
+    entity_buf: wgpu::Buffer,
+    entity_capacity: usize,
+    entity_vertices: Vec<EntityVertex>,
     globals_buf: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     textures_bg: wgpu::BindGroup,
@@ -403,6 +515,67 @@ impl Renderer {
             cache: None,
         });
 
+        let entity_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("entities"),
+            source: wgpu::ShaderSource::Wgsl(ENTITY_SHADER.into()),
+        });
+        let entity_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("entities"),
+            bind_group_layouts: &[Some(&globals_layout)],
+            immediate_size: 0,
+        });
+        let entity_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<EntityVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+        };
+        let entity_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("entities"),
+            layout: Some(&entity_layout),
+            vertex: wgpu::VertexState {
+                module: &entity_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(entity_vertex_layout)],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &entity_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let entity_capacity = 36 * 64;
+        let entity_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("entity vertices"),
+            size: (entity_capacity * std::mem::size_of::<EntityVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("world vertices"),
             contents: bytemuck::cast_slice(&world.vertices),
@@ -416,6 +589,10 @@ impl Renderer {
 
         Renderer {
             pipeline,
+            entity_pipeline,
+            entity_buf,
+            entity_capacity,
+            entity_vertices: Vec::new(),
             globals_buf,
             globals_bg,
             textures_bg,
@@ -477,14 +654,40 @@ impl Renderer {
         }
     }
 
-    /// Record and submit one frame into `target`.
-    pub fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, view_proj: Mat4) {
+    /// Record and submit one frame into `target`, drawing the world and `entities`.
+    pub fn render(
+        &mut self,
+        gpu: &Gpu,
+        target: &wgpu::TextureView,
+        view_proj: Mat4,
+        entities: &[EntityDraw],
+    ) {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             params: [self.lightmap_scale, 0.0, 0.0, 0.0],
         };
         gpu.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        self.entity_vertices.clear();
+        for e in entities {
+            box_vertices(&mut self.entity_vertices, e);
+        }
+        if self.entity_vertices.len() > self.entity_capacity {
+            self.entity_capacity = self.entity_vertices.len().next_power_of_two();
+            self.entity_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("entity vertices"),
+                size: (self.entity_capacity * std::mem::size_of::<EntityVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !self.entity_vertices.is_empty() {
+            gpu.queue.write_buffer(
+                &self.entity_buf,
+                0,
+                bytemuck::cast_slice(&self.entity_vertices),
+            );
+        }
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -526,6 +729,12 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
                 pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
+            if !self.entity_vertices.is_empty() {
+                pass.set_pipeline(&self.entity_pipeline);
+                pass.set_bind_group(0, &self.globals_bg, &[]);
+                pass.set_vertex_buffer(0, self.entity_buf.slice(..));
+                pass.draw(0..self.entity_vertices.len() as u32, 0..1);
             }
         }
         gpu.queue.submit([encoder.finish()]);

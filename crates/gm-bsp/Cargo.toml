@@ -11,3 +11,10 @@ description = "gamengine Quake BSP loader: geometry, lightmaps, PVS, hull tracin
 glam = { workspace = true }
 thiserror = { workspace = true }
 gm-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "trace"
+harness = false

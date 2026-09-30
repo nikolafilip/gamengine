@@ -16,3 +16,7 @@ bytemuck = { workspace = true }
 log = { workspace = true }
 gm-core = { workspace = true }
 gm-bsp = { workspace = true }
+gm-net = { workspace = true }
+tokio = { workspace = true }
+quinn = { workspace = true }
+bytes = { workspace = true }

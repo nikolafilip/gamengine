@@ -38,7 +38,10 @@ kira = "0.12.5"
 
 # server / net
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "time", "signal", "macros", "sync"] }
-quinn = "0.11.12"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "crypto"] }
+bytes = "1.12.1"
 wtransport = "0.7.2"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate"] }
 argon2 = "0.6.0"

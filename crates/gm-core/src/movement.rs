@@ -234,6 +234,31 @@ fn air_accelerate(st: &mut PlayerState, wishdir: Vec3, wishspeed: f32, vars: &Mo
     st.velocity += wishdir * accelspeed;
 }
 
+/// Move a position out of solid after it was rounded by the network (QuakeWorld's
+/// `PM_NudgePosition`). A quantized position can land exactly on a clip plane, which the hull
+/// tracer classifies as solid and then refuses to move; the true position was at least
+/// `DIST_EPSILON` away. Tries offsets of growing size on every axis and returns the first open
+/// spot, or `p` itself when nothing nearby is open.
+pub fn nudge_position<W: CollisionWorld + ?Sized>(world: &W, hull: Hull, p: Vec3) -> Vec3 {
+    let open = |q: Vec3| world.point_contents(hull, q) != crate::trace::Contents::Solid;
+    if open(p) {
+        return p;
+    }
+    for step in [1.0 / 32.0, 1.0 / 8.0, 1.0 / 4.0, 1.0 / 2.0] {
+        for &dz in &[0.0, step, -step] {
+            for &dy in &[0.0, step, -step] {
+                for &dx in &[0.0, step, -step] {
+                    let q = p + Vec3::new(dx, dy, dz);
+                    if open(q) {
+                        return q;
+                    }
+                }
+            }
+        }
+    }
+    p
+}
+
 /// Remove the component of `v` going into the plane. Returns the clipped velocity.
 pub fn clip_velocity(v: Vec3, normal: Vec3, overbounce: f32) -> Vec3 {
     let backoff = v.dot(normal) * overbounce;
@@ -382,95 +407,10 @@ fn ground_move<W: CollisionWorld>(world: &W, vars: &MoveVars, st: &mut PlayerSta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::Contents;
-
-    /// Axis-aligned solid boxes; hull sweeps via Minkowski expansion and a slab test. This is a
-    /// stand-in for the BSP hull tracer with identical trace semantics.
-    struct BoxWorld {
-        solids: Vec<(Vec3, Vec3)>,
-    }
-
-    const DIST_EPSILON: f32 = 0.03125;
-
-    impl CollisionWorld for BoxWorld {
-        fn trace(&self, hull: Hull, start: Vec3, end: Vec3) -> Trace {
-            let mut best = Trace::clear(start, end);
-            let delta = end - start;
-            for &(bmin, bmax) in &self.solids {
-                let emin = bmin - hull.maxs();
-                let emax = bmax - hull.mins();
-                let inside = |p: Vec3| (0..3).all(|a| p[a] > emin[a] && p[a] < emax[a]);
-                if inside(start) {
-                    best.start_solid = true;
-                    best.all_solid = inside(end);
-                    best.fraction = 0.0;
-                    best.end = start;
-                    best.contents = Contents::Solid;
-                    continue;
-                }
-                let mut tmin = 0.0f32;
-                let mut tmax = 1.0f32;
-                let mut hit: Option<Vec3> = None;
-                let mut miss = false;
-                for a in 0..3 {
-                    let (s, d) = (start[a], delta[a]);
-                    if d.abs() < 1e-9 {
-                        if s <= emin[a] || s >= emax[a] {
-                            miss = true;
-                            break;
-                        }
-                        continue;
-                    }
-                    let inv = 1.0 / d;
-                    let (mut t0, mut t1) = ((emin[a] - s) * inv, (emax[a] - s) * inv);
-                    let mut normal = Vec3::ZERO;
-                    normal[a] = -1.0;
-                    if t0 > t1 {
-                        core::mem::swap(&mut t0, &mut t1);
-                        normal[a] = 1.0;
-                    }
-                    // `>=` so a hull resting exactly on a surface and moving into it reports a
-                    // fraction-0 hit with the surface normal, as Quake's hull tracer does.
-                    if t0 >= tmin {
-                        tmin = t0;
-                        hit = Some(normal);
-                    }
-                    tmax = tmax.min(t1);
-                    if tmin > tmax {
-                        miss = true;
-                        break;
-                    }
-                }
-                if miss {
-                    continue;
-                }
-                if let Some(normal) = hit
-                    && tmin < best.fraction
-                {
-                    let len = delta.length();
-                    let frac = if len > 0.0 {
-                        ((tmin * len) - DIST_EPSILON).max(0.0) / len
-                    } else {
-                        0.0
-                    };
-                    best.fraction = frac;
-                    best.end = start + delta * frac;
-                    best.plane_normal = normal;
-                    best.plane_dist = normal.dot(best.end);
-                    best.contents = Contents::Empty;
-                }
-            }
-            best
-        }
-    }
+    use crate::collide::BoxWorld;
 
     fn floor_world() -> BoxWorld {
-        BoxWorld {
-            solids: vec![(
-                Vec3::new(-4096.0, -4096.0, -64.0),
-                Vec3::new(4096.0, 4096.0, 0.0),
-            )],
-        }
+        BoxWorld::floor()
     }
 
     const DT: f32 = 1.0 / 64.0;
@@ -558,10 +498,10 @@ mod tests {
     #[test]
     fn slides_along_walls() {
         let mut world = floor_world();
-        world.solids.push((
+        world.push(
             Vec3::new(64.0, -4096.0, 0.0),
             Vec3::new(128.0, 4096.0, 256.0),
-        ));
+        );
         let mut st = PlayerState::new(Vec3::new(0.0, 0.0, REST_Z));
         // Move diagonally into the wall at x = 64.
         let input = MoveInput {
@@ -591,10 +531,10 @@ mod tests {
     fn climbs_a_step_but_not_a_ledge() {
         for (height, expect_climb) in [(16.0f32, true), (24.0f32, false)] {
             let mut world = floor_world();
-            world.solids.push((
+            world.push(
                 Vec3::new(64.0, -256.0, 0.0),
                 Vec3::new(4096.0, 256.0, height),
-            ));
+            );
             let mut st = PlayerState::new(Vec3::new(0.0, 0.0, REST_Z));
             run(
                 &world,

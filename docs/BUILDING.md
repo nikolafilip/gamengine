@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Rust stable 1.85 or newer with `clippy` and `rustfmt` (`rustup component add clippy rustfmt`).
+- Rust stable 1.88 or newer with `clippy` and `rustfmt` (`rustup component add clippy rustfmt`).
 - A Vulkan driver. Linux: Arch `vulkan-radeon` / `vulkan-intel` / `vulkan-swrast`
   (software), Debian/Ubuntu `mesa-vulkan-drivers`. Without an ICD the client reports
   "no compatible GPU adapter"; `--software` selects the CPU adapter explicitly.
@@ -37,6 +37,10 @@ cargo run --release -p gm-client -- --map assets/maps/built/test_room.bsp
 | `--software` | force the software Vulkan adapter (lavapipe) |
 | `--size WxH` | window or offscreen size (default 1280x720) |
 | `--screenshot out.ppm` | headless only: write the last frame as a binary PPM |
+| `--connect ADDR` | join a zone instead of playing offline (see Multiplayer) |
+| `--cert PATH` | DER certificate of the zone, written by `gm-server --cert-out` (default `zone-cert.der`) |
+| `--name NAME` | player name for the zone (default `$USER`) |
+| `--seconds N` | exit after N seconds and print the network statistics (scripted runs) |
 
 Default present mode is **Mailbox** (no tearing, no blocking) with the frame cap, not Fifo.
 Reason, measured 2026-09-30 on Arch, X11, xfwm4 with compositing, RADV (Renoir): Fifo and
@@ -51,13 +55,37 @@ A monitor in DPMS standby lowers iGPU clocks; wake it (`xset dpms force on`) bef
 Running from a terminal without a display (ssh, tty): set `DISPLAY=:0` to use the desktop
 session's X server, or use `--headless`.
 
-## Server
+## Multiplayer (Phase 2)
+
+One zone process, any number of clients and bots, QUIC on UDP (`docs/PROTOCOL.md`).
 
 ```sh
-cargo run -p gm-server -- --hz 64 --report-secs 5
+# terminal 1: the zone. Writes its self-signed certificate for clients, prints a report every 5 s.
+cargo run --release -p gm-server -- --map assets/maps/built/test_room.bsp --listen 127.0.0.1:4433 --cert-out zone-cert.der
+
+# terminal 2: sixteen bots for 30 seconds (wander, hunter or hold behaviour)
+cargo run --release -p gm-bot -- --connect 127.0.0.1:4433 --cert zone-cert.der --bots 16 --secs 30
+
+# terminal 3: you
+cargo run --release -p gm-client -- --connect 127.0.0.1:4433 --cert zone-cert.der --name pezo
 ```
 
-Prints tick timing (mean, p99, max, overruns) every report interval. Ctrl-C stops it.
+Controls online: mouse look, `WASD`, `Space` jump, **left click** sword swing, **right click**
+crossbow bolt, **Shift** dash (30 stamina). Other players are coloured boxes, corpses are flat
+grey boxes, bolts are small yellow boxes; hand-painted meshes arrive in Phase 6. The window
+title shows health, kills, deaths, interpolation delay and the reconciliation correction count.
+
+Server flags: `--hz 64|20`, `--report-secs N`, `--ticks N` (stop after N ticks),
+`--max-players N`, `--seed N`. The report line carries per-player UDP bytes/s in both
+directions (from QUIC's own counters), snapshot payload bytes/s, tick timing, starvation,
+hits and kills. `RUST_LOG=debug` shows joins, malformed datagrams and connection ends.
+
+Bot flags: `--bots N`, `--secs N`, `--behaviour wander|hunter|hold`, `--seed N`, `--map PATH`
+(the bots predict against the same BSP). The summary prints bytes/s per bot, RTT, snapshot
+gaps and reconciliation corrections.
+
+The zone accepts empty session tokens (`--open` behaviour) until the hub exists in Phase 4.
+Clients trust exactly the certificate they are given; there is no insecure mode.
 
 ## CI gates locally
 
@@ -68,7 +96,12 @@ scripts/check-budgets.sh && scripts/check-budgets.sh --self-test
 scripts/check-binary-size.sh && scripts/check-binary-size.sh --self-test
 scripts/check-perf.sh                 # windowed, real GPU
 scripts/check-perf.sh --software      # what CI runs
+scripts/check-netcode.sh              # 16 bots at 150 ms / 3% loss in turmoil, bytes/player/s gate
 ```
+
+`check-netcode.sh` runs the turmoil acceptance test (`crates/gm-server/tests/netcode.rs`) in
+simulated time and the real-UDP loopback test; both print per-bot and per-zone numbers with
+`--nocapture`.
 
 When the release binary legitimately grows (a new feature), update the baseline in the same
 commit with `scripts/check-binary-size.sh --update-baseline` and say why in the commit message.
@@ -86,3 +119,10 @@ commit with `scripts/check-binary-size.sh --update-baseline` and say why in the 
 Entities: `worldspawn` keys `wad`, `light` (minlight), `_sunlight*`, `_dirt`, `_bounce`;
 `light` (point or spot with `mangle`); `info_player_start`; `func_detail`, `func_wall`,
 `func_illusionary`; placeholders `gm_spawn`, `gm_zone` for Phase 3.
+
+## Development helper: independent reviews
+
+`scripts/dev/gemini-review.py --prompt "..." --file docs/PROTOCOL.md --file crates/...` sends a
+prompt plus files to Google AI Studio (Gemini) and prints the answer; it needs
+`~/google-ai-studio-api-key` or `$GEMINI_API_KEY`. It is a development aid for design and code
+reviews (PROTOCOL.md section 10 records one); CI never runs it and nothing depends on it.

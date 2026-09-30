@@ -69,6 +69,7 @@ pub fn run(opts: &Options) -> Result<(), Error> {
             &gpu,
             &view,
             view_proj(eye, sim.yaw, sim.pitch, w as f32 / h as f32),
+            &[],
         );
         gpu.device
             .poll(wgpu::PollType::wait_indefinitely())

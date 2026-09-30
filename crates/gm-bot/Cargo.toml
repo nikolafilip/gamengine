@@ -5,9 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "GPL-3.0-or-later"
-description = "gamengine headless load-test client."
+description = "gamengine headless load-test client: connects, predicts, fights, reports."
 
 [dependencies]
-tokio = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+glam = { workspace = true }
+gm-bsp = { workspace = true }
 gm-core = { workspace = true }
 gm-net = { workspace = true }
+quinn = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

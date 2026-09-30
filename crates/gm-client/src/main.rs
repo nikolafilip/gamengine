@@ -6,6 +6,7 @@
 
 mod app;
 mod headless;
+mod net;
 mod render;
 mod stats;
 mod world;
@@ -17,6 +18,11 @@ pub type Error = Box<dyn std::error::Error>;
 pub struct Options {
     pub map: PathBuf,
     pub palette: PathBuf,
+    /// Zone address; `None` plays offline against the local simulation.
+    pub connect: Option<std::net::SocketAddr>,
+    /// DER certificate of the zone (written by `gm-server --cert-out`).
+    pub cert: PathBuf,
+    pub name: String,
     pub bench_frames: Option<u32>,
     pub vsync: bool,
     /// Explicit present mode (overrides `vsync`): fifo, relaxed, mailbox, immediate.
@@ -28,15 +34,20 @@ pub struct Options {
     pub width: u32,
     pub height: u32,
     pub screenshot: Option<PathBuf>,
+    /// Exit after this many seconds (scripted runs); 0 = never.
+    pub seconds: f32,
 }
 
-const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] \
-[--max-fps N] [--headless] [--software] [--size WxH] [--screenshot out.ppm]";
+const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME]] [--bench N] \
+[--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] [--size WxH] [--screenshot out.ppm] [--seconds N]";
 
 fn parse_args() -> Result<Options, String> {
     let mut o = Options {
         map: PathBuf::from("assets/maps/built/test_room.bsp"),
         palette: PathBuf::from("assets/textures/palette.lmp"),
+        connect: None,
+        cert: PathBuf::from("zone-cert.der"),
+        name: std::env::var("USER").unwrap_or_else(|_| "player".into()),
         bench_frames: None,
         vsync: true,
         present: None,
@@ -46,6 +57,7 @@ fn parse_args() -> Result<Options, String> {
         width: 1280,
         height: 720,
         screenshot: None,
+        seconds: 0.0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -53,6 +65,15 @@ fn parse_args() -> Result<Options, String> {
         match a.as_str() {
             "--map" => o.map = PathBuf::from(value("--map")?),
             "--palette" => o.palette = PathBuf::from(value("--palette")?),
+            "--connect" => {
+                o.connect = Some(
+                    value("--connect")?
+                        .parse()
+                        .map_err(|e| format!("--connect: {e}"))?,
+                )
+            }
+            "--cert" => o.cert = PathBuf::from(value("--cert")?),
+            "--name" => o.name = value("--name")?,
             "--bench" => {
                 o.bench_frames = Some(
                     value("--bench")?
@@ -78,6 +99,11 @@ fn parse_args() -> Result<Options, String> {
             "--headless" => o.headless = true,
             "--software" => o.software = true,
             "--screenshot" => o.screenshot = Some(PathBuf::from(value("--screenshot")?)),
+            "--seconds" => {
+                o.seconds = value("--seconds")?
+                    .parse()
+                    .map_err(|e| format!("--seconds: {e}"))?
+            }
             "--size" => {
                 let v = value("--size")?;
                 let (w, h) = v.split_once('x').ok_or("--size expects WxH")?;

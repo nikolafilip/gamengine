@@ -34,6 +34,8 @@ jobs:
         run: scripts/check-budgets.sh
       - name: Asset budgets self-test (an over-budget asset must fail)
         run: scripts/check-budgets.sh --self-test
+      - name: Netcode gate (turmoil, 16 bots, 150 ms, 3% loss; bytes/player/s budget)
+        run: scripts/check-netcode.sh
 
   gates:
     name: binary size, RAM, software render

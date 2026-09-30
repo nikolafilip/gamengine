@@ -17,3 +17,10 @@ max_binary_bytes = 10485760     # 10 MiB absolute (Phase 1 acceptance)
 max_regression_bytes = 1048576  # 1 MiB over ci/baselines/gm-client-size fails
 max_rss_bytes = 209715200       # 200 MiB (Phase 1 acceptance); product ceiling is 500 MiB
 min_fps = 60                    # on the reference iGPU; only checked on a self-hosted runner
+
+[net]
+# PROTOCOL.md 9: UDP bytes per player per second in each direction, 16 players, 64 Hz.
+max_bytes_per_player_s = 30720
+# Acceptance test network: round trip and independent datagram loss per direction.
+test_rtt_ms = 150
+test_loss = 0.03

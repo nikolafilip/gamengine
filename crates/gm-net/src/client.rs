@@ -1,0 +1,779 @@
+//! Client-side netcode shared by `gm-client` and `gm-bot` (PROTOCOL.md 7): prediction ring,
+//! reconciliation, reconstructed snapshot store, interpolation tracks and input datagrams.
+//! Pure state machine: no sockets, no clocks. The caller feeds ticks and datagrams.
+
+use std::collections::{BTreeMap, VecDeque};
+
+use glam::Vec3;
+use gm_core::collide::{Aabb, Composite};
+use gm_core::sim::{Action, Input, Kit, Mover, step_mover, tick_delta};
+use gm_core::tick::TickRate;
+use gm_core::trace::{CollisionWorld, Hull};
+use gm_core::vocab::EntityId;
+
+use crate::NetError;
+use crate::input::{InputDatagram, InputFrame, MAX_FRAMES};
+use crate::quant;
+use crate::snapshot::{EntityKind, EntityState, Snapshot, SpawnInfo, flags};
+
+pub const PREDICTION_RING: usize = 128;
+pub const SNAPSHOT_RING: usize = 64;
+/// Reconciliation tolerances (PROTOCOL.md 7.2).
+pub const POS_TOLERANCE: f32 = 2.0;
+pub const VEL_TOLERANCE: f32 = 16.0;
+/// Interpolation delay (PROTOCOL.md 7.3).
+pub const BASE_DELAY_TICKS: u32 = 6;
+pub const MAX_DELAY_TICKS: u32 = 13;
+const TRACK_SAMPLES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ClientStats {
+    pub inputs_sent: u64,
+    pub snapshots: u64,
+    pub stale_snapshots: u64,
+    pub unknown_baseline: u64,
+    pub decode_errors: u64,
+    /// Reconciliations above tolerance after the initial sync (any cause).
+    pub corrections: u64,
+    /// Corrections with no visible cause: no health change, no death or respawn, no other
+    /// player within body-blocking distance. These are the ones that indicate a prediction bug.
+    pub corrections_unexplained: u64,
+    pub max_correction: f32,
+    pub gaps: u64,
+    pub max_gap: u32,
+    pub predicted_ticks: u64,
+    pub replayed_ticks: u64,
+}
+
+/// Samples of one other entity.
+#[derive(Clone, Debug, Default)]
+pub struct Track {
+    pub samples: VecDeque<(u32, EntityState)>,
+    /// Server tick at which the entity was removed for us (leaves at render time).
+    pub removed_at: Option<u32>,
+}
+
+/// An interpolated view of another entity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderEntity {
+    pub id: EntityId,
+    pub kind: EntityKind,
+    pub spawn: SpawnInfo,
+    pub pos: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub anim: u8,
+    pub flags: u8,
+}
+
+impl RenderEntity {
+    pub fn alive(&self) -> bool {
+        self.flags & flags::ALIVE != 0
+    }
+}
+
+pub struct ClientState {
+    pub my_id: EntityId,
+    pub rate: TickRate,
+    pub kit: Kit,
+    /// Client input tick counter.
+    pub tick: u32,
+    pub mover: Mover,
+    ring: VecDeque<(u32, Input, Mover)>,
+    frames: VecDeque<InputFrame>,
+    snapshots: VecDeque<Snapshot>,
+    pub newest_tick: u32,
+    pub last_acked_input: u32,
+    tracks: BTreeMap<EntityId, Track>,
+    gap_ticks: VecDeque<u32>,
+    pub delay_ticks: u32,
+    last_shrink: u32,
+    pub own_health: i32,
+    pub own_alive: bool,
+    pub own_anim: u8,
+    pub stats: ClientStats,
+    synced: bool,
+    /// Server tick until which corrections count as explained by a hit, death or respawn.
+    explained_until: u32,
+    /// Actions the local prediction produced this tick (for cosmetic previews).
+    pub actions: Vec<Action>,
+}
+
+impl ClientState {
+    pub fn new(my_id: EntityId, rate: TickRate) -> ClientState {
+        ClientState {
+            my_id,
+            rate,
+            kit: Kit::phase2(rate),
+            tick: 0,
+            mover: Mover::new(Vec3::ZERO, 0.0),
+            ring: VecDeque::with_capacity(PREDICTION_RING),
+            frames: VecDeque::with_capacity(MAX_FRAMES),
+            snapshots: VecDeque::with_capacity(SNAPSHOT_RING),
+            newest_tick: 0,
+            last_acked_input: 0,
+            tracks: BTreeMap::new(),
+            gap_ticks: VecDeque::new(),
+            delay_ticks: BASE_DELAY_TICKS,
+            last_shrink: 0,
+            own_health: 0,
+            own_alive: false,
+            own_anim: 0,
+            stats: ClientStats::default(),
+            synced: false,
+            explained_until: 0,
+            actions: Vec::new(),
+        }
+    }
+
+    pub fn synced(&self) -> bool {
+        self.synced
+    }
+
+    /// Server tick the client displays for other entities, `extra_ticks` past the newest
+    /// snapshot (the caller's sub-tick progress since it arrived, at most about one tick).
+    pub fn render_tick(&self, extra_ticks: f32) -> f32 {
+        if self.newest_tick == 0 {
+            return 0.0;
+        }
+        self.newest_tick as f32 + extra_ticks.clamp(0.0, 1.5) - self.delay_ticks as f32
+    }
+
+    /// `view_tick` for the next input datagram (PROTOCOL.md 4).
+    pub fn view_tick(&self) -> u32 {
+        let t = self.render_tick(0.0);
+        if t < 1.0 { 0 } else { t.floor() as u32 }
+    }
+
+    /// Advance the own entity by one client tick and build the input datagram to send.
+    /// Prediction runs on the **dequantized wire input**, exactly what the server will run
+    /// (PROTOCOL.md 2); predicting with the raw float yaw drifts about a unit every few seconds.
+    pub fn local_tick(&mut self, world: &dyn CollisionWorld, input: Input) -> InputDatagram {
+        let frame = InputFrame::from_sim(&input);
+        let input = frame.to_sim();
+        self.tick = self.tick.wrapping_add(1);
+        if self.tick == 0 {
+            // Tick 0 means "none" on the wire; skip it and start a fresh consecutive run of
+            // frames so the datagram's `first_tick + i` labelling stays exact across the wrap.
+            self.tick = 1;
+            self.frames.clear();
+        }
+        let dt = self.rate.dt();
+        let solids = self.latest_boxes();
+        let composite = Composite {
+            world,
+            solids: &solids,
+        };
+        self.actions.clear();
+        if self.own_alive || !self.synced {
+            step_mover(
+                &composite,
+                &self.kit,
+                &mut self.mover,
+                &input,
+                self.tick,
+                dt,
+                &mut self.actions,
+            );
+        } else {
+            self.mover.yaw = input.yaw;
+            self.mover.pitch = input.pitch;
+            self.mover.buttons_prev = input.buttons;
+        }
+        self.stats.predicted_ticks += 1;
+        self.ring.push_back((self.tick, input, self.mover));
+        while self.ring.len() > PREDICTION_RING {
+            self.ring.pop_front();
+        }
+        self.frames.push_back(frame);
+        while self.frames.len() > MAX_FRAMES {
+            self.frames.pop_front();
+        }
+        let first = self.tick.wrapping_sub(self.frames.len() as u32 - 1);
+        let mut d = InputDatagram::new(self.newest_tick, self.view_tick(), first);
+        for f in &self.frames {
+            d.push(*f);
+        }
+        self.stats.inputs_sent += 1;
+        d
+    }
+
+    /// Decode a snapshot datagram, store it, reconcile the own entity, update tracks.
+    pub fn on_snapshot(
+        &mut self,
+        world: &dyn CollisionWorld,
+        bytes: &[u8],
+    ) -> Result<(), NetError> {
+        let snap = match Snapshot::decode(bytes, |t| {
+            self.snapshots.iter().find(|s| s.server_tick == t)
+        }) {
+            Ok(s) => s,
+            Err(NetError::UnknownBaseline(t)) => {
+                self.stats.unknown_baseline += 1;
+                return Err(NetError::UnknownBaseline(t));
+            }
+            Err(e) => {
+                self.stats.decode_errors += 1;
+                return Err(e);
+            }
+        };
+        if self.newest_tick != 0 && tick_delta(snap.server_tick, self.newest_tick) <= 0 {
+            self.stats.stale_snapshots += 1;
+            return Ok(());
+        }
+        self.stats.snapshots += 1;
+        if self.newest_tick != 0 {
+            let gap = tick_delta(snap.server_tick, self.newest_tick) - 1;
+            if gap > 0 {
+                self.stats.gaps += 1;
+                self.stats.max_gap = self.stats.max_gap.max(gap as u32);
+                self.gap_ticks.push_back(snap.server_tick);
+            }
+        }
+        self.newest_tick = snap.server_tick;
+        self.adapt_delay();
+
+        for e in &snap.entities {
+            if e.id == self.my_id {
+                continue;
+            }
+            let track = self.tracks.entry(e.id).or_default();
+            track.removed_at = None;
+            track.samples.push_back((snap.server_tick, *e));
+            while track.samples.len() > TRACK_SAMPLES {
+                track.samples.pop_front();
+            }
+        }
+        for &id in &snap.removed {
+            if let Some(track) = self.tracks.get_mut(&id) {
+                track.removed_at = Some(snap.server_tick);
+            }
+        }
+        if let Some(own) = snap.find(self.my_id) {
+            let own = *own;
+            self.reconcile(world, snap.server_tick, snap.last_input_tick, &own);
+        }
+        self.snapshots.push_back(snap);
+        while self.snapshots.len() > SNAPSHOT_RING {
+            self.snapshots.pop_front();
+        }
+        Ok(())
+    }
+
+    fn adapt_delay(&mut self) {
+        let hz = self.rate.hz();
+        while self
+            .gap_ticks
+            .front()
+            .is_some_and(|&t| tick_delta(self.newest_tick, t) > hz as i32)
+        {
+            self.gap_ticks.pop_front();
+        }
+        let target = (BASE_DELAY_TICKS + self.gap_ticks.len() as u32).min(MAX_DELAY_TICKS);
+        if target > self.delay_ticks {
+            self.delay_ticks = target;
+            self.last_shrink = self.newest_tick;
+        } else if self.delay_ticks > target
+            && tick_delta(self.newest_tick, self.last_shrink) >= hz as i32
+        {
+            self.delay_ticks -= 1;
+            self.last_shrink = self.newest_tick;
+        }
+    }
+
+    fn reconcile(
+        &mut self,
+        world: &dyn CollisionWorld,
+        server_tick: u32,
+        last_input_tick: u32,
+        own: &EntityState,
+    ) {
+        let was_alive = self.own_alive;
+        let prev_health = self.own_health;
+        self.own_health = own.health.map_or(self.own_health, |h| h as i32);
+        self.own_alive = own.flags & flags::ALIVE != 0;
+        self.own_anim = own.anim;
+        let respawned = !was_alive && self.own_alive && self.synced;
+        // A hit (knockback) or a death lands on a server tick; the frame whose comparison
+        // reveals it may only run a few ticks later (dejitter reserve, starvation), so the
+        // explanation stays valid for a short window.
+        if self.own_health != prev_health || was_alive != self.own_alive {
+            self.explained_until = server_tick.wrapping_add(8);
+        }
+        let explained = tick_delta(self.explained_until, server_tick) >= 0;
+        let server_pos = Vec3::from(quant::dequantize_pos3(own.pos));
+        let server_vel = own.vel.map(|v| Vec3::from(quant::dequantize_vel3(v)));
+        let apply = |m: &mut Mover| {
+            // The wire position is rounded to 1/4 u and can sit exactly on a clip plane, where
+            // the tracer would report solid and freeze the mover; nudge out first.
+            m.mv.origin = gm_core::movement::nudge_position(world, m.mv.hull, server_pos);
+            if let Some(v) = server_vel {
+                m.mv.velocity = v;
+            }
+            m.mv.on_ground = own.flags & flags::ON_GROUND != 0;
+            m.mv.jump_held = own.flags & flags::JUMP_HELD != 0;
+        };
+        // A respawn resets the ability state exactly as the server does (cooldowns survive).
+        let reset_abilities = |m: &mut Mover| {
+            m.script = None;
+            m.dash = None;
+            m.stamina = gm_core::sim::MAX_STAMINA;
+        };
+        if last_input_tick != 0 {
+            self.last_acked_input = last_input_tick;
+        }
+        let idx = if last_input_tick == 0 {
+            None
+        } else {
+            self.ring.iter().position(|(t, _, _)| *t == last_input_tick)
+        };
+
+        if !self.own_alive && self.synced {
+            // Dead: the server owns the body and has dropped any running script.
+            apply(&mut self.mover);
+            self.mover.script = None;
+            self.mover.dash = None;
+            self.drop_acked(last_input_tick);
+            return;
+        }
+
+        let (mut m, replay_from) = match idx {
+            Some(i) => {
+                let predicted = self.ring[i].2;
+                let dpos = (server_pos - predicted.mv.origin).length();
+                let dvel = server_vel.map_or(0.0, |v| (v - predicted.mv.velocity).length());
+                let mismatch = dpos > POS_TOLERANCE || dvel > VEL_TOLERANCE;
+                if self.synced && !respawned {
+                    if !mismatch {
+                        self.drop_acked(last_input_tick);
+                        return;
+                    }
+                    self.stats.corrections += 1;
+                    self.stats.max_correction = self.stats.max_correction.max(dpos);
+                    // Another body within reach of a block, given a few ticks of staleness.
+                    let near_other = self
+                        .latest_boxes()
+                        .iter()
+                        .any(|b| (b.center() - predicted.mv.origin).truncate().length() < 96.0);
+                    if !explained && !near_other {
+                        self.stats.corrections_unexplained += 1;
+                        tracing::debug!(
+                            me = self.my_id,
+                            server_tick,
+                            last_input_tick,
+                            dpos = format_args!("{dpos:.2}"),
+                            dvel = format_args!("{dvel:.1}"),
+                            predicted = ?predicted.mv.origin,
+                            server = ?server_pos,
+                            pred_vel = ?predicted.mv.velocity,
+                            server_vel = ?server_vel,
+                            pred_ground = predicted.mv.on_ground,
+                            server_ground = own.flags & flags::ON_GROUND != 0,
+                            script = ?predicted.script,
+                            dash = predicted.dash.is_some(),
+                            anim = own.anim,
+                            nearest = format_args!("{:.0}", self
+                                .latest_boxes()
+                                .iter()
+                                .map(|b| (b.center() - predicted.mv.origin).truncate().length())
+                                .fold(f32::INFINITY, f32::min)),
+                            ring = self.ring.len(),
+                            "unexplained correction"
+                        );
+                    }
+                }
+                let mut m = predicted;
+                if respawned {
+                    reset_abilities(&mut m);
+                }
+                apply(&mut m);
+                self.ring[i].2 = m;
+                (m, i + 1)
+            }
+            None if last_input_tick == 0 || !self.synced || respawned => {
+                // The server has run none of our frames yet (first contact, respawn, or a lost
+                // reference): rebuild from its state and replay everything still in flight.
+                let mut m = self.mover;
+                if respawned || !self.synced {
+                    reset_abilities(&mut m);
+                }
+                apply(&mut m);
+                (m, 0)
+            }
+            None => {
+                // Acked tick older than the ring: drop what we cannot compare.
+                self.drop_acked(last_input_tick);
+                return;
+            }
+        };
+        let solids = self.latest_boxes();
+        let composite = Composite {
+            world,
+            solids: &solids,
+        };
+        let dt = self.rate.dt();
+        let mut sink = Vec::new();
+        for j in replay_from..self.ring.len() {
+            let (tick, input, _) = self.ring[j];
+            step_mover(&composite, &self.kit, &mut m, &input, tick, dt, &mut sink);
+            self.ring[j].2 = m;
+            self.stats.replayed_ticks += 1;
+        }
+        self.mover = m;
+        self.synced = true;
+        self.drop_acked(last_input_tick);
+    }
+
+    /// Everything before the acknowledged frame is settled. The acknowledged frame itself stays:
+    /// a later snapshot with the same `last_input_tick` (a tick in which none of our frames ran)
+    /// can still change our state there (knockback), and must be compared again.
+    fn drop_acked(&mut self, last_input_tick: u32) {
+        if last_input_tick == 0 {
+            return;
+        }
+        while self
+            .ring
+            .front()
+            .is_some_and(|(t, _, _)| tick_delta(*t, last_input_tick) < 0)
+        {
+            self.ring.pop_front();
+        }
+    }
+
+    /// Other entities interpolated at `t` (a value from `render_tick`).
+    pub fn others_at(&self, t: f32) -> Vec<RenderEntity> {
+        let mut out = Vec::with_capacity(self.tracks.len());
+        for (&id, track) in &self.tracks {
+            if track.removed_at.is_some_and(|r| t >= r as f32) {
+                continue;
+            }
+            let Some(&(t_last, last)) = track.samples.back() else {
+                continue;
+            };
+            if (t_last as f32) < t - 4.0 * MAX_DELAY_TICKS as f32 {
+                continue; // long stale, nothing to show
+            }
+            // Bracket t: a = newest sample at or before t, b = oldest sample after t.
+            let mut a: Option<&(u32, EntityState)> = None;
+            let mut b: Option<&(u32, EntityState)> = None;
+            for s in &track.samples {
+                if s.0 as f32 <= t {
+                    a = Some(s);
+                } else {
+                    b = Some(s);
+                    break;
+                }
+            }
+            let (pos, yaw, pitch, state) = match (a, b) {
+                (Some(&(ta, sa)), Some(&(tb, sb))) => {
+                    let alpha =
+                        ((t - ta as f32) / (tb as f32 - ta as f32).max(1.0)).clamp(0.0, 1.0);
+                    let pa = Vec3::from(quant::dequantize_pos3(sa.pos));
+                    let pb = Vec3::from(quant::dequantize_pos3(sb.pos));
+                    (
+                        pa.lerp(pb, alpha),
+                        lerp_angle(
+                            quant::wire_to_yaw(sa.yaw),
+                            quant::wire_to_yaw(sb.yaw),
+                            alpha,
+                        ),
+                        quant::wire_to_pitch(sa.pitch) * (1.0 - alpha)
+                            + quant::wire_to_pitch(sb.pitch) * alpha,
+                        if alpha < 0.5 { sa } else { sb },
+                    )
+                }
+                (Some(&(_, sa)), None) => (
+                    Vec3::from(quant::dequantize_pos3(sa.pos)),
+                    quant::wire_to_yaw(sa.yaw),
+                    quant::wire_to_pitch(sa.pitch),
+                    sa,
+                ),
+                (None, Some(&(_, sb))) => {
+                    // Not yet in the past: it spawned after our render time; show it where it is.
+                    let _ = last;
+                    (
+                        Vec3::from(quant::dequantize_pos3(sb.pos)),
+                        quant::wire_to_yaw(sb.yaw),
+                        quant::wire_to_pitch(sb.pitch),
+                        sb,
+                    )
+                }
+                (None, None) => continue,
+            };
+            out.push(RenderEntity {
+                id,
+                kind: state.spawn.kind(),
+                spawn: state.spawn,
+                pos,
+                yaw,
+                pitch,
+                anim: state.anim,
+                flags: state.flags,
+            });
+        }
+        out
+    }
+
+    /// Boxes of living other players at `t`, for drawing.
+    pub fn other_boxes(&self, t: f32) -> Vec<Aabb> {
+        self.others_at(t)
+            .into_iter()
+            .filter(|e| e.kind == EntityKind::Player && e.alive())
+            .map(|e| Aabb::around(e.pos, Hull::Player))
+            .collect()
+    }
+
+    /// Boxes of living other players at their newest known positions, for predicting
+    /// body-blocks: fresher than the render time by the whole interpolation delay.
+    pub fn latest_boxes(&self) -> Vec<Aabb> {
+        self.tracks
+            .values()
+            .filter(|t| t.removed_at.is_none())
+            .filter_map(|t| t.samples.back())
+            .filter(|(_, e)| e.spawn.kind() == EntityKind::Player && e.flags & flags::ALIVE != 0)
+            .map(|(_, e)| Aabb::around(Vec3::from(quant::dequantize_pos3(e.pos)), Hull::Player))
+            .collect()
+    }
+
+    /// Forget tracks that left before `t` and have nothing newer.
+    pub fn prune(&mut self, t: f32) {
+        self.tracks.retain(|_, tr| {
+            !tr.removed_at
+                .is_some_and(|r| t >= r as f32 && tr.samples.back().is_none_or(|(ts, _)| *ts < r))
+        });
+    }
+
+    pub fn tracks(&self) -> &BTreeMap<EntityId, Track> {
+        &self.tracks
+    }
+
+    pub fn snapshots(&self) -> &VecDeque<Snapshot> {
+        &self.snapshots
+    }
+}
+
+/// Shortest-arc interpolation of angles in degrees.
+pub fn lerp_angle(a: f32, b: f32, alpha: f32) -> f32 {
+    let mut d = (b - a).rem_euclid(360.0);
+    if d > 180.0 {
+        d -= 360.0;
+    }
+    (a + d * alpha).rem_euclid(360.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gm_core::collide::BoxWorld;
+    use gm_core::sim::buttons;
+
+    fn own_state(pos: Vec3, vel: Vec3, alive: bool, on_ground: bool) -> EntityState {
+        let mut f = flags::ON_GROUND * on_ground as u8;
+        if alive {
+            f |= flags::ALIVE;
+        }
+        EntityState {
+            id: 1,
+            spawn: SpawnInfo::Player { frame: 1 },
+            pos: quant::quantize_pos3(pos.into()),
+            yaw: 0,
+            pitch: 900,
+            vel: Some(quant::quantize_vel3(vel.into())),
+            anim: 0,
+            health: Some(100),
+            flags: f,
+        }
+    }
+
+    fn snap(tick: u32, baseline: u32, last_input: u32, entities: Vec<EntityState>) -> Snapshot {
+        let mut s = Snapshot::new(tick);
+        s.baseline_tick = baseline;
+        s.last_input_tick = last_input;
+        s.entities = entities;
+        s.normalize(None);
+        s
+    }
+
+    #[test]
+    fn first_snapshot_adopts_the_server_state_then_predicts_locally() {
+        let world = BoxWorld::floor();
+        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let s = snap(
+            10,
+            0,
+            0,
+            vec![own_state(
+                Vec3::new(100.0, 0.0, 24.0),
+                Vec3::ZERO,
+                true,
+                true,
+            )],
+        );
+        c.on_snapshot(&world, &s.encode(None)).unwrap();
+        assert!(c.synced());
+        assert_eq!(c.mover.mv.origin, Vec3::new(100.0, 0.0, 24.0));
+        let input = Input {
+            forward: 1.0,
+            ..Default::default()
+        };
+        for _ in 0..32 {
+            let d = c.local_tick(&world, input);
+            assert_eq!(d.ack_tick, 10);
+        }
+        assert!(c.mover.mv.origin.x > 130.0, "{:?}", c.mover.mv.origin);
+        assert_eq!(c.stats.inputs_sent, 32);
+    }
+
+    #[test]
+    fn matching_server_state_causes_no_correction_and_mismatch_replays() {
+        let world = BoxWorld::floor();
+        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let s = snap(
+            10,
+            0,
+            0,
+            vec![own_state(Vec3::new(0.0, 0.0, 24.0), Vec3::ZERO, true, true)],
+        );
+        c.on_snapshot(&world, &s.encode(None)).unwrap();
+        let input = Input {
+            forward: 1.0,
+            ..Default::default()
+        };
+        for _ in 0..20 {
+            c.local_tick(&world, input);
+        }
+        // The server agrees with our prediction at tick 10: replay the same physics to get it.
+        let mut shadow = ClientState::new(1, TickRate::COMBAT);
+        shadow.on_snapshot(&world, &s.encode(None)).unwrap();
+        for _ in 0..10 {
+            shadow.local_tick(&world, input);
+        }
+        let agreed = own_state(shadow.mover.mv.origin, shadow.mover.mv.velocity, true, true);
+        let s2 = snap(11, 0, 10, vec![agreed]);
+        let before = c.mover;
+        c.on_snapshot(&world, &s2.encode(None)).unwrap();
+        assert_eq!(c.stats.corrections, 0);
+        assert_eq!(c.mover, before);
+        // A server that disagrees by more than the tolerance pulls us back and replays.
+        let moved = own_state(
+            shadow.mover.mv.origin + Vec3::new(-50.0, 0.0, 0.0),
+            shadow.mover.mv.velocity,
+            true,
+            true,
+        );
+        let s3 = snap(12, 0, 10, vec![moved]);
+        // Ring entries up to tick 10 were dropped; feed a replayable ring first.
+        for _ in 0..5 {
+            c.local_tick(&world, input);
+        }
+        let s3 = Snapshot {
+            last_input_tick: 21,
+            ..s3
+        };
+        let x_before = c.mover.mv.origin.x;
+        c.on_snapshot(&world, &s3.encode(None)).unwrap();
+        assert_eq!(c.stats.corrections, 1);
+        assert!(
+            c.mover.mv.origin.x < x_before - 30.0,
+            "{} vs {}",
+            c.mover.mv.origin.x,
+            x_before
+        );
+        assert!(c.stats.replayed_ticks >= 4);
+    }
+
+    #[test]
+    fn others_are_interpolated_and_removed_at_render_time() {
+        let world = BoxWorld::floor();
+        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let mk = |tick: u32, x: f32| {
+            let mut other = own_state(Vec3::new(x, 0.0, 24.0), Vec3::ZERO, true, true);
+            other.id = 2;
+            other.vel = None;
+            other.health = None;
+            snap(
+                tick,
+                0,
+                0,
+                vec![own_state(Vec3::ZERO, Vec3::ZERO, true, true), other],
+            )
+        };
+        c.on_snapshot(&world, &mk(100, 0.0).encode(None)).unwrap();
+        c.on_snapshot(&world, &mk(101, 10.0).encode(None)).unwrap();
+        c.on_snapshot(&world, &mk(102, 20.0).encode(None)).unwrap();
+        let t = c.render_tick(0.0);
+        assert_eq!(t, 96.0, "6 ticks behind");
+        // Before the first sample: shown at the first sample.
+        let e = &c.others_at(t)[0];
+        assert_eq!(e.pos.x, 0.0);
+        let e = &c.others_at(100.5)[0];
+        assert!((e.pos.x - 5.0).abs() < 1e-3);
+        let e = &c.others_at(101.75)[0];
+        assert!((e.pos.x - 17.5).abs() < 1e-3);
+        // Removal takes effect at render time, not on arrival.
+        let mut gone = snap(
+            103,
+            0,
+            0,
+            vec![own_state(Vec3::ZERO, Vec3::ZERO, true, true)],
+        );
+        gone.removed = vec![2];
+        c.on_snapshot(&world, &gone.encode(None)).unwrap();
+        assert_eq!(c.others_at(101.0).len(), 1);
+        assert_eq!(c.others_at(103.0).len(), 0);
+        c.prune(103.0);
+        assert!(c.tracks().is_empty());
+    }
+
+    #[test]
+    fn gaps_widen_the_delay_and_it_shrinks_back() {
+        let world = BoxWorld::floor();
+        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let own = own_state(Vec3::ZERO, Vec3::ZERO, true, true);
+        c.on_snapshot(&world, &snap(1, 0, 0, vec![own]).encode(None))
+            .unwrap();
+        c.on_snapshot(&world, &snap(4, 0, 0, vec![own]).encode(None))
+            .unwrap();
+        assert_eq!(c.stats.gaps, 1);
+        assert_eq!(c.stats.max_gap, 2);
+        assert_eq!(c.delay_ticks, 7);
+        for t in 5..200 {
+            c.on_snapshot(&world, &snap(t, 0, 0, vec![own]).encode(None))
+                .unwrap();
+        }
+        assert_eq!(c.delay_ticks, BASE_DELAY_TICKS);
+        // Stale and duplicate snapshots are ignored.
+        c.on_snapshot(&world, &snap(150, 0, 0, vec![own]).encode(None))
+            .unwrap();
+        assert_eq!(c.stats.stale_snapshots, 1);
+    }
+
+    #[test]
+    fn input_datagrams_carry_the_last_four_frames() {
+        let world = BoxWorld::floor();
+        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let d = c.local_tick(&world, Input::default());
+        assert_eq!((d.first_tick, d.count), (1, 1));
+        for i in 0..6 {
+            let d = c.local_tick(
+                &world,
+                Input {
+                    buttons: if i == 5 { buttons::JUMP } else { 0 },
+                    ..Default::default()
+                },
+            );
+            assert_eq!(d.last_tick(), c.tick);
+        }
+        let d = c.local_tick(&world, Input::default());
+        assert_eq!(d.count, 4);
+        assert_eq!(d.first_tick, 5);
+        assert_eq!(d.frames[2].buttons, buttons::JUMP);
+    }
+
+    #[test]
+    fn angle_lerp_takes_the_short_way() {
+        assert!((lerp_angle(350.0, 10.0, 0.5) - 0.0).abs() < 1e-4);
+        assert!((lerp_angle(10.0, 350.0, 0.5) - 0.0).abs() < 1e-4);
+        assert!((lerp_angle(0.0, 180.0, 0.25) - 45.0).abs() < 1e-4);
+    }
+}

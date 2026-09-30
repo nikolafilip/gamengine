@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-09-30 (Phase 0 and 1 implemented; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-09-30 (Phases 0, 1 and 2 implemented; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -338,7 +338,7 @@ gamengine/
 | Concern | Crate | Note |
 |---|---|---|
 | Rendering | `wgpu`, `winit`, `glam`, `bytemuck` | forward renderer, lightmap + diffuse, skinned meshes in a storage buffer |
-| ECS | `hecs` | fallback `bevy_ecs` |
+| ECS | `hecs` | fallback `bevy_ecs`. **Not used yet:** the Phase 2 zone holds players in a `BTreeMap` and projectiles in a `Vec` (deterministic iteration, a handful of entity kinds); `hecs` enters when Phase 3 adds statuses, areas and many entity kinds |
 | Async/server | `tokio` | one runtime per zone process |
 | Transport | `quinn` (native), `wtransport` (browser) | QUIC datagrams + streams |
 | Serialization | hand-rolled bit packing for snapshots; `bitcode` for reliable messages | snapshots must be byte-tight |
@@ -355,20 +355,32 @@ gamengine/
 - **Fixed timestep** in `gm-core` (64 Hz combat, 20 Hz towns). f32, not fixed-point: the server is the
   only authority, so cross-platform bit-determinism is not required, only tolerance-based reconciliation.
 - **Client sends** input frames (tick, move bits, look angles quantized, action bits) at tick rate, redundantly
-  (last 3 frames per packet) so loss does not stall movement.
+  (last 4 frames per packet, **[CORRECTED]** from 3 after the Phase 2 design review) so loss does not stall movement.
+  The server runs every frame exactly once, in order, at most 3 per tick and 64 per second on average (token bucket),
+  keeps one frame in reserve as a dejitter buffer (one tick of added latency, took starvation from 14% to about 1%
+  of ticks at 75 ± 10 ms one-way latency) and never invents or reuses a frame, so `last_input_tick` in a snapshot
+  means exactly "the state after that frame" on both sides (PROTOCOL.md 4, 7.1).
 - **Server sends** snapshots: per-entity deltas vs the client's last acked baseline, quantized position
   (1/4 world unit ≈ 0.8 cm; the power-of-two neighbour of the "1 cm" intent), yaw (0.1°), state bits; rate by
   distance band. Entities outside the client's PVS are not sent.
 - **Prediction:** client runs `gm-core` locally for its own entity, keeps a ring of predicted states, replays
-  from the server-acked tick on mismatch beyond tolerance.
+  from the server-acked tick on mismatch beyond tolerance (2 u / 16 u/s). It predicts on the dequantized wire
+  input, exactly what the server runs. Ability clocks (cooldowns, scripts, dashes) run in the client's frame
+  ticks on both sides so they elapse identically when the server runs two frames in one tick. An adopted server
+  position is nudged out of solid first (QuakeWorld's `PM_NudgePosition`): the 1/4-unit rounding can land
+  exactly on a clip plane and freeze the mover (PROTOCOL.md 7.2).
 - **Interpolation:** other entities rendered ~100 ms behind with two buffered snapshots.
 - **Melee lag comp:** server rewinds capsule positions of nearby entities to the attacker's view tick
   (bounded to ~200 ms) when resolving swing arcs and parries.
 - **Projectiles:** spawned server-side at the attacker's view tick, simulated forward; no rewind. Client shows a
   predicted local projectile and reconciles.
-- **Collision:** BSP hull tracing for world, capsule sweeps for player-player, resolved on the server;
-  client predicts its own. World collision uses the Quake player hull (32×32×56) for every archetype in
-  year one, because the BSP carries exactly two hull sizes; hitbox capsules differ per frame (VOCABULARY.md 3).
+- **Collision:** BSP hull tracing for world; **[CORRECTED]** player-player body blocking uses axis-aligned box
+  sweeps with the same 32×32×56 hull inside the movement trace (sliding and stepping against a player work
+  exactly as against a wall, and the Minkowski sweep is exact), while hitboxes for damage are the archetype
+  capsules. Resolved on the server; the client predicts its own against the newest known positions of others.
+  World collision uses the Quake player hull for every archetype in year one, because the BSP carries exactly
+  two hull sizes; hitbox capsules differ per frame (VOCABULARY.md 3). Players within 128 u of a client are always
+  sent even outside its PVS, because a body that can block you must be predictable (PROTOCOL.md 5).
 - **Zone handoff:** hub-directed; character state serialized, token issued for the target zone, client
   reconnects; the origin zone keeps a ghost until the ack.
 
@@ -412,9 +424,9 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 ### 11.8 Milestones with acceptance criteria
 | Phase | Deliverable | Done when |
 |---|---|---|
-| 0 | Workspace, CI gates, `VOCABULARY.md`, `PROTOCOL.md` skeleton | CI fails on a 1 MB binary-size regression and on an over-budget test asset |
-| 1 | `gm-bsp` + `gm-client`: load a TrenchBroom map compiled by ericw-tools, lightmapped, Quake movement, collision | 60+ fps on an Intel iGPU; binary < 10 MB; RAM < 200 MB |
-| 2 | `gm-net` + `gm-server`: 16 players, prediction, reconciliation, interpolation, melee lag comp, projectiles, collision, FF | playable at 150 ms / 3% loss in `turmoil`; bytes/player < 30 KB/s |
+| 0 | Workspace, CI gates, `VOCABULARY.md`, `PROTOCOL.md` skeleton | CI fails on a 1 MB binary-size regression and on an over-budget test asset. **Done 2026-09-30** |
+| 1 | `gm-bsp` + `gm-client`: load a TrenchBroom map compiled by ericw-tools, lightmapped, Quake movement, collision | 60+ fps on an Intel iGPU; binary < 10 MB; RAM < 200 MB. **Done 2026-09-30** |
+| 2 | `gm-net` + `gm-server`: 16 players, prediction, reconciliation, interpolation, melee lag comp, projectiles, collision, FF | playable at 150 ms / 3% loss in `turmoil`; bytes/player < 30 KB/s. **Done 2026-09-30** (11.10) |
 | 3 | Point-buy characters, type matrix, FPS + third-person viewports, PVS culling | one arena map, 8v8 playtest, a build can be countered by re-speccing |
 | 4 | Hub: accounts, persistence, zones, handoff, 200-bot swarm | 200 bots on one zone under CPU budget; login → zone → handoff → logout round trip |
 | 5 | Economy: stalls, escrow contracts, component drops with corrected split, crafting, decomposition, account storage caps, guild halls, tavern hires, ledger | every coin/item movement is a DB transaction; scam test suite passes (mutation lock, escrow, floors) |
@@ -448,6 +460,47 @@ class):
 - `gm-server`: 64 Hz tick loop, 3 µs of work per tick, zero overruns, wake-up lateness 1.4 ms mean /
   2.4 ms max (tokio's 1 ms timer; a spin-wait for the last millisecond is a later optimisation).
 - Not done from 11.6: `criterion` benchmarks per crate and `turmoil` tests (Phase 2 with gm-net).
+
+**2026-09-30, Phase 2 done** (same machine; all numbers measured, none estimated):
+- `docs/PROTOCOL.md` v1 (bit packing with test vectors, 4-frame input datagrams, carry-forward delta
+  snapshots, frame ledger with a one-frame dejitter reserve and a 64/s token bucket, latency-bounded lag
+  compensation, fixed QUIC congestion window) after an independent design review (its log is section 10 of
+  the document: 14 points accepted, 3 rejected with reasons). `gm-core::sim` runs movers, ability scripts,
+  melee with rewind, projectiles with forward step, deaths and respawns; `gm-net` implements the wire format
+  and the shared client prediction/interpolation; `gm-server` adds sessions, PVS and distance-band
+  snapshots, quinn connection handling; `gm-bot` is the headless client; `gm-client` joins a zone.
+- **Acceptance test** (`scripts/check-netcode.sh`, turmoil, simulated time, 16 bots, 30 s, 75 ± 10 ms per
+  hop = 150 ms round trip, 3% independent datagram loss per direction, run four times): every bot received
+  61–62 snapshots/s (max gap 3 ticks, most 2); per player **5.4–5.8 KB/s up and 8.2–8.7 KB/s down** as UDP
+  bytes counted by QUIC (budget 30 KB/s each way); reconciliation corrections 22–91 per bot in 30 s, all
+  under 6.5 u, of which **0–2 per bot had no visible cause** (the rest follow a hit, a respawn or a body within
+  blocking distance); input starvation 1.3% of player-ticks including joins and the reserve fill; 419–435
+  melee hits and 6–12 crossbow hits registered under latency; 106–110 kills; no oversize snapshots, no send
+  failures, no decode errors. The same test at 10 ms round trip and no loss: zero gaps, zero unexplained
+  corrections. Real UDP on loopback (`tests/loopback.rs` and a 4-player live run): 0.2 ms RTT, 4.4 KB/s
+  down / 5.5 KB/s up per player, server tick 43–55 µs mean with 4 players, 2 starved ticks per bot in 10 s.
+- Three defects found by the test's correction log and fixed before the numbers above: ability clocks keyed
+  to server ticks drifted when two frames ran in one tick (now frame ticks); the client predicted on the raw
+  float yaw instead of the dequantized wire value; a rounded server position landing exactly on a clip
+  plane froze the mover (now nudged out first, as QuakeWorld's `PM_NudgePosition`). Corrections went from
+  100–250 per bot with 30-u jumps to the figures above.
+- Independent code review (Gemini 3.1 Pro, PROTOCOL.md 10): fixed four real defects it found (reordered
+  datagrams lost frames; `view_tick` taken from the wrong datagram; the projectile catch-up swept current
+  instead of historical positions, an exploit for anyone delaying their acknowledgements; unbounded per-client
+  control channel) plus three cheap scaling items; rejected one finding that misread the respawn replay.
+- Binaries (release, LTO): `gm-client` **8,051,416 bytes (7.68 MiB)**, up 2.09 MiB for quinn + rustls/ring +
+  tokio; baseline updated on purpose (cap 10 MiB). `gm-server` 3.34 MB, `gm-bot` 3.25 MB, `gm-tools` 1.91 MB.
+  Peak RSS **128 MB** windowed (RADV), 172 MB under lavapipe. Windowed bench 1280×720, no vsync:
+  **1,447 fps** (0.69 ms mean, 3.96 ms p99) drawing the room plus the entity pass; default play mode 218 fps
+  under the 250 cap including start-up.
+- Criterion (this CPU): snapshot delta encode 0.80 µs and decode 1.20 µs for 16 entities; input datagram
+  encode 103 ns, decode 114 ns; one movement tick 84 ns on the box world; one full zone tick with 16
+  running, swinging players 11.1 µs; BSP player-hull trace across the room 128 ns, point LOS trace 142 ns,
+  leaf lookup 51 ns, PVS row decompression 17 ns.
+- Known limits: other players are boxes; the tick loop is single-threaded (fine to hundreds of players by the
+  numbers above); prediction against other players uses their newest known positions, so body-block
+  corrections are frequent in a crowd (visible as small snaps, never desync); `hecs` still unused (11.2);
+  `wtransport` untouched until Phase 8; `SO_RCVBUF` tuning and time-scaled interpolation drain deferred.
 
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). Full type matrix and attribute

@@ -5,6 +5,30 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "GPL-3.0-or-later"
-description = "gamengine wire protocol: bit packing, snapshot deltas, input frames, transport."
+description = "gamengine wire protocol: bit packing, snapshot deltas, input frames, QUIC transport."
+
+[features]
+default = []
+# Adapter that runs quinn over turmoil's simulated UDP (tests only).
+turmoil = ["dep:turmoil"]
 
 [dependencies]
+gm-core = { workspace = true }
+glam = { workspace = true }
+bitcode = { workspace = true }
+bytes = { workspace = true }
+quinn = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+turmoil = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "codec"
+harness = false
