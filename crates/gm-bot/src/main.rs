@@ -29,10 +29,23 @@ struct Args {
     /// Teams, cycled over the bots (empty: let the zone balance).
     teams: Vec<u8>,
     counter_pick: bool,
+    /// Play through the hub instead of connecting to a zone directly.
+    hub: Option<SocketAddr>,
+    hub_cert: PathBuf,
+    user: String,
+    password: String,
+    register: bool,
+    character: String,
+    zone: String,
+    travel_to: Option<String>,
+    travel_after: u64,
+    maps_dir: PathBuf,
 }
 
 const USAGE: &str = "gm-bot --connect ADDR --cert PATH [--map PATH] [--bots N] [--secs N] \
-[--behaviour wander|hunter|hold|duelist] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]";
+[--behaviour wander|hunter|hold|duelist] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]\n\
+       gm-bot --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME --zone ID \
+[--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...]";
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
@@ -46,6 +59,16 @@ fn parse_args() -> Result<Args, String> {
         builds: Vec::new(),
         teams: Vec::new(),
         counter_pick: false,
+        hub: None,
+        hub_cert: PathBuf::from("hub-cert.der"),
+        user: String::new(),
+        password: String::new(),
+        register: false,
+        character: String::new(),
+        zone: "arena".into(),
+        travel_to: None,
+        travel_after: 10,
+        maps_dir: PathBuf::from("assets/maps/built"),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -90,6 +113,20 @@ fn parse_args() -> Result<Args, String> {
                     .collect()
             }
             "--counter-pick" => a.counter_pick = true,
+            "--hub" => a.hub = Some(value("--hub")?.parse().map_err(|e| format!("--hub: {e}"))?),
+            "--hub-cert" => a.hub_cert = PathBuf::from(value("--hub-cert")?),
+            "--user" => a.user = value("--user")?,
+            "--password" => a.password = value("--password")?,
+            "--register" => a.register = true,
+            "--character" => a.character = value("--character")?,
+            "--zone" => a.zone = value("--zone")?,
+            "--travel-to" => a.travel_to = Some(value("--travel-to")?),
+            "--travel-after" => {
+                a.travel_after = value("--travel-after")?
+                    .parse()
+                    .map_err(|e| format!("--travel-after: {e}"))?
+            }
+            "--maps-dir" => a.maps_dir = PathBuf::from(value("--maps-dir")?),
             "--teams" => {
                 a.teams = value("--teams")?
                     .split(',')
@@ -121,6 +158,60 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(2);
         }
     };
+    if let Some(hub) = args.hub {
+        if args.user.is_empty() || args.password.is_empty() || args.character.is_empty() {
+            anyhow::bail!("--hub needs --user, --password and --character");
+        }
+        let cfg = gm_bot::HubFlowConfig {
+            hub,
+            hub_cert_der: std::fs::read(&args.hub_cert)?,
+            email: args.user,
+            password: args.password,
+            register: args.register,
+            character: args.character,
+            preset: args
+                .builds
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "blade".into()),
+            zone: args.zone,
+            travel_after: args
+                .travel_to
+                .as_ref()
+                .map(|_| Duration::from_secs(args.travel_after)),
+            travel_to: args.travel_to,
+            maps_dir: args.maps_dir,
+            bot: BotConfig {
+                name: String::new(),
+                seed: args.seed,
+                behaviour: args.behaviour,
+                rate: TickRate::COMBAT,
+                run_ticks: 0,
+                build: None,
+                team: 0,
+                counter_pick: args.counter_pick,
+                travel_to: None,
+                travel_after_ticks: 0,
+            },
+            play: Duration::from_secs(args.secs),
+        };
+        let r = gm_bot::run_hub_flow(cfg).await?;
+        println!(
+            "hub flow: character {} zones {:?} login {:.0} ms enter {:.0} ms travel {:.0} ms logout {:.0} ms",
+            r.character, r.zones, r.login_ms, r.enter_ms, r.travel_ms, r.logout_ms
+        );
+        for rep in &r.reports {
+            println!(
+                "  {}: {} snapshots, {} corrections, kills {} deaths {}",
+                rep.name,
+                rep.client.snapshots,
+                rep.client.corrections,
+                rep.own_kills,
+                rep.own_deaths
+            );
+        }
+        return Ok(());
+    }
     let cert = CertificateDer::from(std::fs::read(&args.cert)?);
     let world = Arc::new(Bsp::load(&args.map)?);
     let bind: SocketAddr = if args.connect.is_ipv4() {
@@ -148,6 +239,8 @@ async fn main() -> anyhow::Result<()> {
                 args.teams[i % args.teams.len()]
             },
             counter_pick: args.counter_pick,
+            travel_to: None,
+            travel_after_ticks: 0,
         };
         let secs = args.secs;
         set.spawn(async move {

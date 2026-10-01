@@ -18,7 +18,8 @@ crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
 crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
 crates/gm-client    wgpu forward renderer, Quake movement, fixed-step loop, zone connection.
 crates/gm-server    authoritative tokio zone server: tick loop, sessions, PVS snapshots, lag compensation.
-crates/gm-hub       accounts, characters, shard registry (Phase 4).
+crates/gm-hub       accounts, characters, zone registry, handoff, Postgres persistence.
+crates/gm-hub-proto hub messages, entry tokens and the hub connection used by zones, bots and the client.
 crates/gm-ai        AI companions (Phase 7).
 crates/gm-tools     CLI: map build (ericw-tools wrapper), WAD generation, asset budget lint.
 crates/gm-bot       headless bots: the client's prediction code with scripted behaviour, for tests and load.
@@ -26,7 +27,7 @@ assets/maps/src     TrenchBroom .map sources and gamengine.fgd (test_room, the 8
 assets/maps/built   compiled .bsp (+ .lit colored lightmaps)
 assets/textures     generated palette and WAD (gm-tools wad make)
 assets/content      abilities and preset builds (TOML), the v1 kits
-docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, BUILDING.md
+docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
@@ -62,6 +63,10 @@ F1–F4 re-spec to a preset at the next respawn. The wire protocol, prediction a
 lag-compensation contract is [`docs/PROTOCOL.md`](docs/PROTOCOL.md); the point-buy budget,
 the type matrix and the damage pipeline are [`docs/MATRIX.md`](docs/MATRIX.md).
 
+Persistent play (Phase 4): a hub with accounts and characters hands out tickets to zones and
+moves characters between them ([`docs/HUB.md`](docs/HUB.md), setup in
+[`docs/BUILDING.md`](docs/BUILDING.md)).
+
 ## CI gates
 
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then:
@@ -79,6 +84,10 @@ the type matrix and the damage pipeline are [`docs/MATRIX.md`](docs/MATRIX.md).
   the counter-pick match (blades re-spec into frostweavers and turn the match).
 - `scripts/check-matrix.sh` — 8v8 bot matches in the arena: ironclads beat blades,
   frostweavers beat ironclads, blades beat frostweavers, a mirror match is even.
+- `scripts/check-swarm.sh` — 200 duelist bots on one zone over real UDP: server tick
+  time, RSS and bytes per player under `budgets.toml`.
+- `crates/gm-server/tests/handoff.rs` — login → zone → handoff → logout through the hub
+  against Postgres, the character's location checked in the database at every step.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

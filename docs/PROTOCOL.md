@@ -32,8 +32,10 @@ Section 10 records the independent design review this version went through and w
   file). Clients trust a certificate DER passed on the command line or, in Phase 4, receive the
   zone's certificate hash from the hub in the session token. There is no "accept anything" mode.
 - Idle timeout 10 s, QUIC keep-alive every 2 s.
-- The session token (hub-signed, ed25519) rides in `Hello.token`. Phase 2 zones accept an empty
-  token when started with `--open` (development and tests). Phase 4 makes it mandatory.
+- The entry token (hub-signed, ed25519, HUB.md 3.1) rides in `Hello.token`. A zone started
+  without `--hub` accepts an empty token (development and tests); under a hub the token is
+  mandatory, the zone verifies it offline, claims the character at the hub, and takes the
+  player's name and build from the hub's answer (`Hello.name` and `Hello.build` are ignored).
 
 ## 2. Bit packing
 
@@ -330,6 +332,8 @@ enum Control {
     Content { pack: ContentPack, own: Build, team: u8 },   // right after Welcome
     RespecResult(Result<(), String>),
     BuildApplied(Build),                       // the respawn switched the build
+    TravelTicket { zone: String, addr: String, cert_der: Vec<u8>, token: Vec<u8> },
+    TravelRefused(String),
     Reject(String),
     PlayerInfo { id: u32, name: String, team: u8 },
     PlayerLeft(u32),
@@ -353,6 +357,12 @@ is validated immediately (`RespecResult`) and takes effect at the player's next 
 `BuildApplied` tells the client to switch its prediction; `BuildApplied` is also sent on every
 respawn so a client can never run the wrong kit for long. The content pack is 5–10 KB on the
 wire and must fit one control message (65,535 bytes).
+
+Travel (HUB.md 3.3): `Travel(zone)` asks the zone to hand the character to another zone; the
+zone answers `TravelTicket` (the other zone's address, certificate and a fresh token) or
+`TravelRefused`. On a ticket the client says `Bye`, connects to the other zone with the token
+in `Hello`, and loads the map that zone's `Welcome` names. Its body stays here as a ghost
+(visible, hittable, no inputs run) until the other zone claims it or 10 s pass.
 
 `Hello.name`: 1..=24 bytes of printable UTF-8 after trimming; anything else is rejected.
 
@@ -421,3 +431,9 @@ implementation; verdicts are ours):
   `BuildApplied` added; `PlayerInfo` carries the team.
 - Measured cost (turmoil, 16 bots, 150 ms, 3% loss, test_room): 5.6 KB/s up, 9.2 KB/s down per
   player (v1: 5.6 / 8.5). With the full kits on the arena map: 5.3 KB/s up, 10.3 KB/s down.
+
+## 12. Changes in v2.1 (Phase 4)
+
+- Control: `Travel`, `TravelTicket`, `TravelRefused`; `Hello.token` mandatory under a hub,
+  `Hello.name`/`Hello.build` ignored then. The datagram format is unchanged; the version byte
+  stays 2 (sections 2–5 did not change).

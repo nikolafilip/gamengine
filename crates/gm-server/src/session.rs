@@ -1,5 +1,9 @@
 //! Per-client state on the server: acked baselines, reconstructed snapshot history, PVS and
 //! distance-band scheduling, delta encoding within the datagram budget (PROTOCOL.md 5).
+//!
+//! Everything that does not depend on the client is computed once per tick into a
+//! [`TickTable`] (wire records, leaves, stealth radii) and shared by every session; a session
+//! then does one PVS bit test and one record copy per entity.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -25,17 +29,93 @@ pub const HALF_RATE_DIST: f32 = 1536.0;
 /// its prediction must know about them (PROTOCOL.md 5).
 pub const TOUCH_DIST: f32 = 128.0;
 
-/// Decompressed PVS rows by leaf, shared by all sessions within a tick loop.
+/// Decompressed PVS rows by leaf, shared by all sessions within a tick loop. Rows are filled
+/// before the parallel snapshot pass (`prepare`) so the pass only reads.
 #[derive(Default)]
 pub struct PvsCache {
     rows: HashMap<usize, Vec<u8>>,
 }
 
 impl PvsCache {
-    pub fn row(&mut self, bsp: &Bsp, leaf: usize) -> &[u8] {
+    pub fn prepare(&mut self, bsp: &Bsp, leaf: usize) {
         self.rows
             .entry(leaf)
-            .or_insert_with(|| bsp.decompress_pvs(leaf))
+            .or_insert_with(|| bsp.decompress_pvs(leaf));
+    }
+
+    pub fn row(&self, leaf: usize) -> Option<&[u8]> {
+        self.rows.get(&leaf).map(|r| r.as_slice())
+    }
+}
+
+/// One entity as every session sees it this tick, plus what the visibility test needs.
+#[derive(Clone, Copy, Debug)]
+pub struct TableEntry {
+    pub id: EntityId,
+    pub origin: Vec3,
+    /// Leaves of the origin and of the eye (or the origin again for things without eyes).
+    pub leaf: usize,
+    pub leaf_top: usize,
+    /// The non-own wire record.
+    pub state: EntityState,
+    /// Stealth radius (MATRIX.md 8); `f32::INFINITY` when not stealthed.
+    pub stealth: f32,
+    pub is_player: bool,
+}
+
+/// The shared per-tick view of the zone, ascending by entity id.
+#[derive(Default)]
+pub struct TickTable {
+    pub entries: Vec<TableEntry>,
+}
+
+impl TickTable {
+    /// Rebuild from the zone after its step; one leaf lookup per point, once per tick.
+    pub fn rebuild(&mut self, zone: &Zone, world: &ZoneWorld) {
+        self.entries.clear();
+        let bsp = &world.bsp;
+        for p in zone.players() {
+            let origin = p.mover.mv.origin;
+            self.entries.push(TableEntry {
+                id: p.id,
+                origin,
+                leaf: bsp.leaf_for_point(origin),
+                leaf_top: bsp.leaf_for_point(p.mover.eye()),
+                state: player_state(p, false),
+                stealth: if p.mover.statuses.has(Status::Stealth) {
+                    p.mover.statuses.magnitude(Status::Stealth)
+                } else {
+                    f32::INFINITY
+                },
+                is_player: true,
+            });
+        }
+        for pr in zone.projectiles() {
+            let leaf = bsp.leaf_for_point(pr.pos);
+            self.entries.push(TableEntry {
+                id: pr.id,
+                origin: pr.pos,
+                leaf,
+                leaf_top: leaf,
+                state: projectile_state(pr),
+                stealth: f32::INFINITY,
+                is_player: false,
+            });
+        }
+        for ar in zone.areas() {
+            self.entries.push(TableEntry {
+                id: ar.id,
+                origin: ar.origin,
+                leaf: bsp.leaf_for_point(ar.origin),
+                leaf_top: bsp.leaf_for_point(ar.origin + Vec3::new(0.0, 0.0, 32.0)),
+                state: area_state(ar),
+                stealth: f32::INFINITY,
+                is_player: false,
+            });
+        }
+        // Players, projectiles and areas each come out ascending; ids are monotonic across
+        // kinds, so a merge would do, but a sort of a nearly sorted list is just as cheap.
+        self.entries.sort_unstable_by_key(|e| e.id);
     }
 }
 
@@ -94,95 +174,101 @@ impl Session {
         };
     }
 
-    fn baseline(&self, tick: u32) -> Option<&Snapshot> {
+    fn baseline_index(&self, tick: u32) -> Option<usize> {
         if self.acked == 0 {
             return None;
         }
         self.history
             .iter()
-            .find(|s| s.server_tick == self.acked)
-            .filter(|s| tick.wrapping_sub(s.server_tick) as i32 <= MAX_BASELINE_AGE)
+            .position(|s| s.server_tick == self.acked)
+            .filter(|&i| tick.wrapping_sub(self.history[i].server_tick) as i32 <= MAX_BASELINE_AGE)
     }
 
     /// Build this tick's snapshot for the client: PVS filter, distance bands, carry-forward of
     /// unscheduled entities, delta encoding, and the datagram budget. `None` when the client's
     /// entity is gone.
+    /// The leaf whose PVS row this session needs (so the cache can be filled before the
+    /// parallel pass).
+    pub fn eye_leaf(&self, zone: &Zone, world: &ZoneWorld) -> Option<usize> {
+        let me = zone.player(self.id)?;
+        Some(world.bsp.leaf_for_point(me.mover.eye()))
+    }
+
     pub fn build_snapshot(
         &mut self,
         zone: &Zone,
         world: &ZoneWorld,
-        pvs: &mut PvsCache,
+        table: &TickTable,
+        pvs: &PvsCache,
         tick: u32,
     ) -> Option<Vec<u8>> {
         let me = zone.player(self.id)?;
         let eye = me.mover.eye();
         let my_leaf = world.bsp.leaf_for_point(eye);
         let see_all = my_leaf == 0;
+        // A missing row (not prepared) is treated as "see everything": never hide a body by
+        // accident.
         let row: &[u8] = if see_all {
             &[]
         } else {
-            pvs.row(&world.bsp, my_leaf)
+            pvs.row(my_leaf).unwrap_or(&[])
         };
-        let visible = |origin: Vec3, top: Vec3| -> bool {
-            if see_all {
-                return true;
-            }
-            let bsp = &world.bsp;
-            Bsp::leaf_in_pvs(row, bsp.leaf_for_point(origin))
-                || Bsp::leaf_in_pvs(row, bsp.leaf_for_point(top))
-        };
+        let see_all = see_all || row.is_empty();
 
-        let baseline_tick = self.baseline(tick).map_or(0, |b| b.server_tick);
-        let baseline = self.baseline(tick).cloned();
-        let base = baseline.as_ref();
+        let base_idx = self.baseline_index(tick);
+        let baseline_tick = base_idx.map_or(0, |i| self.history[i].server_tick);
         let mut snap = Snapshot::new(tick);
         snap.baseline_tick = baseline_tick;
         snap.last_input_tick = me.last_input_tick;
         snap.own = own_state(me);
+        snap.entities.reserve(table.entries.len());
         // (id, distance) of droppable (other player) records for the size budget.
         let mut droppable: Vec<(EntityId, f32)> = Vec::new();
 
-        for p in zone.players() {
-            if p.id == self.id {
-                snap.entities.push(player_state(p, true));
-                continue;
+        {
+            let base = base_idx.map(|i| &self.history[i]);
+            let base_entities: &[EntityState] = base.map_or(&[], |b| &b.entities);
+            // The table and the baseline both ascend by id: one merged walk pairs them.
+            let mut j = 0;
+            for e in &table.entries {
+                while j < base_entities.len() && base_entities[j].id < e.id {
+                    j += 1;
+                }
+                let base_rec = (j < base_entities.len() && base_entities[j].id == e.id)
+                    .then(|| &base_entities[j]);
+                if e.id == self.id {
+                    snap.entities.push(player_state(me, true));
+                    continue;
+                }
+                let dist = (e.origin - eye).length();
+                let visible =
+                    see_all || Bsp::leaf_in_pvs(row, e.leaf) || Bsp::leaf_in_pvs(row, e.leaf_top);
+                if e.is_player {
+                    if dist > TOUCH_DIST && (!visible || dist > e.stealth) {
+                        continue;
+                    }
+                    let scheduled = base_rec.is_none() || band_scheduled(tick, e.id, dist);
+                    let rec = match base_rec {
+                        Some(b) if !scheduled => *b,
+                        _ => e.state,
+                    };
+                    droppable.push((e.id, dist));
+                    snap.entities.push(rec);
+                } else {
+                    if !visible {
+                        continue;
+                    }
+                    snap.entities.push(e.state);
+                }
             }
-            let dist = (p.mover.mv.origin - eye).length();
-            if dist > TOUCH_DIST && !visible(p.mover.mv.origin, p.mover.eye()) {
-                continue;
-            }
-            // Stealth (MATRIX.md 8): included only within its magnitude, never past the PVS.
-            if dist > TOUCH_DIST
-                && p.mover.statuses.has(Status::Stealth)
-                && dist > p.mover.statuses.magnitude(Status::Stealth)
-            {
-                continue;
-            }
-            let base_rec = base.and_then(|b| b.find(p.id));
-            let scheduled = base_rec.is_none() || band_scheduled(tick, p.id, dist);
-            let rec = if scheduled {
-                player_state(p, false)
-            } else {
-                *base_rec.expect("unscheduled implies a baseline record")
-            };
-            droppable.push((p.id, dist));
-            snap.entities.push(rec);
+            snap.normalize(base);
         }
-        for pr in zone.projectiles() {
-            if !visible(pr.pos, pr.pos) {
-                continue;
-            }
-            snap.entities.push(projectile_state(pr));
-        }
-        for ar in zone.areas() {
-            if !visible(ar.origin, ar.origin + Vec3::new(0.0, 0.0, 32.0)) {
-                continue;
-            }
-            snap.entities.push(area_state(ar));
-        }
-        snap.normalize(base);
 
-        let mut bytes = snap.encode(base);
+        let base_tick = baseline_tick;
+        let mut bytes = {
+            let base = base_idx.map(|i| &self.history[i]);
+            snap.encode(base)
+        };
         droppable.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut drop_iter = droppable.into_iter();
         while bytes.len() > MAX_DATAGRAM_PAYLOAD {
@@ -191,6 +277,7 @@ impl Session {
             let excess = bytes.len() - MAX_DATAGRAM_PAYLOAD;
             let mut to_drop = excess / 6 + 1;
             let mut dropped_any = false;
+            let base = base_idx.map(|i| &self.history[i]);
             while to_drop > 0 {
                 let Some((id, _)) = drop_iter.next() else {
                     break;
@@ -215,6 +302,7 @@ impl Session {
             if !dropped_any {
                 break;
             }
+            debug_assert_eq!(snap.baseline_tick, base_tick);
             bytes = snap.encode(base);
         }
 

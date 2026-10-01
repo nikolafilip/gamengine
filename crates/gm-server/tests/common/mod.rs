@@ -175,6 +175,7 @@ pub fn play(m: Match) -> Outcome {
                     report_tx: Some(tx),
                     content,
                     default_build: "blade".into(),
+                    hub: None,
                 };
                 let report =
                     gm_server::run(cfg, zone_world, endpoint, std::future::pending()).await?;
@@ -227,6 +228,8 @@ pub fn play(m: Match) -> Outcome {
                 build,
                 team,
                 counter_pick,
+                travel_to: None,
+                travel_after_ticks: 0,
             };
             let report = run_bot(
                 &endpoint,

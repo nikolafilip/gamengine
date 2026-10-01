@@ -16,6 +16,7 @@ gm-bsp = { path = "crates/gm-bsp" }
 gm-net = { path = "crates/gm-net" }
 gm-ai = { path = "crates/gm-ai" }
 gm-content = { path = "crates/gm-content" }
+gm-hub-proto = { path = "crates/gm-hub-proto" }
 
 # math / data
 glam = "0.33.11"
@@ -38,6 +39,7 @@ egui-winit = "0.36.2"
 kira = "0.12.5"
 
 # server / net
+rayon = "1.11"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "time", "signal", "macros", "sync"] }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }

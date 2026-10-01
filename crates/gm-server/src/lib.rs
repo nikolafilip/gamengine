@@ -3,11 +3,13 @@
 //! history, the QUIC connection handling and the tick loop that drives `gm_core::sim::Zone`.
 #![forbid(unsafe_code)]
 
+pub mod hub_link;
 pub mod net;
 pub mod session;
 pub mod tick;
 pub mod world;
 pub mod zone;
 
+pub use hub_link::{HubLink, HubLinkConfig};
 pub use world::ZoneWorld;
 pub use zone::{ZoneConfig, ZoneReport, run};

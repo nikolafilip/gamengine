@@ -4,6 +4,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use gm_bsp::Bsp;
@@ -36,6 +37,17 @@ pub struct BotConfig {
     pub team: u8,
     /// Re-spec to the preset that counters the enemy's aspects (MATRIX.md 11).
     pub counter_pick: bool,
+    /// Ask to travel to this zone after `travel_after_ticks` (hub flows only).
+    pub travel_to: Option<String>,
+    pub travel_after_ticks: u32,
+}
+
+/// Why the bot loop ended.
+#[derive(Clone, Debug)]
+pub enum BotExit {
+    Done,
+    /// The zone handed over a ticket for another zone.
+    Travel(Box<gm_hub_proto::protocol::ZoneTicket>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -79,6 +91,28 @@ pub async fn run_bot(
     world: Arc<Bsp>,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<BotReport> {
+    let (report, _, _) = run_bot_with_token(
+        endpoint,
+        server,
+        cfg,
+        Vec::new(),
+        move |_| Ok(world.clone()),
+        shutdown,
+    )
+    .await?;
+    Ok(report)
+}
+
+/// Like [`run_bot`] with a hub token; the map is loaded by name from `Welcome` through
+/// `load_map`. Returns the report, why the loop ended and the map name.
+pub async fn run_bot_with_token(
+    endpoint: &quinn::Endpoint,
+    server: SocketAddr,
+    cfg: BotConfig,
+    token: Vec<u8>,
+    load_map: impl Fn(&str) -> anyhow::Result<Arc<Bsp>>,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<(BotReport, BotExit, String)> {
     let conn = endpoint.connect(server, SERVER_NAME)?.await?;
     let (mut send, mut recv) = conn.open_bi().await?;
     control::send(
@@ -86,7 +120,7 @@ pub async fn run_bot(
         &Control::Hello {
             version: PROTOCOL_VERSION as u16,
             name: cfg.name.clone(),
-            token: Vec::new(),
+            token,
             build: cfg.build.clone().map(BuildChoice::Preset),
             team: cfg.team,
         },
@@ -95,11 +129,15 @@ pub async fn run_bot(
     let welcome = control::recv(&mut recv)
         .await?
         .ok_or_else(|| anyhow::anyhow!("server closed before Welcome"))?;
-    let (entity, hz) = match welcome {
-        Control::Welcome { entity, hz, .. } => (entity, hz),
+    let (entity, hz, map_name) = match welcome {
+        Control::Welcome {
+            entity, hz, map, ..
+        } => (entity, hz, map),
         Control::Reject(reason) => anyhow::bail!("rejected: {reason}"),
         other => anyhow::bail!("unexpected handshake message {other:?}"),
     };
+    let world = load_map(&map_name)?;
+    let mut exit = BotExit::Done;
     let content = control::recv(&mut recv)
         .await?
         .ok_or_else(|| anyhow::anyhow!("server closed before Content"))?;
@@ -152,6 +190,13 @@ pub async fn run_bot(
                     others: &others,
                     tick: client.tick.wrapping_add(1),
                 });
+                if let Some(to) = &cfg.travel_to
+                    && cfg.travel_after_ticks > 0
+                    && ticks == cfg.travel_after_ticks
+                {
+                    info!(name = %cfg.name, %to, "asking to travel");
+                    let _ = control::send(&mut send, &Control::Travel(to.clone())).await;
+                }
                 if cfg.counter_pick && ticks >= next_pick {
                     next_pick = ticks + COUNTER_PICK_PERIOD_S * rate.hz();
                     let enemy = dominant_enemy_aspects(team, &others);
@@ -207,6 +252,30 @@ pub async fn run_bot(
                             client.set_sheet(Sheet::new(build, &pack, team));
                         }
                     }
+                    Ok(Some(Control::TravelTicket { zone, addr, cert_der, token })) => {
+                        let addr: SocketAddr = match addr.parse() {
+                            Ok(a) => a,
+                            Err(e) => {
+                                info!(name = %cfg.name, "bad travel address {addr}: {e}");
+                                continue;
+                            }
+                        };
+                        let Ok(token) = bitcode::decode(&token) else {
+                            info!(name = %cfg.name, "bad travel token");
+                            continue;
+                        };
+                        info!(name = %cfg.name, %zone, %addr, "travel ticket");
+                        exit = BotExit::Travel(Box::new(gm_hub_proto::protocol::ZoneTicket {
+                            zone,
+                            addr,
+                            cert_der,
+                            token,
+                        }));
+                        break;
+                    }
+                    Ok(Some(Control::TravelRefused(reason))) => {
+                        info!(name = %cfg.name, "travel refused: {reason}");
+                    }
                     Ok(Some(Control::Kick(reason))) => {
                         info!(name = %cfg.name, "kicked: {reason}");
                         break;
@@ -229,5 +298,7 @@ pub async fn run_bot(
     report.final_build = current_build;
     let _ = control::send(&mut send, &Control::Bye).await;
     conn.close(0u32.into(), b"done");
-    Ok(report)
+    // Give the Bye a moment to leave before the endpoint is dropped.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    Ok((report, exit, map_name))
 }

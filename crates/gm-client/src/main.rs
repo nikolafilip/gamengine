@@ -6,6 +6,7 @@
 
 mod app;
 mod headless;
+mod hub;
 mod net;
 mod render;
 mod stats;
@@ -29,6 +30,16 @@ pub struct Options {
     pub team: u8,
     /// Start in the third-person viewport.
     pub third_person: bool,
+    /// Play through the hub: log in, pick a character, get a ticket (HUB.md).
+    pub hub: Option<std::net::SocketAddr>,
+    pub hub_cert: PathBuf,
+    pub user: String,
+    pub password: String,
+    pub register: bool,
+    pub character: String,
+    pub zone: String,
+    /// Where `<map>.bsp` files live for zone changes.
+    pub maps_dir: PathBuf,
     pub bench_frames: Option<u32>,
     pub vsync: bool,
     /// Explicit present mode (overrides `vsync`): fifo, relaxed, mailbox, immediate.
@@ -46,7 +57,9 @@ pub struct Options {
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
 [--third-person] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
-[--size WxH] [--screenshot out.ppm] [--seconds N]";
+[--size WxH] [--screenshot out.ppm] [--seconds N]\n\
+       gm-client --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME [--zone ID] [--build NAME] \
+[--maps-dir DIR] [--third-person]";
 
 fn parse_args() -> Result<Options, String> {
     let mut o = Options {
@@ -58,6 +71,14 @@ fn parse_args() -> Result<Options, String> {
         build: None,
         team: 0,
         third_person: false,
+        hub: None,
+        hub_cert: PathBuf::from("hub-cert.der"),
+        user: String::new(),
+        password: String::new(),
+        register: false,
+        character: String::new(),
+        zone: "arena".into(),
+        maps_dir: PathBuf::from("assets/maps/built"),
         bench_frames: None,
         vsync: true,
         present: None,
@@ -91,6 +112,14 @@ fn parse_args() -> Result<Options, String> {
                     .map_err(|e| format!("--team: {e}"))?
             }
             "--third-person" => o.third_person = true,
+            "--hub" => o.hub = Some(value("--hub")?.parse().map_err(|e| format!("--hub: {e}"))?),
+            "--hub-cert" => o.hub_cert = PathBuf::from(value("--hub-cert")?),
+            "--user" => o.user = value("--user")?,
+            "--password" => o.password = value("--password")?,
+            "--register" => o.register = true,
+            "--character" => o.character = value("--character")?,
+            "--zone" => o.zone = value("--zone")?,
+            "--maps-dir" => o.maps_dir = PathBuf::from(value("--maps-dir")?),
             "--bench" => {
                 o.bench_frames = Some(
                     value("--bench")?

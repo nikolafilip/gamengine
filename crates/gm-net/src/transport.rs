@@ -139,6 +139,35 @@ pub fn transport_config() -> TransportConfig {
     t
 }
 
+/// The hub's transport (HUB.md 3): the zone transport plus room for a thousand concurrent
+/// request streams, so a zone saving many characters never blocks on a stream limit.
+pub fn hub_transport_config() -> TransportConfig {
+    let mut t = transport_config();
+    t.max_concurrent_bidi_streams(VarInt::from_u32(1024));
+    t.max_concurrent_uni_streams(VarInt::from_u32(256));
+    t
+}
+
+pub fn hub_server_config(identity: &Identity) -> Result<ServerConfig, TransportError> {
+    let mut cfg =
+        ServerConfig::with_single_cert(vec![identity.cert.clone()], identity.key.clone_key())?;
+    cfg.transport_config(Arc::new(hub_transport_config()));
+    Ok(cfg)
+}
+
+/// A client configuration for talking to the hub.
+pub fn hub_client_config(
+    trusted: &[CertificateDer<'static>],
+) -> Result<ClientConfig, TransportError> {
+    let mut roots = rustls::RootCertStore::empty();
+    for c in trusted {
+        roots.add(c.clone())?;
+    }
+    let mut cfg = ClientConfig::with_root_certificates(Arc::new(roots))?;
+    cfg.transport_config(Arc::new(hub_transport_config()));
+    Ok(cfg)
+}
+
 pub fn server_config(identity: &Identity) -> Result<ServerConfig, TransportError> {
     let mut cfg =
         ServerConfig::with_single_cert(vec![identity.cert.clone()], identity.key.clone_key())?;

@@ -45,6 +45,7 @@ impl NetClient {
         name: String,
         build: Option<String>,
         team: u8,
+        token: Vec<u8>,
     ) -> Result<NetClient, Error> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -58,7 +59,7 @@ impl NetClient {
             let hello = Control::Hello {
                 version: PROTOCOL_VERSION as u16,
                 name,
-                token: Vec::new(),
+                token,
                 build: build.map(BuildChoice::Preset),
                 team,
             };

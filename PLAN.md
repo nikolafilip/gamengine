@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-10-01 (Phases 0–3 implemented; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-10-01 (Phases 0–4 implemented; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -325,13 +325,14 @@ gamengine/
     gm-server    tokio zone process: tick loop, interest management (PVS + distance rates), lag comp for
                  melee, projectile sim, AI companions, loot/contract state machines, zone handoff.
     gm-hub       account/auth service, character DB, shard registry, escrow ledger, asset ingestion API.
+    gm-hub-proto hub messages, entry tokens and the hub connection (what zones, bots and the client link).
     gm-ai        companion behavior trees (tank/heal/dps/scout) driving gm-core inputs like a player.
     gm-tools     CLI: model ingestion (gltf → glb + KTX2, budget lint), map build wrapper (ericw-tools),
                  budget checker used by CI.
     gm-bot       headless client for load tests and soak tests.
   assets/        maps (.map source + built .bsp/.lit + gamengine.fgd), textures (generated palette + WAD),
                  content (abilities + builds, TOML), later models/audio
-  docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, BUILDING.md
+  docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, BUILDING.md
   PLAN.md        this file stays at the repository root (it is the entry point; README links it)
   budgets.toml   every number CI enforces; read by gm-tools and scripts/
   scripts/       CI gates and the pinned ericw-tools fetch
@@ -344,10 +345,10 @@ gamengine/
 | Rendering | `wgpu`, `winit`, `glam`, `bytemuck` | forward renderer, lightmap + diffuse, skinned meshes in a storage buffer |
 | ECS | `hecs` | fallback `bevy_ecs`. **Not used yet:** the Phase 2 zone holds players in a `BTreeMap` and projectiles in a `Vec` (deterministic iteration, a handful of entity kinds); `hecs` enters when Phase 3 adds statuses, areas and many entity kinds |
 | Async/server | `tokio` | one runtime per zone process |
-| Transport | `quinn` (native), `wtransport` (browser) | QUIC datagrams + streams |
+| Transport | `quinn` (native), `wtransport` (browser) | QUIC datagrams + streams; the hub API is the same QUIC with one request per stream (HUB.md 3), no HTTP stack in the client |
 | Serialization | hand-rolled bit packing for snapshots; `bitcode` for reliable messages | snapshots must be byte-tight |
-| DB | `sqlx` + Postgres, `refinery` or sqlx migrations | items normalized, components as rows, escrow as transactions |
-| Auth | `argon2`, JWT-style signed session tokens (`ed25519-dalek`) | hub issues, zones verify |
+| DB | `sqlx` 0.9 + Postgres, embedded sqlx migrations | typed location columns with a check constraint (HUB.md 4); items normalized, components as rows, escrow as transactions (Phase 5) |
+| Auth | `argon2`, signed entry tokens (`ed25519-dalek`) | hub issues, zones verify offline; 60 s, single use, zone-bound (HUB.md 3.1). **[CORRECTED]** not JWT: `bitcode` payload + raw signature, no header, no algorithm negotiation |
 | Models | `gltf`, `ktx2`, `basis-universal` | ingestion tool |
 | Audio | `kira` | |
 | Dev UI | `egui` + `egui-wgpu` | not shipped in HUD |
@@ -432,7 +433,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 1 | `gm-bsp` + `gm-client`: load a TrenchBroom map compiled by ericw-tools, lightmapped, Quake movement, collision | 60+ fps on an Intel iGPU; binary < 10 MB; RAM < 200 MB. **Done 2026-09-30** |
 | 2 | `gm-net` + `gm-server`: 16 players, prediction, reconciliation, interpolation, melee lag comp, projectiles, collision, FF | playable at 150 ms / 3% loss in `turmoil`; bytes/player < 30 KB/s. **Done 2026-09-30** (11.10) |
 | 3 | Point-buy characters, type matrix, FPS + third-person viewports, PVS culling | one arena map, 8v8 playtest, a build can be countered by re-speccing. **Done 2026-10-01** (11.10) |
-| 4 | Hub: accounts, persistence, zones, handoff, 200-bot swarm | 200 bots on one zone under CPU budget; login → zone → handoff → logout round trip |
+| 4 | Hub: accounts, persistence, zones, handoff, 200-bot swarm | 200 bots on one zone under CPU budget; login → zone → handoff → logout round trip. **Done 2026-10-01** (11.10) |
 | 5 | Economy: stalls, escrow contracts, component drops with corrected split, crafting, decomposition, account storage caps, guild halls, tavern hires, ledger | every coin/item movement is a DB transaction; scam test suite passes (mutation lock, escrow, floors) |
 | 6 | Custom models: ingestion, hash cache, LRU, silhouette fallback, takedown flag, moderation queue | 100 unique uploaded avatars in a town at 60 fps on iGPU, no disk growth past cap |
 | 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars |
@@ -554,6 +555,42 @@ class):
   wall-contact corrections and positional abilities against stale bodies are classified, not hidden);
   areas draw as flat discs; bots never use cover; `Origin::Target` resolves to the caster; the hub
   still does not exist, so builds live only for the session.
+
+**2026-10-01, Phase 4 done** (same machine; all numbers measured, none estimated):
+- `docs/HUB.md` v1: one hub process, QUIC with one request per stream (1,024 streams per hub
+  connection), `bitcode` messages, Postgres via `sqlx` with embedded migrations and typed location
+  columns under a check constraint, argon2id on the blocking pool behind a semaphore, ed25519 entry
+  tokens (60 s, single use, zone-bound, 5 s skew, persisted key), claims and saves scoped to the
+  character's zone, handoff with a 10 s ghost, transits abandoned after 15 s, logout kicks. Design
+  review before coding (section 9 of the document: 12 accepted, 1 accepted with a different reading).
+- `gm-hub`: protocol, token, db, hub, client modules, 1 migration, the binary; `gm-server`: hub link
+  (register, heartbeat, claim, save every 30 s staggered, handoff, notices), tokens mandatory under
+  `--hub`, ghosts in `gm-core` (`Player.ghost`); `gm-bot --hub` and `gm-client --hub` log in, enter,
+  travel (the client reloads the destination's map) and log out.
+- Server scaling for the swarm: the tick is instrumented (events, sim, snapshot, send); snapshots are
+  built from one shared per-tick table (wire records and leaves computed once) with merged walks
+  against the baseline, in parallel over sessions on a `rayon` pool. 200 duelists in the arena hall
+  (nothing culled): **14.5 ms → 6.6 ms mean, 9.1 ms p99** per tick (snapshots 12 → 2.8 ms, simulation
+  3.0 ms), 272 MB RSS, 20 KB/s down and 5.6 KB/s up per player, with the 200 bots on the same machine.
+  Gate `scripts/check-swarm.sh` with `budgets.toml [server]` (8 ms mean, 12 ms p99, 512 MiB).
+- **Acceptance** (`crates/gm-server/tests/handoff.rs`, loopback, one hub on a test database, two zones):
+  register → enter zone A → travel to zone B → logout with the location checked in the database at
+  every step; the hub's share **218 ms** (login 24, enter 110, travel 82, logout 2; budget 2 s), claimed
+  in A 55 ms after start and in B 160 ms after the travel request. Wrong password refused, a second
+  `Enter` during a transit refused, name and email normalisation checked. Live smoke: the windowed
+  client through the hub (243 fps, 122.6 MB) while a bot travelled from an arena zone to a test-room
+  zone with a different map, 0 corrections.
+- Binaries (release, LTO): `gm-client` **8,415,016 bytes (8.03 MiB)**, +151 KB for the hub
+  connection, tokens and the map switch; baseline updated. Linking the whole hub crate into the
+  client first cost +682 KB (sqlx and argon2 came along), so the protocol, tokens and connection
+  live in `gm-hub-proto` and the hub resolves preset names itself. `gm-hub` 5.34 MB, `gm-server`
+  4.72 MB, `gm-bot` 3.66 MB.
+- Independent code review (Gemini 3.1 Pro, HUB.md 9): six defects fixed, none rejected (a save
+  racing a handoff on another stream, logout losing the last save, the character cap race, the
+  rate limiter's sweep under the global lock, simultaneous saves, unread heartbeats).
+- Known limits: a zone that loses its hub connection orphans its characters (conservative); the
+  simulation step is still O(N²) in bodies (3 ms at 200; a grid is the next lever); no ops tool yet
+  (`gm-hub ctl`); sessions and the zone registry are in memory (a hub restart logs everyone out).
 
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute

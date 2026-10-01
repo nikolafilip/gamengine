@@ -26,6 +26,8 @@ pub enum Control {
     Chat(String),
     /// Applied at the next respawn (MATRIX.md 9); answered by `RespecResult`.
     Respec(BuildChoice),
+    /// Ask the hub (through the zone) for a ticket to another zone (HUB.md 3.3).
+    Travel(String),
     Bye,
     // server → client
     Welcome {
@@ -46,6 +48,16 @@ pub enum Control {
     RespecResult(Result<(), String>),
     /// The pending build took effect (at the respawn); the client's prediction switches now.
     BuildApplied(Build),
+    /// The hub issued a ticket for another zone: say `Bye`, connect there with `token`
+    /// (HUB.md 3.3). The body stays as a ghost here until the other zone claims it.
+    TravelTicket {
+        zone: String,
+        addr: String,
+        cert_der: Vec<u8>,
+        token: Vec<u8>,
+    },
+    /// The travel request failed.
+    TravelRefused(String),
     Reject(String),
     PlayerInfo {
         id: u32,
@@ -79,8 +91,9 @@ pub enum ControlError {
     Write(#[from] quinn::WriteError),
 }
 
-/// Length-prefixed bytes for one message.
-pub fn encode_framed(msg: &Control) -> Result<Vec<u8>, ControlError> {
+/// Length-prefixed bytes for one message of any `bitcode` type (the hub protocol uses the
+/// same framing, HUB.md 3).
+pub fn encode_framed_any<T: Encode>(msg: &T) -> Result<Vec<u8>, ControlError> {
     let payload = bitcode::encode(msg);
     if payload.len() > MAX_MESSAGE_BYTES {
         return Err(ControlError::TooLarge);
@@ -89,6 +102,37 @@ pub fn encode_framed(msg: &Control) -> Result<Vec<u8>, ControlError> {
     out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
     out.extend_from_slice(&payload);
     Ok(out)
+}
+
+/// Length-prefixed bytes for one message.
+pub fn encode_framed(msg: &Control) -> Result<Vec<u8>, ControlError> {
+    encode_framed_any(msg)
+}
+
+/// Write one message of any `bitcode` type to a QUIC stream.
+pub async fn send_any<T: Encode>(
+    stream: &mut quinn::SendStream,
+    msg: &T,
+) -> Result<(), ControlError> {
+    let bytes = encode_framed_any(msg)?;
+    stream.write_all(&bytes).await?;
+    Ok(())
+}
+
+/// Read one message of any `bitcode` type; `Ok(None)` on a clean end of stream.
+pub async fn recv_any<T: for<'a> Decode<'a>>(
+    stream: &mut quinn::RecvStream,
+) -> Result<Option<T>, ControlError> {
+    let mut len = [0u8; 2];
+    match stream.read_exact(&mut len).await {
+        Ok(()) => {}
+        Err(quinn::ReadExactError::FinishedEarly(0)) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    let len = u16::from_be_bytes(len) as usize;
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+    Ok(Some(bitcode::decode(&payload)?))
 }
 
 /// Decode one framed message from `buf`, returning it and the bytes consumed; `None` when the
@@ -107,23 +151,12 @@ pub fn decode_framed(buf: &[u8]) -> Result<Option<(Control, usize)>, ControlErro
 
 /// Write one message to a QUIC stream.
 pub async fn send(stream: &mut quinn::SendStream, msg: &Control) -> Result<(), ControlError> {
-    let bytes = encode_framed(msg)?;
-    stream.write_all(&bytes).await?;
-    Ok(())
+    send_any(stream, msg).await
 }
 
 /// Read one message from a QUIC stream; `Ok(None)` on a clean end of stream.
 pub async fn recv(stream: &mut quinn::RecvStream) -> Result<Option<Control>, ControlError> {
-    let mut len = [0u8; 2];
-    match stream.read_exact(&mut len).await {
-        Ok(()) => {}
-        Err(quinn::ReadExactError::FinishedEarly(0)) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    }
-    let len = u16::from_be_bytes(len) as usize;
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload).await?;
-    Ok(Some(bitcode::decode(&payload)?))
+    recv_any(stream).await
 }
 
 /// Validate a `Hello.name` (PROTOCOL.md 8): 1..=24 bytes of printable UTF-8 after trimming.

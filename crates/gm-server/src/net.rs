@@ -5,8 +5,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use glam::Vec3;
 use gm_core::build::{Build, ContentPack};
 use gm_core::vocab::EntityId;
+use gm_hub_proto::protocol::CharacterId;
 use gm_net::PROTOCOL_VERSION;
 use gm_net::control::{self, BuildChoice, Control};
 use gm_net::input::InputDatagram;
@@ -22,14 +24,43 @@ pub struct JoinInfo {
     pub team: u8,
 }
 
+/// A character the hub claimed for this zone (HUB.md 3.1).
+#[derive(Clone, Debug)]
+pub struct HubJoin {
+    pub character: CharacterId,
+    /// Where it was in this zone, if the saved position belongs here.
+    pub origin: Option<(Vec3, f32)>,
+    pub play_seconds: u32,
+}
+
 pub enum ClientEvent {
     Join {
         name: String,
         build: Option<BuildChoice>,
         team: u8,
+        hub: Option<HubJoin>,
         conn: quinn::Connection,
         control: mpsc::Sender<Control>,
         reply: oneshot::Sender<Result<JoinInfo, String>>,
+    },
+    /// The client asks to move to another zone (HUB.md 3.3).
+    Travel {
+        id: EntityId,
+        zone: String,
+    },
+    /// The hub answered a handoff with a ticket (or refused).
+    TravelResult {
+        id: EntityId,
+        result: Result<gm_hub_proto::protocol::ZoneTicket, String>,
+    },
+    /// The hub says another zone claimed this character: drop the ghost.
+    HubClaimed {
+        character: CharacterId,
+    },
+    /// The hub says this character must leave (logout, operator).
+    HubKick {
+        character: CharacterId,
+        reason: String,
     },
     Respec {
         id: EntityId,
@@ -59,6 +90,8 @@ pub struct NetConfig {
     pub open: bool,
     /// Sent to every client after `Welcome` (MATRIX.md 10).
     pub content: Arc<ContentPack>,
+    /// The hub, when this zone runs under one: tokens are then mandatory.
+    pub hub: Option<Arc<crate::hub_link::HubLink>>,
 }
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -110,23 +143,53 @@ async fn handle_connection(
     let reject = |reason: &str| Control::Reject(reason.to_string());
     let rejection = if version != PROTOCOL_VERSION as u16 {
         Some(reject("protocol version mismatch"))
-    } else if token.is_empty() && !cfg.open {
+    } else if token.is_empty() && (!cfg.open || cfg.hub.is_some()) {
         Some(reject("session token required"))
     } else {
         None
     };
-    let name = match (rejection, control::valid_name(&name)) {
-        (Some(r), _) => {
-            control::send(&mut send, &r).await?;
-            conn.close(1u32.into(), b"rejected");
-            return Ok(());
+    if let Some(r) = rejection {
+        control::send(&mut send, &r).await?;
+        conn.close(1u32.into(), b"rejected");
+        return Ok(());
+    }
+    // Under a hub the token names the character; `Hello.name` is ignored (HUB.md 3.1).
+    let (name, build, hub_join) = match &cfg.hub {
+        Some(hub) if !token.is_empty() => {
+            if let Err(e) = hub.verify(&token) {
+                control::send(&mut send, &reject(&e)).await?;
+                conn.close(1u32.into(), b"rejected");
+                return Ok(());
+            }
+            match hub.claim(&token).await {
+                Ok(claimed) => {
+                    let origin = (claimed.state.zone.as_deref() == Some(hub.zone.as_str()))
+                        .then(|| (Vec3::from(claimed.state.position), claimed.state.yaw));
+                    (
+                        claimed.name.clone(),
+                        Some(BuildChoice::Custom(claimed.state.build.clone())),
+                        Some(HubJoin {
+                            character: claimed.character,
+                            origin,
+                            play_seconds: claimed.state.play_seconds,
+                        }),
+                    )
+                }
+                Err(e) => {
+                    control::send(&mut send, &reject(&format!("claim failed: {e}"))).await?;
+                    conn.close(1u32.into(), b"rejected");
+                    return Ok(());
+                }
+            }
         }
-        (None, None) => {
-            control::send(&mut send, &reject("invalid name")).await?;
-            conn.close(1u32.into(), b"rejected");
-            return Ok(());
-        }
-        (None, Some(n)) => n,
+        _ => match control::valid_name(&name) {
+            Some(n) => (n, build, None),
+            None => {
+                control::send(&mut send, &reject("invalid name")).await?;
+                conn.close(1u32.into(), b"rejected");
+                return Ok(());
+            }
+        },
     };
 
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_CHANNEL);
@@ -135,6 +198,7 @@ async fn handle_connection(
         name: name.clone(),
         build,
         team,
+        hub: hub_join,
         conn: conn.clone(),
         control: control_tx,
         reply: reply_tx,
@@ -214,6 +278,11 @@ async fn handle_connection(
                     }
                     Ok(Some(Control::Respec(build))) => {
                         if tx.send(ClientEvent::Respec { id, build }).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(Control::Travel(zone))) => {
+                        if tx.send(ClientEvent::Travel { id, zone }).await.is_err() {
                             break;
                         }
                     }

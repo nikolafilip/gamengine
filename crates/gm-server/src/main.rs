@@ -16,6 +16,11 @@ struct Args {
     content: PathBuf,
     default_build: String,
     listen: SocketAddr,
+    hub: Option<SocketAddr>,
+    hub_cert: PathBuf,
+    zone_id: String,
+    zone_secret: String,
+    public_addr: Option<SocketAddr>,
     cert_out: PathBuf,
     hz: u32,
     report_secs: u64,
@@ -25,7 +30,8 @@ struct Args {
 }
 
 const USAGE: &str = "gm-server [--map PATH] [--content DIR] [--default-build NAME] [--listen ADDR] \
-[--cert-out PATH] [--hz 64|20] [--report-secs N] [--ticks N] [--max-players N] [--seed N]";
+[--cert-out PATH] [--hz 64|20] [--report-secs N] [--ticks N] [--max-players N] [--seed N] \
+[--hub ADDR --hub-cert PATH --zone-id NAME --zone-secret S [--public-addr ADDR]]   (env: GM_ZONE_SECRET)";
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
@@ -33,6 +39,11 @@ fn parse_args() -> Result<Args, String> {
         content: PathBuf::from("assets/content"),
         default_build: "blade".into(),
         listen: "127.0.0.1:4433".parse().unwrap(),
+        hub: None,
+        hub_cert: PathBuf::from("hub-cert.der"),
+        zone_id: "arena".into(),
+        zone_secret: std::env::var("GM_ZONE_SECRET").unwrap_or_default(),
+        public_addr: None,
         cert_out: PathBuf::from("zone-cert.der"),
         hz: TickRate::COMBAT.hz(),
         report_secs: 5,
@@ -47,6 +58,17 @@ fn parse_args() -> Result<Args, String> {
             "--map" => args.map = PathBuf::from(value("--map")?),
             "--content" => args.content = PathBuf::from(value("--content")?),
             "--default-build" => args.default_build = value("--default-build")?,
+            "--hub" => args.hub = Some(value("--hub")?.parse().map_err(|e| format!("--hub: {e}"))?),
+            "--hub-cert" => args.hub_cert = PathBuf::from(value("--hub-cert")?),
+            "--zone-id" => args.zone_id = value("--zone-id")?,
+            "--zone-secret" => args.zone_secret = value("--zone-secret")?,
+            "--public-addr" => {
+                args.public_addr = Some(
+                    value("--public-addr")?
+                        .parse()
+                        .map_err(|e| format!("--public-addr: {e}"))?,
+                )
+            }
             "--listen" => {
                 args.listen = value("--listen")?
                     .parse()
@@ -125,6 +147,29 @@ async fn main() -> anyhow::Result<()> {
     info!(cert = %args.cert_out.display(), "zone certificate written; clients pass it with --cert");
     let endpoint = quinn::Endpoint::server(server_config(&identity)?, args.listen)?;
     info!(listen = %endpoint.local_addr()?, map = %world.name, hash = format_args!("{:016x}", world.hash), "listening");
+    let hub = match args.hub {
+        Some(addr) => {
+            if args.zone_secret.is_empty() {
+                anyhow::bail!("--zone-secret (or GM_ZONE_SECRET) is required with --hub");
+            }
+            let cert_der = std::fs::read(&args.hub_cert)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", args.hub_cert.display()))?;
+            Some(
+                gm_server::HubLink::connect(gm_server::HubLinkConfig {
+                    addr,
+                    cert_der,
+                    zone: args.zone_id.clone(),
+                    secret: args.zone_secret.clone(),
+                    map: world.name.clone(),
+                    map_hash: world.hash,
+                    public_addr: args.public_addr.unwrap_or(endpoint.local_addr()?),
+                    zone_cert_der: identity.cert_der().to_vec(),
+                })
+                .await?,
+            )
+        }
+        None => None,
+    };
 
     let cfg = ZoneConfig {
         rate,
@@ -136,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
         report_tx: None,
         content,
         default_build: args.default_build,
+        hub,
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

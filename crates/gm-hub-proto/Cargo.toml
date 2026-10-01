@@ -1,0 +1,18 @@
+[package]
+name = "gm-hub-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine hub protocol: messages, entry tokens and the hub connection used by zones, bots and the client."
+
+[dependencies]
+anyhow = { workspace = true }
+bitcode = { workspace = true }
+ed25519-dalek = { workspace = true }
+gm-core = { workspace = true, features = ["bitcode"] }
+gm-net = { workspace = true }
+quinn = { workspace = true }
+rand = "0.9"
+thiserror = { workspace = true }

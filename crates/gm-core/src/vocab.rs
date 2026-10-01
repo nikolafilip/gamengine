@@ -138,6 +138,7 @@ pub struct AbilityId(pub u16);
 /// World collision uses [`crate::trace::Hull::Player`] for all of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ArchetypeFrame {
     Colossus,
     Striker,

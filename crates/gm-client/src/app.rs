@@ -6,6 +6,7 @@
 //! world point and re-aims it from the eyes ("camera-to-muzzle re-aim").
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,6 +29,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use crate::hub::{HubLogin, HubSession};
 use crate::net::{NetClient, NetEvent};
 use crate::render::{EntityDraw, Gpu, Renderer, view_proj};
 use crate::stats::{FrameStats, print_bench};
@@ -131,6 +133,11 @@ struct Online {
     deaths: u32,
     map_hash: u64,
     respec_note: String,
+    /// The hub session when playing through the hub (HUB.md); logged out on exit.
+    hub: Option<HubSession>,
+    /// A travel ticket to act on: reconnect to another zone, reloading its map.
+    pending_travel: Option<(String, std::net::SocketAddr, Vec<u8>, Vec<u8>)>,
+    zone_name: String,
 }
 
 impl Online {
@@ -264,6 +271,8 @@ struct App {
     entities: Vec<EntityDraw>,
     /// The aim resolved by the last third-person tick, for the HUD.
     aim: (f32, f32),
+    /// A map to switch to before the next frame (a zone change).
+    pending_map: Option<PathBuf>,
 }
 
 pub fn run(opts: Options) -> Result<(), Error> {
@@ -282,10 +291,45 @@ pub fn run(opts: Options) -> Result<(), Error> {
         .filter(|r| r.index_count > 0)
         .count();
     let sim = Sim::new(&bsp);
-    let online = match opts.connect {
-        Some(addr) => {
+    // Through the hub: log in and get a ticket first; the ticket names the zone, its address
+    // and its certificate. The map comes from `Welcome` and is loaded then.
+    let (connect, cert, token, hub, zone_name) = match (opts.hub, opts.connect) {
+        (Some(hub_addr), _) => {
+            let cert_der = std::fs::read(&opts.hub_cert)
+                .map_err(|e| format!("reading hub certificate {}: {e}", opts.hub_cert.display()))?;
+            let (session, ticket) = HubSession::enter(HubLogin {
+                hub: hub_addr,
+                cert_der,
+                email: opts.user.clone(),
+                password: opts.password.clone(),
+                register: opts.register,
+                character: opts.character.clone(),
+                new_preset: opts.build.clone(),
+                zone: opts.zone.clone(),
+            })?;
+            log::info!(
+                "hub ticket for zone {} at {} (character {})",
+                ticket.zone,
+                ticket.addr,
+                session.character
+            );
+            (
+                Some(ticket.addr),
+                ticket.cert_der,
+                bitcode::encode(&ticket.token),
+                Some(session),
+                ticket.zone,
+            )
+        }
+        (None, Some(addr)) => {
             let cert = std::fs::read(&opts.cert)
                 .map_err(|e| format!("reading zone certificate {}: {e}", opts.cert.display()))?;
+            (Some(addr), cert, Vec::new(), None, String::new())
+        }
+        (None, None) => (None, Vec::new(), Vec::new(), None, String::new()),
+    };
+    let online = match connect {
+        Some(addr) => {
             let map_hash = fnv1a64(&std::fs::read(&opts.map)?);
             log::info!("connecting to {addr} as {}", opts.name);
             Some(Online {
@@ -295,6 +339,7 @@ pub fn run(opts: Options) -> Result<(), Error> {
                     opts.name.clone(),
                     opts.build.clone(),
                     opts.team,
+                    token,
                 )?,
                 welcome: None,
                 client: None,
@@ -311,6 +356,9 @@ pub fn run(opts: Options) -> Result<(), Error> {
                 deaths: 0,
                 map_hash,
                 respec_note: String::new(),
+                hub,
+                pending_travel: None,
+                zone_name,
             })
         }
         None => None,
@@ -344,10 +392,15 @@ pub fn run(opts: Options) -> Result<(), Error> {
         acquire_timeouts: 0,
         entities: Vec::new(),
         aim: (0.0, 0.0),
+        pending_map: None,
     };
     event_loop.run_app(&mut app)?;
     if let Some(o) = &mut app.online {
         o.net.close();
+        if let Some(hub) = &o.hub {
+            hub.logout();
+            log::info!("logged out of the hub");
+        }
     }
 
     let report = app.stats.report();
@@ -504,6 +557,12 @@ impl App {
             return;
         };
         let Some(pack) = &o.pack else { return };
+        if self.input.just_pressed.remove(&KeyCode::KeyT)
+            && let Ok(target) = std::env::var("GM_TRAVEL_TO")
+        {
+            o.net.send_control(Control::Travel(target.clone()));
+            o.respec_note = format!("travel to {target} requested");
+        }
         let keys = [KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4];
         for (i, k) in keys.iter().enumerate() {
             if self.input.just_pressed.remove(k)
@@ -536,13 +595,25 @@ impl App {
                     map_hash,
                 } => {
                     if map_hash != o.map_hash {
-                        log::error!(
-                            "zone runs map {map} with hash {map_hash:016x}; ours is {:016x} (wrong map build)",
-                            o.map_hash
-                        );
-                        self.exit_requested = true;
-                        event_loop.exit();
-                        return None;
+                        // Another map: load it (a zone change through the hub lands here).
+                        let path = self.opts.maps_dir.join(format!("{map}.bsp"));
+                        match std::fs::read(&path) {
+                            Ok(bytes) if fnv1a64(&bytes) == map_hash => {
+                                log::info!("zone runs map {map}; loading {}", path.display());
+                                self.pending_map = Some(path);
+                                o.map_hash = map_hash;
+                            }
+                            _ => {
+                                log::error!(
+                                    "zone runs map {map} with hash {map_hash:016x}; ours is {:016x} and {} does not match (wrong map build)",
+                                    o.map_hash,
+                                    path.display()
+                                );
+                                self.exit_requested = true;
+                                event_loop.exit();
+                                return None;
+                            }
+                        }
                     }
                     o.rate = TickRate::new(hz as u32);
                     o.welcome = Some((entity, hz));
@@ -597,6 +668,22 @@ impl App {
                         };
                         log::info!("{}", o.respec_note);
                     }
+                    Control::TravelTicket {
+                        zone,
+                        addr,
+                        cert_der,
+                        token,
+                    } => match addr.parse::<std::net::SocketAddr>() {
+                        Ok(addr) => {
+                            log::info!("travel ticket for {zone} at {addr}");
+                            o.pending_travel = Some((zone, addr, cert_der, token));
+                        }
+                        Err(e) => log::error!("bad travel address {addr}: {e}"),
+                    },
+                    Control::TravelRefused(reason) => {
+                        o.respec_note = format!("travel refused: {reason}");
+                        log::info!("{}", o.respec_note);
+                    }
                     Control::PlayerInfo { id, name, team } => {
                         o.names.insert(id, (name, team));
                     }
@@ -629,6 +716,32 @@ impl App {
                     return None;
                 }
             }
+        }
+        // A travel ticket: say goodbye here, connect there (the body stays as a ghost until
+        // the other zone claims it, HUB.md 3.3).
+        if let Some((zone, addr, cert_der, token)) = o.pending_travel.take() {
+            o.net.close();
+            match NetClient::connect(
+                addr,
+                cert_der,
+                self.opts.name.clone(),
+                None,
+                self.opts.team,
+                token,
+            ) {
+                Ok(net) => {
+                    o.net = net;
+                    o.welcome = None;
+                    o.client = None;
+                    o.pack = None;
+                    o.names.clear();
+                    o.zone_name = zone;
+                    o.respec_note = format!("travelling to {}", o.zone_name);
+                    self.entities.clear();
+                }
+                Err(e) => log::error!("travel failed: {e}"),
+            }
+            return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
         }
         let Some(c) = &mut o.client else {
             return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
@@ -738,7 +851,43 @@ impl App {
         }
     }
 
+    /// Replace the world (BSP, mesh, renderer) with another map.
+    fn switch_map(&mut self, path: &std::path::Path) {
+        let bsp = match Bsp::load(path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::error!("loading {}: {e}", path.display());
+                return;
+            }
+        };
+        let palette = world::load_palette(&self.opts.palette);
+        let mesh = world::build(&bsp, &palette);
+        self.faces_total = mesh
+            .face_ranges
+            .iter()
+            .filter(|r| r.index_count > 0)
+            .count();
+        if let Some(a) = &mut self.active {
+            a.renderer = Renderer::new(
+                &a.gpu,
+                a.config.format,
+                &mesh,
+                (a.config.width, a.config.height),
+            );
+            a.current_leaf = None;
+        } else {
+            self.mesh = Some(mesh);
+        }
+        self.sim = Sim::new(&bsp);
+        self.bsp = bsp;
+        self.opts.map = path.to_path_buf();
+        log::info!("switched to {}", path.display());
+    }
+
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(path) = self.pending_map.take() {
+            self.switch_map(&path);
+        }
         let now = Instant::now();
         let frame_dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -886,7 +1035,12 @@ impl App {
                             )
                         });
                     format!(
-                        "gamengine [{} team {} {vp}]  hp {hp}/{max_hp}  st {st:.0}  fo {fo:.0}  k {} d {}  {} players  delay {delay}  corr {corr}  {:.0} fps  {}",
+                        "gamengine [{}{} team {} {vp}]  hp {hp}/{max_hp}  st {st:.0}  fo {fo:.0}  k {} d {}  {} players  delay {delay}  corr {corr}  {:.0} fps  {}",
+                        if o.zone_name.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{} ", o.zone_name)
+                        },
                         o.build_name,
                         o.team,
                         o.kills,

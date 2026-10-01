@@ -13,10 +13,12 @@ winit = { workspace = true }
 pollster = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
+bitcode = { workspace = true }
 log = { workspace = true }
 gm-core = { workspace = true }
 gm-bsp = { workspace = true }
 gm-net = { workspace = true }
+gm-hub-proto = { workspace = true }
 tokio = { workspace = true }
 quinn = { workspace = true }
 bytes = { workspace = true }

@@ -154,15 +154,21 @@ impl Snapshot {
 
     /// Sort entities by id and fill `removed` from `baseline`; call after building the table.
     pub fn normalize(&mut self, baseline: Option<&Snapshot>) {
-        self.entities.sort_by_key(|e| e.id);
-        let removed: Vec<u32> = baseline.map_or_else(Vec::new, |b| {
-            b.entities
-                .iter()
-                .map(|e| e.id)
-                .filter(|&id| self.find(id).is_none())
-                .collect()
-        });
-        self.removed = removed;
+        self.entities.sort_unstable_by_key(|e| e.id);
+        self.removed.clear();
+        let Some(b) = baseline else {
+            return;
+        };
+        // Both lists ascend: one merged walk finds the baseline ids missing now.
+        let mut i = 0;
+        for be in &b.entities {
+            while i < self.entities.len() && self.entities[i].id < be.id {
+                i += 1;
+            }
+            if i >= self.entities.len() || self.entities[i].id != be.id {
+                self.removed.push(be.id);
+            }
+        }
     }
 
     /// Encode against `baseline`, which must be the snapshot at `self.baseline_tick` (or
@@ -182,12 +188,21 @@ impl Snapshot {
         w.write_bits(self.baseline_tick as u64, 32);
         w.write_bits(self.last_input_tick as u64, 32);
         write_own(&mut w, &self.own);
-        let changed: Vec<(&EntityState, Option<&EntityState>)> = self
-            .entities
-            .iter()
-            .map(|e| (e, baseline.and_then(|b| b.find(e.id))))
-            .filter(|(e, base)| base.is_none_or(|b| record_differs(e, b)))
-            .collect();
+        // Both tables ascend by id: one merged walk pairs each record with its baseline.
+        let base_entities: &[EntityState] = baseline.map_or(&[], |b| &b.entities);
+        let mut changed: Vec<(&EntityState, Option<&EntityState>)> =
+            Vec::with_capacity(self.entities.len());
+        let mut j = 0;
+        for e in &self.entities {
+            while j < base_entities.len() && base_entities[j].id < e.id {
+                j += 1;
+            }
+            let base =
+                (j < base_entities.len() && base_entities[j].id == e.id).then(|| &base_entities[j]);
+            if base.is_none_or(|b| record_differs(e, b)) {
+                changed.push((e, base));
+            }
+        }
         w.write_uvar(changed.len() as u64);
         for (e, base) in changed {
             write_entity(&mut w, e, base);

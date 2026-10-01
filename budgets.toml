@@ -24,3 +24,14 @@ max_bytes_per_player_s = 30720
 # Acceptance test network: round trip and independent datagram loss per direction.
 test_rtt_ms = 150
 test_loss = 0.03
+
+[server]
+# HUB.md 5: one zone with 200 duelist bots in the arena hall on the reference machine (the bots
+# run on the same machine). Half the 15.6 ms period for the mean, three quarters for the p99.
+max_tick_mean_us = 8000
+max_tick_p99_us = 12000
+max_rss_bytes = 536870912   # 512 MiB with 200 players
+
+[hub]
+# HUB.md 5: the hub's share of login -> zone -> handoff -> logout on loopback, milliseconds.
+round_trip_ms = 2000

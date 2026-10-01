@@ -106,6 +106,50 @@ reconciliation corrections, kills and the re-specs that happened.
 The zone accepts empty session tokens (`--open` behaviour) until the hub exists in Phase 4.
 Clients trust exactly the certificate they are given; there is no insecure mode.
 
+## Accounts, characters and zone handoff (Phase 4)
+
+The hub (`docs/HUB.md`) needs Postgres. Any 14+ works; the hub migrates its schema at start.
+
+```sh
+# a database for development (Arch: pacman -S postgresql; initdb once)
+createdb gamengine   # or any URL in DATABASE_URL
+
+# terminal 1: the hub. Writes hub-cert.der (clients and zones trust it) and hub.key (persisted
+# signing key, keep it). --wipe empties the database first.
+cargo run --release -p gm-hub -- --database-url postgres://localhost/gamengine --listen 127.0.0.1:4400 \
+    --cert-out hub-cert.der --key hub.key --zone-secret s3cret
+
+# terminals 2 and 3: two zones under the hub (different maps are fine)
+cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --listen 127.0.0.1:4433 --cert-out zone-a.der \
+    --hub 127.0.0.1:4400 --hub-cert hub-cert.der --zone-id arena-a --zone-secret s3cret
+cargo run --release -p gm-server -- --map assets/maps/built/test_room.bsp --listen 127.0.0.1:4434 --cert-out zone-b.der \
+    --hub 127.0.0.1:4400 --hub-cert hub-cert.der --zone-id room-b --zone-secret s3cret
+
+# terminal 4: you. --register creates the account the first time; the character is created with
+# the --build preset if it does not exist. GM_TRAVEL_TO=room-b makes the T key ask for a transfer.
+GM_TRAVEL_TO=room-b cargo run --release -p gm-client -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der \
+    --user you@example.com --password 'at least 8 chars' --register --character Pezo --zone arena-a --build blade
+
+# a bot that logs in, plays 4 s in arena-a, travels to room-b, plays on, logs out
+cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --user bot@example.com --password botbotbot \
+    --register --character Botko --zone arena-a --travel-to room-b --travel-after 4 --secs 12 --behaviour duelist
+```
+
+Zones started without `--hub` still run open (empty tokens, builds live for the session), which
+is what the netcode tests use. `--public-addr` tells the hub where clients should connect when
+the listen address is not routable. The zone secret (`--zone-secret` or `GM_ZONE_SECRET`) is
+shared by the hub and its zones.
+
+Tests: `crates/gm-server/tests/handoff.rs` runs the whole trip (register → enter → travel →
+logout) against a database named by `GM_TEST_DATABASE_URL`, which it **wipes**; without the
+variable the test prints `SKIPPED`. A throwaway cluster for local runs:
+
+```sh
+initdb -D /tmp/gmpg -U gm --auth=trust && pg_ctl -D /tmp/gmpg -o "-k /tmp -p 54329 -c listen_addresses=''" start
+psql -h /tmp -p 54329 -U gm -d postgres -c 'create database gm_test'
+GM_TEST_DATABASE_URL='postgres://gm@localhost:54329/gm_test?host=/tmp' cargo test -p gm-server --test handoff
+```
+
 ## CI gates locally
 
 ```sh
@@ -117,6 +161,7 @@ scripts/check-perf.sh                 # windowed, real GPU
 scripts/check-perf.sh --software      # what CI runs
 scripts/check-netcode.sh              # 16 bots at 150 ms / 3% loss in turmoil, bytes/player/s gate, counter-pick
 scripts/check-matrix.sh               # 8v8 arena: a dominant build is countered by re-speccing
+scripts/check-swarm.sh                # 200 bots on one zone over real UDP: tick time, RSS, bytes (BOTS=32 for a smoke)
 ```
 
 `check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and

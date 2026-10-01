@@ -9,18 +9,22 @@ description = "gamengine authoritative zone server."
 
 [dependencies]
 anyhow = { workspace = true }
+bitcode = { workspace = true }
 bytes = { workspace = true }
 glam = { workspace = true }
 gm-bsp = { workspace = true }
 gm-content = { workspace = true }
 gm-core = { workspace = true }
+gm-hub-proto = { workspace = true }
 gm-net = { workspace = true }
 quinn = { workspace = true }
+rayon = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+gm-hub = { path = "../gm-hub" }
 tracing-subscriber = { workspace = true }
 gm-bot = { path = "../gm-bot" }
 gm-content = { workspace = true }

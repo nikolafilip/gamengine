@@ -9,15 +9,18 @@ description = "gamengine headless load-test client: connects, predicts, fights, 
 
 [dependencies]
 anyhow = { workspace = true }
+bitcode = { workspace = true }
 bytes = { workspace = true }
 glam = { workspace = true }
 gm-bsp = { workspace = true }
 gm-core = { workspace = true }
+gm-hub-proto = { workspace = true }
 gm-net = { workspace = true }
 quinn = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
 
 [dev-dependencies]
 gm-content = { workspace = true }

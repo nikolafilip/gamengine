@@ -11,6 +11,7 @@ use crate::vocab::{ArchetypeFrame, Bypass, DamagePacket, DamageType};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 #[repr(u8)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Element {
     Flame = 0,
     Shadow = 1,
@@ -71,6 +72,7 @@ pub fn element_mult(attack: Element, aspect: Element) -> f32 {
 /// A set of 1..=2 aspects as a bitmask over `Element` indices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Aspects(pub u8);
 
 impl Aspects {
@@ -108,6 +110,7 @@ impl Aspects {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 #[repr(u8)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Kind {
     Slash = 0,
     Pierce = 1,
@@ -118,6 +121,7 @@ pub enum Kind {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 #[repr(u8)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ArmourClass {
     #[default]
     Cloth = 0,
@@ -265,6 +269,7 @@ impl ArchetypeFrame {
 /// The five attributes (MATRIX.md 2), each `MIN..=MAX`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Attributes {
     pub str_: u8,
     pub agi: u8,

@@ -70,6 +70,9 @@ pub struct Player {
     pub pending_build: Option<Build>,
     /// Server tick of the last hit taken (statistics, diagnostics).
     pub last_hit_tick: Tick,
+    /// In transit to another zone (HUB.md 3.3): the body stays, visible and hittable, but no
+    /// frames run.
+    pub ghost: bool,
 }
 
 impl Player {
@@ -367,9 +370,20 @@ impl Zone {
             stagger: 0.0,
             pending_build: None,
             last_hit_tick: 0,
+            ghost: false,
         };
         self.players.insert(id, p);
         id
+    }
+
+    /// Mark a player as a ghost (or back); a ghost's frames are consumed but never run.
+    pub fn set_ghost(&mut self, id: EntityId, ghost: bool) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.ghost = ghost;
+            if ghost {
+                p.mover.reset_actions();
+            }
+        }
     }
 
     pub fn remove_player(&mut self, id: EntityId) -> Option<Player> {
@@ -477,7 +491,7 @@ impl Zone {
                 executed += 1;
                 p.last_input_tick = t;
                 p.executed_frames += 1;
-                if p.alive {
+                if p.alive && !p.ghost {
                     let sheet = &p.sheet;
                     step_mover(&composite, sheet, &mut p.mover, &input, t, dt, &mut sink);
                     actions.extend(sink.drain(..).map(|a| (t, view, a)));

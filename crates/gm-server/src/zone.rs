@@ -11,12 +11,20 @@ use gm_core::sim::{HitKind, Zone, ZoneEvent};
 use gm_core::tick::TickRate;
 use gm_core::vocab::EntityId;
 use gm_net::control::{BuildChoice, Control};
+use rayon::prelude::*;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
+use crate::hub_link::HubLink;
 use crate::net::{ClientEvent, EVENT_CHANNEL, JoinInfo, NetConfig, accept_loop};
-use crate::session::{PvsCache, Session};
+use crate::session::{PvsCache, Session, TickTable};
+use gm_hub_proto::protocol::{CharacterId, CharacterState};
+
+/// Zones save every character this often (HUB.md 3.2).
+pub const SAVE_EVERY: Duration = Duration::from_secs(30);
+/// A ghost waits this long for the other zone's claim (HUB.md 3.3).
+pub const GHOST_TIMEOUT: Duration = Duration::from_secs(10);
 use crate::tick::{TickMetrics, TickScheduler};
 use crate::world::ZoneWorld;
 
@@ -34,6 +42,8 @@ pub struct ZoneConfig {
     pub content: ContentPack,
     /// Preset given to clients that ask for none.
     pub default_build: String,
+    /// The hub this zone runs under (HUB.md); `None` = open development zone.
+    pub hub: Option<Arc<HubLink>>,
 }
 
 impl Default for ZoneConfig {
@@ -48,8 +58,38 @@ impl Default for ZoneConfig {
             report_tx: None,
             content: gm_core::sim::test_content::pack(TickRate::COMBAT),
             default_build: "blade".into(),
+            hub: None,
         }
     }
+}
+
+/// Hub bookkeeping of one session.
+struct HubSlot {
+    character: CharacterId,
+    joined: Instant,
+    play_seconds_before: u32,
+    last_save: Instant,
+    /// Set when a travel ticket went out; the body is a ghost until the claim or the timeout.
+    ghost_since: Option<Instant>,
+    /// Another zone claimed the character: no save on leave.
+    claimed_elsewhere: bool,
+}
+
+fn character_state(
+    zone: &Zone,
+    link: &HubLink,
+    id: EntityId,
+    slot: &HubSlot,
+) -> Option<CharacterState> {
+    let p = zone.player(id)?;
+    Some(CharacterState {
+        build: p.sheet.build.clone(),
+        zone: Some(link.zone.clone()),
+        position: p.mover.mv.origin.into(),
+        yaw: p.mover.yaw,
+        viewport: 0,
+        play_seconds: slot.play_seconds_before + slot.joined.elapsed().as_secs() as u32,
+    })
 }
 
 /// Counters over one report window plus running totals.
@@ -67,6 +107,12 @@ pub struct ZoneReport {
     pub tick_max_us: f64,
     pub late_max_us: f64,
     pub overruns: u64,
+    /// Where the tick went, mean microseconds over the window: network events, the
+    /// simulation step, snapshot building, datagram sends.
+    pub events_us_mean: f64,
+    pub sim_us_mean: f64,
+    pub snapshot_us_mean: f64,
+    pub send_us_mean: f64,
     // Totals since start.
     pub joins: u64,
     pub leaves: u64,
@@ -110,9 +156,17 @@ pub async fn run(
         map_hash: world.hash,
         open: cfg.open,
         content: Arc::new(cfg.content.clone()),
+        hub: cfg.hub.clone(),
     });
     let acceptor = tokio::spawn(accept_loop(endpoint.clone(), tx.clone(), net_cfg));
+    let hub_stats: Arc<std::sync::Mutex<(u32, f32)>> = Arc::new(std::sync::Mutex::new((0, 0.0)));
+    if let Some(link) = &cfg.hub {
+        link.spawn_heartbeat(hub_stats.clone());
+        link.spawn_notice_reader(tx.clone());
+    }
+    let event_tx = tx.clone();
     drop(tx);
+    let mut hub_slots: BTreeMap<EntityId, HubSlot> = BTreeMap::new();
 
     let mut zone = Zone::new(rate, cfg.seed, world.spawns.clone(), cfg.content.clone());
     let resolve = |zone: &Zone, choice: Option<&BuildChoice>| -> Result<Build, String> {
@@ -132,8 +186,10 @@ pub async fn run(
     };
     let mut sessions: BTreeMap<EntityId, Session> = BTreeMap::new();
     let mut pvs = PvsCache::default();
+    let mut table = TickTable::default();
     let mut scheduler = TickScheduler::new(rate, Instant::now());
     let mut metrics = TickMetrics::new(rate.period());
+    let mut phases = Phases::default();
     let mut report = ZoneReport::default();
     let mut last_report = Instant::now();
     let shutdown = std::pin::pin!(shutdown);
@@ -164,12 +220,14 @@ pub async fn run(
         }
 
         // Network events since the last tick.
+        let t_events = Instant::now();
         while let Ok(ev) = rx.try_recv() {
             match ev {
                 ClientEvent::Join {
                     name,
                     build,
                     team,
+                    hub,
                     conn,
                     control,
                     reply,
@@ -177,6 +235,19 @@ pub async fn run(
                     if sessions.len() >= cfg.max_players {
                         let _ = reply.send(Err("zone full".into()));
                         continue;
+                    }
+                    // The same character again (a reconnect the hub allowed): drop the old body.
+                    if let Some(h) = &hub
+                        && let Some(old) = hub_slots
+                            .iter()
+                            .find(|(_, s)| s.character == h.character)
+                            .map(|(id, _)| *id)
+                    {
+                        zone.remove_player(old);
+                        if let Some(s) = sessions.remove(&old) {
+                            s.conn.close(4u32.into(), b"character joined again");
+                        }
+                        hub_slots.remove(&old);
                     }
                     let build = match resolve(&zone, build.as_ref()) {
                         Ok(b) => b,
@@ -190,13 +261,40 @@ pub async fn run(
                     } else {
                         team
                     };
-                    let id = match zone.add_player(&world.bsp, build.clone(), team) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            let _ = reply.send(Err(format!("invalid build: {e}")));
-                            continue;
+                    let id = match &hub {
+                        Some(h) if h.origin.is_some() => {
+                            if let Err(e) = build.validate(&zone.content) {
+                                let _ = reply.send(Err(format!("invalid build: {e}")));
+                                continue;
+                            }
+                            let (origin, yaw) = h.origin.expect("checked");
+                            zone.add_player_at(build.clone(), team, origin, yaw)
                         }
+                        _ => match zone.add_player(&world.bsp, build.clone(), team) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                let _ = reply.send(Err(format!("invalid build: {e}")));
+                                continue;
+                            }
+                        },
                     };
+                    if let Some(h) = hub {
+                        hub_slots.insert(
+                            id,
+                            HubSlot {
+                                character: h.character,
+                                joined: Instant::now(),
+                                play_seconds_before: h.play_seconds,
+                                // Staggered so a zone full of players never saves at once.
+                                last_save: Instant::now()
+                                    - Duration::from_secs(
+                                        (id % SAVE_EVERY.as_secs() as u32) as u64,
+                                    ),
+                                ghost_since: None,
+                                claimed_elsewhere: false,
+                            },
+                        );
+                    }
                     let _ = reply.send(Ok(JoinInfo {
                         entity: id,
                         server_tick: zone.tick,
@@ -230,6 +328,81 @@ pub async fn run(
                         s.send_control(Control::RespecResult(result));
                     }
                 }
+                ClientEvent::Travel { id, zone: to_zone } => {
+                    let Some(link) = cfg.hub.clone() else {
+                        if let Some(s) = sessions.get(&id) {
+                            s.send_control(Control::TravelRefused("no hub".into()));
+                        }
+                        continue;
+                    };
+                    let Some(slot) = hub_slots.get(&id) else {
+                        continue;
+                    };
+                    if slot.ghost_since.is_some() {
+                        continue;
+                    }
+                    let Some(state) = character_state(&zone, &link, id, slot) else {
+                        continue;
+                    };
+                    let character = slot.character;
+                    let tx = event_tx.clone();
+                    tokio::spawn(async move {
+                        let result = link.handoff(character, state, to_zone).await;
+                        let _ = tx.send(ClientEvent::TravelResult { id, result }).await;
+                    });
+                }
+                ClientEvent::TravelResult { id, result } => {
+                    let Some(s) = sessions.get(&id) else { continue };
+                    match result {
+                        Ok(ticket) => {
+                            s.send_control(Control::TravelTicket {
+                                zone: ticket.zone,
+                                addr: ticket.addr.to_string(),
+                                cert_der: ticket.cert_der,
+                                token: bitcode::encode(&ticket.token),
+                            });
+                            zone.set_ghost(id, true);
+                            if let Some(slot) = hub_slots.get_mut(&id) {
+                                slot.ghost_since = Some(Instant::now());
+                            }
+                        }
+                        Err(e) => {
+                            s.send_control(Control::TravelRefused(e));
+                        }
+                    }
+                }
+                ClientEvent::HubClaimed { character } => {
+                    if let Some(id) = hub_slots
+                        .iter()
+                        .find(|(_, s)| s.character == character)
+                        .map(|(id, _)| *id)
+                    {
+                        if let Some(slot) = hub_slots.get_mut(&id) {
+                            slot.claimed_elsewhere = true;
+                        }
+                        zone.remove_player(id);
+                        if let Some(s) = sessions.remove(&id) {
+                            s.send_control(Control::Kick("claimed by another zone".into()));
+                            s.conn.close(0u32.into(), b"travelled");
+                        }
+                        hub_slots.remove(&id);
+                        for s in sessions.values() {
+                            s.send_control(Control::PlayerLeft(id));
+                        }
+                        report.leaves += 1;
+                    }
+                }
+                ClientEvent::HubKick { character, reason } => {
+                    if let Some(id) = hub_slots
+                        .iter()
+                        .find(|(_, s)| s.character == character)
+                        .map(|(id, _)| *id)
+                        && let Some(s) = sessions.get(&id)
+                    {
+                        s.send_control(Control::Kick(reason));
+                        s.conn.close(3u32.into(), b"kicked by the hub");
+                    }
+                }
                 ClientEvent::Input { id, datagram } => {
                     if let Some(s) = sessions.get_mut(&id) {
                         s.on_ack(datagram.ack_tick);
@@ -258,6 +431,25 @@ pub async fn run(
                     }
                 }
                 ClientEvent::Leave { id } => {
+                    // A ghost's connection ends with its `Bye` on the way to another zone: the
+                    // body and the hub's transit stay until the claim or the timeout (HUB.md 3.3).
+                    if hub_slots.get(&id).is_some_and(|s| s.ghost_since.is_some()) {
+                        if let Some(s) = sessions.remove(&id) {
+                            report.oversize_drops += s.oversize_drops;
+                            report.send_failures += s.send_failures;
+                        }
+                        report.leaves += 1;
+                        continue;
+                    }
+                    if let (Some(link), Some(slot)) = (&cfg.hub, hub_slots.remove(&id))
+                        && !slot.claimed_elsewhere
+                        && let Some(state) = character_state(&zone, link, id, &slot)
+                    {
+                        let link = link.clone();
+                        tokio::spawn(async move {
+                            link.save(slot.character, state, true).await;
+                        });
+                    }
                     if let Some(p) = zone.remove_player(id) {
                         info!(
                             entity = id,
@@ -285,6 +477,58 @@ pub async fn run(
             }
         }
 
+        // Hub bookkeeping once a second: periodic saves (staggered), ghost timeouts.
+        if let Some(link) = &cfg.hub
+            && scheduler.tick().is_multiple_of(rate.hz() as u64)
+        {
+            let now = Instant::now();
+            let mut expired_ghosts: Vec<EntityId> = Vec::new();
+            for (&id, slot) in hub_slots.iter_mut() {
+                if let Some(since) = slot.ghost_since
+                    && now.duration_since(since) >= GHOST_TIMEOUT
+                {
+                    slot.ghost_since = None;
+                    match sessions.get(&id) {
+                        Some(s) => {
+                            // The other zone never claimed: the player plays on here.
+                            zone.set_ghost(id, false);
+                            s.send_control(Control::TravelRefused(
+                                "the other zone never claimed you".into(),
+                            ));
+                        }
+                        // The client is gone too: the body leaves and the character goes
+                        // offline (the hub accepts the origin's leaving save of a transit).
+                        None => expired_ghosts.push(id),
+                    }
+                }
+                if slot.ghost_since.is_none()
+                    && now.duration_since(slot.last_save) >= SAVE_EVERY
+                    && let Some(state) = character_state(&zone, link, id, slot)
+                {
+                    slot.last_save = now;
+                    let link = link.clone();
+                    let character = slot.character;
+                    tokio::spawn(async move {
+                        link.save(character, state, false).await;
+                    });
+                }
+            }
+            for id in expired_ghosts {
+                if let Some(slot) = hub_slots.remove(&id)
+                    && let Some(state) = character_state(&zone, link, id, &slot)
+                {
+                    let link = link.clone();
+                    tokio::spawn(async move {
+                        link.save(slot.character, state, true).await;
+                    });
+                }
+                zone.remove_player(id);
+                for s in sessions.values() {
+                    s.send_control(Control::PlayerLeft(id));
+                }
+            }
+        }
+
         // Latency-bounded lag compensation (PROTOCOL.md 4), refreshed once a second.
         if scheduler.tick().is_multiple_of(rate.hz() as u64) {
             for s in sessions.values() {
@@ -294,7 +538,10 @@ pub async fn run(
             }
         }
 
+        phases.events += t_events.elapsed();
+        let t_sim = Instant::now();
         zone.step(&world.bsp);
+        phases.sim += t_sim.elapsed();
 
         let events: Vec<ZoneEvent> = zone.events.drain(..).collect();
         for ev in events {
@@ -335,13 +582,40 @@ pub async fn run(
         }
 
         let tick = zone.tick;
-        for s in sessions.values_mut() {
-            if let Some(bytes) = s.build_snapshot(&zone, &world, &mut pvs, tick)
+        let t_snap = Instant::now();
+        table.rebuild(&zone, &world);
+        for s in sessions.values() {
+            if let Some(leaf) = s.eye_leaf(&zone, &world) {
+                pvs.prepare(&world.bsp, leaf);
+            }
+        }
+        // Each session's snapshot only reads the zone, the table and the PVS rows; the
+        // per-session history is its own. Spread them over the pool (rayon).
+        let outgoing: Vec<(EntityId, Vec<u8>)> = {
+            let zone = &zone;
+            let world = &*world;
+            let table = &table;
+            let pvs = &pvs;
+            let mut slots: Vec<&mut Session> = sessions.values_mut().collect();
+            slots
+                .par_iter_mut()
+                .filter_map(|s| {
+                    s.build_snapshot(zone, world, table, pvs, tick)
+                        .map(|bytes| (s.id, bytes))
+                })
+                .collect()
+        };
+        phases.snapshot += t_snap.elapsed();
+        let t_send = Instant::now();
+        for (id, bytes) in outgoing {
+            if let Some(s) = sessions.get_mut(&id)
                 && s.conn.send_datagram(Bytes::from(bytes)).is_err()
             {
                 s.send_failures += 1;
             }
         }
+        phases.send += t_send.elapsed();
+        phases.ticks += 1;
 
         metrics.record(
             started.saturating_duration_since(deadline),
@@ -359,6 +633,9 @@ pub async fn run(
                 secs,
                 scheduler.tick(),
             );
+            phases.fill(&mut report);
+            phases = Phases::default();
+            *hub_stats.lock().unwrap() = (report.players as u32, report.tick_mean_us as f32);
             info!(
                 tick = report.tick,
                 players = report.players,
@@ -366,9 +643,14 @@ pub async fn run(
                 rx_bps = format_args!("{:.0}", report.rx_bytes_per_player_s),
                 snap_bps = format_args!("{:.0}", report.snapshot_payload_per_player_s),
                 tick_us_mean = format_args!("{:.1}", report.tick_mean_us),
+                tick_us_p99 = format_args!("{:.1}", report.tick_p99_us),
                 tick_us_max = format_args!("{:.1}", report.tick_max_us),
                 late_us_max = format_args!("{:.1}", report.late_max_us),
                 overruns = report.overruns,
+                events_us = format_args!("{:.0}", report.events_us_mean),
+                sim_us = format_args!("{:.0}", report.sim_us_mean),
+                snapshot_us = format_args!("{:.0}", report.snapshot_us_mean),
+                send_us = format_args!("{:.0}", report.send_us_mean),
                 starved = report.starved_ticks + report.live_starved_ticks,
                 executed = report.executed_frames + report.live_executed_frames,
                 hits = report.hits_melee + report.hits_projectile + report.hits_area,
@@ -395,6 +677,17 @@ pub async fn run(
         secs,
         scheduler.tick(),
     );
+    phases.fill(&mut report);
+    // Save everyone before the lights go out (HUB.md 3.2).
+    if let Some(link) = &cfg.hub {
+        for (&id, slot) in &hub_slots {
+            if !slot.claimed_elsewhere
+                && let Some(state) = character_state(&zone, link, id, slot)
+            {
+                link.save(slot.character, state, true).await;
+            }
+        }
+    }
     for s in sessions.values() {
         s.send_control(Control::Kick("zone stopped".into()));
         s.conn.close(0u32.into(), b"zone stopped");
@@ -463,6 +756,26 @@ fn fill_report(
     // Live players' counters (folded into the totals when they leave).
     report.live_executed_frames = zone.players().map(|p| p.executed_frames).sum();
     report.live_starved_ticks = zone.players().map(|p| p.starved_ticks).sum();
+}
+
+/// Where the ticks of a report window went.
+#[derive(Default)]
+struct Phases {
+    ticks: u64,
+    events: Duration,
+    sim: Duration,
+    snapshot: Duration,
+    send: Duration,
+}
+
+impl Phases {
+    fn fill(&self, report: &mut ZoneReport) {
+        let n = self.ticks.max(1) as f64;
+        report.events_us_mean = self.events.as_secs_f64() * 1e6 / n;
+        report.sim_us_mean = self.sim.as_secs_f64() * 1e6 / n;
+        report.snapshot_us_mean = self.snapshot.as_secs_f64() * 1e6 / n;
+        report.send_us_mean = self.send.as_secs_f64() * 1e6 / n;
+    }
 }
 
 /// A future that stays pending after it first resolved, so `select!` can poll it repeatedly.

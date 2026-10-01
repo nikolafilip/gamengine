@@ -52,6 +52,8 @@ async fn zone_and_bots_over_real_udp() {
                     build: None,
                     team: 0,
                     counter_pick: false,
+                    travel_to: None,
+                    travel_after_ticks: 0,
                 },
                 bsp,
                 std::future::pending(),

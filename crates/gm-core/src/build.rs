@@ -17,6 +17,7 @@ pub const MAX_ACTIVES: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 #[repr(u8)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Slot {
     Primary = 0,
     Secondary = 1,
@@ -40,6 +41,7 @@ pub struct AbilityDef {
 /// A character build (MATRIX.md 9). Ability references are indices into the content pack.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Build {
     pub frame: ArchetypeFrame,
     pub attributes: Attributes,
@@ -54,6 +56,7 @@ pub struct Build {
 /// A build with the name content gave it.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NamedBuild {
     pub name: String,
     pub build: Build,

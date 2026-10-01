@@ -11,10 +11,13 @@ description = "gamengine shared simulation: entity vocabulary, movement, fixed-t
 default = []
 # Wire encoding of the vocabulary, matrix and build types (used by gm-net).
 bitcode = ["dep:bitcode"]
+# JSON storage of builds (used by gm-hub).
+serde = ["dep:serde"]
 
 [dependencies]
 glam = { workspace = true }
 bitcode = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
