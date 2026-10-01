@@ -102,6 +102,8 @@ async fn main() -> anyhow::Result<()> {
         key,
         session_secs: gm_hub::protocol::SESSION_SECS,
         auth_per_minute: 10.0,
+        templates: gm_content::items::load_items(&args.content)?.template_ids(),
+        max_coin_grant: 10_000,
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

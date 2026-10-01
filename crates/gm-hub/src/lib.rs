@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod db;
+pub mod economy;
 pub mod hub;
 
 pub use db::Db;

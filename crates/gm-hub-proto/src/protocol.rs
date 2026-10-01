@@ -144,6 +144,192 @@ pub enum HubRequest {
         state: CharacterState,
         to_zone: ZoneId,
     },
+    // a session, about one of its characters (ECONOMY.md)
+    Econ {
+        session: SessionId,
+        character: CharacterId,
+        op: EconOp,
+    },
+    // a registered zone connection (ECONOMY.md 8, 9)
+    ZoneEcon(ZoneEconOp),
+}
+
+pub type ItemId = i64;
+
+/// What a character may ask of the economy (ECONOMY.md). Every op is one transaction.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum EconOp {
+    Inventory,
+    Storage,
+    StorageDeposit {
+        item: ItemId,
+    },
+    StorageWithdraw {
+        item: ItemId,
+    },
+    Craft {
+        template: String,
+        components: Vec<ItemId>,
+    },
+    Decompose {
+        item: ItemId,
+    },
+    TradeOpen {
+        with: CharacterId,
+    },
+    TradeOfferItem {
+        trade: i64,
+        item: ItemId,
+    },
+    TradeRetractItem {
+        trade: i64,
+        item: ItemId,
+    },
+    TradeSetCoin {
+        trade: i64,
+        coin: i64,
+    },
+    /// `version` is the offer version the client is showing.
+    TradeAccept {
+        trade: i64,
+        version: i32,
+    },
+    TradeCancel {
+        trade: i64,
+    },
+    /// The offers as the hub holds them, with the version an accept must name.
+    TradeView {
+        trade: i64,
+    },
+    StallOpen {
+        tile_x: i32,
+        tile_y: i32,
+    },
+    StallList {
+        item: ItemId,
+        price: i64,
+    },
+    /// `price` is the price the buyer was shown.
+    StallBuy {
+        listing: i64,
+        price: i64,
+    },
+    StallClose,
+    BuyOrderPost {
+        material: String,
+        price: i64,
+        quantity: i32,
+    },
+    BuyOrderFill {
+        order: i64,
+        item: ItemId,
+    },
+    BuyOrderCancel {
+        order: i64,
+    },
+    ContractPost {
+        instance: String,
+        price: i64,
+        collateral: i64,
+    },
+    ContractCancel {
+        contract: i64,
+    },
+    /// By the party leader; `sellers` includes the leader.
+    ContractAccept {
+        contract: i64,
+        sellers: Vec<CharacterId>,
+    },
+    ChestDeposit {
+        chest: i64,
+        item: ItemId,
+    },
+    ChestWithdraw {
+        chest: i64,
+        item: ItemId,
+    },
+    HireList {
+        price: i64,
+    },
+    Hire {
+        avatar: CharacterId,
+    },
+    Tavern,
+}
+
+/// What a zone reports (ECONOMY.md 8, 9): only a registered zone connection may send these.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum ZoneEconOp {
+    /// The boss split's result: one component per entry.
+    GrantComponents {
+        grants: Vec<(CharacterId, String)>,
+        reference: i64,
+    },
+    GrantCoin {
+        character: CharacterId,
+        amount: i64,
+        reference: i64,
+    },
+    ContractReport {
+        contract: i64,
+        outcome: ContractOutcome,
+    },
+    /// A character drops an item onto this zone's ground, or picks one up from it. The zone
+    /// asks, because only the zone knows where the character stands.
+    Drop {
+        character: CharacterId,
+        item: ItemId,
+    },
+    Pickup {
+        character: CharacterId,
+        item: ItemId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum ContractOutcome {
+    Completed,
+    Wipe,
+    Abandon,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct ItemSummary {
+    pub id: ItemId,
+    pub template: String,
+    /// `(layer, material)` in layer order.
+    pub components: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct TradeOffer {
+    pub coin: i64,
+    pub accepted: bool,
+    pub items: Vec<ItemSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum EconReply {
+    Done,
+    Id(i64),
+    Ids(Vec<i64>),
+    Holder {
+        coin: i64,
+        items: Vec<ItemSummary>,
+    },
+    TradeView {
+        version: i32,
+        mine: TradeOffer,
+        theirs: TradeOffer,
+    },
+    /// `committed` is false while the other side has yet to accept.
+    Trade {
+        committed: bool,
+    },
+    /// The report decided the contract (false: it was already decided).
+    Decided(bool),
+    /// `(character, price, hires in the last 12 h)`.
+    Tavern(Vec<(CharacterId, i64, i64)>),
 }
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -155,6 +341,12 @@ pub enum HubError {
     Unauthorized,
     Invalid(String),
     Internal,
+    /// Not enough coin.
+    Insufficient,
+    /// No room in the inventory, the storage or the stall.
+    Full,
+    /// Too soon after the last change of a trade.
+    Cooldown,
 }
 
 impl std::fmt::Display for HubError {
@@ -167,6 +359,9 @@ impl std::fmt::Display for HubError {
             HubError::Unauthorized => write!(f, "unauthorized"),
             HubError::Invalid(s) => write!(f, "invalid: {s}"),
             HubError::Internal => write!(f, "internal error"),
+            HubError::Insufficient => write!(f, "not enough coin"),
+            HubError::Full => write!(f, "no room"),
+            HubError::Cooldown => write!(f, "too soon after the last change"),
         }
     }
 }
@@ -194,6 +389,7 @@ pub enum HubResponse {
     Registered {
         public_key: [u8; 32],
     },
+    Econ(EconReply),
 }
 
 /// Hub → zone, on unidirectional streams (HUB.md 3.4).

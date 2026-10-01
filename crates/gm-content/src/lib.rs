@@ -4,6 +4,8 @@
 //! compiled pack over the wire.
 #![forbid(unsafe_code)]
 
+pub mod items;
+
 use std::path::Path;
 
 use gm_core::build::{AbilityDef, Build, ContentPack, NamedBuild, Slot};

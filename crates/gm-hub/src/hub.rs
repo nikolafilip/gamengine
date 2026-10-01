@@ -20,9 +20,12 @@ use tracing::{debug, info, warn};
 
 use crate::db::Db;
 use gm_hub_proto::protocol::{
-    AccountId, BuildChoice, CharacterId, HASH_PERMITS, HubError, HubNotice, HubRequest,
-    HubResponse, SessionId, ZoneId, ZoneSummary, ZoneTicket, now_secs,
+    AccountId, BuildChoice, CharacterId, ContractOutcome, EconOp, EconReply, HASH_PERMITS,
+    HubError, HubNotice, HubRequest, HubResponse, ItemSummary, LocationSummary, SessionId,
+    TradeOffer, ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
 };
+
+use crate::economy::{EconError, Economy, Outcome, TradeStatus};
 
 /// A zone whose last heartbeat is older than this gets no new players (HUB.md 2).
 const ZONE_STALE: Duration = Duration::from_secs(15);
@@ -36,6 +39,10 @@ pub struct HubConfig {
     pub session_secs: u64,
     /// `Register`/`Login` attempts per minute per source address.
     pub auth_per_minute: f64,
+    /// Item templates a craft may name (`assets/content/items.toml`); empty = any.
+    pub templates: Vec<String>,
+    /// The largest coin drop a zone may report in one grant, in copper (ECONOMY.md 9).
+    pub max_coin_grant: i64,
 }
 
 struct Session {
@@ -73,6 +80,7 @@ struct State {
 struct Hub {
     cfg: HubConfig,
     db: Db,
+    econ: Economy,
     state: Mutex<State>,
     hashing: Semaphore,
     /// Verifies our own tokens on `Claim` (defence in depth; the zone verified too).
@@ -95,10 +103,34 @@ pub async fn run(
         hashing: Semaphore::new(HASH_PERMITS),
         verifier: Mutex::new(HashMap::new()),
         cfg,
+        econ: Economy::new(db.pool().clone()),
         db,
         state: Mutex::new(State::default()),
     });
     info!(listen = %endpoint.local_addr()?, "hub listening");
+    // Stalls past their 48 h close and stalled contracts refund, once a minute.
+    let sweeper = {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                every.tick().await;
+                match hub.econ.stalls_expired().await {
+                    Ok(owners) => {
+                        for owner in owners {
+                            if let Err(e) = hub.econ.stall_close(owner).await {
+                                warn!(owner, "closing an expired stall: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => warn!("stall sweep: {e}"),
+                }
+                if let Err(e) = hub.econ.contracts_expire().await {
+                    warn!("contract sweep: {e}");
+                }
+            }
+        })
+    };
     let accept = {
         let hub = hub.clone();
         let endpoint = endpoint.clone();
@@ -119,6 +151,7 @@ pub async fn run(
         _ = accept => {}
         _ = shutdown => {}
     }
+    sweeper.abort();
     endpoint.close(0u32.into(), b"hub stopped");
     info!("hub stopped");
     Ok(())
@@ -609,6 +642,234 @@ async fn handle(
                 row.account_id,
                 character,
             )?))
+        }
+        HubRequest::Econ {
+            session,
+            character,
+            op,
+        } => {
+            let account = hub.session_account(session)?;
+            let row = hub
+                .db
+                .character(character)
+                .await?
+                .filter(|r| r.account_id == account)
+                .ok_or(HubError::NotFound)?;
+            let zone = match row.summary().location {
+                LocationSummary::Zone(z) => Some(z),
+                _ => None,
+            };
+            Ok(HubResponse::Econ(econ_op(hub, character, zone, op).await?))
+        }
+        HubRequest::ZoneEcon(op) => {
+            let zone = hub.zone_of_conn(auth)?;
+            Ok(HubResponse::Econ(zone_econ_op(hub, &zone, op).await?))
+        }
+    }
+}
+
+fn econ_err(e: EconError) -> HubError {
+    match e {
+        EconError::NotFound => HubError::NotFound,
+        EconError::Forbidden => HubError::Unauthorized,
+        EconError::Insufficient => HubError::Insufficient,
+        EconError::Full => HubError::Full,
+        EconError::Cooldown => HubError::Cooldown,
+        EconError::State(s) | EconError::Invalid(s) => HubError::Invalid(s),
+        EconError::Busy => HubError::Busy,
+        EconError::Internal => HubError::Internal,
+    }
+}
+
+fn item_summary(i: crate::economy::Item) -> ItemSummary {
+    ItemSummary {
+        id: i.id,
+        template: i.template,
+        components: i
+            .components
+            .into_iter()
+            .map(|c| (c.layer, c.material))
+            .collect(),
+    }
+}
+
+fn trade_offer((coin, accepted, items): (i64, bool, Vec<crate::economy::Item>)) -> TradeOffer {
+    TradeOffer {
+        coin,
+        accepted,
+        items: items.into_iter().map(item_summary).collect(),
+    }
+}
+
+fn holder_reply((coin, items): (i64, Vec<crate::economy::Item>)) -> EconReply {
+    EconReply::Holder {
+        coin,
+        items: items.into_iter().map(item_summary).collect(),
+    }
+}
+
+/// One economy request of a character its session owns. `zone` is where the character is
+/// playing; the ops that happen in the world (ground, stalls, trades) need one.
+async fn econ_op(
+    hub: &Hub,
+    me: CharacterId,
+    zone: Option<ZoneId>,
+    op: EconOp,
+) -> Result<EconReply, HubError> {
+    let e = &hub.econ;
+    let here = || {
+        zone.clone()
+            .ok_or_else(|| HubError::Invalid("the character is not in a zone".into()))
+    };
+    let done = |r: Result<(), EconError>| r.map(|()| EconReply::Done).map_err(econ_err);
+    let id = |r: Result<i64, EconError>| r.map(EconReply::Id).map_err(econ_err);
+    match op {
+        EconOp::Inventory => e.inventory(me).await.map(holder_reply).map_err(econ_err),
+        EconOp::Storage => e.storage(me).await.map(holder_reply).map_err(econ_err),
+        EconOp::StorageDeposit { item } => done(e.storage_deposit(me, item).await),
+        EconOp::StorageWithdraw { item } => done(e.storage_withdraw(me, item).await),
+        EconOp::Craft {
+            template,
+            components,
+        } => {
+            if !hub.cfg.templates.is_empty() && !hub.cfg.templates.contains(&template) {
+                return Err(HubError::Invalid(format!("unknown template {template:?}")));
+            }
+            id(e.craft(me, &template, &components).await)
+        }
+        EconOp::Decompose { item } => e
+            .decompose(me, item)
+            .await
+            .map(EconReply::Ids)
+            .map_err(econ_err),
+        EconOp::TradeOpen { with } => {
+            // A trade window is between two characters standing in the same zone.
+            let mine = here()?;
+            if hub.db.zone_of(with).await?.as_ref() != Some(&mine) {
+                return Err(HubError::Invalid("the other character is not here".into()));
+            }
+            id(e.trade_open(me, with).await)
+        }
+        EconOp::TradeOfferItem { trade, item } => done(e.trade_offer_item(trade, me, item).await),
+        EconOp::TradeRetractItem { trade, item } => {
+            done(e.trade_retract_item(trade, me, item).await)
+        }
+        EconOp::TradeSetCoin { trade, coin } => done(e.trade_set_coin(trade, me, coin).await),
+        EconOp::TradeAccept { trade, version } => e
+            .trade_accept(trade, me, version)
+            .await
+            .map(|s| EconReply::Trade {
+                committed: s == TradeStatus::Committed,
+            })
+            .map_err(econ_err),
+        EconOp::TradeCancel { trade } => done(e.trade_cancel(trade, me).await),
+        EconOp::TradeView { trade } => e
+            .trade_view(trade, me)
+            .await
+            .map(|(version, mine, theirs)| EconReply::TradeView {
+                version,
+                mine: trade_offer(mine),
+                theirs: trade_offer(theirs),
+            })
+            .map_err(econ_err),
+        EconOp::StallOpen { tile_x, tile_y } => {
+            id(e.stall_open(me, &here()?, tile_x, tile_y).await)
+        }
+        EconOp::StallList { item, price } => id(e.stall_list(me, item, price).await),
+        EconOp::StallBuy { listing, price } => done(e.stall_buy(me, listing, price).await),
+        EconOp::StallClose => done(e.stall_close(me).await),
+        EconOp::BuyOrderPost {
+            material,
+            price,
+            quantity,
+        } => id(e.buy_order_post(me, &material, price, quantity).await),
+        EconOp::BuyOrderFill { order, item } => done(e.buy_order_fill(me, order, item).await),
+        EconOp::BuyOrderCancel { order } => done(e.buy_order_cancel(me, order).await),
+        EconOp::ContractPost {
+            instance,
+            price,
+            collateral,
+        } => id(e.contract_post(me, &instance, price, collateral).await),
+        EconOp::ContractCancel { contract } => done(e.contract_cancel(me, contract).await),
+        EconOp::ContractAccept { contract, sellers } => {
+            done(e.contract_accept(me, contract, &sellers).await)
+        }
+        EconOp::ChestDeposit { chest, item } => done(e.chest_deposit(me, chest, item).await),
+        EconOp::ChestWithdraw { chest, item } => done(e.chest_withdraw(me, chest, item).await),
+        EconOp::HireList { price } => done(e.hire_list(me, price).await),
+        EconOp::Hire { avatar } => e
+            .hire(me, avatar)
+            .await
+            .map(EconReply::Id)
+            .map_err(econ_err),
+        EconOp::Tavern => e.tavern().await.map(EconReply::Tavern).map_err(econ_err),
+    }
+}
+
+/// What a zone reports. A zone speaks only for itself: it grants to characters playing in
+/// it and decides contracts whose instance it is.
+async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconReply, HubError> {
+    let e = &hub.econ;
+    match op {
+        ZoneEconOp::GrantComponents { grants, reference } => {
+            if grants.len() > 256 {
+                return Err(HubError::Invalid("too many grants".into()));
+            }
+            for (character, _) in &grants {
+                if hub.db.zone_of(*character).await?.as_ref() != Some(zone) {
+                    return Err(HubError::Unauthorized);
+                }
+            }
+            e.grant_components(zone, &grants, reference)
+                .await
+                .map(EconReply::Ids)
+                .map_err(econ_err)
+        }
+        ZoneEconOp::GrantCoin {
+            character,
+            amount,
+            reference,
+        } => {
+            if hub.db.zone_of(character).await?.as_ref() != Some(zone) {
+                return Err(HubError::Unauthorized);
+            }
+            if amount > hub.cfg.max_coin_grant {
+                return Err(HubError::Invalid("coin drops are tiny".into()));
+            }
+            e.grant_coin(character, amount, reference)
+                .await
+                .map(|()| EconReply::Done)
+                .map_err(econ_err)
+        }
+        ZoneEconOp::Drop { character, item } | ZoneEconOp::Pickup { character, item }
+            if hub.db.zone_of(character).await?.as_ref() != Some(zone) =>
+        {
+            let _ = item;
+            Err(HubError::Unauthorized)
+        }
+        ZoneEconOp::Drop { character, item } => e
+            .drop_item(character, item, zone)
+            .await
+            .map(|()| EconReply::Done)
+            .map_err(econ_err),
+        ZoneEconOp::Pickup { character, item } => e
+            .pickup(character, item, zone)
+            .await
+            .map(|()| EconReply::Done)
+            .map_err(econ_err),
+        ZoneEconOp::ContractReport { contract, outcome } => {
+            if e.contract_instance(contract).await.map_err(econ_err)? != *zone {
+                return Err(HubError::Unauthorized);
+            }
+            let outcome = match outcome {
+                ContractOutcome::Completed => Outcome::Completed,
+                ContractOutcome::Wipe => Outcome::Wipe,
+                ContractOutcome::Abandon => Outcome::Abandon,
+            };
+            e.contract_report(contract, outcome)
+                .await
+                .map(EconReply::Decided)
+                .map_err(econ_err)
         }
     }
 }

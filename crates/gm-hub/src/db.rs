@@ -104,6 +104,10 @@ const CHARACTER_COLUMNS: &str = "id, account_id, name, build, location_kind, loc
     pos_x, pos_y, pos_z, yaw, viewport, play_seconds";
 
 impl Db {
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     pub async fn connect(url: &str) -> anyhow::Result<Db> {
         let pool = PgPoolOptions::new()
             .max_connections(16)
@@ -121,7 +125,11 @@ impl Db {
 
     /// Drop every row (tests).
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        sqlx::query("truncate characters, accounts, zones_log restart identity cascade")
+        sqlx::query("truncate item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
+            .execute(&self.pool)
+            .await?;
+        // The cascade empties `holders` too; the two singletons come back at zero.
+        sqlx::query("insert into holders (kind) values ('source'), ('sink')")
             .execute(&self.pool)
             .await?;
         Ok(())

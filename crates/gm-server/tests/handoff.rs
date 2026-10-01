@@ -113,6 +113,8 @@ async fn login_zone_handoff_logout_round_trip() {
         key: HubKey::generate(),
         session_secs: 3600,
         auth_per_minute: 100.0,
+        templates: Vec::new(),
+        max_coin_grant: 10_000,
     };
     let hub_task = tokio::spawn(gm_hub::run(
         hub_cfg,

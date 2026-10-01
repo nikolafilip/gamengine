@@ -38,3 +38,11 @@ when the two drift.
 Presets (all exactly 100 points): **ironclad** (colossus, plate, stone), **blade** (striker,
 mail, flame), **frostweaver** (caster, cloth, frost + shadow), **shade** (infiltrator, leather,
 shadow). MATRIX.md 11 records how they fare against each other.
+
+## Items
+
+`items.toml` holds the item templates and the materials of the five component layers
+(ECONOMY.md 4). `gm_content::items` validates it: materials are `layer/name`, only catalysts
+carry an element, every template takes a core and a frame, and the best possible craft of any
+template gives at most 250 per mille over a standard item (PLAN.md 0). The hub refuses crafts
+of templates that are not in this file.

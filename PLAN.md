@@ -592,9 +592,53 @@ class):
   simulation step is still O(N²) in bodies (3 ms at 200; a grid is the next lever); no ops tool yet
   (`gm-hub ctl`); sessions and the zone registry are in memory (a hub restart logs everyone out).
 
+**2026-10-01, Phase 5 done** (same machine; all numbers measured, none estimated):
+- `docs/ECONOMY.md` v1 is the contract: holders (character 24 slots, account storage 60, stall 12,
+  escrow, guild chest 48, ground), items with components as rows, integer copper, `coin_ledger` and
+  `item_moves` written in the same transaction as every movement. Coin is created only from the
+  `source` and destroyed only into the `sink`; `audit` checks created = circulating + burned and
+  every balance against the ledger.
+- `gm-hub::economy` (one transaction per operation, one lock order: holders ascending, then trade
+  rows, then items): trade window with the mutation lock, the 3 s cooldown and offer versions;
+  48 h grid-snapped stalls with listings and escrowed buy orders, no fee and no tax; carry
+  contracts (`open → active → paid | refunded`, no cancel mid-run, idempotent zone reports, 120 min
+  refund); component and coin drops; crafting and ⌊k/2⌋ decomposition by an unsteerable hash;
+  per-account storage; guild chests gated by rank on withdrawal; tavern hires with the 30% burn.
+  `gm_core::loot` is the corrected boss split (10% party floor over the surviving parties, wiped
+  parties get nothing, minimum one, 40% leech floor inside a party). `assets/content/items.toml`
+  holds templates and materials; the loader refuses a template whose best craft exceeds the 25%
+  edge cap (the shipped best sword is exactly 250 per mille).
+- Over the wire: `HubRequest::Econ` (a session, for its own character) and `HubRequest::ZoneEcon`
+  (drops, ground, contract outcomes; a zone speaks only for itself), HUB.md 3. The zone server and
+  the client do not call them yet: there is no boss, no inventory screen and no stall in the world.
+- **Acceptance** (`crates/gm-hub/tests/economy.rs`, `economy_protocol.rs`, real Postgres): the scam
+  suite is 15 tests in 1.6 s: the swap scam and the blind accept refused, a commit that verifies
+  again, eight buyers racing for one listing (one wins, 300 copper paid once), the price-swap
+  refused, tiles that cannot overlap, a full owner who cannot keep a tile, escrow that pays only on
+  completion and refunds on wipe, abandon and stalling, the split with a wiped party, a leech and a
+  tagger, crafting that creates nothing, storage capped under concurrent deposits, the 30% burn.
+  The storm test runs 792 mixed operations between six characters in 1.4 to 1.5 s (520 to 560 per
+  second, debug build) with no deadlock victim, five runs of five. The wire test runs a drop, a
+  craft, a trade with the real cooldown, a contract and a stall sale through a live hub in 3.4 s
+  and ends with 900 copper created, 0 burned, 900 circulating.
+- Reviews (ECONOMY.md 12): design review 8 accepted, 3 already covered, 3 rejected (collateral
+  forfeited on a wipe, a deposit rank on guild chests, stacking now). Code review: four findings,
+  all fixed, three of them lock-order deadlocks also found by the author's own pass, which added
+  four more (the global `source`/`sink` row lock, client-side pickup, deadlock victims reported as
+  internal errors, an unlocked location read in `hire`).
+- Binaries (release, LTO): `gm-client` **8,455,592 bytes (8.06 MiB)**, +40,576 for the economy
+  messages it does not use yet; baseline updated. `gm-hub` 5.69 MB, `gm-server` 4.77 MB, `gm-bot`
+  3.70 MB. Swarm gate after the Phase 4 review fixes: 6.9 ms mean, 8.8 ms p99, 273 MB, 18 KB/s
+  per player (one run taken straight after the netcode gate, with the machine still loaded, read
+  10.1 ms and failed; the gate needs a quiet machine).
+- Known limits: nothing in the world uses the economy yet (Phase 6 and 7 bring the town, the boss
+  and the avatars); materials do not stack; a trade does not check the zone again at commit; the
+  hire window is recorded but no avatar is spawned; item edges are validated but not read by the
+  simulation.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
-the numbers, the structure is what the code depends on). Currency purchasing-power table. Death-drop in
-contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Salvaged-component
-recipes. Storage slot counts. Name.
+the numbers, the structure is what the code depends on). The economy numbers are **proposed** in `docs/ECONOMY.md` 12 (slot counts, the purchasing-power scale,
+the floors, the salvage rule, the contract timeout, no self-hire, no stacking of materials in v1).
+Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

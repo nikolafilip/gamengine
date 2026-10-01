@@ -1,0 +1,114 @@
+# Item content v1 (ECONOMY.md 4). Templates say which layers a craft may fill; materials say
+# which layer they are and how large an edge they give, in per mille of the item's base
+# stats. The loader refuses any template whose best possible craft exceeds 250 (PLAN.md 0:
+# the gear edge is capped at 25%). The simulation reads the edges in a later phase.
+
+[[template]]
+id = "sword"
+kind = "weapon"
+layers = ["shard", "core", "catalyst", "frame", "gem"]
+
+[[template]]
+id = "hammer"
+kind = "weapon"
+layers = ["shard", "core", "catalyst", "frame", "gem"]
+
+[[template]]
+id = "staff"
+kind = "weapon"
+layers = ["shard", "core", "catalyst", "frame", "gem"]
+
+[[template]]
+id = "crossbow"
+kind = "weapon"
+layers = ["shard", "core", "frame", "gem"]
+
+[[template]]
+id = "cuirass"
+kind = "armour"
+layers = ["shard", "core", "frame", "gem"]
+
+[[template]]
+id = "robe"
+kind = "armour"
+layers = ["shard", "core", "catalyst", "frame", "gem"]
+
+# Cores: weight and physical bias.
+[[material]]
+id = "core/tin"
+edge = 10
+note = "light, soft"
+
+[[material]]
+id = "core/iron"
+edge = 30
+note = "the standard"
+
+[[material]]
+id = "core/dragonbone"
+edge = 60
+note = "light and hard; boss core"
+
+# Frames: speed, stamina, crit.
+[[material]]
+id = "frame/oak"
+edge = 10
+note = "steady"
+
+[[material]]
+id = "frame/ash"
+edge = 25
+note = "quick"
+
+[[material]]
+id = "frame/whalebone"
+edge = 45
+note = "stamina; boss frame"
+
+# Catalysts: the element (MATRIX.md 4).
+[[material]]
+id = "catalyst/ember"
+edge = 30
+element = "flame"
+
+[[material]]
+id = "catalyst/rime"
+edge = 30
+element = "frost"
+
+[[material]]
+id = "catalyst/thunderstone"
+edge = 30
+element = "storm"
+
+[[material]]
+id = "catalyst/umbra"
+edge = 30
+element = "shadow"
+
+[[material]]
+id = "catalyst/basalt"
+edge = 30
+element = "stone"
+
+# Shards: a passive trait; boss drops only.
+[[material]]
+id = "shard/glass"
+edge = 5
+note = "decorative"
+
+[[material]]
+id = "shard/boss_scale"
+edge = 55
+note = "thorns"
+
+# Gems: counter-meta sockets, two per item.
+[[material]]
+id = "gem/quartz"
+edge = 10
+note = "plain"
+
+[[material]]
+id = "gem/opal"
+edge = 30
+note = "resists one element"

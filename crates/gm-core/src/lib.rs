@@ -22,6 +22,7 @@
 pub mod build;
 pub mod collide;
 pub mod geom;
+pub mod loot;
 pub mod matrix;
 pub mod movement;
 pub mod rng;

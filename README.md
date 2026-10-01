@@ -18,7 +18,7 @@ crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
 crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
 crates/gm-client    wgpu forward renderer, Quake movement, fixed-step loop, zone connection.
 crates/gm-server    authoritative tokio zone server: tick loop, sessions, PVS snapshots, lag compensation.
-crates/gm-hub       accounts, characters, zone registry, handoff, Postgres persistence.
+crates/gm-hub       accounts, characters, zone registry, handoff, the economy, Postgres persistence.
 crates/gm-hub-proto hub messages, entry tokens and the hub connection used by zones, bots and the client.
 crates/gm-ai        AI companions (Phase 7).
 crates/gm-tools     CLI: map build (ericw-tools wrapper), WAD generation, asset budget lint.

@@ -56,8 +56,8 @@ enum HubRequest {
     Login { email: String, password: String },
     // accounts (session: the Login response's session id, 24 h, in-memory)
     Characters { session: SessionId },
-    CreateCharacter { session: SessionId, name: String, build: Build },
-    SetBuild { session: SessionId, character: CharacterId, build: Build },
+    CreateCharacter { session: SessionId, name: String, build: BuildChoice },  // preset name or full build
+    SetBuild { session: SessionId, character: CharacterId, build: BuildChoice },
     ListZones { session: SessionId },
     Enter { session: SessionId, character: CharacterId, zone: ZoneId },
     Logout { session: SessionId },
@@ -67,6 +67,9 @@ enum HubRequest {
     Claim { token: SessionToken },
     Save { character: CharacterId, state: CharacterState, leaving: bool },
     Handoff { character: CharacterId, state: CharacterState, to_zone: ZoneId },
+    // the economy (ECONOMY.md): a session for one of its own characters; a zone for itself
+    Econ { session: SessionId, character: CharacterId, op: EconOp },
+    ZoneEcon(ZoneEconOp),
 }
 
 enum HubNotice {                   // hub → zone, unidirectional streams
@@ -76,7 +79,8 @@ enum HubNotice {                   // hub → zone, unidirectional streams
 
 enum HubResponse {
     Ok,
-    Err(HubError),                 // typed: Credentials, Taken, NotFound, Busy, Invalid(String), Internal
+    Err(HubError),                 // typed: Credentials, Taken, NotFound, Busy, Unauthorized,
+                                   // Invalid(String), Internal, Insufficient, Full, Cooldown
     Session { session: SessionId, account: AccountId },
     Characters(Vec<CharacterSummary>),
     Character(CharacterSummary),
@@ -84,6 +88,7 @@ enum HubResponse {
     Ticket(ZoneTicket),            // addr, cert_der, token
     Claimed { character: CharacterId, name: String, state: CharacterState, team: u8 },
     Registered { public_key: [u8; 32] },  // the hub's token verification key
+    Econ(EconReply),               // Done, Id, Ids, Holder, TradeView, Trade, Decided, Tavern
 }
 ```
 
@@ -94,6 +99,12 @@ case-insensitively; an account holds at most **10** characters. Password hashing
 blocking pool behind a semaphore of 8 permits; a ninth concurrent `Register`/`Login` answers
 `Busy` rather than stalling the executor that carries the zones' heartbeats. `Register` and
 `Login` are rate limited per source address (a token bucket of 10 per minute).
+
+`EconOp` and `ZoneEconOp` are listed in `gm-hub-proto::protocol` and specified by ECONOMY.md:
+every op is one database transaction. `Econ` is refused with `NotFound` unless the character
+belongs to the session's account. `ZoneEcon` is refused with `Unauthorized` on any connection
+that has not said `ZoneHello`; a zone grants only to characters playing in it and decides only
+contracts whose instance it is.
 
 `Logout` while the character is in a zone also tells that zone to drop the player
 (`HubNotice::Kick`); a session cannot be used to leave a character playing after the account
