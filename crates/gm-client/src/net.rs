@@ -6,7 +6,7 @@ use std::sync::mpsc as std_mpsc;
 
 use bytes::Bytes;
 use gm_net::PROTOCOL_VERSION;
-use gm_net::control::{self, Control};
+use gm_net::control::{self, BuildChoice, Control};
 use gm_net::transport::{SERVER_NAME, client_config};
 use quinn::rustls::pki_types::CertificateDer;
 use tokio::sync::mpsc;
@@ -25,25 +25,44 @@ pub enum NetEvent {
     Disconnected(String),
 }
 
+/// Outbound traffic from the render thread.
+pub enum Outbound {
+    Input(Vec<u8>),
+    Control(Control),
+}
+
 pub struct NetClient {
     _rt: tokio::runtime::Runtime,
-    input_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    input_tx: Option<mpsc::UnboundedSender<Outbound>>,
     events: std_mpsc::Receiver<NetEvent>,
 }
 
 impl NetClient {
     /// Connect in the background; events arrive through `poll`.
-    pub fn connect(addr: SocketAddr, cert_der: Vec<u8>, name: String) -> Result<NetClient, Error> {
+    pub fn connect(
+        addr: SocketAddr,
+        cert_der: Vec<u8>,
+        name: String,
+        build: Option<String>,
+        team: u8,
+    ) -> Result<NetClient, Error> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .thread_name("gm-net")
             .build()?;
-        let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (input_tx, input_rx) = mpsc::unbounded_channel::<Outbound>();
         let (event_tx, events) = std_mpsc::channel::<NetEvent>();
         let cfg = client_config(&[CertificateDer::from(cert_der)])?;
         rt.spawn(async move {
-            let result = session(addr, cfg, name, input_rx, event_tx.clone()).await;
+            let hello = Control::Hello {
+                version: PROTOCOL_VERSION as u16,
+                name,
+                token: Vec::new(),
+                build: build.map(BuildChoice::Preset),
+                team,
+            };
+            let result = session(addr, cfg, hello, input_rx, event_tx.clone()).await;
             let reason = match result {
                 Ok(()) => "connection closed".to_string(),
                 Err(e) => format!("{e}"),
@@ -59,7 +78,14 @@ impl NetClient {
 
     pub fn send_input(&self, datagram: Vec<u8>) {
         if let Some(tx) = &self.input_tx {
-            let _ = tx.send(datagram);
+            let _ = tx.send(Outbound::Input(datagram));
+        }
+    }
+
+    /// Queue a reliable message (chat, respec).
+    pub fn send_control(&self, msg: Control) {
+        if let Some(tx) = &self.input_tx {
+            let _ = tx.send(Outbound::Control(msg));
         }
     }
 
@@ -95,8 +121,8 @@ impl NetClient {
 async fn session(
     addr: SocketAddr,
     cfg: quinn::ClientConfig,
-    name: String,
-    mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    hello: Control,
+    mut input_rx: mpsc::UnboundedReceiver<Outbound>,
     events: std_mpsc::Sender<NetEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let bind: SocketAddr = if addr.is_ipv4() {
@@ -108,15 +134,7 @@ async fn session(
     endpoint.set_default_client_config(cfg);
     let conn = endpoint.connect(addr, SERVER_NAME)?.await?;
     let (mut send, mut recv) = conn.open_bi().await?;
-    control::send(
-        &mut send,
-        &Control::Hello {
-            version: PROTOCOL_VERSION as u16,
-            name,
-            token: Vec::new(),
-        },
-    )
-    .await?;
+    control::send(&mut send, &hello).await?;
     match control::recv(&mut recv).await? {
         Some(Control::Welcome {
             entity,
@@ -139,8 +157,11 @@ async fn session(
         tokio::select! {
             input = input_rx.recv() => {
                 match input {
-                    Some(bytes) => {
+                    Some(Outbound::Input(bytes)) => {
                         let _ = conn.send_datagram(Bytes::from(bytes));
+                    }
+                    Some(Outbound::Control(msg)) => {
+                        control::send(&mut send, &msg).await?;
                     }
                     None => break,
                 }

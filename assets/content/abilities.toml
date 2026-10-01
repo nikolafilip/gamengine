@@ -1,0 +1,408 @@
+# gamengine v1 abilities (MATRIX.md 10). Authored in milliseconds and names; gm-content compiles
+# this against the zone tick rate and validates it against VOCABULARY.md 11 and MATRIX.md.
+# Price bands: primaries 0-2, secondaries 3-5, guards 4-6, actives 6-12.
+# Damage types: slash pierce blunt (physical) | flame shadow storm frost stone (elements).
+# An ability with an `aspect` needs that aspect in the build; its elemental packets are that element.
+
+# ---------- primaries ----------
+
+[[ability]]
+key = "sword"
+name = "Sword"
+slot = "primary"
+cost = 2
+cooldown_ms = 300
+move_scale = 0.6
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 72, arc = 90, half_height = 40, windup_ms = 90, active_ms = 45, recovery_ms = 160, damage = { amount = 35, type = "slash", knockback = 150, stagger = 20 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30 }
+
+[[ability]]
+key = "hammer"
+name = "Hammer"
+slot = "primary"
+cost = 2
+cooldown_ms = 600
+move_scale = 0.5
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 76, arc = 80, half_height = 40, windup_ms = 200, active_ms = 60, recovery_ms = 340, damage = { amount = 50, type = "blunt", bypass = ["magic_shield"], knockback = 220, stagger = 35 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30 }
+
+[[ability]]
+key = "staff"
+name = "Staff"
+slot = "primary"
+cost = 0
+cooldown_ms = 350
+move_scale = 0.7
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 64, arc = 70, half_height = 40, windup_ms = 100, active_ms = 45, recovery_ms = 200, damage = { amount = 25, type = "blunt", knockback = 120, stagger = 15 }, max_targets = 2, cleave_falloff = 0.6, parryable = true, hit_stop_ms = 30 }
+
+[[ability]]
+key = "dagger"
+name = "Dagger"
+slot = "primary"
+cost = 0
+cooldown_ms = 200
+move_scale = 0.8
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 56, arc = 70, half_height = 40, windup_ms = 60, active_ms = 30, recovery_ms = 90, damage = { amount = 22, type = "slash", knockback = 60, stagger = 10 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30 }
+
+# ---------- secondaries ----------
+
+[[ability]]
+key = "crossbow"
+name = "Crossbow"
+slot = "secondary"
+cost = 4
+cooldown_ms = 1500
+move_scale = 0.7
+interrupt = "never"
+[[ability.step]]
+at_ms = 125
+projectile = { speed = 1800, gravity = 0.3, radius = 2, lifetime_ms = 3000, damage = { amount = 40, type = "pierce", knockback = 100, stagger = 10 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3, count = 1 }
+
+[[ability]]
+key = "firebolt"
+name = "Firebolt"
+slot = "secondary"
+cost = 4
+aspect = "flame"
+cooldown_ms = 1500
+focus = 10
+move_scale = 0.7
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 200
+[ability.step.projectile]
+speed = 1400
+gravity = 0.1
+radius = 4
+lifetime_ms = 3000
+damage = { amount = 35, type = "flame", knockback = 60, stagger = 10 }
+spawn = { weapon = [16, 4, -2] }
+spread = 0.3
+on_hit = [ { status = { status = "burn", duration_ms = 3000, magnitude = 8, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
+
+[[ability]]
+key = "ice_shard"
+name = "Ice shard"
+slot = "secondary"
+cost = 4
+aspect = "frost"
+cooldown_ms = 900
+focus = 8
+move_scale = 0.7
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 150
+[ability.step.projectile]
+speed = 1500
+gravity = 0.15
+radius = 4
+lifetime_ms = 3000
+damage = { amount = 40, type = "frost", knockback = 60, stagger = 10 }
+spawn = { weapon = [16, 4, -2] }
+spread = 0.3
+on_hit = [ { status = { status = "chill", duration_ms = 3000, magnitude = 0, max_stacks = 3, stacking = "extend", target = "hit" } } ]
+
+[[ability]]
+key = "stone_throw"
+name = "Stone throw"
+slot = "secondary"
+cost = 4
+aspect = "stone"
+cooldown_ms = 1600
+focus = 8
+move_scale = 0.6
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 250
+projectile = { speed = 1100, gravity = 0.6, radius = 6, lifetime_ms = 3000, damage = { amount = 45, type = "stone", knockback = 250, stagger = 30 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
+
+[[ability]]
+key = "shadow_dart"
+name = "Shadow dart"
+slot = "secondary"
+cost = 3
+aspect = "shadow"
+cooldown_ms = 700
+focus = 6
+move_scale = 0.8
+interrupt = "never"
+[[ability.step]]
+at_ms = 100
+projectile = { speed = 2000, gravity = 0.05, radius = 2, lifetime_ms = 3000, damage = { amount = 30, type = "shadow", bypass = ["evasion"], knockback = 40, stagger = 5 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
+
+[[ability]]
+key = "spark"
+name = "Spark"
+slot = "secondary"
+cost = 4
+aspect = "storm"
+cooldown_ms = 1200
+focus = 10
+move_scale = 0.7
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 150
+[ability.step.projectile]
+speed = 2400
+gravity = 0
+radius = 3
+lifetime_ms = 3000
+damage = { amount = 32, type = "storm", knockback = 40, stagger = 10 }
+spawn = { weapon = [16, 4, -2] }
+spread = 0.3
+on_hit = [ { status = { status = "shock", duration_ms = 16, magnitude = 1, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
+
+# ---------- guards ----------
+
+[[ability]]
+key = "shield_wall"
+name = "Shield wall"
+slot = "guard"
+cost = 6
+[[ability.step]]
+guard = { block = { arc = 150, mitigation = 0.8, stamina_per_hit = 12, stops_projectiles = true, move_speed_scale = 0.5 } }
+
+[[ability]]
+key = "parry"
+name = "Parry"
+slot = "guard"
+cost = 4
+cooldown_ms = 1000
+stamina = 10
+[[ability.step]]
+[ability.step.guard.parry]
+arc = 90
+window_ms = 150
+whiff_recovery_ms = 400
+on_success = [
+  { status = { status = "stagger", duration_ms = 600, magnitude = 1, max_stacks = 1, stacking = "refresh", target = "hit" } },
+  { swing = { reach = 72, arc = 90, half_height = 40, windup_ms = 0, active_ms = 45, recovery_ms = 0, damage = { amount = 40, type = "slash", knockback = 120, stagger = 0 }, max_targets = 1, cleave_falloff = 1.0, parryable = false, hit_stop_ms = 0 } },
+]
+
+[[ability]]
+key = "brace"
+name = "Brace"
+slot = "guard"
+cost = 2
+[[ability.step]]
+guard = { block = { arc = 120, mitigation = 0.5, stamina_per_hit = 10, stops_projectiles = false, move_speed_scale = 0.7 } }
+
+# ---------- actives ----------
+
+[[ability]]
+key = "dash"
+name = "Dash"
+slot = "active"
+cost = 6
+cooldown_ms = 1000
+stamina = 30
+[[ability.step]]
+move_self = { dash = { speed = 900, duration_ms = 150 } }
+
+[[ability]]
+key = "leap"
+name = "Leap"
+slot = "active"
+cost = 6
+cooldown_ms = 1500
+stamina = 25
+[[ability.step]]
+move_self = { leap = { forward = 400, up = 320 } }
+
+[[ability]]
+key = "charge"
+name = "Charge"
+slot = "active"
+cost = 6
+cooldown_ms = 4000
+stamina = 30
+[[ability.step]]
+move_self = { charge = { speed = 700, duration_ms = 400, stop_on_hit = true } }
+
+[[ability]]
+key = "blink"
+name = "Blink"
+slot = "active"
+cost = 10
+aspect = "shadow"
+cooldown_ms = 6000
+focus = 30
+[[ability.step]]
+move_self = { blink = { distance = 256 } }
+
+[[ability]]
+key = "overhead"
+name = "Overhead"
+slot = "active"
+cost = 8
+cooldown_ms = 3000
+stamina = 20
+move_scale = 0.4
+interrupt = "on_stagger"
+[[ability.step]]
+melee_arc = { reach = 80, arc = 60, half_height = 40, windup_ms = 350, active_ms = 60, recovery_ms = 500, damage = { amount = 70, type = "slash", knockback = 200, stagger = 40 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30 }
+
+[[ability]]
+key = "stomp"
+name = "Stomp"
+slot = "active"
+cost = 10
+aspect = "stone"
+cooldown_ms = 8000
+focus = 25
+move_scale = 0.3
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 250
+[ability.step.area_effect]
+shape = { cylinder = { radius = 128, height = 96 } }
+origin = "self_feet"
+damage = { amount = 35, type = "stone", knockback = 200, stagger = 40 }
+effects = [ { status = "slow", duration_ms = 2000, magnitude = 0.3, max_stacks = 1, stacking = "refresh", target = "area" } ]
+falloff = "none"
+max_targets = 8
+requires_los = true
+exclude_actor = true
+
+[[ability]]
+key = "fortify"
+name = "Fortify"
+slot = "active"
+cost = 8
+aspect = "stone"
+cooldown_ms = 15000
+focus = 30
+move_scale = 0.8
+[[ability.step]]
+apply_status = { status = "fortify", duration_ms = 5000, magnitude = 0.4, max_stacks = 1, stacking = "refresh", target = "actor" }
+
+[[ability]]
+key = "frost_nova"
+name = "Frost nova"
+slot = "active"
+cost = 10
+aspect = "frost"
+cooldown_ms = 8000
+focus = 30
+move_scale = 0.3
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 300
+[ability.step.area_effect]
+shape = { sphere = { radius = 160 } }
+origin = "self_feet"
+damage = { amount = 30, type = "frost", knockback = 60, stagger = 10 }
+effects = [
+  { status = "chill", duration_ms = 4000, magnitude = 0, max_stacks = 3, stacking = "extend", target = "area" },
+  { status = "chill", duration_ms = 4000, magnitude = 0, max_stacks = 3, stacking = "extend", target = "area" },
+]
+falloff = "none"
+max_targets = 8
+requires_los = true
+exclude_actor = true
+
+[[ability]]
+key = "haste"
+name = "Haste"
+slot = "active"
+cost = 8
+cooldown_ms = 12000
+focus = 20
+[[ability.step]]
+apply_status = { status = "haste", duration_ms = 5000, magnitude = 0.25, max_stacks = 1, stacking = "refresh", target = "actor" }
+
+[[ability]]
+key = "thunderclap"
+name = "Thunderclap"
+slot = "active"
+cost = 10
+aspect = "storm"
+cooldown_ms = 7000
+focus = 30
+move_scale = 0.3
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 250
+[ability.step.area_effect]
+shape = { sphere = { radius = 140 } }
+origin = "self_feet"
+damage = { amount = 40, type = "storm", knockback = 80, stagger = 20 }
+effects = [ { status = "shock", duration_ms = 16, magnitude = 1, max_stacks = 1, stacking = "refresh", target = "area" } ]
+falloff = "linear"
+max_targets = 8
+requires_los = true
+exclude_actor = true
+
+[[ability]]
+key = "vanish"
+name = "Vanish"
+slot = "active"
+cost = 8
+aspect = "shadow"
+cooldown_ms = 14000
+focus = 25
+[[ability.step]]
+apply_status = { status = "stealth", duration_ms = 6000, magnitude = 256, max_stacks = 1, stacking = "refresh", target = "actor" }
+
+[[ability]]
+key = "poison_cloud"
+name = "Poison cloud"
+slot = "active"
+cost = 8
+aspect = "shadow"
+cooldown_ms = 10000
+focus = 25
+move_scale = 0.6
+[[ability.step]]
+at_ms = 200
+[ability.step.area_effect]
+shape = { cylinder = { radius = 96, height = 80 } }
+origin = { weapon = [96, 0, -40] }
+duration_ms = 5000
+interval_ms = 1000
+effects = [ { status = "bleed", duration_ms = 3000, magnitude = 6, max_stacks = 1, stacking = "refresh", target = "area" } ]
+falloff = "none"
+max_targets = 8
+requires_los = false
+exclude_actor = false
+
+[[ability]]
+key = "fireball"
+name = "Fireball"
+slot = "active"
+cost = 12
+aspect = "flame"
+cooldown_ms = 5000
+focus = 35
+move_scale = 0.5
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 400
+[ability.step.projectile]
+speed = 900
+gravity = 0
+radius = 6
+lifetime_ms = 3000
+damage = { amount = 20, type = "flame", knockback = 40, stagger = 10 }
+spawn = { weapon = [16, 4, -2] }
+spread = 0
+[[ability.step.projectile.on_hit]]
+[ability.step.projectile.on_hit.area]
+shape = { sphere = { radius = 96 } }
+origin = "impact"
+damage = { amount = 30, type = "flame", knockback = 120, stagger = 15 }
+effects = [ { status = "burn", duration_ms = 3000, magnitude = 6, max_stacks = 1, stacking = "refresh", target = "area" } ]
+falloff = "linear"
+max_targets = 8
+requires_los = true
+exclude_actor = false

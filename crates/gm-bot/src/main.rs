@@ -24,10 +24,15 @@ struct Args {
     secs: u64,
     behaviour: Behaviour,
     seed: u64,
+    /// Preset builds, cycled over the bots (empty: the zone's default).
+    builds: Vec<String>,
+    /// Teams, cycled over the bots (empty: let the zone balance).
+    teams: Vec<u8>,
+    counter_pick: bool,
 }
 
 const USAGE: &str = "gm-bot --connect ADDR --cert PATH [--map PATH] [--bots N] [--secs N] \
-[--behaviour wander|hunter|hold] [--seed N]";
+[--behaviour wander|hunter|hold|duelist] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]";
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
@@ -38,6 +43,9 @@ fn parse_args() -> Result<Args, String> {
         secs: 30,
         behaviour: Behaviour::Wander,
         seed: 1,
+        builds: Vec::new(),
+        teams: Vec::new(),
+        counter_pick: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -70,8 +78,23 @@ fn parse_args() -> Result<Args, String> {
                     "wander" => Behaviour::Wander,
                     "hunter" => Behaviour::Hunter,
                     "hold" => Behaviour::Hold,
+                    "duelist" => Behaviour::Duelist,
                     other => return Err(format!("--behaviour: unknown {other}")),
                 }
+            }
+            "--builds" => {
+                a.builds = value("--builds")?
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }
+            "--counter-pick" => a.counter_pick = true,
+            "--teams" => {
+                a.teams = value("--teams")?
+                    .split(',')
+                    .map(|s| s.trim().parse().map_err(|e| format!("--teams: {e}")))
+                    .collect::<Result<_, _>>()?
             }
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -118,6 +141,13 @@ async fn main() -> anyhow::Result<()> {
             behaviour: args.behaviour,
             rate: TickRate::COMBAT,
             run_ticks: 0,
+            build: (!args.builds.is_empty()).then(|| args.builds[i % args.builds.len()].clone()),
+            team: if args.teams.is_empty() {
+                0
+            } else {
+                args.teams[i % args.teams.len()]
+            },
+            counter_pick: args.counter_pick,
         };
         let secs = args.secs;
         set.spawn(async move {
@@ -175,5 +205,11 @@ async fn main() -> anyhow::Result<()> {
         reports.iter().map(|r| r.own_kills).sum::<u32>(),
         reports.iter().map(|r| r.own_deaths).sum::<u32>()
     );
+    let respecs: u32 = reports.iter().map(|r| r.respecs).sum();
+    if respecs > 0 {
+        let mut finals: Vec<&str> = reports.iter().map(|r| r.final_build.as_str()).collect();
+        finals.sort_unstable();
+        println!("respecs {respecs}; final builds {finals:?}");
+    }
     Ok(())
 }

@@ -2,9 +2,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use glam::Vec3;
 use gm_core::collide::BoxWorld;
 use gm_core::movement::{MoveInput, MoveVars, PlayerState, player_move};
-use gm_core::sim::{Input, Zone, buttons};
+use gm_core::sim::{Input, Zone, buttons, test_content};
 use gm_core::tick::TickRate;
-use gm_core::vocab::ArchetypeFrame;
 use std::hint::black_box;
 
 fn bench(c: &mut Criterion) {
@@ -27,12 +26,15 @@ fn bench(c: &mut Criterion) {
     });
 
     // 16 players running around and swinging: one server tick of the whole zone.
-    let mut zone = Zone::new(TickRate::COMBAT, 1, vec![]);
+    let pack = test_content::pack(TickRate::COMBAT);
+    let build = test_content::phase2_build(&pack);
+    let mut zone = Zone::new(TickRate::COMBAT, 1, vec![], pack);
     let ids: Vec<u32> = (0..16)
         .map(|i| {
             let a = i as f32 / 16.0 * std::f32::consts::TAU;
             zone.add_player_at(
-                ArchetypeFrame::Striker,
+                build.clone(),
+                0,
                 Vec3::new(a.cos() * 200.0, a.sin() * 200.0, 24.0),
                 a.to_degrees() + 180.0,
             )

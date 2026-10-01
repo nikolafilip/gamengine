@@ -12,7 +12,8 @@ anti-cheat, and the phased implementation plan with acceptance criteria.
 
 ```
 Cargo.toml          workspace (crates/*)
-crates/gm-core      shared simulation: entity vocabulary, movement, fixed tick. No I/O.
+crates/gm-core      shared simulation: entity vocabulary, matrix, builds, statuses, movement, fixed tick. No I/O.
+crates/gm-content   content loader: abilities and builds in TOML, compiled and validated into gm-core packs.
 crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
 crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
 crates/gm-client    wgpu forward renderer, Quake movement, fixed-step loop, zone connection.
@@ -21,10 +22,11 @@ crates/gm-hub       accounts, characters, shard registry (Phase 4).
 crates/gm-ai        AI companions (Phase 7).
 crates/gm-tools     CLI: map build (ericw-tools wrapper), WAD generation, asset budget lint.
 crates/gm-bot       headless bots: the client's prediction code with scripted behaviour, for tests and load.
-assets/maps/src     TrenchBroom .map sources and gamengine.fgd
+assets/maps/src     TrenchBroom .map sources and gamengine.fgd (test_room, the 8v8 arena)
 assets/maps/built   compiled .bsp (+ .lit colored lightmaps)
 assets/textures     generated palette and WAD (gm-tools wad make)
-docs/               VOCABULARY.md, PROTOCOL.md, BUILDING.md
+assets/content      abilities and preset builds (TOML), the v1 kits
+docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
@@ -45,16 +47,20 @@ Controls: mouse look, `WASD`, `Space` jump, `Esc` releases the cursor (click to 
 exits. `--headless` renders offscreen (CI runs it under software Vulkan). All flags are listed
 in [`docs/BUILDING.md`](docs/BUILDING.md).
 
-Multiplayer (Phase 2): start a zone, add bots, join it.
+Multiplayer (Phases 2 and 3): start a zone on the arena, add bots, join it.
 
 ```sh
-cargo run --release -p gm-server -- --listen 127.0.0.1:4433 --cert-out zone-cert.der
-cargo run --release -p gm-bot -- --connect 127.0.0.1:4433 --cert zone-cert.der --bots 16 --secs 30
-cargo run --release -p gm-client -- --connect 127.0.0.1:4433 --cert zone-cert.der
+cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --listen 127.0.0.1:4433 --cert-out zone-cert.der
+cargo run --release -p gm-bot -- --connect 127.0.0.1:4433 --cert zone-cert.der --map assets/maps/built/arena.bsp \
+    --bots 15 --secs 60 --behaviour duelist --builds ironclad,blade,frostweaver,shade --teams 1,2 --counter-pick
+cargo run --release -p gm-client -- --map assets/maps/built/arena.bsp --connect 127.0.0.1:4433 --cert zone-cert.der \
+    --build blade --team 1 --third-person
 ```
 
-Left click swings the sword, right click fires the crossbow, Shift dashes. The wire protocol,
-prediction and lag-compensation contract is [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+Left click primary, right click secondary, Ctrl guard, 1–4 actives, V switches viewport,
+F1–F4 re-spec to a preset at the next respawn. The wire protocol, prediction and
+lag-compensation contract is [`docs/PROTOCOL.md`](docs/PROTOCOL.md); the point-buy budget,
+the type matrix and the damage pipeline are [`docs/MATRIX.md`](docs/MATRIX.md).
 
 ## CI gates
 
@@ -69,7 +75,10 @@ prediction and lag-compensation contract is [`docs/PROTOCOL.md`](docs/PROTOCOL.m
   the ceiling. Frame-time on a real iGPU needs the self-hosted runner.
 - `scripts/check-netcode.sh` — 16 bots on one zone in `turmoil` at 150 ms round
   trip and 3% loss: under 30 KB/s per player each way, no unexplained prediction
-  corrections, melee and projectiles register; plus a real-UDP loopback test.
+  corrections, melee and projectiles register; plus a real-UDP loopback test and
+  the counter-pick match (blades re-spec into frostweavers and turn the match).
+- `scripts/check-matrix.sh` — 8v8 bot matches in the arena: ironclads beat blades,
+  frostweavers beat ironclads, blades beat frostweavers, a mirror match is even.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

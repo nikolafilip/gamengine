@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use glam::Vec3;
 use gm_bsp::Bsp;
+use gm_core::sim::Spawn;
 use gm_net::transport::fnv1a64;
 
 pub struct ZoneWorld {
@@ -12,8 +12,8 @@ pub struct ZoneWorld {
     pub name: String,
     /// FNV-1a 64 of the `.bsp` bytes (PROTOCOL.md 8).
     pub hash: u64,
-    /// `(hull origin, yaw)` of every `info_player_start` and `gm_spawn`.
-    pub spawns: Vec<(Vec3, f32)>,
+    /// Every `info_player_start` (team 0) and `gm_spawn` (its `team` key, 0 = any).
+    pub spawns: Vec<Spawn>,
 }
 
 impl ZoneWorld {
@@ -34,7 +34,13 @@ impl ZoneWorld {
             .entities
             .iter()
             .filter(|e| matches!(e.classname(), "info_player_start" | "gm_spawn"))
-            .filter_map(|e| Some((e.origin()?, e.f32("angle").unwrap_or(0.0))))
+            .filter_map(|e| {
+                Some(Spawn {
+                    origin: e.origin()?,
+                    yaw: e.f32("angle").unwrap_or(0.0),
+                    team: e.f32("team").unwrap_or(0.0) as u8,
+                })
+            })
             .collect();
         ZoneWorld {
             bsp,

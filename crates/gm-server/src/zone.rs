@@ -6,10 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use gm_core::build::{Build, ContentPack};
 use gm_core::sim::{HitKind, Zone, ZoneEvent};
 use gm_core::tick::TickRate;
-use gm_core::vocab::{ArchetypeFrame, EntityId};
-use gm_net::control::Control;
+use gm_core::vocab::EntityId;
+use gm_net::control::{BuildChoice, Control};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
@@ -29,6 +30,10 @@ pub struct ZoneConfig {
     pub max_ticks: Option<u64>,
     /// Latest report, for tests and dashboards.
     pub report_tx: Option<watch::Sender<ZoneReport>>,
+    /// Abilities and preset builds (MATRIX.md 10).
+    pub content: ContentPack,
+    /// Preset given to clients that ask for none.
+    pub default_build: String,
 }
 
 impl Default for ZoneConfig {
@@ -41,6 +46,8 @@ impl Default for ZoneConfig {
             report_every: Duration::from_secs(5),
             max_ticks: None,
             report_tx: None,
+            content: gm_core::sim::test_content::pack(TickRate::COMBAT),
+            default_build: "blade".into(),
         }
     }
 }
@@ -71,7 +78,15 @@ pub struct ZoneReport {
     pub malformed: u64,
     pub hits_melee: u64,
     pub hits_projectile: u64,
+    pub hits_area: u64,
+    pub hits_dot: u64,
+    pub parries: u64,
+    pub guard_breaks: u64,
+    pub staggers: u64,
+    pub statuses_applied: u64,
     pub kills: u64,
+    /// Kills per team (index 0 = team 0 / none, 1, 2).
+    pub team_kills: [u64; 3],
     pub max_tx_bytes_per_player_s: f64,
     pub max_rx_bytes_per_player_s: f64,
     /// Counters of the players connected right now (not yet folded into the totals).
@@ -94,11 +109,27 @@ pub async fn run(
         map_name: world.name.clone(),
         map_hash: world.hash,
         open: cfg.open,
+        content: Arc::new(cfg.content.clone()),
     });
     let acceptor = tokio::spawn(accept_loop(endpoint.clone(), tx.clone(), net_cfg));
     drop(tx);
 
-    let mut zone = Zone::new(rate, cfg.seed, world.spawns.clone());
+    let mut zone = Zone::new(rate, cfg.seed, world.spawns.clone(), cfg.content.clone());
+    let resolve = |zone: &Zone, choice: Option<&BuildChoice>| -> Result<Build, String> {
+        match choice {
+            None => zone
+                .content
+                .build(&cfg.default_build)
+                .cloned()
+                .ok_or_else(|| format!("no default build {:?}", cfg.default_build)),
+            Some(BuildChoice::Preset(name)) => zone
+                .content
+                .build(name)
+                .cloned()
+                .ok_or_else(|| format!("unknown preset {name:?}")),
+            Some(BuildChoice::Custom(b)) => Ok(b.clone()),
+        }
+    };
     let mut sessions: BTreeMap<EntityId, Session> = BTreeMap::new();
     let mut pvs = PvsCache::default();
     let mut scheduler = TickScheduler::new(rate, Instant::now());
@@ -137,6 +168,8 @@ pub async fn run(
             match ev {
                 ClientEvent::Join {
                     name,
+                    build,
+                    team,
                     conn,
                     control,
                     reply,
@@ -145,27 +178,57 @@ pub async fn run(
                         let _ = reply.send(Err("zone full".into()));
                         continue;
                     }
-                    let id = zone.add_player(&world.bsp, ArchetypeFrame::Striker);
+                    let build = match resolve(&zone, build.as_ref()) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = reply.send(Err(e));
+                            continue;
+                        }
+                    };
+                    let team = if team == 0 || team > 2 {
+                        zone.smallest_team()
+                    } else {
+                        team
+                    };
+                    let id = match zone.add_player(&world.bsp, build.clone(), team) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let _ = reply.send(Err(format!("invalid build: {e}")));
+                            continue;
+                        }
+                    };
                     let _ = reply.send(Ok(JoinInfo {
                         entity: id,
                         server_tick: zone.tick,
+                        build,
+                        team,
                     }));
                     for s in sessions.values() {
                         s.send_control(Control::PlayerInfo {
                             id,
                             name: name.clone(),
+                            team,
                         });
                         let _ = control.try_send(Control::PlayerInfo {
                             id: s.id,
                             name: s.name.clone(),
+                            team: zone.player(s.id).map_or(0, |p| p.team()),
                         });
                     }
                     let _ = control.try_send(Control::PlayerInfo {
                         id,
                         name: name.clone(),
+                        team,
                     });
                     sessions.insert(id, Session::new(id, name, conn, control));
                     report.joins += 1;
+                }
+                ClientEvent::Respec { id, build } => {
+                    let result = resolve(&zone, Some(&build))
+                        .and_then(|b| zone.request_respec(id, b).map_err(|e| e.to_string()));
+                    if let Some(s) = sessions.get(&id) {
+                        s.send_control(Control::RespecResult(result));
+                    }
                 }
                 ClientEvent::Input { id, datagram } => {
                     if let Some(s) = sessions.get_mut(&id) {
@@ -233,14 +296,19 @@ pub async fn run(
 
         zone.step(&world.bsp);
 
-        for ev in zone.events.drain(..) {
+        let events: Vec<ZoneEvent> = zone.events.drain(..).collect();
+        for ev in events {
             match ev {
                 ZoneEvent::Hit { kind, .. } => match kind {
                     HitKind::Melee => report.hits_melee += 1,
                     HitKind::Projectile => report.hits_projectile += 1,
+                    HitKind::Area => report.hits_area += 1,
+                    HitKind::Dot => report.hits_dot += 1,
                 },
                 ZoneEvent::Killed { victim, killer } => {
                     report.kills += 1;
+                    let team = zone.player(killer).map_or(0, |p| p.team()) as usize;
+                    report.team_kills[team.min(2)] += 1;
                     for s in sessions.values_mut() {
                         if !s.send_control(Control::Killed { victim, killer }) {
                             // Not draining its control stream: the connection is as good as dead.
@@ -248,9 +316,21 @@ pub async fn run(
                         }
                     }
                 }
-                ZoneEvent::Respawned(_)
+                ZoneEvent::Respawned(id) => {
+                    // The client's prediction switches to whatever build the respawn applied.
+                    if let (Some(s), Some(p)) = (sessions.get(&id), zone.player(id)) {
+                        s.send_control(Control::BuildApplied(p.sheet.build.clone()));
+                    }
+                }
+                ZoneEvent::Parried { .. } => report.parries += 1,
+                ZoneEvent::GuardBroken(_) => report.guard_breaks += 1,
+                ZoneEvent::Staggered(_) => report.staggers += 1,
+                ZoneEvent::StatusApplied { .. } => report.statuses_applied += 1,
+                ZoneEvent::Healed { .. }
                 | ZoneEvent::ProjectileSpawned { .. }
-                | ZoneEvent::ProjectileRemoved(_) => {}
+                | ZoneEvent::ProjectileRemoved(_)
+                | ZoneEvent::AreaSpawned { .. }
+                | ZoneEvent::AreaRemoved(_) => {}
             }
         }
 
@@ -291,7 +371,7 @@ pub async fn run(
                 overruns = report.overruns,
                 starved = report.starved_ticks + report.live_starved_ticks,
                 executed = report.executed_frames + report.live_executed_frames,
-                hits = report.hits_melee + report.hits_projectile,
+                hits = report.hits_melee + report.hits_projectile + report.hits_area,
                 kills = report.kills,
                 "zone report"
             );

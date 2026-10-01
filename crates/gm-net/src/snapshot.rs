@@ -8,6 +8,8 @@ use crate::{Kind, NetError, read_header, write_header};
 pub enum EntityKind {
     Player = 0,
     Projectile = 1,
+    /// A pulsing area effect (cosmetic on the client).
+    Area = 2,
 }
 
 /// First-sight information, by kind.
@@ -16,13 +18,26 @@ pub enum SpawnInfo {
     Player {
         /// Archetype frame: 0 colossus, 1 striker, 2 caster, 3 infiltrator.
         frame: u8,
+        /// 0 = none, 1 or 2.
+        team: u8,
+        /// Bitmask over `gm_core::matrix::Element` indices (5 bits).
+        aspects: u8,
+        /// `gm_core::matrix::ArmourClass` index (2 bits).
+        armour: u8,
     },
     Projectile {
         owner: u32,
-        /// Index into the kit's projectile definitions.
+        /// Index into the owner's kit.
         def: u32,
         /// The owner's client tick that fired it.
         input_tick: u32,
+    },
+    Area {
+        owner: u32,
+        /// Index into the owner's kit (0 for areas triggered by projectiles or parries).
+        def: u32,
+        /// Largest extent in whole units.
+        radius: u32,
     },
 }
 
@@ -31,6 +46,7 @@ impl SpawnInfo {
         match self {
             SpawnInfo::Player { .. } => EntityKind::Player,
             SpawnInfo::Projectile { .. } => EntityKind::Projectile,
+            SpawnInfo::Area { .. } => EntityKind::Area,
         }
     }
 }
@@ -42,17 +58,25 @@ pub mod flags {
     pub const GUARDING: u8 = 1 << 2;
     pub const DASHING: u8 = 1 << 3;
     pub const JUMP_HELD: u8 = 1 << 4;
+    /// An ability script is running (own entity: the client drops a predicted script the
+    /// server has interrupted).
+    pub const SCRIPT: u8 = 1 << 5;
+    /// A parry window is open or its whiff recovery runs (own entity: a successful parry on
+    /// the server ends the window at once, and the client must follow).
+    pub const PARRY: u8 = 1 << 6;
 }
 
 mod mask {
-    pub const SPAWN: u8 = 1 << 0;
-    pub const POS: u8 = 1 << 1;
-    pub const YAW: u8 = 1 << 2;
-    pub const PITCH: u8 = 1 << 3;
-    pub const VEL: u8 = 1 << 4;
-    pub const ANIM: u8 = 1 << 5;
-    pub const HEALTH: u8 = 1 << 6;
-    pub const FLAGS: u8 = 1 << 7;
+    pub const SPAWN: u16 = 1 << 0;
+    pub const POS: u16 = 1 << 1;
+    pub const YAW: u16 = 1 << 2;
+    pub const PITCH: u16 = 1 << 3;
+    pub const VEL: u16 = 1 << 4;
+    pub const ANIM: u16 = 1 << 5;
+    pub const HEALTH: u16 = 1 << 6;
+    pub const FLAGS: u16 = 1 << 7;
+    pub const STATUS: u16 = 1 << 8;
+    pub const BITS: u32 = 9;
 }
 
 /// One entity as seen by one client at one tick, in wire units.
@@ -70,17 +94,43 @@ pub struct EntityState {
     /// Own entity (Phase 5: party) only.
     pub health: Option<u16>,
     pub flags: u8,
+    /// Active statuses, a bit per `gm_core::vocab::Status` index (cosmetic for others).
+    pub status: u16,
 }
+
+/// One of the own entity's statuses (PROTOCOL.md 5, own block).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StatusWire {
+    /// `gm_core::vocab::Status` index.
+    pub status: u8,
+    /// Frame ticks left, relative to `last_input_tick`.
+    pub remaining: u32,
+    /// Magnitude at 1/16 resolution.
+    pub magnitude: f32,
+    pub stacks: u8,
+}
+
+/// The own entity's resources and statuses, sent in full every snapshot (they are small and
+/// the client must adopt them exactly).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OwnState {
+    pub stamina: u16,
+    pub focus: u16,
+    pub statuses: Vec<StatusWire>,
+}
+
+pub const MAX_OWN_STATUSES: usize = 8;
 
 /// The **reconstructed** entity table at one tick (PROTOCOL.md 5): what the server tracks per
 /// client and what the client rebuilds. Encoding writes only the records that differ from the
 /// baseline; decoding carries the rest forward.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub server_tick: u32,
     /// 0 = full snapshot.
     pub baseline_tick: u32,
     pub last_input_tick: u32,
+    pub own: OwnState,
     /// Every entity the client knows after this snapshot, ascending by id.
     pub entities: Vec<EntityState>,
     /// Ids present in the baseline and gone now.
@@ -131,6 +181,7 @@ impl Snapshot {
         w.write_bits(self.server_tick as u64, 32);
         w.write_bits(self.baseline_tick as u64, 32);
         w.write_bits(self.last_input_tick as u64, 32);
+        write_own(&mut w, &self.own);
         let changed: Vec<(&EntityState, Option<&EntityState>)> = self
             .entities
             .iter()
@@ -170,6 +221,7 @@ impl Snapshot {
             Some(baseline(baseline_tick).ok_or(NetError::UnknownBaseline(baseline_tick))?)
         };
         let last_input_tick = r.read_bits(32)? as u32;
+        let own = read_own(&mut r)?;
         let count = r.read_uvar32()? as usize;
         if count > 4096 {
             return Err(NetError::Malformed("too many entities"));
@@ -214,10 +266,53 @@ impl Snapshot {
             server_tick,
             baseline_tick,
             last_input_tick,
+            own,
             entities,
             removed,
         })
     }
+}
+
+const MAGNITUDE_SCALE: f32 = 16.0;
+
+fn write_own(w: &mut BitWriter, own: &OwnState) {
+    w.write_uvar(own.stamina as u64);
+    w.write_uvar(own.focus as u64);
+    let n = own.statuses.len().min(MAX_OWN_STATUSES);
+    w.write_bits(n as u64, 4);
+    for s in &own.statuses[..n] {
+        w.write_bits(s.status as u64 & 0xf, 4);
+        w.write_uvar(s.remaining as u64);
+        w.write_svar((s.magnitude * MAGNITUDE_SCALE).round() as i64);
+        w.write_bits(s.stacks.min(7) as u64, 3);
+    }
+}
+
+fn read_own(r: &mut BitReader<'_>) -> Result<OwnState, NetError> {
+    let stamina = u16::try_from(r.read_uvar()?).map_err(|_| NetError::Malformed("stamina"))?;
+    let focus = u16::try_from(r.read_uvar()?).map_err(|_| NetError::Malformed("focus"))?;
+    let n = r.read_bits(4)? as usize;
+    if n > MAX_OWN_STATUSES {
+        return Err(NetError::Malformed("too many own statuses"));
+    }
+    let mut statuses = Vec::with_capacity(n);
+    for _ in 0..n {
+        let status = r.read_bits(4)? as u8;
+        let remaining = r.read_uvar32()?;
+        let magnitude = r.read_svar32()? as f32 / MAGNITUDE_SCALE;
+        let stacks = r.read_bits(3)? as u8;
+        statuses.push(StatusWire {
+            status,
+            remaining,
+            magnitude,
+            stacks,
+        });
+    }
+    Ok(OwnState {
+        stamina,
+        focus,
+        statuses,
+    })
 }
 
 fn record_differs(e: &EntityState, b: &EntityState) -> bool {
@@ -229,6 +324,7 @@ fn record_differs(e: &EntityState, b: &EntityState) -> bool {
         || e.anim != b.anim
         || (e.health.is_some() && e.health != b.health)
         || e.flags != b.flags
+        || e.status != b.status
 }
 
 fn write_i32x3(w: &mut BitWriter, v: [i32; 3], base: Option<[i32; 3]>) {
@@ -249,7 +345,7 @@ fn read_i32x3(r: &mut BitReader<'_>, base: Option<[i32; 3]>) -> Result<[i32; 3],
 
 fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) {
     w.write_uvar(e.id as u64);
-    let mut m = 0u8;
+    let mut m = 0u16;
     match base {
         None => {
             m |= mask::SPAWN | mask::POS | mask::YAW | mask::PITCH | mask::ANIM | mask::FLAGS;
@@ -258,6 +354,9 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
             }
             if e.health.is_some() {
                 m |= mask::HEALTH;
+            }
+            if e.status != 0 {
+                m |= mask::STATUS;
             }
         }
         Some(b) => {
@@ -282,13 +381,26 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
             if e.flags != b.flags {
                 m |= mask::FLAGS;
             }
+            if e.status != b.status {
+                m |= mask::STATUS;
+            }
         }
     }
-    w.write_bits(m as u64, 8);
+    w.write_bits(m as u64, mask::BITS);
     if m & mask::SPAWN != 0 {
         w.write_bits(e.spawn.kind() as u64, 4);
         match e.spawn {
-            SpawnInfo::Player { frame } => w.write_bits(frame as u64, 2),
+            SpawnInfo::Player {
+                frame,
+                team,
+                aspects,
+                armour,
+            } => {
+                w.write_bits(frame as u64, 2);
+                w.write_bits(team as u64, 2);
+                w.write_bits(aspects as u64 & 0x1f, 5);
+                w.write_bits(armour as u64, 2);
+            }
             SpawnInfo::Projectile {
                 owner,
                 def,
@@ -297,6 +409,11 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
                 w.write_uvar(owner as u64);
                 w.write_uvar(def as u64);
                 w.write_uvar(input_tick as u64);
+            }
+            SpawnInfo::Area { owner, def, radius } => {
+                w.write_uvar(owner as u64);
+                w.write_uvar(def as u64);
+                w.write_uvar(radius as u64);
             }
         }
     }
@@ -321,6 +438,9 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
     if m & mask::FLAGS != 0 {
         w.write_bits(e.flags as u64, 8);
     }
+    if m & mask::STATUS != 0 {
+        w.write_bits(e.status as u64, 16);
+    }
 }
 
 fn read_entity(
@@ -328,16 +448,24 @@ fn read_entity(
     id: u32,
     base: Option<&EntityState>,
 ) -> Result<EntityState, NetError> {
-    let m = r.read_bits(8)? as u8;
+    let m = r.read_bits(mask::BITS)? as u16;
     let spawn = if m & mask::SPAWN != 0 {
         match r.read_bits(4)? {
             0 => SpawnInfo::Player {
                 frame: r.read_bits(2)? as u8,
+                team: r.read_bits(2)? as u8,
+                aspects: r.read_bits(5)? as u8,
+                armour: r.read_bits(2)? as u8,
             },
             1 => SpawnInfo::Projectile {
                 owner: r.read_uvar32()?,
                 def: r.read_uvar32()?,
                 input_tick: r.read_uvar32()?,
+            },
+            2 => SpawnInfo::Area {
+                owner: r.read_uvar32()?,
+                def: r.read_uvar32()?,
+                radius: r.read_uvar32()?,
             },
             _ => return Err(NetError::Malformed("unknown entity kind")),
         }
@@ -361,6 +489,7 @@ fn read_entity(
             anim: 0,
             health: None,
             flags: 0,
+            status: 0,
         },
     };
     e.spawn = spawn;
@@ -392,6 +521,9 @@ fn read_entity(
     if m & mask::FLAGS != 0 {
         e.flags = r.read_bits(8)? as u8;
     }
+    if m & mask::STATUS != 0 {
+        e.status = r.read_bits(16)? as u16;
+    }
     Ok(e)
 }
 
@@ -399,10 +531,19 @@ fn read_entity(
 mod tests {
     use super::*;
 
+    pub(crate) fn player_spawn() -> SpawnInfo {
+        SpawnInfo::Player {
+            frame: 1,
+            team: 1,
+            aspects: 0b00001,
+            armour: 2,
+        }
+    }
+
     fn player(id: u32, x: i32, own: bool) -> EntityState {
         EntityState {
             id,
-            spawn: SpawnInfo::Player { frame: 1 },
+            spawn: player_spawn(),
             pos: [x, -400, 96],
             yaw: 1234,
             pitch: 900,
@@ -410,11 +551,22 @@ mod tests {
             anim: 2,
             health: own.then_some(100),
             flags: flags::ALIVE | flags::ON_GROUND,
+            status: 0,
         }
     }
 
     fn scene(tick: u32, shift: i32) -> Snapshot {
         let mut s = Snapshot::new(tick);
+        s.own = OwnState {
+            stamina: 97,
+            focus: 120,
+            statuses: vec![StatusWire {
+                status: 1,
+                remaining: 300,
+                magnitude: 0.25,
+                stacks: 1,
+            }],
+        };
         s.entities.push(player(1, shift, true));
         for i in 2..17 {
             s.entities.push(player(i, i as i32 * 100 + shift, false));
@@ -438,15 +590,17 @@ mod tests {
         next.last_input_tick = 77;
         next.entities[3].yaw = 1300;
         next.entities[5].flags = flags::ALIVE;
+        next.entities[6].status = 1 << 3;
         let full = {
             let mut f = next.clone();
             f.baseline_tick = 0;
             f.encode(None).len()
         };
         let bytes = next.encode(Some(&base));
-        // 16 entities: id (1) + mask (1) + x delta (1) + two zero deltas (2) ≈ 5 bytes each,
-        // plus the own entity's velocity and a couple of changed fields, plus 14 bytes of header.
-        assert!(bytes.len() < 110, "delta is {} bytes", bytes.len());
+        // 16 entities: id (1) + mask (2) + x delta (1) + two zero deltas (2) ≈ 6 bytes each,
+        // plus the own entity's velocity and a couple of changed fields, plus 14 bytes of
+        // header and the own block (~8 bytes with one status).
+        assert!(bytes.len() < 130, "delta is {} bytes", bytes.len());
         assert!(bytes.len() < full, "delta {} >= full {}", bytes.len(), full);
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, next);
@@ -458,9 +612,11 @@ mod tests {
         let mut next = scene(11, 0);
         next.baseline_tick = 10;
         next.last_input_tick = 5;
+        next.own.statuses.clear();
         let bytes = next.encode(Some(&base));
-        // header 2 + 3 x 4 + count 1 + removed 1 = 16
-        assert_eq!(bytes.len(), 16);
+        // header 2 + 3 x 4 + own (stamina 1, focus 2, count 4 bits) + count 1 + removed 1,
+        // bit-packed: 19 bytes.
+        assert_eq!(bytes.len(), 19);
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, next);
         // One entity moves: only it is on the wire, the rest still come back.
@@ -469,7 +625,7 @@ mod tests {
         moved.baseline_tick = 10;
         moved.entities[7].pos[0] += 4;
         let bytes = moved.encode(Some(&base));
-        assert!(bytes.len() <= 16 + 6, "{}", bytes.len());
+        assert!(bytes.len() <= 19 + 7, "{}", bytes.len());
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, moved);
     }
@@ -494,6 +650,23 @@ mod tests {
             anim: 0,
             health: None,
             flags: flags::ALIVE,
+            status: 0,
+        });
+        next.entities.push(EntityState {
+            id: 41,
+            spawn: SpawnInfo::Area {
+                owner: 1,
+                def: 3,
+                radius: 128,
+            },
+            pos: [10, 20, 30],
+            yaw: 0,
+            pitch: 0,
+            vel: None,
+            anim: 0,
+            health: None,
+            flags: flags::ALIVE,
+            status: 0,
         });
         next.normalize(Some(&base));
         assert_eq!(next.removed, (2..17).collect::<Vec<u32>>());
@@ -501,6 +674,7 @@ mod tests {
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, next);
         assert_eq!(back.find(40).unwrap().spawn.kind(), EntityKind::Projectile);
+        assert_eq!(back.find(41).unwrap().spawn.kind(), EntityKind::Area);
     }
 
     #[test]

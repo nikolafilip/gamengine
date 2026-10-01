@@ -5,26 +5,35 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use gm_core::build::{Build, ContentPack};
 use gm_core::vocab::EntityId;
 use gm_net::PROTOCOL_VERSION;
-use gm_net::control::{self, Control};
+use gm_net::control::{self, BuildChoice, Control};
 use gm_net::input::InputDatagram;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 /// What the tick loop hands back to a joining connection.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct JoinInfo {
     pub entity: EntityId,
     pub server_tick: u32,
+    pub build: Build,
+    pub team: u8,
 }
 
 pub enum ClientEvent {
     Join {
         name: String,
+        build: Option<BuildChoice>,
+        team: u8,
         conn: quinn::Connection,
         control: mpsc::Sender<Control>,
         reply: oneshot::Sender<Result<JoinInfo, String>>,
+    },
+    Respec {
+        id: EntityId,
+        build: BuildChoice,
     },
     Input {
         id: EntityId,
@@ -48,6 +57,8 @@ pub struct NetConfig {
     pub map_hash: u64,
     /// Accept empty session tokens (Phase 2 development and tests).
     pub open: bool,
+    /// Sent to every client after `Welcome` (MATRIX.md 10).
+    pub content: Arc<ContentPack>,
 }
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -90,6 +101,8 @@ async fn handle_connection(
         version,
         name,
         token,
+        build,
+        team,
     }) = hello
     else {
         anyhow::bail!("first control message was not Hello");
@@ -120,6 +133,8 @@ async fn handle_connection(
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(ClientEvent::Join {
         name: name.clone(),
+        build,
+        team,
         conn: conn.clone(),
         control: control_tx,
         reply: reply_tx,
@@ -146,7 +161,16 @@ async fn handle_connection(
         },
     )
     .await?;
-    info!(%remote, entity = info.entity, %name, "player joined");
+    control::send(
+        &mut send,
+        &Control::Content {
+            pack: (*cfg.content).clone(),
+            own: info.build.clone(),
+            team: info.team,
+        },
+    )
+    .await?;
+    info!(%remote, entity = info.entity, %name, team = info.team, "player joined");
     let id = info.entity;
 
     let writer = tokio::spawn(async move {
@@ -185,6 +209,11 @@ async fn handle_connection(
                 match msg {
                     Ok(Some(Control::Chat(text))) => {
                         if tx.send(ClientEvent::Chat { id, text }).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(Control::Respec(build))) => {
+                        if tx.send(ClientEvent::Respec { id, build }).await.is_err() {
                             break;
                         }
                     }

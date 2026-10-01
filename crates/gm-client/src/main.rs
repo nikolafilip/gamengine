@@ -23,6 +23,12 @@ pub struct Options {
     /// DER certificate of the zone (written by `gm-server --cert-out`).
     pub cert: PathBuf,
     pub name: String,
+    /// Preset build to ask the zone for (`None`: the zone's default).
+    pub build: Option<String>,
+    /// Team to ask for (0 = let the zone balance).
+    pub team: u8,
+    /// Start in the third-person viewport.
+    pub third_person: bool,
     pub bench_frames: Option<u32>,
     pub vsync: bool,
     /// Explicit present mode (overrides `vsync`): fifo, relaxed, mailbox, immediate.
@@ -38,8 +44,9 @@ pub struct Options {
     pub seconds: f32,
 }
 
-const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME]] [--bench N] \
-[--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] [--size WxH] [--screenshot out.ppm] [--seconds N]";
+const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
+[--third-person] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
+[--size WxH] [--screenshot out.ppm] [--seconds N]";
 
 fn parse_args() -> Result<Options, String> {
     let mut o = Options {
@@ -48,6 +55,9 @@ fn parse_args() -> Result<Options, String> {
         connect: None,
         cert: PathBuf::from("zone-cert.der"),
         name: std::env::var("USER").unwrap_or_else(|_| "player".into()),
+        build: None,
+        team: 0,
+        third_person: false,
         bench_frames: None,
         vsync: true,
         present: None,
@@ -74,6 +84,13 @@ fn parse_args() -> Result<Options, String> {
             }
             "--cert" => o.cert = PathBuf::from(value("--cert")?),
             "--name" => o.name = value("--name")?,
+            "--build" => o.build = Some(value("--build")?),
+            "--team" => {
+                o.team = value("--team")?
+                    .parse()
+                    .map_err(|e| format!("--team: {e}"))?
+            }
+            "--third-person" => o.third_person = true,
             "--bench" => {
                 o.bench_frames = Some(
                     value("--bench")?

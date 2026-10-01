@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-09-30 (Phases 0, 1 and 2 implemented; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-10-01 (Phases 0–3 implemented; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -172,7 +172,8 @@ class, mobility), and kit (counters, multipliers, skill slots). Reallocatable. V
 ### 3.2 RPS rules
 Opportunity cost on everything. True bypasses (magic through armor, blunt through magic shields, tracking
 through evasion). Kits readable within ~3 s of contact through silhouette, stance, aura. Compressed stat
-bands. Type matrix with stacking multipliers, dual-type 4×. [OPEN: author the matrix]
+bands. Type matrix with stacking multipliers, dual-type 4×. The matrix, the attribute set and the
+budget are `docs/MATRIX.md` (v1, Phase 3, proposed to the director in its section 12).
 
 ### 3.3 Onboarding
 Archetype first, math later. 3-minute tutorial proving the loop. Build & Model Browser with community presets.
@@ -312,8 +313,10 @@ VRChat avatar makers. Solo-viable day one; human-only endgame pulls people into 
 gamengine/
   Cargo.toml                 workspace
   crates/
-    gm-core      shared simulation: entity vocabulary, movement, damage/type matrix, status, fixed-tick step.
+    gm-core      shared simulation: entity vocabulary, movement, damage/type matrix, builds, status, fixed-tick step.
                  Runs identically on client (prediction) and server (authority). No I/O, no rendering.
+    gm-content   content loader: abilities and preset builds authored in TOML, compiled and validated into
+                 gm-core packs. Zones load it; clients receive the compiled pack over the wire.
     gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing. Used by client and server.
     gm-net       protocol: bit writer/reader, snapshot delta encoding, input frames, reliable messages.
                  Transport abstraction over quinn (native) and wtransport (wasm).
@@ -326,8 +329,9 @@ gamengine/
     gm-tools     CLI: model ingestion (gltf → glb + KTX2, budget lint), map build wrapper (ericw-tools),
                  budget checker used by CI.
     gm-bot       headless client for load tests and soak tests.
-  assets/        maps (.map source + built .bsp/.lit + gamengine.fgd), textures (generated palette + WAD), later models/audio
-  docs/          VOCABULARY.md, PROTOCOL.md, BUILDING.md, MATRIX.md (Phase 3)
+  assets/        maps (.map source + built .bsp/.lit + gamengine.fgd), textures (generated palette + WAD),
+                 content (abilities + builds, TOML), later models/audio
+  docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, BUILDING.md
   PLAN.md        this file stays at the repository root (it is the entry point; README links it)
   budgets.toml   every number CI enforces; read by gm-tools and scripts/
   scripts/       CI gates and the pinned ericw-tools fetch
@@ -427,7 +431,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 0 | Workspace, CI gates, `VOCABULARY.md`, `PROTOCOL.md` skeleton | CI fails on a 1 MB binary-size regression and on an over-budget test asset. **Done 2026-09-30** |
 | 1 | `gm-bsp` + `gm-client`: load a TrenchBroom map compiled by ericw-tools, lightmapped, Quake movement, collision | 60+ fps on an Intel iGPU; binary < 10 MB; RAM < 200 MB. **Done 2026-09-30** |
 | 2 | `gm-net` + `gm-server`: 16 players, prediction, reconciliation, interpolation, melee lag comp, projectiles, collision, FF | playable at 150 ms / 3% loss in `turmoil`; bytes/player < 30 KB/s. **Done 2026-09-30** (11.10) |
-| 3 | Point-buy characters, type matrix, FPS + third-person viewports, PVS culling | one arena map, 8v8 playtest, a build can be countered by re-speccing |
+| 3 | Point-buy characters, type matrix, FPS + third-person viewports, PVS culling | one arena map, 8v8 playtest, a build can be countered by re-speccing. **Done 2026-10-01** (11.10) |
 | 4 | Hub: accounts, persistence, zones, handoff, 200-bot swarm | 200 bots on one zone under CPU budget; login → zone → handoff → logout round trip |
 | 5 | Economy: stalls, escrow contracts, component drops with corrected split, crafting, decomposition, account storage caps, guild halls, tavern hires, ledger | every coin/item movement is a DB transaction; scam test suite passes (mutation lock, escrow, floors) |
 | 6 | Custom models: ingestion, hash cache, LRU, silhouette fallback, takedown flag, moderation queue | 100 unique uploaded avatars in a town at 60 fps on iGPU, no disk growth past cap |
@@ -502,7 +506,58 @@ class):
   corrections are frequent in a crowd (visible as small snaps, never desync); `hecs` still unused (11.2);
   `wtransport` untouched until Phase 8; `SO_RCVBUF` tuning and time-scaled interpolation drain deferred.
 
+**2026-10-01, Phase 3 done** (same machine; all numbers measured, none estimated):
+- `docs/MATRIX.md` v1: five attributes 5..=20, four free frames, four armour classes with a physical
+  kind × class table, five elements in a pentagram (each beats two, loses to two, resists itself; dual
+  aspects two apart have one 4× hole and two 0.25× walls, adjacent ones no hole and one wall), derived
+  stats in bands of at most 1.5× per stat and 2× effective health, a multiplicative damage pipeline with
+  the three structural bypasses, fourteen statuses with stacking and immunity rules, an exact 100-point
+  budget. Independent design review before coding (section 12 of the document: 7 accepted, 1 corrected
+  differently, 1 rejected): it found that "every dual aspect has a 4× hole" is impossible in a balanced
+  five-element matrix, which is now stated honestly.
+- `gm-core`: `matrix` (tables, derived stats, pipeline), `build` (budget validation, kits, sheets,
+  content packs), `status` (eight slots, Chill→Freeze, immunities), `sim` split into mover/zone with
+  every verb resolved: areas (shapes, falloff, LOS, `exclude_actor`), block/parry with facing, guard break,
+  stagger build-up with a 1 s immunity, damage and healing over time at 4 pulses/s, blink and charge,
+  triggers on projectile hits, respec at respawn, teams and team spawns. The vocabulary became
+  non-recursive (typed trigger lists) so it is `bitcode`-encodable. `gm-content` compiles TOML content
+  (26 abilities, 4 presets) and a test proves the in-code fixture mirrors it.
+- Protocol v2: own block (stamina, focus, statuses), status aura mask, script/parry flags, areas as
+  entities, build/team spawn info, content sent after `Welcome`, `Respec`/`BuildApplied`. The client adopts
+  resources, statuses and guard state whenever they differ, not only on a position mismatch (found by the
+  code review). Turmoil, 16 bots, 150 ms, 3% loss: test_room **5.6 KB/s up / 9.2 KB/s down** (v1: 5.6 /
+  8.5); arena with full kits **5.3–5.6 / 10.0–10.9 KB/s**; real UDP arena with 16 duelists 5.5 / 9.4.
+- Client: third-person viewport (camera 110 u back, 24 right, 12 up, point-traced out of walls) with
+  camera-to-muzzle re-aim, `V` toggles; abilities on 1–4, guard on Ctrl, F1–F4 respec; team colours,
+  facing markers, auras, areas. Arena map (`gm-tools map gen-arena`, 688 faces, 62 leaves, 16 team
+  spawns). Windowed bench 1280×720 no vsync: **arena 2,312 fps (0.43 ms mean, 4.6 ms p99)**, test_room
+  5,663 fps; live 8v8 match in third person **243 fps (250 cap), peak RSS 124.6 MB**, 0 unexplained
+  corrections. Software Vulkan (CI path) arena 216 fps, 181 MB.
+- Bots: a duelist brain that uses the whole kit (closes or kites by frame, blocks and parries wind-ups,
+  fires actives by their shape) and counter-picks from the matrix (the preset whose elements score best
+  against the enemy's aspects, requested through `Respec`).
+- **Acceptance** (`scripts/check-matrix.sh`, offline 8v8 in the arena, identical brains, three seeds ×
+  60 s): ironclad : blade **85–98 : 30–34** (2.8–2.9), the blades re-specced to frostweavers :
+  ironclad **156 : 5** (31, a hard counter: Frost 2× through plate, Stone 0.25× into Frost + Shadow,
+  haste out-kites plate), blade : frostweaver **100 : 58** (1.7, the 4× Flame hole closes the cycle),
+  mirror **70–74 : 69–75**. Over the real protocol (`tests/counterpick.rs`, turmoil, 150 ms, 3% loss,
+  team 2 counter-picks after 10 s): team 2's kill share goes from **0.20–0.36 to 0.72–0.88**.
+- Independent code review (Gemini 3.1 Pro, MATRIX.md 12): six defects fixed (own-state adoption,
+  projectile block facing, swings surviving a stagger, DoT rounding, parry cooldown groups, Extend
+  shrinking), one rejected, one deferred to Phase 4 (the O(N²) body list).
+- Binaries (release, LTO): `gm-client` **8,264,392 bytes (7.88 MiB)**, +213 KB for the matrix, statuses,
+  areas, content types and the viewport; baseline updated. `gm-server` 4.15 MB, `gm-bot` 3.47 MB.
+  Server tick with 16 duelists on the arena **460 µs mean, 0.8 ms max** (Phase 2: 11 µs for 16 runners
+  on a box world; the arena PVS checks, areas, statuses and per-session snapshots add the rest; the
+  200-player budget is Phase 4's problem and the body list is already known to be O(N²)).
+- Known limits: unexplained corrections are 0–3 per bot per minute with full kits at 150 ms (velocity-only
+  wall-contact corrections and positional abilities against stale bodies are classified, not hidden);
+  areas draw as flat discs; bots never use cover; `Origin::Target` resolves to the caster; the hub
+  still does not exist, so builds live only for the session.
+
 ## 12. Open decisions
-License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). Full type matrix and attribute
-set. Currency purchasing-power table. Death-drop in contested zones: on/off and fraction. Housing: instanced
-interiors vs world plots. Salvaged-component recipes. Storage slot counts. Name.
+License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
+set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
+the numbers, the structure is what the code depends on). Currency purchasing-power table. Death-drop in
+contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Salvaged-component
+recipes. Storage slot counts. Name.

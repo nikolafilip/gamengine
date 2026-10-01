@@ -5,16 +5,18 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use glam::Vec3;
+use gm_core::build::Sheet;
 use gm_core::collide::{Aabb, Composite};
-use gm_core::sim::{Action, Input, Kit, Mover, step_mover, tick_delta};
+use gm_core::sim::{Action, GuardState, Input, Mover, step_mover, tick_delta};
+use gm_core::status::{StatusSlot, Statuses};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Hull};
-use gm_core::vocab::EntityId;
+use gm_core::vocab::{EntityId, Status};
 
 use crate::NetError;
 use crate::input::{InputDatagram, InputFrame, MAX_FRAMES};
 use crate::quant;
-use crate::snapshot::{EntityKind, EntityState, Snapshot, SpawnInfo, flags};
+use crate::snapshot::{EntityKind, EntityState, OwnState, Snapshot, SpawnInfo, flags};
 
 pub const PREDICTION_RING: usize = 128;
 pub const SNAPSHOT_RING: usize = 64;
@@ -35,9 +37,13 @@ pub struct ClientStats {
     pub decode_errors: u64,
     /// Reconciliations above tolerance after the initial sync (any cause).
     pub corrections: u64,
-    /// Corrections with no visible cause: no health change, no death or respawn, no other
-    /// player within body-blocking distance. These are the ones that indicate a prediction bug.
+    /// Corrections with no visible cause: no health, status or guard change, no death or
+    /// respawn, no body within blocking distance, no positional ability, and a real position
+    /// disagreement. These are the ones that indicate a prediction bug.
     pub corrections_unexplained: u64,
+    /// Corrections where only the velocity disagreed: wall contact resolved on the server a
+    /// frame earlier or later than on the client because of the quarter-unit rounding.
+    pub corrections_velocity_only: u64,
     pub max_correction: f32,
     pub gaps: u64,
     pub max_gap: u32,
@@ -64,18 +70,32 @@ pub struct RenderEntity {
     pub pitch: f32,
     pub anim: u8,
     pub flags: u8,
+    /// Active statuses, a bit per `Status` index.
+    pub status: u16,
 }
 
 impl RenderEntity {
     pub fn alive(&self) -> bool {
         self.flags & flags::ALIVE != 0
     }
+
+    pub fn team(&self) -> u8 {
+        match self.spawn {
+            SpawnInfo::Player { team, .. } => team,
+            _ => 0,
+        }
+    }
+
+    pub fn has_status(&self, s: Status) -> bool {
+        self.status & (1 << s.index()) != 0
+    }
 }
 
 pub struct ClientState {
     pub my_id: EntityId,
     pub rate: TickRate,
-    pub kit: Kit,
+    /// The own character (kit and derived stats), from `Control::Content`.
+    pub sheet: Sheet,
     /// Client input tick counter.
     pub tick: u32,
     pub mover: Mover,
@@ -100,13 +120,14 @@ pub struct ClientState {
 }
 
 impl ClientState {
-    pub fn new(my_id: EntityId, rate: TickRate) -> ClientState {
+    pub fn new(my_id: EntityId, rate: TickRate, sheet: Sheet) -> ClientState {
+        let mover = Mover::spawn(Vec3::ZERO, 0.0, &sheet);
         ClientState {
             my_id,
             rate,
-            kit: Kit::phase2(rate),
+            sheet,
             tick: 0,
-            mover: Mover::new(Vec3::ZERO, 0.0),
+            mover,
             ring: VecDeque::with_capacity(PREDICTION_RING),
             frames: VecDeque::with_capacity(MAX_FRAMES),
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING),
@@ -128,6 +149,13 @@ impl ClientState {
 
     pub fn synced(&self) -> bool {
         self.synced
+    }
+
+    /// Switch to a new build (a respec took effect at the respawn). Only the sheet changes:
+    /// the respawn snapshot resets the pools and the ring replays against the new numbers.
+    /// Dropping the ring here would re-synchronise a round trip behind the server.
+    pub fn set_sheet(&mut self, sheet: Sheet) {
+        self.sheet = sheet;
     }
 
     /// Server tick the client displays for other entities, `extra_ticks` past the newest
@@ -168,7 +196,7 @@ impl ClientState {
         if self.own_alive || !self.synced {
             step_mover(
                 &composite,
-                &self.kit,
+                &self.sheet,
                 &mut self.mover,
                 &input,
                 self.tick,
@@ -251,7 +279,14 @@ impl ClientState {
         }
         if let Some(own) = snap.find(self.my_id) {
             let own = *own;
-            self.reconcile(world, snap.server_tick, snap.last_input_tick, &own);
+            let own_state = snap.own.clone();
+            self.reconcile(
+                world,
+                snap.server_tick,
+                snap.last_input_tick,
+                &own,
+                &own_state,
+            );
         }
         self.snapshots.push_back(snap);
         while self.snapshots.len() > SNAPSHOT_RING {
@@ -287,6 +322,7 @@ impl ClientState {
         server_tick: u32,
         last_input_tick: u32,
         own: &EntityState,
+        own_state: &OwnState,
     ) {
         let was_alive = self.own_alive;
         let prev_health = self.own_health;
@@ -294,15 +330,44 @@ impl ClientState {
         self.own_alive = own.flags & flags::ALIVE != 0;
         self.own_anim = own.anim;
         let respawned = !was_alive && self.own_alive && self.synced;
-        // A hit (knockback) or a death lands on a server tick; the frame whose comparison
-        // reveals it may only run a few ticks later (dejitter reserve, starvation), so the
-        // explanation stays valid for a short window.
-        if self.own_health != prev_health || was_alive != self.own_alive {
+        // A hit (knockback), a death or a status the server put on us (a parry's stagger, a
+        // freeze) lands on a server tick; the frame whose comparison reveals it may only run a
+        // few ticks later (dejitter reserve, starvation), so the explanation stays valid for a
+        // short window.
+        let acked = self.ring.iter().find(|(t, _, _)| *t == last_input_tick);
+        let status_changed = acked.is_some_and(|(_, _, m)| m.statuses.mask() != own.status);
+        let guard_changed = acked.is_some_and(|(_, _, m)| {
+            let server_parry = own.flags & flags::PARRY != 0;
+            let server_block = own.flags & flags::GUARDING != 0;
+            let client_parry =
+                matches!(m.guard, GuardState::Parry { .. } | GuardState::Whiff { .. });
+            let client_block = m.guard == GuardState::Block;
+            server_parry != client_parry || server_block != client_block
+        });
+        if self.own_health != prev_health
+            || was_alive != self.own_alive
+            || status_changed
+            || guard_changed
+        {
             self.explained_until = server_tick.wrapping_add(8);
         }
         let explained = tick_delta(self.explained_until, server_tick) >= 0;
         let server_pos = Vec3::from(quant::dequantize_pos3(own.pos));
         let server_vel = own.vel.map(|v| Vec3::from(quant::dequantize_vel3(v)));
+        // Statuses arrive relative to the acknowledged frame; rebuild them in our frame clock.
+        let server_statuses = {
+            let mut st = Statuses::default();
+            for (slot, w) in st.slots.iter_mut().zip(&own_state.statuses) {
+                *slot = StatusSlot {
+                    status: Status::from_index(w.status),
+                    until: last_input_tick.wrapping_add(w.remaining),
+                    magnitude: w.magnitude,
+                    stacks: w.stacks,
+                    source: 0,
+                };
+            }
+            st
+        };
         let apply = |m: &mut Mover| {
             // The wire position is rounded to 1/4 u and can sit exactly on a clip plane, where
             // the tracer would report solid and freeze the mover; nudge out first.
@@ -312,12 +377,36 @@ impl ClientState {
             }
             m.mv.on_ground = own.flags & flags::ON_GROUND != 0;
             m.mv.jump_held = own.flags & flags::JUMP_HELD != 0;
+            // Resources and statuses are the server's (block costs, enemy debuffs); a script
+            // the server interrupted is dropped; a broken block is released.
+            m.stamina = own_state.stamina as f32;
+            m.focus = own_state.focus as f32;
+            let immune = (
+                m.statuses.chill_immune_until,
+                m.statuses.stagger_immune_until,
+            );
+            m.statuses = server_statuses;
+            m.statuses.chill_immune_until = immune.0;
+            m.statuses.stagger_immune_until = immune.1;
+            if own.flags & flags::SCRIPT == 0 {
+                m.script = None;
+            }
+            if own.flags & flags::GUARDING == 0 && m.guard == GuardState::Block {
+                m.guard = GuardState::None;
+            }
+            // A parry that landed: the server closed the window, no whiff recovery follows.
+            if own.flags & flags::PARRY == 0
+                && matches!(m.guard, GuardState::Parry { .. } | GuardState::Whiff { .. })
+            {
+                m.guard = GuardState::None;
+            }
         };
         // A respawn resets the ability state exactly as the server does (cooldowns survive).
+        let derived = self.sheet.derived;
         let reset_abilities = |m: &mut Mover| {
-            m.script = None;
-            m.dash = None;
-            m.stamina = gm_core::sim::MAX_STAMINA;
+            m.reset_actions();
+            m.stamina = derived.stamina;
+            m.focus = derived.focus;
         };
         if last_input_tick != 0 {
             self.last_acked_input = last_input_tick;
@@ -329,33 +418,63 @@ impl ClientState {
         };
 
         if !self.own_alive && self.synced {
-            // Dead: the server owns the body and has dropped any running script.
+            // Dead: the server owns the body and has dropped everything running.
             apply(&mut self.mover);
-            self.mover.script = None;
-            self.mover.dash = None;
+            self.mover.reset_actions();
             self.drop_acked(last_input_tick);
             return;
         }
 
-        let (mut m, replay_from) = match idx {
+        let (m, replay_from) = match idx {
             Some(i) => {
                 let predicted = self.ring[i].2;
                 let dpos = (server_pos - predicted.mv.origin).length();
                 let dvel = server_vel.map_or(0.0, |v| (v - predicted.mv.velocity).length());
                 let mismatch = dpos > POS_TOLERANCE || dvel > VEL_TOLERANCE;
+                // Resources, statuses, scripts and guards the server changed without moving
+                // us (a blocked hit's stamina, a Bleed, a landed parry) are adopted and
+                // replayed too; they are not position corrections and are not counted.
+                let soft = (own_state.stamina as f32 - predicted.stamina).abs() > 1.0
+                    || (own_state.focus as f32 - predicted.focus).abs() > 1.0
+                    || predicted.statuses.mask() != own.status
+                    || (own.flags & flags::SCRIPT == 0) != predicted.script.is_none()
+                    || (own.flags & flags::GUARDING != 0) != (predicted.guard == GuardState::Block)
+                    || (own.flags & flags::PARRY != 0)
+                        != matches!(
+                            predicted.guard,
+                            GuardState::Parry { .. } | GuardState::Whiff { .. }
+                        );
                 if self.synced && !respawned {
+                    if !mismatch && !soft {
+                        self.drop_acked(last_input_tick);
+                        return;
+                    }
                     if !mismatch {
+                        let mut m = predicted;
+                        apply(&mut m);
+                        self.ring[i].2 = m;
+                        self.replay_from(world, i + 1, m);
                         self.drop_acked(last_input_tick);
                         return;
                     }
                     self.stats.corrections += 1;
                     self.stats.max_correction = self.stats.max_correction.max(dpos);
-                    // Another body within reach of a block, given a few ticks of staleness.
+                    // Another body within reach of a block, given a few ticks of staleness
+                    // (bodies within 128 u are always sent, PROTOCOL.md 5).
                     let near_other = self
                         .latest_boxes()
                         .iter()
-                        .any(|b| (b.center() - predicted.mv.origin).truncate().length() < 96.0);
-                    if !explained && !near_other {
+                        .any(|b| (b.center() - predicted.mv.origin).truncate().length() < 128.0);
+                    // A dash, charge or blink resolves against bodies the client only had
+                    // interpolated; its landing spot is the server's call.
+                    let moving_self = predicted.evading(last_input_tick);
+                    // Same place, different velocity: wall contact landed on the clip plane
+                    // on one side and a quarter unit short on the other; harmless.
+                    let velocity_only = dpos <= POS_TOLERANCE;
+                    if velocity_only {
+                        self.stats.corrections_velocity_only += 1;
+                    }
+                    if !explained && !near_other && !moving_self && !velocity_only {
                         self.stats.corrections_unexplained += 1;
                         tracing::debug!(
                             me = self.my_id,
@@ -371,6 +490,15 @@ impl ClientState {
                             server_ground = own.flags & flags::ON_GROUND != 0,
                             script = ?predicted.script,
                             dash = predicted.dash.is_some(),
+                            guard = ?predicted.guard,
+                            pred_stamina = format_args!("{:.0}", predicted.stamina),
+                            server_stamina = own_state.stamina,
+                            pred_focus = format_args!("{:.0}", predicted.focus),
+                            server_focus = own_state.focus,
+                            pred_status = predicted.statuses.mask(),
+                            server_status = own.status,
+                            server_flags = own.flags,
+                            speed_scale = format_args!("{:.2}", predicted.statuses.speed_scale()),
                             anim = own.anim,
                             nearest = format_args!("{:.0}", self
                                 .latest_boxes()
@@ -406,6 +534,13 @@ impl ClientState {
                 return;
             }
         };
+        self.replay_from(world, replay_from, m);
+        self.synced = true;
+        self.drop_acked(last_input_tick);
+    }
+
+    /// Re-run the ring from index `from` starting at state `m`; the result is the new mover.
+    fn replay_from(&mut self, world: &dyn CollisionWorld, from: usize, mut m: Mover) {
         let solids = self.latest_boxes();
         let composite = Composite {
             world,
@@ -413,15 +548,13 @@ impl ClientState {
         };
         let dt = self.rate.dt();
         let mut sink = Vec::new();
-        for j in replay_from..self.ring.len() {
+        for j in from..self.ring.len() {
             let (tick, input, _) = self.ring[j];
-            step_mover(&composite, &self.kit, &mut m, &input, tick, dt, &mut sink);
+            step_mover(&composite, &self.sheet, &mut m, &input, tick, dt, &mut sink);
             self.ring[j].2 = m;
             self.stats.replayed_ticks += 1;
         }
         self.mover = m;
-        self.synced = true;
-        self.drop_acked(last_input_tick);
     }
 
     /// Everything before the acknowledged frame is settled. The acknowledged frame itself stays:
@@ -509,6 +642,7 @@ impl ClientState {
                 pitch,
                 anim: state.anim,
                 flags: state.flags,
+                status: state.status,
             });
         }
         out
@@ -565,7 +699,15 @@ pub fn lerp_angle(a: f32, b: f32, alpha: f32) -> f32 {
 mod tests {
     use super::*;
     use gm_core::collide::BoxWorld;
-    use gm_core::sim::buttons;
+    use gm_core::sim::{buttons, test_content};
+
+    fn client(id: EntityId) -> ClientState {
+        ClientState::new(
+            id,
+            TickRate::COMBAT,
+            test_content::phase2_sheet(TickRate::COMBAT),
+        )
+    }
 
     fn own_state(pos: Vec3, vel: Vec3, alive: bool, on_ground: bool) -> EntityState {
         let mut f = flags::ON_GROUND * on_ground as u8;
@@ -574,7 +716,12 @@ mod tests {
         }
         EntityState {
             id: 1,
-            spawn: SpawnInfo::Player { frame: 1 },
+            spawn: SpawnInfo::Player {
+                frame: 1,
+                team: 1,
+                aspects: 1,
+                armour: 0,
+            },
             pos: quant::quantize_pos3(pos.into()),
             yaw: 0,
             pitch: 900,
@@ -582,6 +729,7 @@ mod tests {
             anim: 0,
             health: Some(100),
             flags: f,
+            status: 0,
         }
     }
 
@@ -589,6 +737,12 @@ mod tests {
         let mut s = Snapshot::new(tick);
         s.baseline_tick = baseline;
         s.last_input_tick = last_input;
+        // The Phase 2 test character's full pools (MATRIX.md 6 on flat attributes of 10).
+        s.own = OwnState {
+            stamina: 100,
+            focus: 80,
+            statuses: Vec::new(),
+        };
         s.entities = entities;
         s.normalize(None);
         s
@@ -597,7 +751,7 @@ mod tests {
     #[test]
     fn first_snapshot_adopts_the_server_state_then_predicts_locally() {
         let world = BoxWorld::floor();
-        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let mut c = client(1);
         let s = snap(
             10,
             0,
@@ -627,7 +781,7 @@ mod tests {
     #[test]
     fn matching_server_state_causes_no_correction_and_mismatch_replays() {
         let world = BoxWorld::floor();
-        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let mut c = client(1);
         let s = snap(
             10,
             0,
@@ -643,7 +797,7 @@ mod tests {
             c.local_tick(&world, input);
         }
         // The server agrees with our prediction at tick 10: replay the same physics to get it.
-        let mut shadow = ClientState::new(1, TickRate::COMBAT);
+        let mut shadow = client(1);
         shadow.on_snapshot(&world, &s.encode(None)).unwrap();
         for _ in 0..10 {
             shadow.local_tick(&world, input);
@@ -685,7 +839,7 @@ mod tests {
     #[test]
     fn others_are_interpolated_and_removed_at_render_time() {
         let world = BoxWorld::floor();
-        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let mut c = client(1);
         let mk = |tick: u32, x: f32| {
             let mut other = own_state(Vec3::new(x, 0.0, 24.0), Vec3::ZERO, true, true);
             other.id = 2;
@@ -728,7 +882,7 @@ mod tests {
     #[test]
     fn gaps_widen_the_delay_and_it_shrinks_back() {
         let world = BoxWorld::floor();
-        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let mut c = client(1);
         let own = own_state(Vec3::ZERO, Vec3::ZERO, true, true);
         c.on_snapshot(&world, &snap(1, 0, 0, vec![own]).encode(None))
             .unwrap();
@@ -751,7 +905,7 @@ mod tests {
     #[test]
     fn input_datagrams_carry_the_last_four_frames() {
         let world = BoxWorld::floor();
-        let mut c = ClientState::new(1, TickRate::COMBAT);
+        let mut c = client(1);
         let d = c.local_tick(&world, Input::default());
         assert_eq!((d.first_tick, d.count), (1, 1));
         for i in 0..6 {

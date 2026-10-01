@@ -1,6 +1,7 @@
 //! gm-tools: the asset pipeline CLI (PLAN.md 11.5) and the CI budget gates (2.6, 2.7).
 #![forbid(unsafe_code)]
 
+mod arena;
 mod budget;
 mod glb;
 mod mapbuild;
@@ -77,6 +78,11 @@ enum MapCmd {
         #[arg(long)]
         no_light: bool,
     },
+    /// Write the generated 8v8 arena source map.
+    GenArena {
+        #[arg(long, default_value = "assets/maps/src/arena.map")]
+        out: PathBuf,
+    },
     /// Print statistics about a compiled .bsp.
     Info { bsp: PathBuf },
 }
@@ -132,6 +138,17 @@ fn main() -> Result<()> {
         Cmd::Map {
             cmd: MapCmd::Info { bsp },
         } => mapbuild::info(&bsp),
+        Cmd::Map {
+            cmd: MapCmd::GenArena { out },
+        } => {
+            if let Some(dir) = out.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let text = arena::generate();
+            std::fs::write(&out, &text)?;
+            println!("gen-arena: {} bytes -> {}", text.len(), out.display());
+            Ok(())
+        }
         Cmd::Budget {
             cmd: BudgetCmd::Check { paths, budgets },
         } => budget::check_cli(&paths, &budgets),

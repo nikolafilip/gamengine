@@ -13,6 +13,8 @@ use tracing::info;
 
 struct Args {
     map: PathBuf,
+    content: PathBuf,
+    default_build: String,
     listen: SocketAddr,
     cert_out: PathBuf,
     hz: u32,
@@ -22,12 +24,14 @@ struct Args {
     seed: u64,
 }
 
-const USAGE: &str = "gm-server [--map PATH] [--listen ADDR] [--cert-out PATH] [--hz 64|20] \
-[--report-secs N] [--ticks N] [--max-players N] [--seed N]";
+const USAGE: &str = "gm-server [--map PATH] [--content DIR] [--default-build NAME] [--listen ADDR] \
+[--cert-out PATH] [--hz 64|20] [--report-secs N] [--ticks N] [--max-players N] [--seed N]";
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         map: PathBuf::from("assets/maps/built/test_room.bsp"),
+        content: PathBuf::from("assets/content"),
+        default_build: "blade".into(),
         listen: "127.0.0.1:4433".parse().unwrap(),
         cert_out: PathBuf::from("zone-cert.der"),
         hz: TickRate::COMBAT.hz(),
@@ -41,6 +45,8 @@ fn parse_args() -> Result<Args, String> {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
         match a.as_str() {
             "--map" => args.map = PathBuf::from(value("--map")?),
+            "--content" => args.content = PathBuf::from(value("--content")?),
+            "--default-build" => args.default_build = value("--default-build")?,
             "--listen" => {
                 args.listen = value("--listen")?
                     .parse()
@@ -99,6 +105,21 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let world = Arc::new(ZoneWorld::load(&args.map)?);
+    let rate = TickRate::new(args.hz);
+    let content = gm_content::load_dir(&args.content, rate)?;
+    if content.build(&args.default_build).is_none() {
+        anyhow::bail!(
+            "default build {:?} is not in {}",
+            args.default_build,
+            args.content.display()
+        );
+    }
+    info!(
+        abilities = content.abilities.len(),
+        builds = content.builds.len(),
+        dir = %args.content.display(),
+        "content loaded"
+    );
     let identity = Identity::generate(&["localhost"])?;
     std::fs::write(&args.cert_out, identity.cert_der())?;
     info!(cert = %args.cert_out.display(), "zone certificate written; clients pass it with --cert");
@@ -106,13 +127,15 @@ async fn main() -> anyhow::Result<()> {
     info!(listen = %endpoint.local_addr()?, map = %world.name, hash = format_args!("{:016x}", world.hash), "listening");
 
     let cfg = ZoneConfig {
-        rate: TickRate::new(args.hz),
+        rate,
         open: true,
         seed: args.seed,
         max_players: args.max_players,
         report_every: Duration::from_secs(args.report_secs.max(1)),
         max_ticks: args.ticks,
         report_tx: None,
+        content,
+        default_build: args.default_build,
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -123,8 +146,9 @@ async fn main() -> anyhow::Result<()> {
         joins = report.joins,
         executed_frames = report.executed_frames,
         starved_ticks = report.starved_ticks,
-        hits = report.hits_melee + report.hits_projectile,
+        hits = report.hits_melee + report.hits_projectile + report.hits_area,
         kills = report.kills,
+        team_kills = ?report.team_kills,
         max_tx_bps = format_args!("{:.0}", report.max_tx_bytes_per_player_s),
         max_rx_bps = format_args!("{:.0}", report.max_rx_bytes_per_player_s),
         "final report"

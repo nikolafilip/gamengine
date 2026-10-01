@@ -5,12 +5,12 @@ use std::collections::{HashMap, VecDeque};
 
 use glam::Vec3;
 use gm_bsp::Bsp;
-use gm_core::sim::{Player, Projectile, Zone};
-use gm_core::vocab::{ArchetypeFrame, EntityId};
+use gm_core::sim::{Area, GuardState, Player, Projectile, Zone};
+use gm_core::vocab::{ArchetypeFrame, EntityId, Status};
 use gm_net::MAX_DATAGRAM_PAYLOAD;
 use gm_net::control::Control;
 use gm_net::quant;
-use gm_net::snapshot::{EntityState, Snapshot, SpawnInfo, flags};
+use gm_net::snapshot::{EntityState, OwnState, Snapshot, SpawnInfo, StatusWire, flags};
 use tokio::sync::mpsc;
 
 use crate::world::ZoneWorld;
@@ -138,6 +138,7 @@ impl Session {
         let mut snap = Snapshot::new(tick);
         snap.baseline_tick = baseline_tick;
         snap.last_input_tick = me.last_input_tick;
+        snap.own = own_state(me);
         // (id, distance) of droppable (other player) records for the size budget.
         let mut droppable: Vec<(EntityId, f32)> = Vec::new();
 
@@ -148,6 +149,13 @@ impl Session {
             }
             let dist = (p.mover.mv.origin - eye).length();
             if dist > TOUCH_DIST && !visible(p.mover.mv.origin, p.mover.eye()) {
+                continue;
+            }
+            // Stealth (MATRIX.md 8): included only within its magnitude, never past the PVS.
+            if dist > TOUCH_DIST
+                && p.mover.statuses.has(Status::Stealth)
+                && dist > p.mover.statuses.magnitude(Status::Stealth)
+            {
                 continue;
             }
             let base_rec = base.and_then(|b| b.find(p.id));
@@ -165,6 +173,12 @@ impl Session {
                 continue;
             }
             snap.entities.push(projectile_state(pr));
+        }
+        for ar in zone.areas() {
+            if !visible(ar.origin, ar.origin + Vec3::new(0.0, 0.0, 32.0)) {
+                continue;
+            }
+            snap.entities.push(area_state(ar));
         }
         snap.normalize(base);
 
@@ -243,7 +257,8 @@ pub fn frame_from_index(i: u8) -> ArchetypeFrame {
     }
 }
 
-/// Wire state of a player; `own` adds velocity, health and the jump flag (PROTOCOL.md 5).
+/// Wire state of a player; `own` adds velocity, health and the jump and script flags
+/// (PROTOCOL.md 5).
 pub fn player_state(p: &Player, own: bool) -> EntityState {
     let mut f = 0u8;
     if p.alive {
@@ -255,13 +270,28 @@ pub fn player_state(p: &Player, own: bool) -> EntityState {
     if p.mover.dash.is_some() {
         f |= flags::DASHING;
     }
+    if p.mover.guard == GuardState::Block {
+        f |= flags::GUARDING;
+    }
+    if matches!(
+        p.mover.guard,
+        GuardState::Parry { .. } | GuardState::Whiff { .. }
+    ) {
+        f |= flags::PARRY;
+    }
     if own && p.mover.mv.jump_held {
         f |= flags::JUMP_HELD;
+    }
+    if own && p.mover.script.is_some() {
+        f |= flags::SCRIPT;
     }
     EntityState {
         id: p.id,
         spawn: SpawnInfo::Player {
-            frame: frame_index(p.frame),
+            frame: frame_index(p.frame()),
+            team: p.team(),
+            aspects: p.sheet.build.aspects.0,
+            armour: p.sheet.build.armour as u8,
         },
         pos: quant::quantize_pos3(p.mover.mv.origin.into()),
         yaw: quant::yaw_to_wire(p.mover.yaw),
@@ -270,6 +300,48 @@ pub fn player_state(p: &Player, own: bool) -> EntityState {
         anim: p.anim,
         health: own.then_some(p.health.clamp(0, u16::MAX as i32) as u16),
         flags: f,
+        status: p.mover.statuses.mask(),
+    }
+}
+
+/// The own block (PROTOCOL.md 5): resources and statuses relative to the acknowledged frame.
+pub fn own_state(p: &Player) -> OwnState {
+    let now = p.last_input_tick;
+    OwnState {
+        stamina: p.mover.stamina.round().clamp(0.0, u16::MAX as f32) as u16,
+        focus: p.mover.focus.round().clamp(0.0, u16::MAX as f32) as u16,
+        statuses: p
+            .mover
+            .statuses
+            .active()
+            .filter_map(|s| {
+                Some(StatusWire {
+                    status: s.status?.index(),
+                    remaining: s.until.wrapping_sub(now),
+                    magnitude: s.magnitude,
+                    stacks: s.stacks,
+                })
+            })
+            .collect(),
+    }
+}
+
+pub fn area_state(a: &Area) -> EntityState {
+    EntityState {
+        id: a.id,
+        spawn: SpawnInfo::Area {
+            owner: a.owner,
+            def: a.ability as u32,
+            radius: a.radius().round() as u32,
+        },
+        pos: quant::quantize_pos3(a.origin.into()),
+        yaw: quant::yaw_to_wire(a.dir.y.atan2(a.dir.x).to_degrees()),
+        pitch: 900,
+        vel: None,
+        anim: 0,
+        health: None,
+        flags: flags::ALIVE,
+        status: 0,
     }
 }
 
@@ -291,6 +363,7 @@ pub fn projectile_state(pr: &Projectile) -> EntityState {
         anim: 0,
         health: None,
         flags: flags::ALIVE,
+        status: 0,
     }
 }
 

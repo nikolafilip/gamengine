@@ -1,33 +1,26 @@
-//! One bot: connect, handshake, then a fixed-step loop of predicted inputs and snapshots.
+//! One bot: connect, handshake, receive the content, then a fixed-step loop of predicted
+//! inputs and snapshots.
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use glam::Vec3;
 use gm_bsp::Bsp;
-use gm_core::rng::Rng;
-use gm_core::sim::{Input, buttons};
+use gm_core::build::Sheet;
 use gm_core::tick::TickRate;
 use gm_core::vocab::EntityId;
 use gm_net::PROTOCOL_VERSION;
-use gm_net::client::{ClientState, ClientStats, RenderEntity};
-use gm_net::control::{self, Control};
-use gm_net::snapshot::EntityKind;
+use gm_net::client::{ClientState, ClientStats};
+use gm_net::control::{self, BuildChoice, Control};
 use gm_net::transport::SERVER_NAME;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Behaviour {
-    /// Stand still, face the nearest player, swing when it is in reach.
-    Hold,
-    /// Run around, jump now and then, shoot and swing at whoever is nearest.
-    Wander,
-    /// Chase the nearest player: sword in reach, crossbow otherwise.
-    Hunter,
-}
+use crate::brain::{Behaviour, Brain, View, counter_pick, dominant_enemy_aspects};
+
+/// Counter-picking bots look at the enemy every this many seconds (after the first look).
+pub const COUNTER_PICK_PERIOD_S: u32 = 10;
 
 #[derive(Clone, Debug)]
 pub struct BotConfig {
@@ -37,12 +30,19 @@ pub struct BotConfig {
     pub rate: TickRate,
     /// Stop after this many client ticks (0 = run until `shutdown`).
     pub run_ticks: u32,
+    /// Preset build to ask for (`None`: the zone's default).
+    pub build: Option<String>,
+    /// Team to ask for (0 = let the zone balance).
+    pub team: u8,
+    /// Re-spec to the preset that counters the enemy's aspects (MATRIX.md 11).
+    pub counter_pick: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct BotReport {
     pub name: String,
     pub entity: EntityId,
+    pub team: u8,
     pub ticks: u32,
     pub secs: f64,
     pub client: ClientStats,
@@ -56,6 +56,9 @@ pub struct BotReport {
     pub final_health: i32,
     pub send_failures: u64,
     pub others_seen_max: usize,
+    /// Re-specs requested and the build the bot ended with.
+    pub respecs: u32,
+    pub final_build: String,
 }
 
 impl BotReport {
@@ -84,6 +87,8 @@ pub async fn run_bot(
             version: PROTOCOL_VERSION as u16,
             name: cfg.name.clone(),
             token: Vec::new(),
+            build: cfg.build.clone().map(BuildChoice::Preset),
+            team: cfg.team,
         },
     )
     .await?;
@@ -95,14 +100,30 @@ pub async fn run_bot(
         Control::Reject(reason) => anyhow::bail!("rejected: {reason}"),
         other => anyhow::bail!("unexpected handshake message {other:?}"),
     };
+    let content = control::recv(&mut recv)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("server closed before Content"))?;
+    let (pack, own, team) = match content {
+        Control::Content { pack, own, team } => (pack, own, team),
+        other => anyhow::bail!("expected Content, got {other:?}"),
+    };
     let rate = TickRate::new(hz as u32);
-    info!(name = %cfg.name, entity, hz, "bot joined");
+    info!(name = %cfg.name, entity, hz, team, "bot joined");
 
-    let mut client = ClientState::new(entity, rate);
+    let build_name = |b: &gm_core::build::Build| -> String {
+        pack.builds
+            .iter()
+            .find(|nb| &nb.build == b)
+            .map_or_else(|| "custom".to_string(), |nb| nb.name.clone())
+    };
+    let mut current_build = build_name(&own);
+    let mut client = ClientState::new(entity, rate, Sheet::new(own, &pack, team));
     let mut brain = Brain::new(cfg.seed, cfg.behaviour);
+    let mut next_pick = COUNTER_PICK_PERIOD_S * rate.hz();
     let mut report = BotReport {
         name: cfg.name.clone(),
         entity,
+        team,
         ..Default::default()
     };
     let start = Instant::now();
@@ -119,8 +140,28 @@ pub async fn run_bot(
                 ticks += 1;
                 let t = client.render_tick(0.0);
                 let others = client.others_at(t);
-                report.others_seen_max = report.others_seen_max.max(others.len());
-                let input = brain.think(&client, &others, ticks);
+                report.others_seen_max = report.others_seen_max.max(
+                    others.iter().filter(|e| e.kind == gm_net::snapshot::EntityKind::Player).count(),
+                );
+                let input = brain.think(&View {
+                    me: &client.mover,
+                    kit: &client.sheet.kit,
+                    frame: client.sheet.build.frame,
+                    team,
+                    alive: client.own_alive,
+                    others: &others,
+                    tick: client.tick.wrapping_add(1),
+                });
+                if cfg.counter_pick && ticks >= next_pick {
+                    next_pick = ticks + COUNTER_PICK_PERIOD_S * rate.hz();
+                    let enemy = dominant_enemy_aspects(team, &others);
+                    if let Some(name) = counter_pick(&pack, &current_build, enemy) {
+                        info!(name = %cfg.name, from = %current_build, to = %name, "counter-pick");
+                        let _ = control::send(&mut send, &Control::Respec(BuildChoice::Preset(name)))
+                            .await;
+                        report.respecs += 1;
+                    }
+                }
                 let datagram = client.local_tick(world.as_ref(), input);
                 if conn.send_datagram(Bytes::from(datagram.encode())).is_err() {
                     report.send_failures += 1;
@@ -160,6 +201,12 @@ pub async fn run_bot(
                             report.own_kills += 1;
                         }
                     }
+                    Ok(Some(Control::BuildApplied(build))) => {
+                        if build != client.sheet.build {
+                            current_build = build_name(&build);
+                            client.set_sheet(Sheet::new(build, &pack, team));
+                        }
+                    }
                     Ok(Some(Control::Kick(reason))) => {
                         info!(name = %cfg.name, "kicked: {reason}");
                         break;
@@ -179,121 +226,8 @@ pub async fn run_bot(
     report.udp_rx_bytes = stats.udp_rx.bytes;
     report.rtt_ms = conn.rtt().as_secs_f64() * 1000.0;
     report.final_health = client.own_health;
+    report.final_build = current_build;
     let _ = control::send(&mut send, &Control::Bye).await;
     conn.close(0u32.into(), b"done");
     Ok(report)
-}
-
-/// The scripted player.
-struct Brain {
-    rng: Rng,
-    behaviour: Behaviour,
-    yaw: f32,
-    pitch: f32,
-    next_turn: u32,
-    next_shot: u32,
-    jump_until: u32,
-}
-
-impl Brain {
-    fn new(seed: u64, behaviour: Behaviour) -> Brain {
-        let mut rng = Rng::new(seed);
-        let yaw = rng.range_f32(0.0, 360.0);
-        Brain {
-            rng,
-            behaviour,
-            yaw,
-            pitch: 0.0,
-            next_turn: 64,
-            next_shot: 90,
-            jump_until: 0,
-        }
-    }
-
-    fn nearest<'a>(&self, me: Vec3, others: &'a [RenderEntity]) -> Option<(&'a RenderEntity, f32)> {
-        others
-            .iter()
-            .filter(|e| e.kind == EntityKind::Player && e.alive())
-            .map(|e| (e, (e.pos - me).length()))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-    }
-
-    fn face(&mut self, me_eye: Vec3, target: Vec3) {
-        let to = target + Vec3::new(0.0, 0.0, 28.0) - me_eye;
-        let horiz = to.truncate().length();
-        self.yaw = to.y.atan2(to.x).to_degrees().rem_euclid(360.0);
-        self.pitch = (-to.z).atan2(horiz).to_degrees().clamp(-89.0, 89.0);
-    }
-
-    fn think(&mut self, client: &ClientState, others: &[RenderEntity], tick: u32) -> Input {
-        let me = client.mover.mv.origin;
-        let eye = client.mover.eye();
-        let mut buttons = 0u16;
-        let mut forward = 0.0f32;
-        let nearest = self.nearest(me, others);
-        match self.behaviour {
-            Behaviour::Hold => {
-                if let Some((e, d)) = nearest {
-                    self.face(eye, e.pos);
-                    if d < 70.0 && tick.is_multiple_of(24) {
-                        buttons |= buttons::PRIMARY;
-                    }
-                }
-            }
-            Behaviour::Wander => {
-                if tick >= self.next_turn {
-                    self.yaw = self.rng.range_f32(0.0, 360.0);
-                    self.pitch = 0.0;
-                    self.next_turn = tick + 64 + self.rng.below(128);
-                }
-                forward = 1.0;
-                if self.rng.next_f32() < 0.02 {
-                    self.jump_until = tick + 2;
-                }
-                if tick < self.jump_until {
-                    buttons |= buttons::JUMP;
-                }
-                if let Some((e, d)) = nearest {
-                    if d < 70.0 && tick.is_multiple_of(24) {
-                        self.face(eye, e.pos);
-                        buttons |= buttons::PRIMARY;
-                    } else if tick >= self.next_shot {
-                        self.face(eye, e.pos);
-                        buttons |= buttons::SECONDARY;
-                        self.next_shot = tick + 96 + self.rng.below(64);
-                    }
-                }
-            }
-            Behaviour::Hunter => {
-                if let Some((e, d)) = nearest {
-                    self.face(eye, e.pos);
-                    if d > 50.0 {
-                        forward = 1.0;
-                    }
-                    if d < 70.0 {
-                        if tick.is_multiple_of(20) {
-                            buttons |= buttons::PRIMARY;
-                        }
-                    } else if d > 150.0 && tick >= self.next_shot {
-                        buttons |= buttons::SECONDARY;
-                        self.next_shot = tick + 96;
-                    }
-                } else {
-                    forward = 1.0;
-                    if tick >= self.next_turn {
-                        self.yaw = self.rng.range_f32(0.0, 360.0);
-                        self.next_turn = tick + 96;
-                    }
-                }
-            }
-        }
-        Input {
-            buttons,
-            yaw: self.yaw,
-            pitch: self.pitch,
-            forward,
-            side: 0.0,
-            ability: 0,
-        }
-    }
 }

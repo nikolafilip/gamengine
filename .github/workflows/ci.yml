@@ -26,8 +26,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Fetch ericw-tools (pinned)
         run: scripts/fetch-ericw-tools.sh
-      - name: Rebuild the test map with the pinned compiler
-        run: cargo run -q -p gm-tools --locked -- map build assets/maps/src/test_room.map --out target/ci-maps
+      - name: Rebuild the maps with the pinned compiler
+        run: |
+          cargo run -q -p gm-tools --locked -- map build assets/maps/src/test_room.map --out target/ci-maps
+          cargo run -q -p gm-tools --locked -- map build assets/maps/src/arena.map --out target/ci-maps
       - name: Tests
         run: cargo test --workspace --locked
       - name: Asset budgets
@@ -36,6 +38,8 @@ jobs:
         run: scripts/check-budgets.sh --self-test
       - name: Netcode gate (turmoil, 16 bots, 150 ms, 3% loss; bytes/player/s budget)
         run: scripts/check-netcode.sh
+      - name: Matrix gate (8v8 arena: a dominant build is countered by re-speccing)
+        run: scripts/check-matrix.sh
 
   gates:
     name: binary size, RAM, software render

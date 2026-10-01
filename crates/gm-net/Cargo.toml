@@ -13,7 +13,7 @@ default = []
 turmoil = ["dep:turmoil"]
 
 [dependencies]
-gm-core = { workspace = true }
+gm-core = { workspace = true, features = ["bitcode"] }
 glam = { workspace = true }
 bitcode = { workspace = true }
 bytes = { workspace = true }

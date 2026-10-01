@@ -21,7 +21,8 @@ cargo run --release -p gm-client -- --map assets/maps/built/test_room.bsp
 
 `map build` runs `qbsp -leaktest`, `vis` and `light -extra -lit`. The output is
 `assets/maps/built/<name>.bsp` plus `<name>.lit` (RGB lightmaps). Both are committed; the
-`.prt` portal file is not.
+`.prt` portal file is not. `map gen-arena` regenerates `assets/maps/src/arena.map`, the 8v8
+arena of Phase 3 (symmetric, two team bases, pillars, low cover, side walkways).
 
 ## Client flags
 
@@ -40,6 +41,9 @@ cargo run --release -p gm-client -- --map assets/maps/built/test_room.bsp
 | `--connect ADDR` | join a zone instead of playing offline (see Multiplayer) |
 | `--cert PATH` | DER certificate of the zone, written by `gm-server --cert-out` (default `zone-cert.der`) |
 | `--name NAME` | player name for the zone (default `$USER`) |
+| `--build NAME` | preset build to ask the zone for: `ironclad`, `blade`, `frostweaver`, `shade` (default: the zone's default) |
+| `--team N` | team 1 or 2 (default 0: the zone balances) |
+| `--third-person` | start in the third-person viewport (`V` toggles at any time) |
 | `--seconds N` | exit after N seconds and print the network statistics (scripted runs) |
 
 Default present mode is **Mailbox** (no tearing, no blocking) with the frame cap, not Fifo.
@@ -55,34 +59,49 @@ A monitor in DPMS standby lowers iGPU clocks; wake it (`xset dpms force on`) bef
 Running from a terminal without a display (ssh, tty): set `DISPLAY=:0` to use the desktop
 session's X server, or use `--headless`.
 
-## Multiplayer (Phase 2)
+## Multiplayer (Phases 2 and 3)
 
-One zone process, any number of clients and bots, QUIC on UDP (`docs/PROTOCOL.md`).
+One zone process, any number of clients and bots, QUIC on UDP (`docs/PROTOCOL.md`). The zone
+loads `assets/content` (abilities and preset builds, `docs/MATRIX.md`) and sends it to every
+client, so clients need no content files.
 
 ```sh
-# terminal 1: the zone. Writes its self-signed certificate for clients, prints a report every 5 s.
-cargo run --release -p gm-server -- --map assets/maps/built/test_room.bsp --listen 127.0.0.1:4433 --cert-out zone-cert.der
+# terminal 1: the zone on the 8v8 arena. Writes its self-signed certificate for clients,
+# prints a report every 5 s.
+cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --listen 127.0.0.1:4433 --cert-out zone-cert.der
 
-# terminal 2: sixteen bots for 30 seconds (wander, hunter or hold behaviour)
-cargo run --release -p gm-bot -- --connect 127.0.0.1:4433 --cert zone-cert.der --bots 16 --secs 30
+# terminal 2: fifteen duelist bots for a minute, four presets, alternating teams; they
+# counter-pick (re-spec to whatever beats the enemy's aspects) every ten seconds
+cargo run --release -p gm-bot -- --connect 127.0.0.1:4433 --cert zone-cert.der --map assets/maps/built/arena.bsp \
+    --bots 15 --secs 60 --behaviour duelist --builds ironclad,blade,frostweaver,shade --teams 1,2 --counter-pick
 
-# terminal 3: you
-cargo run --release -p gm-client -- --connect 127.0.0.1:4433 --cert zone-cert.der --name pezo
+# terminal 3: you, as a blade on team 1, in third person
+cargo run --release -p gm-client -- --map assets/maps/built/arena.bsp --connect 127.0.0.1:4433 --cert zone-cert.der \
+    --name pezo --build blade --team 1 --third-person
 ```
 
-Controls online: mouse look, `WASD`, `Space` jump, **left click** sword swing, **right click**
-crossbow bolt, **Shift** dash (30 stamina). Other players are coloured boxes, corpses are flat
-grey boxes, bolts are small yellow boxes; hand-painted meshes arrive in Phase 6. The window
-title shows health, kills, deaths, interpolation delay and the reconciliation correction count.
+Controls online: mouse look, `WASD`, `Space` jump, **left click** primary, **right click**
+secondary, **Ctrl** guard (hold to block, press to parry, whichever the build has), **1–4** the
+actives (**Shift** is also active 1), **V** switches first/third person, **F1–F4** ask the zone
+for preset 1–4 (applied at your next respawn), `Esc` releases the cursor, `Q` quits. In third
+person the camera sits behind and above you and your shots go where the crosshair points
+(VOCABULARY.md 9). Players are boxes coloured by team (blue own side, red the other), a white
+nose box shows their facing, blocking bodies turn blue-ish, staggered or frozen bodies darken,
+hasted ones brighten; corpses are flat grey, bolts small yellow boxes, area effects flat orange
+discs. The window title shows the build, team and viewport, health, stamina, focus, kills,
+deaths, interpolation delay, the correction count, fps and the last respec reply.
 
-Server flags: `--hz 64|20`, `--report-secs N`, `--ticks N` (stop after N ticks),
+Server flags: `--content DIR` (default `assets/content`), `--default-build NAME` (default
+`blade`), `--hz 64|20`, `--report-secs N`, `--ticks N` (stop after N ticks),
 `--max-players N`, `--seed N`. The report line carries per-player UDP bytes/s in both
-directions (from QUIC's own counters), snapshot payload bytes/s, tick timing, starvation,
-hits and kills. `RUST_LOG=debug` shows joins, malformed datagrams and connection ends.
+directions (from QUIC's own counters), snapshot payload bytes/s, tick timing, starvation, hits
+and kills; the final report adds kills per team. `RUST_LOG=debug` shows joins, malformed
+datagrams and connection ends.
 
-Bot flags: `--bots N`, `--secs N`, `--behaviour wander|hunter|hold`, `--seed N`, `--map PATH`
-(the bots predict against the same BSP). The summary prints bytes/s per bot, RTT, snapshot
-gaps and reconciliation corrections.
+Bot flags: `--bots N`, `--secs N`, `--behaviour wander|hunter|hold|duelist`, `--builds a,b,...`
+and `--teams 1,2,...` (cycled over the bots), `--counter-pick`, `--seed N`, `--map PATH` (the
+bots predict against the same BSP). The summary prints bytes/s per bot, RTT, snapshot gaps,
+reconciliation corrections, kills and the re-specs that happened.
 
 The zone accepts empty session tokens (`--open` behaviour) until the hub exists in Phase 4.
 Clients trust exactly the certificate they are given; there is no insecure mode.
@@ -96,12 +115,14 @@ scripts/check-budgets.sh && scripts/check-budgets.sh --self-test
 scripts/check-binary-size.sh && scripts/check-binary-size.sh --self-test
 scripts/check-perf.sh                 # windowed, real GPU
 scripts/check-perf.sh --software      # what CI runs
-scripts/check-netcode.sh              # 16 bots at 150 ms / 3% loss in turmoil, bytes/player/s gate
+scripts/check-netcode.sh              # 16 bots at 150 ms / 3% loss in turmoil, bytes/player/s gate, counter-pick
+scripts/check-matrix.sh               # 8v8 arena: a dominant build is countered by re-speccing
 ```
 
-`check-netcode.sh` runs the turmoil acceptance test (`crates/gm-server/tests/netcode.rs`) in
-simulated time and the real-UDP loopback test; both print per-bot and per-zone numbers with
-`--nocapture`.
+`check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and
+`counterpick.rs`) in simulated time and the real-UDP loopback test; all print per-bot and
+per-zone numbers with `--nocapture`. `check-matrix.sh` runs the offline 8v8 matches of
+MATRIX.md 11 (`crates/gm-bot/tests/arena.rs`).
 
 When the release binary legitimately grows (a new feature), update the baseline in the same
 commit with `scripts/check-binary-size.sh --update-baseline` and say why in the commit message.
@@ -117,8 +138,9 @@ commit with `scripts/check-binary-size.sh --update-baseline` and say why in the 
 4. Save under `assets/maps/src/` and run `cargo run -p gm-tools -- map build <file>`.
 
 Entities: `worldspawn` keys `wad`, `light` (minlight), `_sunlight*`, `_dirt`, `_bounce`;
-`light` (point or spot with `mangle`); `info_player_start`; `func_detail`, `func_wall`,
-`func_illusionary`; placeholders `gm_spawn`, `gm_zone` for Phase 3.
+`light` (point or spot with `mangle`); `info_player_start` (a spawn for any team);
+`gm_spawn` with `team` 1 or 2 (0 = any) and `angle`; `func_detail`, `func_wall`,
+`func_illusionary`; `gm_zone` is a placeholder for later phases.
 
 ## Development helper: independent reviews
 

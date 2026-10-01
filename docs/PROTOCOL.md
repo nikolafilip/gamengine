@@ -1,10 +1,11 @@
 # Wire Protocol
 
-Status: v1, Phase 2. `gm-net` implements exactly this document; the test vectors in section 2
+Status: v2, Phase 3. `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
 document disagree, the document wins and the code is wrong; changes to either go in one commit.
 
-Protocol version byte: **1**. Any change to sections 2–5 bumps it.
+Protocol version byte: **2**. Any change to sections 2–5 bumps it. Section 11 lists what v2
+changed over v1.
 
 Section 10 records the independent design review this version went through and what changed.
 
@@ -158,18 +159,31 @@ always computed against that table, never against what happened to be on the wir
 | server_tick | 32 | ≥ 1 |
 | baseline_tick | 32 | 0 = full snapshot |
 | last_input_tick | 32 | client tick of the last frame executed; drives reconciliation. 0 = none |
+| own block | | the client's own resources and statuses, always in full (below) |
 | entity_count | uvar | |
 | entities | | records, ascending id |
 | removed_count | uvar | entities present in the baseline and gone now |
 | removed | uvar each | ids |
+
+Own block (never delta-encoded: it is small and the client must adopt it exactly):
+
+| Field | Bits | Notes |
+|---|---|---|
+| stamina | uvar | whole points |
+| focus | uvar | whole points |
+| status_count | 4 | 0..=8 |
+| per status: status | 4 | `Status` index (MATRIX.md 8) |
+| per status: remaining | uvar | frame ticks left, relative to `last_input_tick` |
+| per status: magnitude | svar | `round(magnitude × 16)` |
+| per status: stacks | 3 | |
 
 Entity record:
 
 | Field | Bits | Present when |
 |---|---|---|
 | id | uvar | always |
-| mask | 8 | always. bit 0 SPAWN, 1 POS, 2 YAW, 3 PITCH, 4 VEL, 5 ANIM, 6 HEALTH, 7 FLAGS |
-| kind | 4 | SPAWN. 0 player, 1 projectile |
+| mask | 9 | always. bit 0 SPAWN, 1 POS, 2 YAW, 3 PITCH, 4 VEL, 5 ANIM, 6 HEALTH, 7 FLAGS, 8 STATUS |
+| kind | 4 | SPAWN. 0 player, 1 projectile, 2 area |
 | spawn info | | SPAWN, by kind (below) |
 | pos | 3 × svar | POS. **Absolute** quanta when SPAWN is set, **delta** against the baseline record otherwise |
 | yaw | 12 | YAW |
@@ -177,11 +191,16 @@ Entity record:
 | vel | 3 × svar | VEL. Absolute when SPAWN (or the baseline record has no velocity), delta otherwise |
 | anim | 8 | ANIM |
 | health | uvar | HEALTH |
-| flags | 8 | FLAGS. bit 0 alive, 1 on ground, 2 guarding, 3 dashing, 4 jump held, 5–7 reserved |
+| flags | 8 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 reserved |
+| status | 16 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras) |
 
-Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infiltrator).
-Projectile → `owner` uvar, `def` uvar (ability index in the kit), `input_tick` uvar (the owner's
-client tick that fired it, for matching the owner's predicted copy).
+Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infiltrator), `team`
+2 bits (0 none), `aspects` 5 bits (a bit per element, MATRIX.md 5), `armour` 2 bits (cloth,
+leather, mail, plate): everything that makes a build readable at a glance. Projectile → `owner`
+uvar, `def` uvar (ability index in the owner's kit), `input_tick` uvar (the owner's client tick
+that fired it, for matching the owner's predicted copy). Area → `owner` uvar, `def` uvar (0 when
+triggered by a projectile or a parry), `radius` uvar (largest extent in whole units); its `pos`
+is the origin and it is removed when it expires.
 
 Entity ids are **monotonic** within a zone process and never reused, so a delta can never be
 applied to a different entity's baseline record.
@@ -197,8 +216,9 @@ Rules:
 - An entity that is unchanged since the baseline is not listed at all (carry-forward costs zero
   bytes). An entity that is not scheduled this tick by its distance band is likewise not listed
   and is **not** in `removed`.
-- `vel`, `health` and the `jump held` flag are sent for the **own entity only**. Party members
-  will get `health` in Phase 5. Nothing else about other players' resources is sent.
+- `vel`, `health`, the `jump held` and `script running` flags and the own block are sent for
+  the **own entity only**. Party members will get `health` in Phase 5. Nothing else about other
+  players' resources is sent; their `status` mask is the aura, not the numbers.
 - Only entities in the PVS of the client's eye leaf are sent (PLAN.md 1.2, 8). An entity counts
   as in the PVS when the leaf of its origin or of its eye point is in the row. The client's own
   entity is always sent, and so is any player within **128 u** of the client's eye whatever the
@@ -252,10 +272,21 @@ once, the state after frame `t` is the same on both sides regardless of when it 
    tracer classifies as solid and then refuses to move, while the server's true position sits
    `DIST_EPSILON` away. Without the nudge a client pressed against a wall corner froze for as
    long as the server kept it there (found by the acceptance test's correction log).
-4. Ability activation, cooldowns, stamina and `MoveSelf` (dash) are part of the predicted mover
-   state and replay deterministically. Attacks and projectiles are not predicted beyond
-   spawning a local projectile copy that is replaced by the server's when a record with matching
-   `(owner, input_tick)` arrives.
+4. Ability activation, cooldowns, stamina, focus, self-applied statuses, the guard state and
+   every `MoveSelf` are part of the predicted mover state and replay deterministically. Attacks,
+   projectiles, areas and statuses put on us by others are the server's: the own block's
+   resources and statuses replace the predicted ones at the acknowledged frame before the
+   replay (a status's `remaining` is re-anchored to the client's frame clock), a cleared `script
+   running` flag drops a predicted script the server interrupted, a cleared `guarding` flag
+   releases a broken block, and a cleared `parry` flag closes a parry window the server resolved
+   (a landed parry ends at once, with no whiff recovery). Projectiles are not predicted beyond spawning a local copy that is
+   replaced by the server's when a record with matching `(owner, input_tick)` arrives.
+5. A correction counts as *explained* in the diagnostics when, within 8 server ticks, the own
+   health, status mask or guard state changed, the entity died or respawned, another body was
+   within 128 u (always sent, so it can block), the own entity was in a positional ability, or
+   only the velocity disagreed (wall contact resolved a frame apart because of the quarter-unit
+   rounding of the adopted position); everything else is an unexplained correction and the
+   netcode tests bound those.
 
 ### 7.3 Interpolation (other entities)
 Render time for other entities is `newest_server_tick - delay`, with `delay` = 6 ticks (94 ms)
@@ -286,15 +317,21 @@ capsules.
 ## 8. Reliable messages
 
 ```
+enum BuildChoice { Preset(String), Custom(Build) }
+
 enum Control {
     // client → server
-    Hello { version: u16, name: String, token: Vec<u8> },
+    Hello { version: u16, name: String, token: Vec<u8>, build: Option<BuildChoice>, team: u8 },
     Chat(String),
+    Respec(BuildChoice),                       // applied at the next respawn (MATRIX.md 9)
     Bye,
     // server → client
     Welcome { entity: u32, server_tick: u32, hz: u16, map: String, map_hash: u64 },
+    Content { pack: ContentPack, own: Build, team: u8 },   // right after Welcome
+    RespecResult(Result<(), String>),
+    BuildApplied(Build),                       // the respawn switched the build
     Reject(String),
-    PlayerInfo { id: u32, name: String },
+    PlayerInfo { id: u32, name: String, team: u8 },
     PlayerLeft(u32),
     Killed { victim: u32, killer: u32 },       // killer 0 = world
     ChatFrom { from: u32, text: String },
@@ -302,10 +339,20 @@ enum Control {
 }
 ```
 
-Handshake: connect → client opens the control stream → `Hello` → `Welcome` (or `Reject`, then
-close). The server sends snapshots from the tick after `Welcome`; the client sends inputs after
-`Welcome`. `map_hash` is FNV-1a 64 of the `.bsp` bytes; a mismatch is a client-side error
-("wrong map build").
+`Build` and `ContentPack` are `gm-core::build` types encoded with `bitcode` (the vocabulary
+is non-recursive for exactly this reason, VOCABULARY.md 14).
+
+Handshake: connect → client opens the control stream → `Hello` → `Welcome` then `Content` (or
+`Reject`, then close). The server sends snapshots from the tick after `Welcome`; the client
+sends inputs after `Content`, since it cannot predict without the kit. `map_hash` is FNV-1a 64
+of the `.bsp` bytes; a mismatch is a client-side error ("wrong map build"). `Hello.build` names
+a preset of the zone's content or carries a full build; the zone validates it against MATRIX.md 9
+and rejects the join with the reason when it fails (`None` = the zone's default preset).
+`Hello.team` 0 lets the zone balance; the zone keeps the smaller team filled first. A `Respec`
+is validated immediately (`RespecResult`) and takes effect at the player's next respawn, when
+`BuildApplied` tells the client to switch its prediction; `BuildApplied` is also sent on every
+respawn so a client can never run the wrong kit for long. The content pack is 5–10 KB on the
+wire and must fit one control message (65,535 bytes).
 
 `Hello.name`: 1..=24 bytes of printable UTF-8 after trimming; anything else is rejected.
 
@@ -364,3 +411,13 @@ implementation; verdicts are ours):
   re-encode. The client tick wrap now also restarts the consecutive frame run.
 - Rejected: "dead inputs are replayed after respawn" (only frames the server will execute alive
   are replayed; frames run while dead are acknowledged and dropped first).
+
+## 11. Changes in v2 (Phase 3)
+
+- Snapshot: the own block (stamina, focus, statuses) after `last_input_tick`; the entity mask is
+  9 bits with `STATUS` (16-bit aura mask); flag bit 5 `script running`; entity kind 2 `area`;
+  player spawn info carries team, aspects and armour class.
+- Control: `Hello` carries a build choice and a team; `Content`, `Respec`, `RespecResult` and
+  `BuildApplied` added; `PlayerInfo` carries the team.
+- Measured cost (turmoil, 16 bots, 150 ms, 3% loss, test_room): 5.6 KB/s up, 9.2 KB/s down per
+  player (v1: 5.6 / 8.5). With the full kits on the arena map: 5.3 KB/s up, 10.3 KB/s down.

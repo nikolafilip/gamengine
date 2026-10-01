@@ -8,7 +8,12 @@ fn scene(tick: u32, shift: i32) -> Snapshot {
     for i in 1..17u32 {
         s.entities.push(EntityState {
             id: i,
-            spawn: SpawnInfo::Player { frame: 1 },
+            spawn: SpawnInfo::Player {
+                frame: 1,
+                team: 1,
+                aspects: 1,
+                armour: 2,
+            },
             pos: [i as i32 * 100 + shift, -400 + shift / 2, 96],
             yaw: (1234 + i as u16 * 7) % 3600,
             pitch: 900,
@@ -16,6 +21,7 @@ fn scene(tick: u32, shift: i32) -> Snapshot {
             anim: 2,
             health: (i == 1).then_some(100),
             flags: flags::ALIVE | flags::ON_GROUND,
+            status: 0,
         });
     }
     s

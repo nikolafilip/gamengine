@@ -1,30 +1,143 @@
 //! The entity vocabulary: the data mirror of `docs/VOCABULARY.md`.
 //!
 //! Every ability in every genre compiles down to six server verbs with parameters. This module
-//! holds the parameter types and their validation ranges. Resolution (who gets hit, when) is the
-//! server's job and arrives in Phase 2; nothing here has behaviour beyond validation.
+//! holds the parameter types and their validation ranges. Resolution (who gets hit, when) lives
+//! in [`crate::sim`]; nothing here has behaviour beyond validation.
 //!
 //! Keep this file and the document in lockstep. When they disagree, the document wins and the
-//! code is wrong.
+//! code is wrong. With the `bitcode` feature every type here is wire-encodable, so a zone can
+//! send its loaded content to clients verbatim (MATRIX.md 10).
 
 use crate::tick::{Tick, TickRate};
 
 /// Zone-local entity identifier.
 pub type EntityId = u32;
 
-/// Damage/element type. The table lives in `docs/MATRIX.md` (Phase 3).
+/// Damage types (MATRIX.md 4.1 and 5): three physical kinds and five elements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct DamageType(pub u8);
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+#[repr(u8)]
+pub enum DamageType {
+    Slash = 0,
+    Pierce = 1,
+    Blunt = 2,
+    Flame = 3,
+    Shadow = 4,
+    Storm = 5,
+    Frost = 6,
+    Stone = 7,
+}
+
+impl DamageType {
+    pub const ALL: [DamageType; 8] = [
+        DamageType::Slash,
+        DamageType::Pierce,
+        DamageType::Blunt,
+        DamageType::Flame,
+        DamageType::Shadow,
+        DamageType::Storm,
+        DamageType::Frost,
+        DamageType::Stone,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            DamageType::Slash => "slash",
+            DamageType::Pierce => "pierce",
+            DamageType::Blunt => "blunt",
+            DamageType::Flame => "flame",
+            DamageType::Shadow => "shadow",
+            DamageType::Storm => "storm",
+            DamageType::Frost => "frost",
+            DamageType::Stone => "stone",
+        }
+    }
+}
+
+/// The initial status set (VOCABULARY.md 5.4, semantics in MATRIX.md 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+#[repr(u8)]
+pub enum Status {
+    Slow = 0,
+    Haste = 1,
+    Root = 2,
+    Bleed = 3,
+    Burn = 4,
+    Chill = 5,
+    Shock = 6,
+    Silence = 7,
+    Stagger = 8,
+    Fortify = 9,
+    Weaken = 10,
+    Expose = 11,
+    Regen = 12,
+    Stealth = 13,
+}
+
+impl Status {
+    pub const ALL: [Status; 14] = [
+        Status::Slow,
+        Status::Haste,
+        Status::Root,
+        Status::Bleed,
+        Status::Burn,
+        Status::Chill,
+        Status::Shock,
+        Status::Silence,
+        Status::Stagger,
+        Status::Fortify,
+        Status::Weaken,
+        Status::Expose,
+        Status::Regen,
+        Status::Stealth,
+    ];
+
+    pub const fn from_index(i: u8) -> Option<Status> {
+        if (i as usize) < Self::ALL.len() {
+            Some(Self::ALL[i as usize])
+        } else {
+            None
+        }
+    }
+
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Status::Slow => "slow",
+            Status::Haste => "haste",
+            Status::Root => "root",
+            Status::Bleed => "bleed",
+            Status::Burn => "burn",
+            Status::Chill => "chill",
+            Status::Shock => "shock",
+            Status::Silence => "silence",
+            Status::Stagger => "stagger",
+            Status::Fortify => "fortify",
+            Status::Weaken => "weaken",
+            Status::Expose => "expose",
+            Status::Regen => "regen",
+            Status::Stealth => "stealth",
+        }
+    }
+
+    /// Stagger and Shock durations are not scaled by the defender (MATRIX.md 8).
+    pub const fn fixed_duration(self) -> bool {
+        matches!(self, Status::Stagger | Status::Shock)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StatusId(pub u16);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct AbilityId(pub u16);
 
 /// Archetype frames decide the hitbox capsule and the animation rig, never the mesh.
 /// World collision uses [`crate::trace::Hull::Player`] for all of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum ArchetypeFrame {
     Colossus,
     Striker,
@@ -46,6 +159,7 @@ impl ArchetypeFrame {
 
 /// Windup, active and recovery windows of a verb, in ticks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Timing {
     pub windup: Tick,
     pub active: Tick,
@@ -59,12 +173,14 @@ impl Timing {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Cost {
     pub stamina: u16,
     pub focus: u16,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Cooldown {
     pub ticks: Tick,
     /// Abilities sharing a group share the cooldown.
@@ -73,6 +189,7 @@ pub struct Cooldown {
 
 /// Defence layers a damage packet ignores (the RPS "true bypasses" of PLAN.md 3.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Bypass(pub u8);
 
 impl Bypass {
@@ -91,6 +208,7 @@ impl Bypass {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct DamagePacket {
     pub amount: u16,
     pub dtype: DamageType,
@@ -102,6 +220,7 @@ pub struct DamagePacket {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum Shape {
     Sphere { radius: f32 },
     Cylinder { radius: f32, height: f32 },
@@ -111,6 +230,7 @@ pub enum Shape {
 
 /// Where a verb is anchored.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum Origin {
     SelfFeet,
     SelfEyes,
@@ -125,6 +245,7 @@ pub enum Origin {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum Falloff {
     #[default]
     None,
@@ -134,6 +255,7 @@ pub enum Falloff {
 
 /// Verb 1: a swing that hits every capsule in a wedge. Resolved with melee lag compensation.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct MeleeArc {
     pub reach: f32,
     pub arc_deg: f32,
@@ -149,6 +271,7 @@ pub struct MeleeArc {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Bounce {
     pub count: u8,
     pub restitution: f32,
@@ -156,6 +279,7 @@ pub struct Bounce {
 
 /// Verb 2: everything ranged. Bolts, arrows, fireballs, thrown axes. Never hitscan, never homing.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Projectile {
     pub speed: f32,
     pub gravity_scale: f32,
@@ -173,12 +297,22 @@ pub struct Projectile {
     pub spread_deg: f32,
     /// Projectiles per activation.
     pub count: u8,
-    pub on_hit: Vec<Verb>,
-    pub on_expire: Vec<Verb>,
+    pub on_hit: Vec<Trigger>,
+    pub on_expire: Vec<Trigger>,
+}
+
+/// What a projectile hit or expiry triggers (VOCABULARY.md 5.2): a status on the entity hit
+/// (`target: Hit`) or on the shooter (`Actor`), or an area at the impact point.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub enum Trigger {
+    Status(ApplyStatus),
+    Area(AreaEffect),
 }
 
 /// Verb 3: a volume that pulses.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct AreaEffect {
     pub shape: Shape,
     pub origin: Origin,
@@ -187,13 +321,19 @@ pub struct AreaEffect {
     pub duration: Tick,
     pub interval: Tick,
     pub damage: Option<DamagePacket>,
-    pub effects: Vec<Verb>,
+    /// Statuses put on every entity a pulse touches (`target: Area`) or on the caster
+    /// (`Actor`).
+    pub effects: Vec<ApplyStatus>,
     pub falloff: Falloff,
     pub max_targets: u8,
     pub requires_los: bool,
+    /// The caster is never a target (shockwaves from the caster's own feet). Default false:
+    /// a fireball at your feet burns you.
+    pub exclude_actor: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum StackRule {
     #[default]
     Refresh,
@@ -202,6 +342,7 @@ pub enum StackRule {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum StatusTarget {
     #[default]
     Actor,
@@ -209,10 +350,14 @@ pub enum StatusTarget {
     Area,
 }
 
-/// Verb 4: put a status on someone.
+/// Verb 4: put a status on someone. `target` `Hit` means every entity the previous step of
+/// the same ability hit (or the entity a projectile hit when nested in `on_hit`); `Area`
+/// means every entity an enclosing `AreaEffect` pulse touched; `Actor` is the caster
+/// (VOCABULARY.md 5.4).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct ApplyStatus {
-    pub status: StatusId,
+    pub status: Status,
     pub duration: Tick,
     pub magnitude: f32,
     pub max_stacks: u8,
@@ -222,6 +367,7 @@ pub struct ApplyStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum MoveKind {
     Dash {
         speed: f32,
@@ -244,6 +390,7 @@ pub enum MoveKind {
 
 /// Verb 5: the actor moves itself. Predicted on the client.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct MoveSelf {
     pub kind: MoveKind,
     pub cancelable: bool,
@@ -253,6 +400,7 @@ pub struct MoveSelf {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Block {
     pub arc_deg: f32,
     /// 0..1 damage removed.
@@ -263,23 +411,36 @@ pub struct Block {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Parry {
     pub arc_deg: f32,
     pub window: Tick,
     pub whiff_recovery: Tick,
-    pub on_success: Vec<Verb>,
+    pub on_success: Vec<Riposte>,
+}
+
+/// What a successful parry does to the attacker (VOCABULARY.md 5.6): a status, or a swing
+/// from the defender.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub enum Riposte {
+    Status(ApplyStatus),
+    Swing(MeleeArc),
 }
 
 /// Verb 6: block or parry.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum Guard {
     Block(Block),
     Parry(Parry),
 }
 
-/// The six verbs. An effect triggered by another verb (projectile hit, parry success) is a
-/// verb too, so `Vec<Verb>` fields make the vocabulary composable without a second type.
+/// The six verbs. Effects triggered by another verb (a projectile hit, an area pulse, a parry)
+/// are typed lists of the verbs allowed there ([`Trigger`], [`ApplyStatus`], [`Riposte`]), so
+/// the vocabulary is composable, non-recursive and wire-encodable.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum Verb {
     MeleeArc(MeleeArc),
     Projectile(Projectile),
@@ -290,6 +451,7 @@ pub enum Verb {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub enum Interrupt {
     #[default]
     Never,
@@ -299,6 +461,7 @@ pub enum Interrupt {
 
 /// A verb scheduled at a tick offset from activation.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Step {
     pub at: Tick,
     pub verb: Verb,
@@ -306,6 +469,7 @@ pub struct Step {
 
 /// An ability is a timed script of verbs. There is no ability-specific server code.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Ability {
     pub id: AbilityId,
     pub name: String,
@@ -404,8 +568,11 @@ fn validate_verb(
             if p.radius < 0.0 {
                 return Err(err("projectile radius negative"));
             }
-            for v in p.on_hit.iter().chain(&p.on_expire) {
-                validate_verb(v, rate, err)?;
+            for t in p.on_hit.iter().chain(&p.on_expire) {
+                match t {
+                    Trigger::Status(st) => validate_verb(&Verb::ApplyStatus(*st), rate, err)?,
+                    Trigger::Area(a) => validate_verb(&Verb::AreaEffect(a.clone()), rate, err)?,
+                }
             }
         }
         Verb::AreaEffect(a) => {
@@ -423,8 +590,13 @@ fn validate_verb(
             if a.damage.is_none() && a.effects.is_empty() {
                 return Err(err("area effect does nothing"));
             }
-            for v in &a.effects {
-                validate_verb(v, rate, err)?;
+            if a.delay > max_ticks(limits::MAX_SCRIPT_S)
+                || a.duration > max_ticks(limits::MAX_SCRIPT_S)
+            {
+                return Err(err("area effect delay or duration past the script limit"));
+            }
+            for st in &a.effects {
+                validate_verb(&Verb::ApplyStatus(*st), rate, err)?;
             }
         }
         Verb::ApplyStatus(s) => {
@@ -464,8 +636,11 @@ fn validate_verb(
             if p.window == 0 || !(0.0..=360.0).contains(&p.arc_deg) {
                 return Err(err("parry window or arc out of range"));
             }
-            for v in &p.on_success {
-                validate_verb(v, rate, err)?;
+            for r in &p.on_success {
+                match r {
+                    Riposte::Status(st) => validate_verb(&Verb::ApplyStatus(*st), rate, err)?,
+                    Riposte::Swing(arc) => validate_verb(&Verb::MeleeArc(arc.clone()), rate, err)?,
+                }
             }
         }
     }
@@ -484,7 +659,7 @@ mod tests {
             lifetime: TickRate::COMBAT.ms_to_ticks(3000),
             damage: DamagePacket {
                 amount: 45,
-                dtype: DamageType(1),
+                dtype: DamageType::Pierce,
                 bypass: Bypass::NONE,
                 knockback: 80.0,
                 stagger: 10,
@@ -558,8 +733,8 @@ mod tests {
     #[test]
     fn nested_effects_are_validated() {
         let rate = TickRate::COMBAT;
-        let bad_status = Verb::ApplyStatus(ApplyStatus {
-            status: StatusId(3),
+        let bad_status = Trigger::Status(ApplyStatus {
+            status: Status::Bleed,
             duration: 0,
             magnitude: 0.3,
             max_stacks: 1,

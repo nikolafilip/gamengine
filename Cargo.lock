@@ -918,6 +918,7 @@ dependencies = [
  "bytes",
  "glam",
  "gm-bsp",
+ "gm-content",
  "gm-core",
  "gm-net",
  "quinn",
@@ -955,9 +956,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gm-content"
+version = "0.1.0"
+dependencies = [
+ "gm-core",
+ "serde",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
 name = "gm-core"
 version = "0.1.0"
 dependencies = [
+ "bitcode",
  "criterion",
  "glam",
 ]
@@ -999,6 +1011,7 @@ dependencies = [
  "glam",
  "gm-bot",
  "gm-bsp",
+ "gm-content",
  "gm-core",
  "gm-net",
  "quinn",

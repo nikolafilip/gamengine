@@ -4,8 +4,10 @@
 # the playability assertions. Runs in simulated time (a few seconds of wall clock).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [ ! -f assets/maps/built/test_room.bsp ]; then
-  echo "check-netcode: assets/maps/built/test_room.bsp missing; build it with gm-tools map build" >&2
-  exit 1
-fi
-exec cargo test -q -p gm-server --locked --test netcode --test loopback -- --nocapture "$@"
+for m in test_room arena; do
+  if [ ! -f assets/maps/built/$m.bsp ]; then
+    echo "check-netcode: assets/maps/built/$m.bsp missing; build it with gm-tools map build" >&2
+    exit 1
+  fi
+done
+exec cargo test -q -p gm-server --locked --test netcode --test loopback --test counterpick -- --nocapture "$@"

@@ -1,6 +1,15 @@
 //! Reliable control messages (PROTOCOL.md 8): `bitcode` payloads with a big-endian u16 length.
 
 use bitcode::{Decode, Encode};
+use gm_core::build::{Build, ContentPack};
+
+/// How a client asks for a build: a preset by name (the zone resolves it against its content)
+/// or a full allocation (validated by the zone against MATRIX.md 9).
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum BuildChoice {
+    Preset(String),
+    Custom(Build),
+}
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub enum Control {
@@ -9,8 +18,14 @@ pub enum Control {
         version: u16,
         name: String,
         token: Vec<u8>,
+        /// `None`: the zone's default preset.
+        build: Option<BuildChoice>,
+        /// Preferred team, 0 = let the zone balance.
+        team: u8,
     },
     Chat(String),
+    /// Applied at the next respawn (MATRIX.md 9); answered by `RespecResult`.
+    Respec(BuildChoice),
     Bye,
     // server → client
     Welcome {
@@ -20,10 +35,22 @@ pub enum Control {
         map: String,
         map_hash: u64,
     },
+    /// Sent right after `Welcome`: the zone's content and the client's own build and team.
+    /// Clients run exactly these numbers (MATRIX.md 10).
+    Content {
+        pack: ContentPack,
+        own: Build,
+        team: u8,
+    },
+    /// The requested build was accepted (`Ok`) or refused with the reason.
+    RespecResult(Result<(), String>),
+    /// The pending build took effect (at the respawn); the client's prediction switches now.
+    BuildApplied(Build),
     Reject(String),
     PlayerInfo {
         id: u32,
         name: String,
+        team: u8,
     },
     PlayerLeft(u32),
     Killed {
@@ -114,14 +141,19 @@ pub fn valid_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gm_core::sim::test_content;
+    use gm_core::tick::TickRate;
 
     #[test]
     fn framing_round_trips_and_handles_partials() {
+        let pack = test_content::pack(TickRate::COMBAT);
         let msgs = [
             Control::Hello {
-                version: 1,
+                version: 2,
                 name: "pezo".into(),
                 token: vec![1, 2, 3],
+                build: Some(BuildChoice::Preset("blade".into())),
+                team: 0,
             },
             Control::Welcome {
                 entity: 7,
@@ -129,6 +161,11 @@ mod tests {
                 hz: 64,
                 map: "test_room".into(),
                 map_hash: 0xdead_beef,
+            },
+            Control::Content {
+                own: pack.build("blade").unwrap().clone(),
+                team: 1,
+                pack: pack.clone(),
             },
             Control::Killed {
                 victim: 3,
@@ -149,6 +186,14 @@ mod tests {
         }
         assert_eq!(out, msgs);
         assert_eq!(pos, buf.len());
+        // The whole content pack fits one message with room to spare.
+        let content = encode_framed(&msgs[2]).unwrap();
+        assert!(
+            content.len() < 16 * 1024,
+            "content is {} bytes",
+            content.len()
+        );
+        println!("content pack on the wire: {} bytes", content.len());
     }
 
     #[test]

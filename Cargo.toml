@@ -15,6 +15,7 @@ gm-core = { path = "crates/gm-core" }
 gm-bsp = { path = "crates/gm-bsp" }
 gm-net = { path = "crates/gm-net" }
 gm-ai = { path = "crates/gm-ai" }
+gm-content = { path = "crates/gm-content" }
 
 # math / data
 glam = "0.33.11"

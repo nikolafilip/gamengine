@@ -1,8 +1,8 @@
 # Entity Vocabulary
 
-Status: v0.2, Phase 2 (section 13 added). This document is the contract for phases 2–7. `gm-core::vocab` mirrors it
-as plain data types; when the two disagree, this document wins and the code is wrong. Changes to
-either require changing both in the same commit.
+Status: v0.3, Phase 3 (sections 5.2–5.6 tightened, 14 added). This document is the contract for
+phases 2–7. `gm-core::vocab` mirrors it as plain data types; when the two disagree, this document
+wins and the code is wrong. Changes to either require changing both in the same commit.
 
 ## 1. Principles
 
@@ -31,8 +31,8 @@ either require changing both in the same commit.
 - Every simulated entity has origin, velocity, view yaw/pitch, a collision hull and party/guild
   tags. Tags are for **UI only**. Damage never reads them (PLAN.md 4.4).
 - Combatants add attributes (STR, AGI, CON, INT, SPR), resources (health, stamina, focus), an
-  archetype frame, statuses and a kit (abilities and counters). Derived-stat formulas and the type
-  matrix live in `MATRIX.md` (Phase 3).
+  archetype frame, an armour class, one or two aspects, statuses and a kit (abilities and a
+  guard). Derived-stat formulas, the type matrix and the point budget live in `MATRIX.md`.
 - **Hitbox** = a capsule from the archetype frame table. Never from the mesh (PLAN.md 2.9).
   **World collision** uses the same 32 × 32 × 56 hull for every player archetype in year one; the
   BSP has exactly two hull sizes and a fatter hull would not fit the same doors.
@@ -50,8 +50,10 @@ either require changing both in the same commit.
   `recovery` is the vulnerable window; whether it can be cancelled is an ability property.
 - **Cost** `{ stamina, focus }`.
 - **Cooldown** `{ ticks, group }`; abilities in the same group share one cooldown.
-- **DamagePacket** `{ amount, type, bypass, knockback, stagger }`. `bypass` is a set of
-  `ARMOR`, `MAGIC_SHIELD`, `EVASION`: the RPS "true bypasses" of PLAN.md 3.2.
+- **DamagePacket** `{ amount, type, bypass, knockback, stagger }`. `type` is one of the three
+  physical kinds (Slash, Pierce, Blunt) or the five elements (Flame, Shadow, Storm, Frost,
+  Stone) of MATRIX.md; `bypass` is a set of `ARMOR`, `MAGIC_SHIELD`, `EVASION`: the RPS "true
+  bypasses" of PLAN.md 3.2.
 - **Shape**: `Sphere{radius}`, `Cylinder{radius, height}`, `Cone{length, half_angle}`,
   `Box{half_extents}`.
 - **Origin**: `SelfFeet`, `SelfEyes`, `Weapon{offset}` (forward, right, up in the actor's view
@@ -80,24 +82,35 @@ Everything ranged: bolts, arrows, thrown axes, fireballs. **No hitscan, no homin
 
 Parameters: `speed`, `gravity_scale`, `radius`, `lifetime`, `damage`, `pierce`, `bounce
 {count, restitution}`, `drag`, `spawn: Origin`, `inherit_velocity`, `spread` (deg), `count`,
-`on_hit: [Verb]`, `on_expire: [Verb]`.
+`on_hit: [Trigger]`, `on_expire: [Trigger]`. A **Trigger** is an `ApplyStatus` (on the entity
+hit, or on the shooter with `target: Actor`) or an `AreaEffect` (anchored at `Impact`). The
+lists are typed rather than `[Verb]` so the vocabulary stays non-recursive and wire-encodable;
+projectiles that spawn projectiles are deliberately impossible.
 
 Resolution: spawned on the server at the attacker's view tick, never rewound. Every tick the
 server sweeps the projectile hull against the world and against every capsule in range,
-including the shooter's allies. A hit applies `damage` and runs `on_hit` with `Origin::Impact`
-available. The shooter's own capsule is ignored for the first 2 ticks after spawn. The client
-spawns a predicted copy and reconciles it by id.
+including the shooter's allies. A hit applies `damage` and then runs `on_hit` with
+`Origin::Impact` available (the status lands after the damage, MATRIX.md 7). A world hit runs
+`on_hit` at the impact point with no entity; `bounce` reflects off the world instead while
+bounces remain; expiry runs `on_expire` at the last position. The shooter's own capsule is
+ignored for the first 2 ticks after spawn. The client spawns a predicted copy and reconciles it
+by id.
 
 ### 5.3 AreaEffect
 
 A volume that pulses.
 
 Parameters: `shape`, `origin`, `delay`, `duration` (0 = one instant pulse), `interval`, `damage`
-(optional), `effects: [Verb]`, `falloff`, `max_targets`, `requires_los`.
+(optional), `effects: [ApplyStatus]`, `falloff`, `max_targets`, `requires_los`, `exclude_actor`.
 
 Resolution: first pulse at `delay`, then every `interval` until `duration`. Targets are the
-capsules overlapping the shape; with `requires_los`, a trace from the origin to the capsule
-centre must also be clear. Damage is scaled by `falloff` from the centre.
+capsules overlapping the shape, nearest first up to `max_targets`; with `requires_los`, a trace
+from the origin to the capsule centre must also be clear. Damage is scaled by `falloff` from the
+centre (`Linear` = 1 − d/r, `InverseSquare` = (1 − d/r)²). `effects` with `target: Area` land on
+every target after its damage; `target: Actor` lands on the caster once per pulse. The caster is
+a target like anyone else (a fireball at your feet burns you) unless `exclude_actor` is set,
+which content uses for shockwaves that originate at the caster's own feet. Areas ignore guards.
+The area is sent to clients as an entity (its origin and largest extent) for drawing only.
 
 ### 5.4 ApplyStatus
 
@@ -106,11 +119,20 @@ Parameters: `status`, `duration`, `magnitude`, `max_stacks`, `stacking` (`Refres
 
 Initial status set: `Slow`, `Haste`, `Root`, `Bleed`, `Burn`, `Chill` (stacks to `Freeze`),
 `Shock` (interrupts), `Silence`, `Stagger`, `Fortify`, `Weaken`, `Expose` (grants `ARMOR`
-bypass to attackers), `Regen`, `Stealth`. Statuses act through multipliers on `MoveVars`,
-resources and damage packets. `Stealth` reduces the distance at which the entity is included in
-snapshots; **nothing ever bypasses PVS culling** (PLAN.md 8).
+bypass to attackers), `Regen`, `Stealth`. Exact semantics, stacking and immunity windows are
+MATRIX.md 8. Statuses act through multipliers on `MoveVars`, resources and damage packets.
+`Stealth` reduces the distance at which the entity is included in snapshots; **nothing ever
+bypasses PVS culling** (PLAN.md 8).
 
-Resolution: statuses tick after all verbs in a tick (section 7).
+Targets: `Actor` statuses are predicted on the client (self-buffs resolve in `step_mover` on both
+sides). `Hit` means every entity the previous hitting verb of the same ability hit: a step
+`ApplyStatus { target: Hit }` after a `MeleeArc` is attached to that swing and lands with each
+hit, after the hit's damage; inside a projectile's `on_hit` it lands on the entity hit. `Area`
+is only valid inside an `AreaEffect`'s `effects`. An entity holds at most 8 status slots; a ninth
+application is refused.
+
+Resolution: statuses tick after all verbs in a tick (section 7); damage and healing over time
+pulse four times a second. Durations run in the target's frame ticks, like cooldowns.
 
 ### 5.5 MoveSelf
 
@@ -119,9 +141,13 @@ The actor moves itself. Predicted on the client, authoritative on the server.
 Parameters: `kind` = `Dash{speed, duration}` | `Leap{forward, up}` | `Charge{speed, duration,
 stop_on_hit}` | `Blink{distance}`, `cancelable`, `keep_friction`, `iframes` (default 0).
 
-Resolution: overrides or adds to the actor's movement for the duration. `Blink` is hull-traced
-and requires line of sight; it never passes through geometry. Invulnerability frames are 0
-unless a kit explicitly buys them: dodging is positional.
+Resolution: overrides or adds to the actor's movement for the duration. `Dash` follows the
+movement wish (or the facing when standing); `Charge` always follows the facing and, with
+`stop_on_hit`, ends when the way is blocked by a wall or a body. `Blink` is hull-traced along the
+facing on the ground plane and requires line of sight; it never passes through geometry and
+leaves the actor with no velocity. Every `MoveSelf` makes the actor **evading** (MATRIX.md 6)
+for its duration plus 2 ticks. Invulnerability frames are 0 unless a kit explicitly buys them:
+dodging is positional.
 
 ### 5.6 Guard: Block and Parry
 
@@ -129,10 +155,18 @@ unless a kit explicitly buys them: dodging is positional.
 attacks arriving from within `arc` of the defender's facing lose `mitigation` of their damage and
 cost stamina. Shields stop projectiles; weapons do not.
 
-`Parry { arc, window, whiff_recovery, on_success: [Verb] }`: an attack resolving inside the
-`window` from within `arc` is negated and `on_success` runs (typically `ApplyStatus Stagger` on
-the attacker and a riposte `MeleeArc`). Missing the window costs `whiff_recovery`. Projectiles
-cannot be parried by default. [OPEN: kits that can.]
+`Parry { arc, window, whiff_recovery, on_success: [Riposte] }`: an attack resolving inside the
+`window` from within `arc` is negated and `on_success` runs on the attacker: a **Riposte** is an
+`ApplyStatus` (typically Stagger) or a `MeleeArc` swung by the defender. Missing the window costs
+`whiff_recovery`, during which nothing can be activated. Projectiles cannot be parried; only
+swings with `parryable` set can. [OPEN: kits that parry projectiles.]
+
+The guard lives in the build's guard slot (MATRIX.md 9) and is held or pressed with the `guard`
+button; it is never a step of a script. Blocking from behind does nothing: the attacker (or the
+shot's origin) must be within `arc` of the defender's facing. A blocked hit costs
+`stamina_per_hit` and pauses stamina regeneration; a hit the defender cannot pay for breaks the
+guard (MATRIX.md 7). Attacking releases a held block; a parry window or its whiff recovery
+refuses activations.
 
 ## 6. Abilities are timed verb scripts
 
@@ -158,14 +192,17 @@ Examples (values illustrative, tuning happens in playtests):
 
 ## 7. Tick order (server)
 
-1. Apply this tick's inputs: movement, ability activations, guard state.
-2. Movement for every mover (`gm-core::movement`), with `MoveSelf` overrides.
-3. Ability scripts advance. Verbs whose `at` is reached resolve: `MeleeArc` (with lag
-   compensation), `Projectile` spawns, `AreaEffect` scheduling, `ApplyStatus`.
-4. Projectiles step and resolve hits.
+1. Apply this tick's inputs: statuses expire, guard state, ability activations, script steps
+   (`Actor` statuses and `MoveSelf` resolve here on both sides).
+2. Movement for every mover (`gm-core::movement`), with `MoveSelf` overrides, players in
+   ascending id order blocking each other.
+3. `MeleeArc` swings resolve (with lag compensation) and their `Hit` statuses land; then
+   `Projectile` spawns (forward-stepped), then `AreaEffect` spawns.
+4. Projectiles step and resolve hits (with `on_hit` triggers).
 5. Area effects pulse.
-6. Statuses tick: damage over time, expiry, stack decay.
-7. Deaths, loot eligibility (contribution ledger), contract state machines.
+6. Statuses tick: damage and healing over time (every 16 ticks), stagger build-up decays.
+7. Respawns (a pending respec takes effect here), loot eligibility (contribution ledger, Phase 5),
+   contract state machines (Phase 5).
 8. Snapshots: PVS filter, distance bands, delta encode (PROTOCOL.md).
 
 ## 8. Friendly fire and collision
@@ -206,8 +243,9 @@ that scales with level (there are no levels). No ability-specific server code.
 
 ## 12. Open questions
 
-Final status list and stack rules. Which kits may parry projectiles. Whether `Stealth`
-distance is a status magnitude or a kit constant. The damage-type list (`MATRIX.md`).
+Which kits may parry projectiles. Whether `Stealth` distance stays a status magnitude.
+`Origin::Target` is accepted but resolves to the caster until a targeting rule exists (Phase 7
+companions).
 
 ## 13. Phase 2 implementation notes
 
@@ -236,3 +274,18 @@ dash, dead. They are derived on the server and never simulated on the client.
 
 Damage never checks teams (section 8): the crossbow test in `sim.rs` fires through an ally and
 hits it.
+
+## 14. Phase 3 implementation notes
+
+`gm-core::sim` now resolves every verb of section 5: `AreaEffect` (server), `ApplyStatus`
+(`Actor` on both sides, `Hit`/`Area` on the server), `Guard` block and parry, and every
+`MoveSelf` kind including `Blink` and `Charge`. The Phase 2 placeholder kit is gone: every
+player runs a validated `Build` (MATRIX.md 9) compiled against the zone's content pack
+(`assets/content`, MATRIX.md 10), and the zone sends that pack to every client after `Welcome`.
+
+Animation states carried in snapshots (`sim::anim`): idle, run, air, windup, swing, recover,
+dash, dead, guard, parry, cast, stagger. Derived on the server, never simulated on the client.
+
+The vocabulary became non-recursive in v0.3: `Trigger` (projectile hits), `[ApplyStatus]`
+(area effects) and `Riposte` (parries) replaced `[Verb]`. Nothing content could express before
+is lost; projectile chains were never allowed by the validator.
