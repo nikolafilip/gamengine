@@ -99,6 +99,26 @@ impl NetClient {
         }
     }
 
+    /// Begin to say goodbye without waiting for it: the connection's own thread writes the
+    /// `Bye` and closes. `gone` says when it has.
+    pub fn hang_up(&mut self) {
+        self.input_tx = None;
+    }
+
+    /// Whether the connection has ended. Asked of a connection that was hung up: what
+    /// still arrives on it is dropped.
+    pub fn gone(&self) -> bool {
+        loop {
+            match self.events.try_recv() {
+                Ok(NetEvent::Disconnected(_)) | Err(std_mpsc::TryRecvError::Disconnected) => {
+                    return true;
+                }
+                Ok(_) => {}
+                Err(std_mpsc::TryRecvError::Empty) => return false,
+            }
+        }
+    }
+
     /// Everything that arrived since the last call.
     pub fn poll(&self) -> Vec<NetEvent> {
         let mut out = Vec::new();
@@ -107,6 +127,11 @@ impl NetClient {
         }
         out
     }
+}
+
+/// The client hung up: the sender is gone. (Nothing is sent before the zone's `Welcome`.)
+async fn hung_up(outbound: &mut mpsc::UnboundedReceiver<Outbound>) {
+    while outbound.recv().await.is_some() {}
 }
 
 async fn session(
@@ -123,27 +148,44 @@ async fn session(
     };
     let mut endpoint = quinn::Endpoint::client(bind)?;
     endpoint.set_default_client_config(cfg);
-    let conn = endpoint.connect(addr, SERVER_NAME)?.await?;
-    let (mut send, mut recv) = conn.open_bi().await?;
-    control::send(&mut send, &hello).await?;
-    match control::recv(&mut recv).await? {
-        Some(Control::Welcome {
-            entity,
-            hz,
-            map,
-            map_hash,
-            ..
-        }) => {
-            let _ = events.send(NetEvent::Welcome {
+    // The way in can be given up at any point (a person who cancels): the zone is then
+    // told at once, so that it keeps no body for somebody who went.
+    let conn = tokio::select! {
+        conn = endpoint.connect(addr, SERVER_NAME)? => conn?,
+        _ = hung_up(&mut input_rx) => return Ok(()),
+    };
+    let greeted = async {
+        let (mut send, mut recv) = conn.open_bi().await?;
+        control::send(&mut send, &hello).await?;
+        match control::recv(&mut recv).await? {
+            Some(Control::Welcome {
                 entity,
                 hz,
                 map,
                 map_hash,
-            });
+                ..
+            }) => {
+                let _ = events.send(NetEvent::Welcome {
+                    entity,
+                    hz,
+                    map,
+                    map_hash,
+                });
+                Ok((send, recv))
+            }
+            Some(Control::Reject(reason)) => Err(format!("rejected: {reason}").into()),
+            other => Err(format!("unexpected handshake message {other:?}").into()),
         }
-        Some(Control::Reject(reason)) => return Err(format!("rejected: {reason}").into()),
-        other => return Err(format!("unexpected handshake message {other:?}").into()),
-    }
+    };
+    let greeted: Result<_, Box<dyn std::error::Error + Send + Sync>> = tokio::select! {
+        greeted = greeted => greeted,
+        _ = hung_up(&mut input_rx) => {
+            conn.close(0u32.into(), b"bye");
+            endpoint.wait_idle().await;
+            return Ok(());
+        }
+    };
+    let (mut send, mut recv) = greeted?;
     loop {
         tokio::select! {
             input = input_rx.recv() => {

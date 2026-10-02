@@ -18,6 +18,8 @@ struct Args {
     migrate_only: bool,
     wipe: bool,
     models_dir: PathBuf,
+    /// Where a character that was in no zone enters (CLIENT.md 7).
+    start_zone: Option<String>,
     grant_moderator: Option<String>,
     auth_per_minute: f64,
     /// A WebTransport listener for browsers beside the QUIC one (WEB.md 2).
@@ -30,7 +32,7 @@ struct Args {
 }
 
 const USAGE: &str = "gm-hub --database-url URL [--listen ADDR] [--cert-out PATH] [--key PATH] [--content DIR] \
-[--zone-secret S] [--models-dir DIR] [--auth-per-minute N] [--migrate-only] [--wipe] \
+[--zone-secret S] [--models-dir DIR] [--start-zone ID] [--auth-per-minute N] [--migrate-only] [--wipe] \
 [--web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url https://HOST:PORT] [--web-origin ORIGIN]... [--web-info-out PATH]]   \
 (env: DATABASE_URL, GM_ZONE_SECRET)\n\
        gm-hub --database-url URL --grant-moderator EMAIL     make an existing account a moderator, then exit\n\
@@ -47,6 +49,7 @@ fn parse_args() -> Result<Args, String> {
         migrate_only: false,
         wipe: false,
         models_dir: PathBuf::from("models"),
+        start_zone: None,
         grant_moderator: None,
         auth_per_minute: 10.0,
         web_listen: None,
@@ -71,6 +74,7 @@ fn parse_args() -> Result<Args, String> {
             "--content" => a.content = PathBuf::from(value("--content")?),
             "--zone-secret" => a.zone_secret = value("--zone-secret")?,
             "--models-dir" => a.models_dir = PathBuf::from(value("--models-dir")?),
+            "--start-zone" => a.start_zone = Some(value("--start-zone")?),
             "--grant-moderator" => a.grant_moderator = Some(value("--grant-moderator")?),
             "--auth-per-minute" => {
                 a.auth_per_minute = value("--auth-per-minute")?
@@ -206,6 +210,8 @@ async fn run() -> anyhow::Result<()> {
         // Uploads are parsed by this same binary in a child process.
         ingest: IngestMode::Worker(std::env::current_exe()?),
         ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
+        start_zone: args.start_zone,
+        blurbs: gm_content::load_blurbs(&args.content)?,
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

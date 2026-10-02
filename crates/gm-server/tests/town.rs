@@ -73,6 +73,7 @@ fn flow(
             stall_tile: stall,
             aim: Default::default(),
             report_after_ticks: 0,
+            say: None,
         },
         play: Duration::from_secs(secs),
         list_for_hire: None,
@@ -121,6 +122,8 @@ async fn avatars_and_stalls_in_the_town() {
             models_dir: models_dir.clone(),
             ingest: IngestMode::InProcess,
             ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
+            start_zone: None,
+            blurbs: Vec::new(),
         },
         db.clone(),
         endpoint,
@@ -148,6 +151,7 @@ async fn avatars_and_stalls_in_the_town() {
         web: None,
         min_trust: 0,
         requires: Vec::new(),
+        max_players: 128,
     })
     .await
     .expect("the zone registers");

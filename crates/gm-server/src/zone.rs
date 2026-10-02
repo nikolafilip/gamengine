@@ -102,6 +102,10 @@ impl Default for ZoneConfig {
 
 /// A body that left can still be reported for this long (ANTICHEAT.md 5).
 const REPORTABLE_AFTER_LEAVE: Duration = Duration::from_secs(120);
+/// Chat lines a zone relays: this many a second over time, this many at once
+/// (PROTOCOL.md 8). Past it lines are dropped.
+const ZONE_CHAT_PER_SEC: f32 = 10.0;
+const ZONE_CHAT_BURST: f32 = 30.0;
 
 /// What a replay keeps of a simulation event (ANTICHEAT.md 3.1).
 fn replay_event(ev: &ZoneEvent) -> Option<gm_replay::Event> {
@@ -365,6 +369,9 @@ pub struct ZoneReport {
     pub orders_refused: u64,
     /// The recorder and the aim analysis (ANTICHEAT.md 10): mean microseconds per tick over
     /// the window, frames and their bytes since start, files written, what the ring holds.
+    /// Chat lines relayed, and lines dropped by the zone's ceiling.
+    pub chat_lines: u64,
+    pub chat_dropped: u64,
     pub record_us_mean: f64,
     /// The part of it that is the line-of-sight sweep (ANTICHEAT.md 4.2).
     pub sight_us_mean: f64,
@@ -402,6 +409,7 @@ pub async fn run_with_web(
         open: cfg.open,
         content: Arc::new(cfg.content.clone()),
         hub: cfg.hub.clone(),
+        chat: Default::default(),
     });
     let web_acceptor =
         web.map(|w| tokio::spawn(crate::net::accept_loop_web(w, tx.clone(), net_cfg.clone())));
@@ -526,6 +534,12 @@ pub async fn run_with_web(
             });
         }
     }
+    // Characters whose leaving save is on its way to the hub.
+    let mut leaving_saves: std::collections::HashSet<CharacterId> =
+        std::collections::HashSet::new();
+    // The zone's chat ceiling: lines it may still relay, and as of when.
+    let mut chat_lines = ZONE_CHAT_BURST;
+    let mut chat_at = Instant::now();
     // Bodies that left a moment ago can still be reported: entity, character, when.
     let mut recent_left: Vec<(EntityId, CharacterId, Instant)> = Vec::new();
     let mut report = ZoneReport::default();
@@ -570,11 +584,8 @@ pub async fn run_with_web(
                     control,
                     reply,
                 } => {
-                    if sessions.len() >= cfg.max_players {
-                        let _ = reply.send(Err("zone full".into()));
-                        continue;
-                    }
-                    // The same character again (a reconnect the hub allowed): drop the old body.
+                    // The same character again (a reconnect the hub allowed): drop the old
+                    // body first, so that it does not count against the room it frees.
                     if let Some(h) = &hub
                         && let Some(old) = hub_slots
                             .iter()
@@ -593,6 +604,10 @@ pub async fn run_with_web(
                             old,
                             Some(h.character),
                         );
+                    }
+                    if sessions.len() >= cfg.max_players {
+                        let _ = reply.send(Err("zone full".into()));
+                        continue;
                     }
                     let build = match resolve(&zone, build.as_ref()) {
                         Ok(b) => b,
@@ -799,9 +814,10 @@ pub async fn run_with_web(
                         continue;
                     }
                     let character = slot.character;
+                    let web = sessions.get(&id).is_some_and(|s| s.conn.is_web());
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
-                        let result = link.handoff(character, state, to_zone).await;
+                        let result = link.handoff(character, state, to_zone, web).await;
                         let _ = tx.send(ClientEvent::TravelResult { id, result }).await;
                     });
                 }
@@ -862,13 +878,50 @@ pub async fn run_with_web(
                     }
                 }
                 ClientEvent::HubKick { character, reason } => {
-                    if let Some(id) = hub_slots
+                    let here = hub_slots
                         .iter()
                         .find(|(_, s)| s.character == character)
-                        .map(|(id, _)| *id)
-                        && let Some(s) = sessions.get(&id)
-                    {
-                        s.kick(&reason, 3);
+                        .and_then(|(id, _)| sessions.get(id));
+                    match here {
+                        Some(s) => s.kick(&reason, 3),
+                        // The hub has the character here and the zone has no body for
+                        // it. If it has just left, the save it left with is on its way
+                        // and says so itself (a logout races its own leaving save, and
+                        // that save must not find the character gone). Otherwise the hub
+                        // is told, or the character would stay "here" until this zone
+                        // restarts. (A client of its that is still on the way in gets a
+                        // body all the same; the hub refuses its first save, and that
+                        // ends it: `SaveRefused`.)
+                        None if leaving_saves.contains(&character) => {}
+                        None => {
+                            if let Some(link) = cfg.hub.clone() {
+                                tokio::spawn(async move { link.release(character).await });
+                            }
+                        }
+                    }
+                }
+                ClientEvent::LeftSaved { character } => {
+                    leaving_saves.remove(&character);
+                }
+                ClientEvent::SaveRefused { character } => {
+                    // The hub does not have this character here (it was logged out or
+                    // banned while its client was on the way in, or the hub lost track):
+                    // what the hub does not know of does not play on. Not a traveller on
+                    // its way out, whose character is the other zone's by now.
+                    let here = hub_slots
+                        .iter()
+                        .find(|(_, s)| {
+                            s.character == character
+                                && s.ghost_since.is_none()
+                                && !s.claimed_elsewhere
+                        })
+                        .and_then(|(id, _)| sessions.get(id));
+                    if let Some(s) = here {
+                        warn!(
+                            character,
+                            "the hub does not have this character here: it leaves"
+                        );
+                        s.kick("the hub no longer has this character here", 3);
                     }
                 }
                 ClientEvent::HubModelRevoked { model } => {
@@ -1017,13 +1070,35 @@ pub async fn run_with_web(
                     }
                 }
                 ClientEvent::Chat { id, text } => {
-                    if sessions.contains_key(&id) {
-                        for s in sessions.values() {
-                            s.send_control(Control::ChatFrom {
-                                from: id,
-                                text: text.clone(),
+                    // The connection checked the line and its sender's rate (`net.rs`);
+                    // here is the zone's own ceiling: everybody hears everybody, and a
+                    // crowd of talkers must not become everybody's traffic.
+                    if !sessions.contains_key(&id) {
+                        continue;
+                    }
+                    let now = Instant::now();
+                    let back = now.duration_since(chat_at).as_secs_f32() * ZONE_CHAT_PER_SEC;
+                    chat_lines = (chat_lines + back).min(ZONE_CHAT_BURST);
+                    chat_at = now;
+                    if chat_lines < 1.0 {
+                        report.chat_dropped += 1;
+                        // Its sender is told (their own bucket bounds how often).
+                        if let Some(s) = sessions.get(&id) {
+                            s.send_droppable(Control::ChatFrom {
+                                from: 0,
+                                text: "too many are talking: that line was not heard".into(),
                             });
                         }
+                        continue;
+                    }
+                    chat_lines -= 1.0;
+                    report.chat_lines += 1;
+                    for s in sessions.values() {
+                        // A chat line may be lost; nobody is disconnected over one.
+                        s.send_droppable(Control::ChatFrom {
+                            from: id,
+                            text: text.clone(),
+                        });
                     }
                 }
                 ClientEvent::Report { id, target, reason } => {
@@ -1110,9 +1185,12 @@ pub async fn run_with_web(
                         && !slot.claimed_elsewhere
                         && let Some(state) = character_state(&zone, link, id, &slot)
                     {
-                        let link = link.clone();
+                        let (link, tx) = (link.clone(), event_tx.clone());
+                        let character = slot.character;
+                        leaving_saves.insert(character);
                         tokio::spawn(async move {
-                            link.save(slot.character, state, true).await;
+                            link.save(character, state, true).await;
+                            let _ = tx.send(ClientEvent::LeftSaved { character }).await;
                         });
                     }
                     director.human_left(&mut zone, id);
@@ -1222,8 +1300,11 @@ pub async fn run_with_web(
                     slot.last_save = now;
                     let link = link.clone();
                     let character = slot.character;
+                    let tx = event_tx.clone();
                     tokio::spawn(async move {
-                        link.save(character, state, false).await;
+                        if !link.save(character, state, false).await {
+                            let _ = tx.send(ClientEvent::SaveRefused { character }).await;
+                        }
                     });
                 }
             }
@@ -1239,9 +1320,12 @@ pub async fn run_with_web(
                 if let Some(slot) = slot
                     && let Some(state) = character_state(&zone, link, id, &slot)
                 {
-                    let link = link.clone();
+                    let (link, tx) = (link.clone(), event_tx.clone());
+                    let character = slot.character;
+                    leaving_saves.insert(character);
                     tokio::spawn(async move {
-                        link.save(slot.character, state, true).await;
+                        link.save(character, state, true).await;
+                        let _ = tx.send(ClientEvent::LeftSaved { character }).await;
                     });
                 }
                 director.human_left(&mut zone, id);

@@ -348,7 +348,11 @@ gamengine/
     gm-client    winit, wgpu renderer, input, prediction/reconciliation, interpolation, audio (kira),
                  dev UI (egui), game HUD, asset cache (LRU), viewport modules (fps, tps, tactical).
                  The same crate is the browser client (`src/web/`: the browser's WebTransport, its
-                 Cache API as the model store, fetch for maps).
+                 Cache API as the model store, fetch for maps). Since Phase 10 the screens: a toolkit on
+                 the HUD's primitives (`ui.rs`, `font.rs`), the screens before the game (`front.rs`), the
+                 menu and the chat (`menu.rs`), settings, UI scripts. (egui, 11.2's dev UI, is still not
+                 linked: the screens did not need it, and it would not fit the browser's megabyte. Audio
+                 is still to come.)
     gm-model     avatar models as the client needs them: the standard rig, the `.gmm` container and its
                  strict reader, the shared animation set, the mannequin. Small on purpose (the client
                  links it); nothing here parses an upload.
@@ -357,7 +361,9 @@ gamengine/
     gm-server    tokio zone process: tick loop, interest management (PVS + distance rates), lag comp for
                  melee, projectile sim, AI companions, loot/contract state machines, zone handoff.
     gm-hub       account/auth service, character DB, shard registry, escrow ledger, asset ingestion API.
-    gm-hub-proto hub messages, entry tokens and the hub connection (what zones, bots and the client link).
+    gm-hub-proto hub messages, entry tokens and the hub connection (what zones, bots and the client link);
+                 the players' messages (the client's own, smaller encoding of its requests) and the
+                 rules for names.
     gm-replay    replays: the `.gmr` file a zone records (every entity every tick, and the tick's events),
                  its reader and playback, and the aim analysis computed from its frames: the same code
                  runs live in the zone and offline over a file.
@@ -372,7 +378,7 @@ gamengine/
   web/           the browser client's page and loader (index.html, boot.js); scripts/build-web.sh
                  assembles target/web/ from it
   docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md,
-                 WEB.md, ANTICHEAT.md, BUILDING.md
+                 WEB.md, ANTICHEAT.md, CLIENT.md, BUILDING.md
   PLAN.md        this file stays at the repository root (it is the entry point; README links it)
   budgets.toml   every number CI enforces; read by gm-tools and scripts/
   scripts/       CI gates, the pinned fetches (ericw-tools; wasm-bindgen and wasm-opt), the web build
@@ -486,6 +492,10 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars. **Done 2026-10-01** (11.10) |
 | 8 | WASM/WebGPU/WebTransport build | browser client joins the same zone as native clients. **Done 2026-10-02** (11.10) |
 | 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account. **Done 2026-10-02** (11.10) |
+| 10 | The client's screens: login, characters, a new character from the archetypes, the game menu, chat, settings; UI scripts | a person with nothing but the program gets from a cold start into the town and on to another zone, on the desktop and in a browser, by clicking; no refusal ends the program. **Done 2026-10-02** (11.10) |
+| 11 | *(proposed)* Possessions: the inventory and what is worn, gear's edges in the simulation (3.4), the stall and tavern screens, trade between two players | a character buys a weapon at another's stall with coin it was paid, wears it, and the zone's hits show the edge; all by clicking |
+| 12 | *(proposed)* Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans | two people clear the tutorial dungeon together and split what it drops |
+| 13 | *(proposed)* Sound | steps, hits and the town are heard, inside the size budgets of both targets |
 | ∞ | Content, balance, ops, community | permanent |
 
 ### 11.9 First concrete step
@@ -1021,6 +1031,84 @@ ranges are the spread over repeated runs):
   ban; anybody with an account can report (five open reports each); the privacy notice, the impact
   assessment and a self-service export of an account's record are the operator's to do before launch.
 
+**2026-10-02, Phase 10 done** (same machine; all numbers measured with the final build, none estimated;
+ranges are the spread over repeated runs). The numbered plan ended with Phase 9; this is the first of the
+phases a playable slice still needed (11.8), taken on the standing instruction to go on:
+- `docs/CLIENT.md` v1 is the contract. **A client that knows where its hub is needs no command line**: a
+  login screen (and a new account), the account's characters, a screen to make one from the **archetypes**
+  (3.3: the preset's own words from the content, its facts, no numbers to spend), "entering", and in the
+  game a **menu** (`Escape`: Resume, Travel, Settings, Keys, Leave, Quit) and a **chat line** (`Enter`).
+  A refusal anywhere is said in words and no refusal ends the program; a connection that ends leads back
+  to the screen before it. The command line that named the account and the character is **the same state
+  machine with nobody clicking**, so every earlier gate runs what a person clicks through.
+- **One client, no toolkit library**: an immediate-mode toolkit on the HUD's primitives (`ui.rs`: panel,
+  label, paragraph, button, field, list, checkbox, slider, choice; focus, Tab, paste), the 5×7 dot font
+  extended to printable ASCII and `č ć đ š ž` with a row for descenders, one whole-number scale (1 to 4
+  by the window, or chosen) that gives way to the window in both directions. Settings in a small file of
+  the client's own (the last email and character, the mouse, the size of text, who is ignored; never a
+  password). In a browser **the page's own form is the login** (the browser fills and remembers it) and
+  everything after it is on the canvas; losing the pointer lock is the Escape key.
+- **UI scripts** (`--ui-script`): what a person would do, a line at a time, through the entry points of
+  real events; they fail with the line that waited in vain and what the screen showed instead.
+- **The hub, v1.6** (zone protocol still v5): the **players' messages** (the nine requests a client
+  makes, in an encoding of their own: the browser build stopped paying 89 KB for the codec of everything
+  zones and moderators say); **a version at the head of every hub stream**, the players' and the hub's
+  own apart, so a peer of another build is told so; `Content` with the presets' blurbs before any zone;
+  `Enter` with no zone named (where the character was, else the start zone, else what will have it);
+  a zone's room counted by the characters that are there (a ticket nobody uses holds no seat); `Release`
+  for a character a zone claimed and has no body for; transits swept when their ticket has run out;
+  sessions that live a day past their last use, thirty days at most, eight to an account; a logout that
+  kicks only when it was the account's last; a decoy hash so that login timing does not tell which
+  emails exist; **names** that every client can draw and nobody can mistake (unique by what they look
+  like: `AIdric` cannot be made beside `Aldric`; the game's own voices reserved).
+- **Chat is checked where it arrives**: 200 characters, nothing that cannot be seen, five lines in ten
+  seconds per **account**, thirty unforgotten refusals end the connection, ten lines a second for the zone
+  as a whole, and chat is what a slow client's queue drops. A zone's own line cannot be imitated on the
+  screen, and `/ignore NAME` is what there is against speech.
+- **Acceptance** (`scripts/check-screens.sh --desktop --browser`): every screen whole at five window sizes
+  and every refusal in words, as tests; the windowed client on a display of its own, started from another
+  directory with a settings file that names only the hub, **by script**: a new account, a character, the
+  town, a line heard from a bot and one said to it, the menu's pages, the arena, the town, the arena,
+  Leave, twenty rounds of Play and Leave; then **by real keys and clicks** (the password pasted from the
+  clipboard, Enter, a click on Play, Escape, a click on Quit); then both browser builds in headless
+  Chromium, the page's form filled by the browser's own input events. From the program's start to standing
+  in the town **0.5–0.6 s** by script (software GPU); a round of Play and Leave **121–154 ms**; 20, 60 and
+  150 rounds add the same 2.9 MB to the client and no thread.
+- **Cost**: a frame in the town 0.34–0.35 ms with nothing up; 0.36–0.38 with the menu, 0.38–0.40 with the
+  settings, 0.39–0.42 with the screen that has the most text (uncapped, 1280×720, the Renoir iGPU).
+- **Found by running it** (CLIENT.md 12.2): a click swallowed by a button that went grey for the length of
+  a background request (one gate run in six); a script acting on the frame before its own last line's
+  effect; a re-entry refused as "logged out" because the zone remembered a kick; **a logout that beat its
+  own last save** (the hub's kick reached the zone before the zone's save reached the hub).
+- Reviews (CLIENT.md 12). **Google AI Studio still answered HTTP 402** (credits depleted), so the design
+  review and the code review were done by independent agents. Design: 14 findings, 13 accepted, 1 in part.
+  Code, three reviewers: 23 findings on the client (21 fixed, 2 in part: in a browser a cancelled map
+  download left the next entry on the wrong map; Enter took the screen's action before the focused
+  button's, so Tab to Back and Enter made a character; a double click on Travel travelled), 5 and a list
+  on the hub and the zones (all fixed: **an unused ticket held a seat for good**, and giving a character
+  back by a save wrote a place it never stood), 13 on the page and the gate (all fixed: the gates left
+  their test hub in `target/web/config.json`; a failed run could end without saying FAIL). Gemini should
+  be run over CLIENT.md and the diff once the account has credit.
+- Tests: the workspace suite green (**310 tests**, 266 before); every earlier gate green on the final
+  build: netcode, matrix, swarm 5.8 ms mean / 8.6 ms p99 with 200 bots, perf 2,359–2,969 fps, 100 avatars
+  at 678–720 fps offline and 243 fps through the hub (cap 250), dungeon (online), anti-cheat (online and
+  swarm: 6.5 ms / 9.1 ms with the recorder), web (both builds, and through the hub: 60 fps, 142 and 264 ms
+  to the first frame). The anti-cheat hub test asked for both lock programs flagged on a 45-second
+  five-bot fight; on a busy machine one program's own aim ran loose (two runs in nineteen, none in twelve
+  on a quiet one, none in eight at the commit before): it now asks for the path (both in the report, one
+  flagged, no hand flagged) and the gate keeps the claim.
+- Binaries (release, LTO): `gm-client` **9,474,384 bytes (9.04 MiB)**, +305,872: the screens, and
+  294,856 of it the clipboard (`arboard`, so that a password manager's password can be pasted); baseline
+  updated. `gm-server` 6.58 MB, `gm-hub` 8.14 MB, `gm-bot` 4.88 MB, `gm-tools` 4.94 MB. Browser builds:
+  WebGPU **967,052 bytes** (324,017 packed; 1 MiB budget), WebGL2 2,956,609 (896,912 packed).
+- Known limits (CLIENT.md 11): no inventory, equipment, stall, tavern or trade screen (proposed Phase
+  11), no parties of people or chat channels (12), no sound (13); no point-buy editor, no key rebinding,
+  no localisation; a character cannot be deleted or renamed; no password reset; no paste in a browser's
+  canvas fields; a session that ended under a player is asked for again only when the zone is left;
+  **leaving or quitting in the middle of a fight costs nothing** and how many of an account's characters
+  may play at once is not limited (both open, section 12); whether Chrome offers to save the page form's
+  password was not tried by hand; the screens gate has not run on CI's machines yet.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -1047,4 +1135,10 @@ report at all), and so are two readings of section 8: in a wild zone a "team kil
 own party only (every human is on one team there and kills between parties are the game), and a flag
 never does anything by itself. **Who moderates** is open: today an account whose `accounts.moderator`
 flag an operator has set in the database.
+The screens' numbers are **proposed** in `docs/CLIENT.md` 12 (the scale rule, the chat's limits, the
+rules for names and what counts as one name, sliding sessions and their bounds, the start zone rule, that
+`Q` no longer quits, that a browser logs in on the page's form), and two things are open: **combat
+logging** (Leave and Quit are instant and free, so a body about to die can be taken out of the world by
+its player) and **how many of an account's characters may play at once** (nothing limits it today).
+Phases 11 to 13 in 11.8 are proposals, in the order a playable slice needs them.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

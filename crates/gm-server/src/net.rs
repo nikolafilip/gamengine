@@ -3,7 +3,7 @@
 //! [`ClientEvent`]s on one channel.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glam::Vec3;
 use gm_core::build::{Build, ContentPack};
@@ -60,6 +60,14 @@ pub enum ClientEvent {
     },
     /// The hub says another zone claimed this character: drop the ghost.
     HubClaimed {
+        character: CharacterId,
+    },
+    /// A periodic save of this character was refused: the hub does not have it here.
+    SaveRefused {
+        character: CharacterId,
+    },
+    /// The save a character left with has been answered.
+    LeftSaved {
         character: CharacterId,
     },
     /// The hub says this character must leave (logout, operator).
@@ -143,6 +151,31 @@ pub struct NetConfig {
     pub content: Arc<ContentPack>,
     /// The hub, when this zone runs under one: tokens are then mandatory.
     pub hub: Option<Arc<crate::hub_link::HubLink>>,
+    /// What each account that plays here may still say (PROTOCOL.md 8): its characters
+    /// share one bucket, and a connection that comes back finds it as it left it.
+    pub chat: ChatBuckets,
+}
+
+/// Chat buckets by account, kept a minute past the last connection that used them.
+#[derive(Default)]
+pub struct ChatBuckets(
+    std::sync::Mutex<std::collections::HashMap<i64, Arc<std::sync::Mutex<ChatBucket>>>>,
+);
+
+impl ChatBuckets {
+    /// How long an account's bucket is kept after its last connection went.
+    const KEPT: Duration = Duration::from_secs(60);
+
+    /// The bucket of `account`: the one it has, or a full one.
+    fn of(&self, account: i64, now: Instant) -> Arc<std::sync::Mutex<ChatBucket>> {
+        let mut all = self.0.lock().unwrap();
+        all.retain(|_, b| {
+            Arc::strong_count(b) > 1 || now.duration_since(b.lock().unwrap().at) < Self::KEPT
+        });
+        all.entry(account)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(ChatBucket::new(now))))
+            .clone()
+    }
 }
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -226,6 +259,58 @@ pub async fn accept_loop_web(
 /// Send a `Reject` and close, in that order as the client sees it: the stream is finished
 /// and the client is given a moment to read and hang up first, because a connection closed
 /// under an unread message can take the message with it (WEB.md 2.1).
+/// Lines refused, not yet forgotten, at which a client is taken for a flood and let go;
+/// one is forgotten every `CHAT_REFUSAL_FORGOTTEN_SECS` (somebody who overruns a line
+/// now and then is never let go for it).
+const CHAT_REFUSALS_BEFORE_KICK: f32 = 30.0;
+const CHAT_REFUSAL_FORGOTTEN_SECS: f32 = 10.0;
+
+/// An account's chat lines (PROTOCOL.md 8): `CHAT_BURST` at once, one more every
+/// `CHAT_REFILL_SECS`.
+pub struct ChatBucket {
+    lines: f32,
+    at: Instant,
+    /// Lines refused and not yet forgotten.
+    refused: f32,
+}
+
+impl ChatBucket {
+    fn new(now: Instant) -> ChatBucket {
+        ChatBucket {
+            lines: control::CHAT_BURST as f32,
+            at: now,
+            refused: 0.0,
+        }
+    }
+
+    /// Time passes: lines come back, refusals are forgotten.
+    fn tick(&mut self, now: Instant) {
+        let secs = now.duration_since(self.at).as_secs_f32();
+        self.lines =
+            (self.lines + secs / control::CHAT_REFILL_SECS).min(control::CHAT_BURST as f32);
+        self.refused = (self.refused - secs / CHAT_REFUSAL_FORGOTTEN_SECS).max(0.0);
+        self.at = now;
+    }
+
+    /// Whether a line may be said now.
+    fn allow(&mut self, now: Instant) -> bool {
+        self.tick(now);
+        if self.lines < 1.0 {
+            return false;
+        }
+        self.lines -= 1.0;
+        true
+    }
+
+    /// A line was refused (over the rate, or not a line at all). `true`: that was one
+    /// too many, the connection goes.
+    fn refuse(&mut self, now: Instant) -> bool {
+        self.tick(now);
+        self.refused += 1.0;
+        self.refused >= CHAT_REFUSALS_BEFORE_KICK
+    }
+}
+
 async fn refuse(conn: &Link, send: &mut gm_net::link::SendHalf, msg: &Control) {
     let _ = control::send(send, msg).await;
     let _ = send.finish();
@@ -268,14 +353,21 @@ async fn handle_connection(
         return Ok(());
     }
     // Under a hub the token names the character; `Hello.name` is ignored (HUB.md 3.1).
+    // What was claimed is given back if the zone then does not take the body.
+    let mut claimed_here = None;
+    let mut account = None;
     let (name, build, hub_join) = match &cfg.hub {
         Some(hub) if !token.is_empty() => {
-            if let Err(e) = hub.verify(&token) {
-                refuse(&conn, &mut send, &reject(&e)).await;
-                return Ok(());
+            match hub.verify(&token) {
+                Ok(payload) => account = Some(payload.account),
+                Err(e) => {
+                    refuse(&conn, &mut send, &reject(&e)).await;
+                    return Ok(());
+                }
             }
             match hub.claim(&token).await {
                 Ok(claimed) => {
+                    claimed_here = Some((hub.clone(), claimed.character));
                     let origin = (claimed.state.zone.as_deref() == Some(hub.zone.as_str()))
                         .then(|| (Vec3::from(claimed.state.position), claimed.state.yaw));
                     (
@@ -306,6 +398,8 @@ async fn handle_connection(
     };
 
     let (control_tx, mut control_rx) = mpsc::channel(CONTROL_CHANNEL);
+    // The connection's own way to say something to its client (a chat line refused).
+    let to_client = control_tx.clone();
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(ClientEvent::Join {
         name: name.clone(),
@@ -321,33 +415,49 @@ async fn handle_connection(
     let info = match reply_rx.await {
         Ok(Ok(info)) => info,
         Ok(Err(reason)) => {
+            // The hub has the character in this zone since the claim, and the zone has no
+            // body for it (it is full, the build is not valid here): the character goes
+            // back offline as it came, or it could enter nowhere until this zone restarts.
+            // (Not a save: it never stood here, and a save would say it did.)
+            if let Some((hub, character)) = claimed_here {
+                hub.release(character).await;
+            }
             refuse(&conn, &mut send, &Control::Reject(reason)).await;
             return Ok(());
         }
         Err(_) => anyhow::bail!("zone stopped during join"),
     };
-    control::send(
-        &mut send,
-        &Control::Welcome {
-            entity: info.entity,
-            server_tick: info.server_tick,
-            hz: cfg.hz,
-            map: cfg.map_name.clone(),
-            map_hash: cfg.map_hash,
-        },
-    )
-    .await?;
-    control::send(
-        &mut send,
-        &Control::Content {
-            pack: (*cfg.content).clone(),
-            own: info.build.clone(),
-            team: info.team,
-        },
-    )
-    .await?;
-    info!(%remote, entity = info.entity, %name, team = info.team, web = conn.is_web(), "player joined");
     let id = info.entity;
+    // From here the zone has a body for this connection: every way out says `Leave`.
+    let welcome = Control::Welcome {
+        entity: id,
+        server_tick: info.server_tick,
+        hz: cfg.hz,
+        map: cfg.map_name.clone(),
+        map_hash: cfg.map_hash,
+    };
+    let content = Control::Content {
+        pack: (*cfg.content).clone(),
+        own: info.build.clone(),
+        team: info.team,
+    };
+    let greeted = async {
+        control::send(&mut send, &welcome).await?;
+        control::send(&mut send, &content).await
+    }
+    .await;
+    if let Err(e) = greeted {
+        let _ = tx.send(ClientEvent::Leave { id }).await;
+        anyhow::bail!("{remote}: the client went before it was welcomed: {e}");
+    }
+    info!(%remote, entity = info.entity, %name, team = info.team, web = conn.is_web(), "player joined");
+    // An account's bucket is its own wherever it speaks from; without a hub there are no
+    // accounts, and a connection has one of its own.
+    let chat = match account {
+        Some(account) => cfg.chat.of(account, Instant::now()),
+        None => Arc::new(std::sync::Mutex::new(ChatBucket::new(Instant::now()))),
+    };
+    let mut flooding = false;
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = control_rx.recv().await {
@@ -384,6 +494,42 @@ async fn handle_connection(
             msg = control::recv(&mut recv) => {
                 match msg {
                     Ok(Some(Control::Chat(text))) => {
+                        // Checked here, before the queue everybody's frames share
+                        // (PROTOCOL.md 8): a line out of bounds is dropped, a line too
+                        // many is refused to its sender alone, and a client that keeps
+                        // at it is let go.
+                        let now = Instant::now();
+                        let text = control::valid_chat(&text);
+                        let (said, flood) = {
+                            let mut chat = chat.lock().unwrap();
+                            match text {
+                                Some(text) if chat.allow(now) => (Some(text), false),
+                                // Not a line at all is no better than a line too many.
+                                _ => (None, chat.refuse(now)),
+                            }
+                        };
+                        if flood {
+                            if !flooding {
+                                flooding = true;
+                                // Told why, then closed a moment later: a connection
+                                // closed in the same instant can take the `Kick` with it.
+                                let why = "flooding the chat";
+                                let _ = to_client.try_send(Control::Kick(why.into()));
+                                let conn = conn.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(crate::session::KICK_GRACE).await;
+                                    conn.close(6, why.as_bytes());
+                                });
+                            }
+                            continue;
+                        }
+                        let Some(text) = said else {
+                            let _ = to_client.try_send(Control::ChatFrom {
+                                from: 0,
+                                text: "too many lines; wait a moment".into(),
+                            });
+                            continue;
+                        };
                         if tx.send(ClientEvent::Chat { id, text }).await.is_err() {
                             break;
                         }
@@ -432,4 +578,44 @@ async fn handle_connection(
     writer.abort();
     info!(%remote, entity = id, "player left");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chat_bucket_gives_five_lines_and_forgets_refusals_slowly() {
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let mut b = ChatBucket::new(t0);
+        // Five at once, the sixth not; one more every two seconds.
+        assert!((0..5).all(|_| b.allow(t0)));
+        assert!(!b.allow(t0));
+        assert!(!b.allow(at(1.9)));
+        assert!(b.allow(at(2.1)));
+        // Somebody who overruns a line now and then is never let go for it: thirty
+        // refusals a quarter of a minute apart are thirty forgotten ones.
+        let mut b = ChatBucket::new(t0);
+        assert!((0..30).all(|i| !b.refuse(at(15.0 * i as f32))));
+        // A flood is: thirty refusals in a breath.
+        let mut b = ChatBucket::new(t0);
+        assert!((0..29).all(|_| !b.refuse(t0)));
+        assert!(b.refuse(t0));
+        // And it stays one for whoever comes back at once on another connection: the
+        // account's bucket is the same.
+        let buckets = ChatBuckets::default();
+        let first = buckets.of(7, t0);
+        for _ in 0..30 {
+            first.lock().unwrap().refuse(t0);
+        }
+        drop(first);
+        let again = buckets.of(7, at(5.0));
+        assert!(again.lock().unwrap().refuse(at(5.0)), "still a flood");
+        // After a minute without a connection the bucket is forgotten.
+        drop(again);
+        let later = buckets.of(7, at(120.0));
+        assert!(!later.lock().unwrap().refuse(at(120.0)));
+        assert!(buckets.of(8, at(120.0)).lock().unwrap().allow(at(120.0)));
+    }
 }

@@ -16,7 +16,8 @@ crates/gm-core      shared simulation: entity vocabulary, matrix, builds, status
 crates/gm-content   content loader: abilities, builds, creatures and trials in TOML, compiled and validated into gm-core packs.
 crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
 crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
-crates/gm-client    wgpu forward renderer, skinned characters, model cache, Quake movement, zone connection;
+crates/gm-client    wgpu forward renderer, skinned characters, model cache, Quake movement, zone connection,
+                    the screens (login, characters, menu, chat) on a toolkit of its own;
                     the same crate is the browser client (wasm, WebGPU or WebGL2, WebTransport).
 crates/gm-server    authoritative tokio zone server: tick loop, sessions, PVS snapshots, lag compensation.
 crates/gm-hub       accounts, characters, zone registry, handoff, the economy, avatar models and their moderation.
@@ -33,7 +34,7 @@ assets/textures     generated palette and WAD (gm-tools wad make)
 assets/content      abilities, preset builds, creatures, trials and items (TOML), the v1 content
 web/                the browser client's page and loader (index.html, boot.js)
 docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md, WEB.md,
-                    ANTICHEAT.md, BUILDING.md
+                    ANTICHEAT.md, CLIENT.md, BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
@@ -101,8 +102,8 @@ cargo run --release -p gm-client -- --map assets/maps/built/dungeon.bsp --connec
 
 The browser (Phase 8): the same client compiled to wasm joins the same zones through a
 WebTransport listener the zone and the hub open beside their QUIC endpoint
-([`docs/WEB.md`](docs/WEB.md)). 0.9 MB of `.wasm` on WebGPU (0.3 MB compressed), 2.9 MB on
-WebGL2; the loader picks.
+([`docs/WEB.md`](docs/WEB.md)). 0.97 MB of `.wasm` on WebGPU (0.32 MB compressed), 2.96 MB
+on WebGL2; the loader picks.
 
 ```sh
 scripts/build-web.sh
@@ -123,6 +124,17 @@ Statistics rank; people decide.
 cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --cert-out zone-cert.der --replay-dir replays
 cargo run --release -p gm-tools -- replay aim replays/arena-*.gmr
 cargo run --release -p gm-client -- --replay replays/arena-*.gmr --follow NAME
+```
+
+The screens (Phase 10): a client that knows where its hub is needs no command line. It
+shows a login screen, the account's characters, a screen to make one from the archetypes,
+and in the game a menu (`Escape`) and a chat line (`Enter`); a refusal anywhere is said in
+words, and a connection that ends leads back to the screen before it
+([`docs/CLIENT.md`](docs/CLIENT.md)). The command line that named everything still works:
+it is the same screens with nobody clicking.
+
+```sh
+cargo run --release -p gm-client -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der    # or name the hub in the settings once
 ```
 
 ## CI gates
@@ -169,6 +181,12 @@ cargo run --release -p gm-client -- --replay replays/arena-*.gmr --follow NAME
   arena with fifteen native bots on each build (snapshots, corrections, damage both ways,
   bytes, memory, frame rate); with `--hub` it logs in, fills its model cache under a cap
   smaller than the town's avatars, comes back to find them cached, and travels.
+- `scripts/check-screens.sh` — the client's screens: every screen whole at five window
+  sizes and every refusal in words, as tests; with `--desktop` the windowed client on a
+  display of its own, by UI script (a new account, a character, the town, chat with a bot,
+  the menu, two zones both ways, rounds of Play and Leave) and then by real keys and clicks
+  (the password pasted, Enter, a click on Play, Escape, a click on Quit); with `--browser`
+  both builds in headless Chromium, the page's form filled by the browser's own input.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

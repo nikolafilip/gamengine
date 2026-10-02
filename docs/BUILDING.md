@@ -59,6 +59,10 @@ two turns, the gate room with two sentinels, a stair, the Warden's hall).
 | `--cache-mb N` | byte cap of the model cache on disk (default 2048, at least 16) |
 | `--vram-mb N` | byte cap of models on the GPU (default 256) |
 | `--start X,Y,Z,YAW` | offline: start here instead of at a spawn |
+| `--hub ADDR --hub-cert PATH` | play through a hub: the screens (see "Playing: the screens"); with `--user`, `--password` and `--character` the same steps by themselves |
+| `--settings FILE` | the settings file (default: `settings.toml` in the user's configuration directory, `gamengine/`) |
+| `--offline` | walk the map offline even when the settings name a hub |
+| `--ui-script FILE` | a script that clicks through the screens (docs/CLIENT.md 9): gates use it, a bug report can carry one |
 
 Keys in a zone with a market: `B` opens a stall on the tile you stand on, `N` closes your stall.
 
@@ -66,9 +70,10 @@ The tactical viewport (COMPANIONS.md 6): `Tab` kneels the body into the command 
 lifts the camera above it; `Tab` again stands up (400 ms). In it the cursor is free: `1`–`5`
 select a companion and `` ` `` all of them, left click selects the companion under the cursor,
 right click sends the selection to the ground under the cursor or onto the body under it,
-`F` orders follow and `H` hold; the movement keys pan, `Q`/`E` turn, the wheel zooms. (`Q`
-quits everywhere else.) The HUD shows your health, stamina and focus, the squad with its
-orders, the creature being fought, and what the zone says of encounters, loot and trials.
+`F` orders follow and `H` hold; the movement keys pan, `Q`/`E` turn, the wheel zooms. The HUD
+shows your health, stamina and focus, the squad with its orders, the creature being fought,
+and what the zone says of encounters, loot and trials. `Escape` opens the menu (Quit is
+there; `Q` no longer quits), `Enter` the chat line.
 
 Default present mode is **Mailbox** (no tearing, no blocking) with the frame cap, not Fifo.
 Reason, measured 2026-09-30 on Arch, X11, xfwm4 with compositing, RADV (Renoir): Fifo and
@@ -327,6 +332,53 @@ Under a hub the zone uploads its replays and aim numbers, and a moderator works 
 `gm-tools mod aim-report | replays | replay-get | reports | report | ban | unban |
 reputation | adjust` (ANTICHEAT.md 7).
 
+## Playing: the screens (Phase 10)
+
+`docs/CLIENT.md` is the contract. A client that knows where its hub is needs no command
+line: it shows a login screen, the account's characters, a screen to make one, and in the
+game a menu (`Escape`: Resume, Travel, Settings, Keys, Leave, Quit) and a chat line
+(`Enter`).
+
+```sh
+# a hub and two zones, as in "Accounts, characters and zone handoff"; --start-zone says where
+# a character that has never been anywhere begins (default: the zone called town)
+cargo run --release -p gm-hub -- --database-url postgres://localhost/gamengine --listen 127.0.0.1:4400 \
+    --cert-out hub-cert.der --key hub.key --zone-secret s3cret --start-zone town
+cargo run --release -p gm-server -- --map assets/maps/built/town.bsp --listen 127.0.0.1:4433 --cert-out town.der \
+    --hub 127.0.0.1:4400 --hub-cert hub-cert.der --zone-id town --zone-secret s3cret --hz 20
+cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --listen 127.0.0.1:4434 --cert-out arena.der \
+    --hub 127.0.0.1:4400 --hub-cert hub-cert.der --zone-id arena --zone-secret s3cret
+
+# you: the login screen. New account, a character, Play.
+cargo run --release -p gm-client -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der
+```
+
+Where the hub is can also be written down once, and the client then starts with no
+arguments at all (from a menu entry, a file manager):
+
+- in the person's settings (`~/.config/gamengine/settings.toml`, `%APPDATA%\gamengine\`):
+  `hub = "127.0.0.1:4400"` and `hub_cert = "/path/to/hub-cert.der"`;
+- or in a `client.toml` shipped beside the program (the same two lines; a relative
+  `hub_cert` is looked for beside it): what a build for players carries.
+
+With neither, the client says so on a screen and offers the offline walk. The settings also
+remember the last email and character, the mouse sensitivity, the size of text and who is
+ignored in chat; never a password. A run started without a terminal writes `client.log`
+beside the settings. `Ctrl+V` pastes into a field (a password from a password manager).
+
+In the browser the page's own form is the login (the browser can fill and remember it);
+everything after it is drawn on the canvas. Chat: `/ignore NAME`, `/unignore NAME`.
+
+A UI script plays the person (`--ui-script FILE`; one command a line: `wait screen NAME`,
+`field LABEL`, `type TEXT`, `key NAME`, `click TEXT`, `dclick TEXT`, `expect TEXT`, `say
+TEXT`, `where TEXT`, `sleep SECS`, `quit`), and fails with the line that waited in vain and
+what the screen showed instead:
+
+```sh
+printf 'wait screen login\nclick "New account"\nfield email\ntype me@example.com\n' > walk.ui   # and so on
+cargo run --release -p gm-client -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --settings /tmp/s.toml --ui-script walk.ui
+```
+
 ## CI gates locally
 
 ```sh
@@ -349,6 +401,9 @@ scripts/check-anticheat.sh --online   # also through the hub: flags, replays, a 
 scripts/check-web.sh                  # the browser build: sizes of both .wasm, QUIC and WebTransport clients in one zone
 scripts/check-web.sh --browser        # also headless Chromium in a zone with 15 native bots, per build (--software: no GPU)
 scripts/check-web.sh --browser --hub  # also login, 48 avatars through the browser's cache and a travel (needs a database)
+scripts/check-screens.sh              # the screens as tests: every screen whole at every window size, every refusal in words
+scripts/check-screens.sh --desktop    # also the windowed client on an Xvfb of its own: a cold start by UI script, then by real keys and clicks (xdotool)
+scripts/check-screens.sh --browser    # also both browser builds: the page's form by the browser's own input, then the canvas screens
 ```
 
 `check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and

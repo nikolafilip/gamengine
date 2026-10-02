@@ -138,7 +138,13 @@ pub fn run(opts: &Options) -> Result<(), Error> {
         if let Some(p) = &playback {
             p.hud(&mut renderer.hud);
         } else if opts.tactical {
-            crate::app::build_hud(&mut renderer.hud, None, &tactical, vp, &[], &[], None);
+            let view = crate::app::HudView {
+                bars: &[],
+                squad: &[],
+                target: None,
+                scale: crate::ui::scale_for(renderer.hud.size, crate::front::PANEL_UNITS, 0),
+            };
+            crate::app::build_hud(&mut renderer.hud, None, &tactical, vp, view);
         }
         renderer.render(&gpu, &view, vp, &boxes, &avatars.draws);
         avatars.end_frame(&gpu, &mut renderer.characters);

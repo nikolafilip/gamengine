@@ -69,6 +69,8 @@ async fn start_hub(db: &Db, ingest: IngestMode, timeout: Duration, tag: &str) ->
             models_dir: dir.clone(),
             ingest,
             ingest_timeout: timeout,
+            start_zone: None,
+            blurbs: Vec::new(),
         },
         db.clone(),
         endpoint,
@@ -263,6 +265,7 @@ async fn models_from_upload_to_takedown() {
         web: None,
         min_trust: 0,
         requires: Vec::new(),
+        max_players: 64,
     })
     .await
     .unwrap();

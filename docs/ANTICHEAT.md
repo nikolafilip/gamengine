@@ -560,3 +560,11 @@ protocol's interpolation delay into the freshest view believed (4.2).
   the models', not people's (9).
 - A sword-and-bolt build fired thirty bolts in ninety seconds and was not flagged; the rules
   need shots (9).
+- **A short fight is a thin sample** (found in Phase 10). The test of the way to the hub
+  (`gm-server/tests/anticheat.rs`: five players, 45 seconds) asked that both lock programs
+  be flagged. On a busy machine one program's own aim ran loose in two runs of nineteen
+  (8 locks in 14 shots at moving targets: a bound of 33% against the rule's 35%); in twelve
+  runs on a quiet machine, and eight at the commit before, never. The test now asks for
+  what it is for (both programs' numbers in the hub's report, one of them flagged, no hand
+  flagged); that every program is flagged stays the gate's claim, on sixteen players and
+  ninety seconds.

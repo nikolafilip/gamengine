@@ -40,6 +40,41 @@ pub enum ContentError {
     Validation(#[from] gm_core::build::ContentError),
 }
 
+/// The longest a preset's blurb may be, in characters (CLIENT.md 4.3).
+pub const MAX_BLURB_CHARS: usize = 160;
+
+/// What each preset build is, in a line or two of plain words, in the order of the pack's
+/// builds: shown to a person choosing an archetype (CLIENT.md 4.3). Not part of the pack a
+/// zone sends: the hub hands the blurbs out where a character is made.
+pub fn load_blurbs(dir: &Path) -> Result<Vec<String>, ContentError> {
+    let path = dir.join("builds.toml");
+    let text = std::fs::read_to_string(&path).map_err(|source| ContentError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let file: BuildsFile = toml::from_str(&text).map_err(|source| ContentError::Toml {
+        path: path.display().to_string(),
+        source,
+    })?;
+    file.build
+        .iter()
+        .map(|b| {
+            // Short, and nothing the client's font cannot draw.
+            let blurb = b.blurb.trim();
+            if blurb.is_empty()
+                || blurb.chars().count() > MAX_BLURB_CHARS
+                || !blurb.chars().all(|c| c == ' ' || c.is_ascii_graphic())
+            {
+                return Err(ContentError::Invalid(format!(
+                    "build {:?}: its blurb must be 1 to {MAX_BLURB_CHARS} characters of ASCII",
+                    b.name
+                )));
+            }
+            Ok(blurb.to_string())
+        })
+        .collect()
+}
+
 // ---------- authoring types (TOML) ----------
 
 #[derive(Debug, Deserialize)]
@@ -392,6 +427,7 @@ struct RiposteToml {
 #[serde(deny_unknown_fields)]
 struct BuildToml {
     name: String,
+    blurb: String,
     frame: String,
     attributes: AttributesToml,
     armour: String,

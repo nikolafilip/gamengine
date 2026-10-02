@@ -98,7 +98,13 @@ cleanup() {
 SERVER_PID=; HTTP_PID=; BOTS_PID=
 trap cleanup EXIT
 http=$((20000 + RANDOM % 20000))
-(cd target/web && exec python3 -m http.server "$http" --bind 127.0.0.1 >/dev/null 2>&1) &
+# The page as it was built, served from a directory of this run's own with this run's
+# config.json: the build's directory is left as it is (a run that is interrupted leaves
+# no test configuration behind in what a deployment copies).
+mkdir -p "$tmp/web"; rm -f "$tmp/web"/*
+ln -s "$ROOT"/target/web/* "$tmp/web/"; rm -f "$tmp/web/config.json"
+echo '{"hub": null, "hub_cert_sha256": null, "dev": true}' > "$tmp/web/config.json"
+(cd "$tmp/web" && exec python3 -m http.server "$http" --bind 127.0.0.1 >/dev/null 2>&1) &
 HTTP_PID=$!
 MAX_BPS="$(budget net max_bytes_per_player_s)"
 
@@ -118,7 +124,7 @@ run() { # build name, query flag
   hash="$(sed -n 's/.*"cert_sha256": "\([^"]*\)".*/\1/p' "$tmp/web.json")"
   local page="http://127.0.0.1:$http/?connect=$url&cert=$hash&map=arena&name=browser&build=frostweaver&team=1&script=fight&report=1&third-person=1&seconds=$SECS$extra"
   local soft=(); [[ "$SOFTWARE" == 1 ]] && soft=(--software)
-  node scripts/web-run.mjs --url "$page" --seconds "$SECS" --screenshot "$tmp/browser-$build.png" --at $((SECS / 2)) \
+  timeout $((SECS + 120)) node scripts/web-run.mjs --url "$page" --seconds "$SECS" --screenshot "$tmp/browser-$build.png" --at $((SECS / 2)) \
     ${CHROME:+--chrome "$CHROME"} "${soft[@]}" > "$tmp/browser-$build.log" 2>&1 || true
   sleep 1
   kill $BOTS_PID 2>/dev/null || true
@@ -193,20 +199,18 @@ hub_run() {
   local hub_url hub_hash
   hub_url="$(sed -n 's/.*"url": "\([^"]*\)".*/\1/p' "$tmp/hub-web.json")"
   hub_hash="$(sed -n 's/.*"cert_sha256": "\([^"]*\)".*/\1/p' "$tmp/hub-web.json")"
-  cp target/web/config.json "$tmp/config.json.before"
-  echo "{\"hub\": \"$hub_url\", \"hub_cert_sha256\": \"$hub_hash\", \"dev\": true}" > target/web/config.json
+  echo "{\"hub\": \"$hub_url\", \"hub_cert_sha256\": \"$hub_hash\", \"dev\": true}" > "$tmp/web/config.json"
   for _ in $(seq 1 120); do
-    sed 's/\x1b\[[0-9;]*m//g' "$tmp/town.log" | /usr/bin/grep -aq "zone report .* players=$count " && break; sleep 0.5
+    sed 's/\x1b\[[0-9;]*m//g' "$tmp/town.log" | /usr/bin/grep -a "zone report .* players=$count " > /dev/null && break; sleep 0.5
   done
   local soft=(); [[ "$SOFTWARE" == 1 ]] && soft=(--software)
   local base="http://127.0.0.1:$http/?user=web%40gm.test&password=web-password&character=Webby&zone=town&build=blade&report=1&third-person=1&cache-mb=$cache_mb"
   # First visit: nothing cached; every model comes from the hub and the cache must evict.
-  node scripts/web-run.mjs --profile "$tmp/profile" --url "$base&register=1&seconds=30" --seconds 30 --cache gm-models-v1 \
+  timeout 180 node scripts/web-run.mjs --profile "$tmp/profile" --url "$base&register=1&seconds=30" --seconds 30 --cache gm-models-v1 \
     --screenshot "$tmp/browser-town.png" --at 24 ${CHROME:+--chrome "$CHROME"} "${soft[@]}" > "$tmp/browser-town.log" 2>&1 || true
   # Second visit, same browser profile: most models come from the cache; then to the arena.
-  node scripts/web-run.mjs --profile "$tmp/profile" --url "$base&seconds=24&travel-to=arena&travel-after=12" --seconds 24 --cache gm-models-v1 \
+  timeout 180 node scripts/web-run.mjs --profile "$tmp/profile" --url "$base&seconds=24&travel-to=arena&travel-after=12" --seconds 24 --cache gm-models-v1 \
     ${CHROME:+--chrome "$CHROME"} "${soft[@]}" > "$tmp/browser-travel.log" 2>&1 || true
-  cp "$tmp/config.json.before" target/web/config.json
   local first second
   first="$(/usr/bin/grep -a '^GM-DONE' "$tmp/browser-town.log" | tail -1 || true)"
   second="$(/usr/bin/grep -a '^GM-DONE' "$tmp/browser-travel.log" | tail -1 || true)"
@@ -238,7 +242,7 @@ hub_run() {
   check_max "$(g "$first" wasm_memory_bytes)" "$(budget web max_wasm_memory_bytes)" "wasm memory bytes in the town"
   [[ "$(g "$second" zone)" == arena ]] && echo "OK: the browser travelled to the arena" \
     || { echo "FAIL: the browser ended in zone '$(g "$second" zone)', not the arena"; status=1; }
-  sed 's/\x1b\[[0-9;]*m//g' "$tmp/arena.log" | /usr/bin/grep -a "player joined" | /usr/bin/grep -aq "name=Webby .*web=true" \
+  sed 's/\x1b\[[0-9;]*m//g' "$tmp/arena.log" | /usr/bin/grep -a "player joined" | /usr/bin/grep -a "name=Webby .*web=true" > /dev/null \
     && echo "OK: the arena took the character from a WebTransport session" \
     || { echo "FAIL: the arena never saw Webby on a WebTransport session"; status=1; }
   if [[ "$SOFTWARE" != 1 ]]; then

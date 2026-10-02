@@ -204,7 +204,9 @@ client runs (`beforeunload`); and the page's "fullscreen" control requests fulls
 where the browser has it (Chromium), the Keyboard Lock API, under which `Ctrl+W`, `Tab` and
 `Esc` reach the game (leaving fullscreen is then a long press of `Esc`). A browser gives the
 pointer only to a click: the first click on the canvas takes it, `Esc` releases it (the
-browser's rule), the next click takes it again. Browsers apply the system's mouse
+browser's rule), the next click takes it again. That `Esc` never reaches the page, so the
+client asks every frame whether it still has the pointer, and takes losing it for the key:
+the menu opens, or the chat line is dropped (CLIENT.md 6). Browsers apply the system's mouse
 acceleration under pointer lock unless asked not to; the client does not ask (winit's lock),
 so aim feel differs slightly from native. Listed in 10.
 
@@ -242,19 +244,33 @@ the native client):
 
 ## 5. The page
 
-`index.html` holds a canvas, a login form (email, password, character, zone, build of a new
-character, "new account"), a status line and a fullscreen control. `boot.js` picks the build
-(3.2), reads `config.json` and the query string, leaves the options in `globalThis.gmOptions`
-and imports the build; the client reports to the page through `globalThis.gmStatus(kind,
-text)` (`status`, `error`, `stats`, `done`).
+`index.html` holds a stage with a canvas, a login form (email, password, "new account", which
+asks for the password a second time), a status line and a fullscreen control; fullscreen
+takes the stage, so the form and the status line are there when the client asks for them. `boot.js` picks the build (3.2), reads `config.json` and the query
+string, leaves the options in `globalThis.gmOptions` and imports the build; the client
+reports to the page through `globalThis.gmStatus(kind, text)` (`status`, `error`, `stats`,
+`done`, and since Phase 10 `login`, `login-wait`, `screen` and `say`).
+
+**The form is the client's login screen** (CLIENT.md 4.1), so that the browser can fill and
+remember what goes into it. The client starts at once, behind the form, and says when it
+wants it: `login` shows the form with the text as its notice (the hub's last refusal, in
+words); `login-wait` switches it off while the hub is asked; `screen` hides it, because the
+canvas has a screen of its own (the characters, a new character, the game). On submit the
+page leaves `{ user, password, register }` in `globalThis.gmLogin` and empties its password
+field; the client takes the object on its next frame and deletes it. A client that died
+takes no login: the form goes with the error. Everything after the login is drawn on the
+canvas. The page asks before it is left (`beforeunload`) only while something is played:
+not at the login form, and not in a scripted run. `say` carries a UI script's word to whoever drives the
+browser (`GM-SAY ...` on the console, CLIENT.md 9).
 
 A link may set what a visitor *sees* and nothing that acts for them: `third-person`,
-`tactical`, `map` (the offline map), `zone` and `gl` (force the WebGL2 build). **Only on a
+`tactical`, `map` (the offline map) and `gl` (force the WebGL2 build). **Only on a
 site whose `config.json` says `"dev": true`** a link may also carry the rest of the native
 flags: `connect=https://host:port&cert=<hex>` (a zone directly, without a hub), a login
-(`user`, `password`, `character`, `register`), `name`, `build`, `team`, `seconds`, `report`
+(`user`, `password`, `character`, `register`, `zone`), `name`, `build`, `team`, `seconds`, `report`
 (a line of statistics a second), `script=fight` (a scripted player: it walks at the nearest
-enemy and attacks), `travel-to` / `travel-after`, `cache-mb`, `vram-mb`. On a real site a
+enemy and attacks), `travel-to` / `travel-after`, `cache-mb`, `vram-mb`, and `ui-script` (the
+text of a script that clicks through the screens, CLIENT.md 9). On a real site a
 link with `connect` would walk a visitor's client into a stranger's zone, one with `script`
 or `travel-to` would play their character for them once they log in, one with `cache-mb`
 would resize their cache. With neither a connection nor a login the client plays offline on
@@ -262,9 +278,11 @@ would resize their cache. With neither a connection nor a login the client plays
 digits, `_` and `-` only on every platform: it becomes a URL here and a file name natively.
 
 The password is sent to the hub over the WebTransport session (TLS 1.3). The page's form
-field is emptied on submit and the client deletes the password from the options object as it
-reads it and clears its own copy once the ticket is in; the session id lives in memory only,
-so a reload logs in again.
+field is emptied on submit and the client deletes the password from `gmLogin` (or, on a
+development site, from the options object) as it reads it and clears its own copy once the
+hub has answered; the session id lives in memory only, so a reload logs in again. The
+client's settings (CLIENT.md 8) are one `localStorage` entry, `gamengine.settings`: the last
+email and character, the mouse, the size of text; never a password.
 
 ## 6. Security notes
 
@@ -446,3 +464,21 @@ unchanged; `C` free as a key.
   client 19.6 KB/s instead of 8.4 (still inside `[net]`); the WebGPU build on the same
   software GPU holds 60 fps and 8.3 KB/s. Not investigated further: a client slower than the
   tick rate is a client on a machine without a GPU.
+
+## 13. Changes in Phase 10 (the screens, docs/CLIENT.md)
+
+- The page's form is the client's login screen (5): `gmStatus` gained `login`, `login-wait`,
+  `screen` and `say`; what is typed travels in `globalThis.gmLogin`. A new account types its
+  password twice. Fullscreen takes the stage, so the form is there in fullscreen too.
+- A link may no longer set `zone` on a production site; `ui-script` is a development option.
+- The browser speaks the players' messages to the hub (HUB.md 3.8) and no longer links the
+  codec of the hub's whole protocol: 89 KB less. With the screens the WebGPU build is
+  **967,052 bytes (324,017 packed)**, the WebGL2 build **2,956,609 (896,912 packed)**; the
+  glue, loader and page are 116 KB and 170 KB. The budgets of 9 are unchanged.
+- Losing the pointer lock is the Escape key (3.4). A hub session that closed by itself is
+  opened again by the next request. After a map download that was cancelled or failed, the
+  next entry fetches the map again (it used to play on the one still loaded).
+- The gates serve the page from a directory of their own: `target/web/config.json` is no
+  longer rewritten by a test run.
+- `scripts/web-run.mjs --login EMAIL --password PW [--register]` fills the form by the
+  browser's own input events; the driver ends the browser on every way out.

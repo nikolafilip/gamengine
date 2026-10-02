@@ -12,6 +12,7 @@ jobs:
   check:
     name: fmt, clippy, tests, assets
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:16
@@ -63,10 +64,22 @@ jobs:
         run: sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1
       - name: Anti-cheat gate (hands and programs in a recorded arena; flags, replays, the hub path)
         run: scripts/check-anticheat.sh --online
+      - name: System packages (a display of its own and real input, for the screens gate)
+        run: sudo apt-get install -y -q xvfb xdotool libxkbcommon-x11-0 libxcursor1 libx11-xcb1
+      - name: Screens gate (every screen at every size; the desktop client by UI script and by real keys and clicks)
+        run: KEEP="$RUNNER_TEMP/screens" scripts/check-screens.sh --desktop
+      - name: The screens gate's logs, when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screens-desktop
+          path: ${{ runner.temp }}/screens
+          if-no-files-found: ignore
 
   gates:
     name: binary size, RAM, software render
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -89,6 +102,20 @@ jobs:
   web:
     name: browser client (wasm sizes, WebTransport, headless Chromium)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gm
+          POSTGRES_PASSWORD: gm
+          POSTGRES_DB: gm_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gm" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The screens gate's hub wipes this database (CLIENT.md 10).
+      GM_TEST_DATABASE_URL: postgres://gm:gm@localhost:5432/gm_test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -109,6 +136,15 @@ jobs:
           cargo clippy -p gm-client --target wasm32-unknown-unknown --features webgl --locked -- -D warnings
       - name: Web gate (sizes, QUIC and WebTransport in one zone, headless Chromium on its software GPU)
         run: CHROME=google-chrome scripts/check-web.sh --browser --software
+      - name: Screens gate in the browser (the page's form by the browser's own input, the canvas screens by script)
+        run: CHROME=google-chrome SKIP_TESTS=1 KEEP="$RUNNER_TEMP/screens" scripts/check-screens.sh --browser --software
+      - name: The screens gate's logs, when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screens-browser
+          path: ${{ runner.temp }}/screens
+          if-no-files-found: ignore
 
   # Frame time on a real integrated GPU (PLAN.md 2.7). Enabled once a self-hosted runner exists.
   # perf-igpu:

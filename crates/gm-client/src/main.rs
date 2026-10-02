@@ -10,16 +10,22 @@ mod app;
 mod avatars;
 mod cache;
 mod characters;
+mod font;
+mod front;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod hub;
 mod hud;
+mod menu;
 mod net;
 #[cfg(not(target_arch = "wasm32"))]
 mod playback;
 mod render;
+mod script;
+mod settings;
 mod stats;
 mod tactical;
+mod ui;
 #[cfg(target_arch = "wasm32")]
 mod web;
 mod world;
@@ -97,6 +103,12 @@ pub struct Options {
     pub hub_web: Option<gm_net::control::WebAddr>,
     pub connect_web: Option<gm_net::control::WebAddr>,
     pub assets: String,
+    /// The settings file (CLIENT.md 8); `None`: the user's own.
+    pub settings: Option<PathBuf>,
+    /// A script that plays the person (CLIENT.md 9): its text.
+    pub ui_script: Option<String>,
+    /// Walk around the map offline without being asked (CLIENT.md 2).
+    pub offline: bool,
 }
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
@@ -104,8 +116,9 @@ const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --c
 [--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--crowd N [--crowd-dir DIR]] \
 [--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW] [--script fight] [--report] [--travel-to ZONE [--travel-after SECS]]\n\
        gm-client --replay FILE.gmr [--follow NAME] [--from SECS] [--maps-dir DIR] [--third-person] [--headless --screenshot out.ppm]\n\
-       gm-client --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME [--zone ID] [--build NAME] \
-[--maps-dir DIR] [--third-person]";
+       gm-client --hub ADDR --hub-cert PATH [--user EMAIL --password PW [--register] [--character NAME [--zone ID] [--build NAME]]] \
+[--maps-dir DIR] [--third-person] [--settings FILE] [--ui-script FILE]\n\
+       gm-client                         the screens, on the hub the settings name (docs/CLIENT.md); --offline walks the map instead";
 
 impl Default for Options {
     fn default() -> Options {
@@ -124,7 +137,7 @@ impl Default for Options {
             password: String::new(),
             register: false,
             character: String::new(),
-            zone: "arena".into(),
+            zone: String::new(),
             maps_dir: PathBuf::from("assets/maps/built"),
             bench_frames: None,
             vsync: true,
@@ -154,6 +167,9 @@ impl Default for Options {
             hub_web: None,
             connect_web: None,
             assets: "assets".into(),
+            settings: None,
+            ui_script: None,
+            offline: false,
         }
     }
 }
@@ -249,6 +265,15 @@ fn parse_args() -> Result<Options, String> {
                     .parse()
                     .map_err(|e| format!("--from: {e}"))?
             }
+            "--settings" => o.settings = Some(PathBuf::from(value("--settings")?)),
+            "--offline" => o.offline = true,
+            "--ui-script" => {
+                let path = value("--ui-script")?;
+                o.ui_script = Some(
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| format!("--ui-script {path}: {e}"))?,
+                );
+            }
             "--travel-to" => o.travel_to = Some(value("--travel-to")?),
             "--travel-after" => {
                 o.travel_after = value("--travel-after")?
@@ -280,12 +305,44 @@ fn parse_args() -> Result<Options, String> {
     if o.headless && o.bench_frames.is_none() {
         o.bench_frames = Some(120);
     }
+    // Started from somewhere else than the build's directory (a menu entry, a file
+    // manager): what the build ships is looked for beside the program (CLIENT.md 2).
+    let root = install_root();
+    for path in [&mut o.map, &mut o.palette, &mut o.maps_dir] {
+        if path.is_relative() && !path.exists() {
+            *path = root.join(&*path);
+        }
+    }
     Ok(o)
+}
+
+/// Where the build's files are: the first of the working directory, the program's own
+/// directory and the two above it (a `target/release` build) that holds `assets/maps`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn install_root() -> PathBuf {
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_deref().and_then(|p| p.parent());
+    let mut places = vec![PathBuf::from(".")];
+    places.extend(
+        exe_dir
+            .into_iter()
+            .flat_map(|d| d.ancestors().take(3))
+            .map(PathBuf::from),
+    );
+    places
+        .into_iter()
+        .find(|p| p.join("assets").join("maps").is_dir())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Minimal stderr logger: our crates at `GM_LOG` level (default info), wgpu/naga at warn.
+/// A client started with nobody's terminal behind it also writes the run to a file beside
+/// its settings (`client.log`): that is where its last words are.
 struct Logger;
+
+#[cfg(not(target_arch = "wasm32"))]
+static LOG_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
 
 #[cfg(not(target_arch = "wasm32"))]
 impl log::Log for Logger {
@@ -302,6 +359,12 @@ impl log::Log for Logger {
     fn log(&self, r: &log::Record) {
         if self.enabled(r.metadata()) {
             eprintln!("[{}] {}: {}", r.level(), r.target(), r.args());
+            if let Ok(mut file) = LOG_FILE.lock()
+                && let Some(file) = file.as_mut()
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "[{}] {}: {}", r.level(), r.target(), r.args());
+            }
         }
     }
 
@@ -346,12 +409,27 @@ fn main() {
             std::process::exit(2);
         }
     };
+    // A person's run (no bench, no script) leaves a log beside the settings.
+    let scripted = opts.headless
+        || opts.bench_frames.is_some()
+        || opts.seconds > 0.0
+        || opts.script.is_some()
+        || opts.ui_script.is_some();
+    if !scripted
+        && let Some(settings) = opts.settings.clone().or_else(settings::default_path)
+        && let Some(dir) = settings.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+        && let Ok(file) = std::fs::File::create(dir.join("client.log"))
+    {
+        *LOG_FILE.lock().unwrap() = Some(file);
+    }
     let result = if opts.headless {
         headless::run(&opts)
     } else {
         app::run(opts)
     };
     if let Err(e) = result {
+        log::error!("{e}");
         eprintln!("gm-client: {e}");
         std::process::exit(1);
     }

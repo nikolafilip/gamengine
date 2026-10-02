@@ -1,413 +1,11 @@
 //! The HUD (COMPANIONS.md 6): text and bars in pixels, drawn over the frame in one call.
-//! The font is drawn here, five by seven, capitals only: nothing to load and nothing to
-//! license. Everything is a quad into one small atlas whose first cell is solid.
+//! Everything is a quad into the font's small atlas (`font.rs`), whose first cell is solid.
 
 use wgpu::util::DeviceExt;
 
+pub use crate::font::{ADVANCE, GLYPH_H, GLYPH_W};
+use crate::font::{ATLAS_COLS, CELL_H, CELL_W, GLYPH_ROWS, atlas, cell_of};
 use crate::render::{DEPTH_FORMAT, Gpu};
-
-/// A glyph cell in the atlas: five by seven dots with a dot of space right and below.
-const CELL_W: u32 = 6;
-const CELL_H: u32 = 8;
-const ATLAS_COLS: u32 = 16;
-/// Glyph size and advance in pixels at scale 1.
-pub const GLYPH_W: f32 = 5.0;
-pub const GLYPH_H: f32 = 7.0;
-pub const ADVANCE: f32 = 6.0;
-
-/// Rows top to bottom, the five low bits left to right.
-const GLYPHS: &[(char, [u8; 7])] = &[
-    (
-        'A',
-        [
-            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'B',
-        [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
-        ],
-    ),
-    (
-        'C',
-        [
-            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'D',
-        [
-            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
-        ],
-    ),
-    (
-        'E',
-        [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
-        ],
-    ),
-    (
-        'F',
-        [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
-        ],
-    ),
-    (
-        'G',
-        [
-            0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'H',
-        [
-            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'I',
-        [
-            0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-    ),
-    (
-        'J',
-        [
-            0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
-        ],
-    ),
-    (
-        'K',
-        [
-            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
-        ],
-    ),
-    (
-        'L',
-        [
-            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
-        ],
-    ),
-    (
-        'M',
-        [
-            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'N',
-        [
-            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'O',
-        [
-            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'P',
-        [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
-        ],
-    ),
-    (
-        'Q',
-        [
-            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
-        ],
-    ),
-    (
-        'R',
-        [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
-        ],
-    ),
-    (
-        'S',
-        [
-            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
-        ],
-    ),
-    (
-        'T',
-        [
-            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
-        ],
-    ),
-    (
-        'U',
-        [
-            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'V',
-        [
-            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
-        ],
-    ),
-    (
-        'W',
-        [
-            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001,
-        ],
-    ),
-    (
-        'X',
-        [
-            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'Y',
-        [
-            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
-        ],
-    ),
-    (
-        'Z',
-        [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
-        ],
-    ),
-    (
-        '0',
-        [
-            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '1',
-        [
-            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-    ),
-    (
-        '2',
-        [
-            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
-        ],
-    ),
-    (
-        '3',
-        [
-            0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '4',
-        [
-            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
-        ],
-    ),
-    (
-        '5',
-        [
-            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '6',
-        [
-            0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '7',
-        [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-        ],
-    ),
-    (
-        '8',
-        [
-            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '9',
-        [
-            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
-        ],
-    ),
-    (
-        '.',
-        [
-            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100,
-        ],
-    ),
-    (
-        ',',
-        [
-            0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b00100, 0b01000,
-        ],
-    ),
-    (
-        ':',
-        [
-            0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000,
-        ],
-    ),
-    (
-        ';',
-        [
-            0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b00100, 0b01000,
-        ],
-    ),
-    (
-        '!',
-        [
-            0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100,
-        ],
-    ),
-    (
-        '?',
-        [
-            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100,
-        ],
-    ),
-    (
-        '\'',
-        [
-            0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000,
-        ],
-    ),
-    (
-        '"',
-        [
-            0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000,
-        ],
-    ),
-    (
-        '-',
-        [
-            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
-        ],
-    ),
-    (
-        '+',
-        [
-            0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000,
-        ],
-    ),
-    (
-        '/',
-        [
-            0b00001, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b10000,
-        ],
-    ),
-    (
-        '(',
-        [
-            0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010,
-        ],
-    ),
-    (
-        ')',
-        [
-            0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000,
-        ],
-    ),
-    (
-        '%',
-        [
-            0b11001, 0b11001, 0b00010, 0b00100, 0b01000, 0b10011, 0b10011,
-        ],
-    ),
-    (
-        '#',
-        [
-            0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010,
-        ],
-    ),
-    (
-        '<',
-        [
-            0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010,
-        ],
-    ),
-    (
-        '>',
-        [
-            0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000,
-        ],
-    ),
-    (
-        '=',
-        [
-            0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000,
-        ],
-    ),
-    (
-        '*',
-        [
-            0b00000, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00000,
-        ],
-    ),
-    (
-        '[',
-        [
-            0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110,
-        ],
-    ),
-    (
-        ']',
-        [
-            0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110,
-        ],
-    ),
-    (
-        '_',
-        [
-            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111,
-        ],
-    ),
-    (
-        '`',
-        [
-            0b01000, 0b00100, 0b00010, 0b00000, 0b00000, 0b00000, 0b00000,
-        ],
-    ),
-];
-
-/// The atlas cell of a character: capitals stand for small letters, `?` for the unknown.
-/// Cell 0 is solid and a space draws nothing.
-fn cell_of(c: char) -> Option<u32> {
-    if c == ' ' {
-        return None;
-    }
-    let c = c.to_ascii_uppercase();
-    let find = |c: char| GLYPHS.iter().position(|g| g.0 == c).map(|i| i as u32 + 1);
-    find(c).or_else(|| find('?'))
-}
-
-/// The atlas: one byte per texel, 255 where a dot is.
-fn atlas() -> (Vec<u8>, u32, u32) {
-    let cells = GLYPHS.len() as u32 + 1;
-    let rows = cells.div_ceil(ATLAS_COLS);
-    let (w, h) = (ATLAS_COLS * CELL_W, rows * CELL_H);
-    let mut px = vec![0u8; (w * h) as usize];
-    for y in 0..CELL_H {
-        for x in 0..CELL_W {
-            px[(y * w + x) as usize] = 255;
-        }
-    }
-    for (i, (_, rows)) in GLYPHS.iter().enumerate() {
-        let cell = i as u32 + 1;
-        let (cx, cy) = ((cell % ATLAS_COLS) * CELL_W, (cell / ATLAS_COLS) * CELL_H);
-        for (y, row) in rows.iter().enumerate() {
-            for x in 0..5 {
-                if row & (0b10000 >> x) != 0 {
-                    px[((cy + y as u32) * w + cx + x) as usize] = 255;
-                }
-            }
-        }
-    }
-    (px, w, h)
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -622,14 +220,14 @@ impl Hud {
         self.vertices.is_empty()
     }
 
-    fn quad(&mut self, x: f32, y: f32, w: f32, h: f32, cell: u32, color: [f32; 4]) {
+    /// A quad at `at` (x, y, width, height) showing `rows` rows of an atlas cell.
+    fn quad(&mut self, at: [f32; 4], cell: u32, rows: f32, color: [f32; 4]) {
         // On whole pixels: a glyph that straddles them loses dots to nearest sampling.
-        let (x, y, w, h) = (x.round(), y.round(), w.round(), h.round());
+        let [x, y, w, h] = at.map(f32::round);
         let (aw, ah) = self.atlas_size;
-        // Half a texel in from the cell's edges: nearest sampling never bleeds a neighbour.
         let u0 = ((cell % ATLAS_COLS) * CELL_W) as f32;
         let v0 = ((cell / ATLAS_COLS) * CELL_H) as f32;
-        let (u1, v1) = (u0 + GLYPH_W, v0 + GLYPH_H);
+        let (u1, v1) = (u0 + GLYPH_W, v0 + rows);
         let (u0, v0, u1, v1) = (u0 / aw, v0 / ah, u1 / aw, v1 / ah);
         let v = |px: f32, py: f32, u: f32, v: f32| HudVertex {
             pos: [px, py],
@@ -649,13 +247,12 @@ impl Hud {
     /// A filled rectangle.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
         if w > 0.0 && h > 0.0 {
-            self.quad(x, y, w, h, 0, color);
+            self.quad([x, y, w, h], 0, GLYPH_H, color);
         }
     }
 
     pub fn text_width(scale: f32, text: &str) -> f32 {
-        let n = text.chars().count() as f32;
-        (n * ADVANCE - (ADVANCE - GLYPH_W)).max(0.0) * scale
+        crate::font::text_width(scale, text)
     }
 
     /// Text with its top left at `(x, y)`; returns where it ends.
@@ -663,7 +260,9 @@ impl Hud {
         let mut at = x.round();
         for c in text.chars() {
             if let Some(cell) = cell_of(c) {
-                self.quad(at, y, GLYPH_W * scale, GLYPH_H * scale, cell, color);
+                // Eight rows: the eighth hangs below the line the layout counts with.
+                let rows = GLYPH_ROWS as f32;
+                self.quad([at, y, GLYPH_W * scale, rows * scale], cell, rows, color);
             }
             at += ADVANCE * scale;
         }
@@ -722,43 +321,16 @@ impl Hud {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_glyph_is_five_dots_wide_and_the_table_has_no_duplicates() {
-        for (i, (c, rows)) in GLYPHS.iter().enumerate() {
-            assert!(rows.iter().all(|r| *r < 32), "{c}");
-            assert!(rows.iter().any(|r| *r != 0), "{c} is blank");
-            assert!(
-                GLYPHS[..i].iter().all(|g| g.0 != *c),
-                "{c} is in the table twice"
-            );
-        }
-        // Small letters share the capitals; an unknown character is a question mark.
-        assert_eq!(cell_of('a'), cell_of('A'));
-        assert_eq!(cell_of('~'), cell_of('?'));
-        assert_eq!(cell_of(' '), None);
+impl crate::ui::Canvas for Hud {
+    fn size(&self) -> (f32, f32) {
+        self.size
     }
 
-    #[test]
-    fn the_atlas_has_a_solid_cell_and_the_glyphs_do_not_touch() {
-        let (px, w, h) = atlas();
-        assert_eq!(px.len(), (w * h) as usize);
-        // Cell 0 is solid.
-        assert!((0..CELL_H).all(|y| (0..CELL_W).all(|x| px[(y * w + x) as usize] == 255)));
-        // Every other cell keeps its sixth column and eighth row empty.
-        for cell in 1..=GLYPHS.len() as u32 {
-            let (cx, cy) = ((cell % ATLAS_COLS) * CELL_W, (cell / ATLAS_COLS) * CELL_H);
-            for y in 0..CELL_H {
-                assert_eq!(px[((cy + y) * w + cx + 5) as usize], 0);
-            }
-            for x in 0..CELL_W {
-                assert_eq!(px[((cy + 7) * w + cx + x) as usize], 0);
-            }
-        }
-        assert_eq!(Hud::text_width(2.0, "AB"), 22.0);
-        assert_eq!(Hud::text_width(1.0, ""), 0.0);
+    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        Hud::rect(self, x, y, w, h, color);
+    }
+
+    fn text(&mut self, x: f32, y: f32, scale: f32, color: [f32; 4], text: &str) {
+        Hud::text(self, x, y, scale, color, text);
     }
 }

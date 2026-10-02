@@ -5,6 +5,8 @@
 //! The browser client (WEB.md 3) links only the messages: its connection is the browser's.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod client;
+pub mod names;
+pub mod player;
 pub mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod token;

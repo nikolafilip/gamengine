@@ -57,6 +57,7 @@ async fn zone_and_bots_over_real_udp() {
                     stall_tile: None,
                     aim: Default::default(),
                     report_after_ticks: 0,
+                    say: None,
                 },
                 bsp,
                 std::future::pending(),
@@ -144,6 +145,7 @@ async fn quic_and_webtransport_bots_share_a_zone() {
         stall_tile: None,
         aim: Default::default(),
         report_after_ticks: 0,
+        say: None,
     };
 
     let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -194,4 +196,119 @@ async fn quic_and_webtransport_bots_share_a_zone() {
     let report = server.await.unwrap().unwrap();
     assert_eq!(report.joins, 2);
     assert!(report.executed_frames >= 200, "{}", report.executed_frames);
+}
+
+/// Chat is checked and limited before it is relayed (PROTOCOL.md 8): a line with a line
+/// break in it goes nowhere, a client may say five lines at once and one more every two
+/// seconds, the line too many is refused to its sender alone, and a flood ends the
+/// connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_is_checked_and_limited() {
+    let identity = Identity::generate(&["localhost"]).unwrap();
+    let world = Arc::new(ZoneWorld::load(Path::new(MAP)).unwrap());
+    let bsp = Arc::new(Bsp::load(Path::new(MAP)).unwrap());
+    let endpoint = quinn::Endpoint::server(
+        server_config(&identity).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let cfg = ZoneConfig {
+        max_ticks: Some(64 * 9),
+        report_every: Duration::from_secs(1),
+        ..ZoneConfig::default()
+    };
+    let server = tokio::spawn(gm_server::run(cfg, world, endpoint, std::future::pending()));
+
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(client_config(std::slice::from_ref(&identity.cert)).unwrap());
+    // A flood (a line every tick), a polite talker (every two seconds), and one whose
+    // line has a line break in it.
+    let talkers = [
+        ("flood", 1.0 / 64.0),
+        ("hello there", 2.0),
+        ("two\nlines", 1.0),
+    ];
+    let mut bots = Vec::new();
+    for (i, (line, every)) in talkers.into_iter().enumerate() {
+        let client = client.clone();
+        let bsp = bsp.clone();
+        bots.push(tokio::spawn(async move {
+            run_bot(
+                &client,
+                addr,
+                BotConfig {
+                    name: format!("talker{i}"),
+                    seed: 20 + i as u64,
+                    behaviour: Behaviour::Hold,
+                    rate: TickRate::COMBAT,
+                    run_ticks: 64 * 6,
+                    build: None,
+                    team: 0,
+                    counter_pick: false,
+                    travel_to: None,
+                    travel_after_ticks: 0,
+                    stall_tile: None,
+                    aim: Default::default(),
+                    report_after_ticks: 0,
+                    say: Some((line.to_string(), every)),
+                },
+                bsp,
+                std::future::pending(),
+            )
+            .await
+        }));
+    }
+    let mut reports = Vec::new();
+    for b in bots {
+        reports.push(b.await.unwrap().unwrap());
+    }
+    let (flood, polite, broken) = (&reports[0], &reports[1], &reports[2]);
+    println!(
+        "flood heard {:?}\npolite heard {:?}",
+        flood.heard, polite.heard
+    );
+    // The flood: its first five lines went out, the next were refused to it alone, and
+    // after thirty refusals the zone let it go.
+    assert_eq!(flood.kicked.as_deref(), Some("flooding the chat"));
+    assert!(
+        flood
+            .heard
+            .iter()
+            .any(|(from, text)| *from == 0 && text == "too many lines; wait a moment"),
+        "{:?}",
+        flood.heard
+    );
+    let floods = polite.heard.iter().filter(|(_, t)| t == "flood").count();
+    assert!(
+        (4..=7).contains(&floods),
+        "{floods} lines of the flood were relayed"
+    );
+    assert!(
+        polite.heard.iter().all(|(from, _)| *from != 0),
+        "a refusal is its sender's alone: {:?}",
+        polite.heard
+    );
+    // The polite talker was heard, every time; a line with a line break in it never.
+    let hellos = broken
+        .heard
+        .iter()
+        .filter(|(_, t)| t == "hello there")
+        .count();
+    assert!((2..=3).contains(&hellos), "{:?}", broken.heard);
+    assert!(polite.kicked.is_none() && broken.kicked.is_none());
+    for r in &reports {
+        assert!(
+            r.heard.iter().all(|(_, t)| !t.contains('\n')),
+            "{:?}",
+            r.heard
+        );
+    }
+    let report = server.await.unwrap().unwrap();
+    assert_eq!(report.chat_dropped, 0);
+    assert!(
+        (6..=10).contains(&report.chat_lines),
+        "{}",
+        report.chat_lines
+    );
 }

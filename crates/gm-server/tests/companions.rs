@@ -66,6 +66,7 @@ async fn start_zone(
         web: None,
         min_trust: 0,
         requires: spec.requires,
+        max_players: 64,
     })
     .await
     .expect("zone registers");
@@ -117,6 +118,7 @@ fn flow(
             stall_tile: None,
             aim: Default::default(),
             report_after_ticks: 0,
+            say: None,
         },
         play: Duration::ZERO,
         list_for_hire: None,
@@ -158,6 +160,8 @@ async fn a_solo_player_clears_the_dungeon_with_three_hired_avatars() {
                 .join(format!("gm-hub-models-companions-{}", std::process::id())),
             ingest: gm_hub::IngestMode::InProcess,
             ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
+            start_zone: None,
+            blurbs: Vec::new(),
         },
         db.clone(),
         endpoint,

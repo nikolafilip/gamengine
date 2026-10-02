@@ -1,9 +1,11 @@
 # Preset builds (MATRIX.md 9 and 11). Every build spends exactly 100 points:
 # attributes (each point above 5), armour (cloth 0 / leather 4 / mail 8 / plate 12),
-# a second aspect (10) and the slotted abilities.
+# a second aspect (10) and the slotted abilities. `blurb` is what the archetype is, in a
+# line or two of plain words (CLIENT.md 4.3): at most 160 characters of ASCII.
 
 [[build]]
 name = "ironclad"
+blurb = "A wall of plate with a hammer. Slow and hard to move: holds a doorway and takes the blows meant for others."
 frame = "colossus"
 attributes = { str = 20, agi = 5, con = 20, int = 18, spr = 20 }   # 58
 armour = "plate"                                                     # 12
@@ -15,6 +17,7 @@ actives = ["stomp", "fortify"]                                       # 10 + 8
 
 [[build]]
 name = "blade"
+blurb = "A sword and a parry. Fast on the feet and strong in a duel, but has to get close and stay close."
 frame = "striker"
 attributes = { str = 20, agi = 20, con = 20, int = 15, spr = 18 }  # 68
 armour = "mail"                                                      # 8
@@ -26,6 +29,7 @@ actives = ["dash", "overhead"]                                       # 6 + 8
 
 [[build]]
 name = "frostweaver"
+blurb = "Ice from a distance. Slows and freezes what comes near, then steps away. Wears cloth: one clean hit hurts."
 frame = "caster"
 attributes = { str = 5, agi = 20, con = 16, int = 20, spr = 20 }   # 56
 armour = "cloth"                                                     # 0
@@ -37,6 +41,7 @@ actives = ["frost_nova", "haste", "blink"]                           # 10 + 8 + 
 
 [[build]]
 name = "shade"
+blurb = "Unseen until it strikes. Darts, poison and a way out. Dies quickly when caught in the open."
 frame = "infiltrator"
 attributes = { str = 15, agi = 20, con = 15, int = 18, spr = 20 }  # 63
 armour = "leather"                                                   # 4
@@ -50,6 +55,7 @@ actives = ["blink", "vanish", "poison_cloud"]                        # 10 + 8 + 
 
 [[build]]
 name = "mender"
+blurb = "Keeps the others standing: mends wounds, hallows ground, hurries allies. The one a party cannot do without."
 frame = "caster"
 attributes = { str = 11, agi = 20, con = 20, int = 20, spr = 20 }  # 66
 armour = "cloth"                                                     # 0
@@ -61,6 +67,7 @@ actives = ["sanctuary", "haste", "thunderclap"]                      # 10 + 8 + 
 
 [[build]]
 name = "captain"
+blurb = "Leads from the front: a sword, a crossbow and a standard that lets five companions follow instead of three."
 frame = "striker"
 attributes = { str = 20, agi = 20, con = 20, int = 11, spr = 20 }  # 66
 armour = "mail"                                                      # 8

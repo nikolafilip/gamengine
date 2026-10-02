@@ -251,6 +251,7 @@ pub fn play(m: Match) -> Outcome {
                 stall_tile: None,
                 aim: Default::default(),
                 report_after_ticks: 0,
+                say: None,
             };
             let report = run_bot(
                 &endpoint,

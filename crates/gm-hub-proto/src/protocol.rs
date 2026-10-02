@@ -35,6 +35,9 @@ pub struct CharacterSummary {
     pub name: String,
     pub build: Build,
     pub location: LocationSummary,
+    /// The zone its saved position belongs to: where `Enter` with no zone named takes it
+    /// (CLIENT.md 7). `None` for a character that has never been in one.
+    pub last_zone: Option<ZoneId>,
     pub play_seconds: u32,
     /// The model the character wears (MODELS.md 6), whatever its status.
     pub model: Option<ModelId>,
@@ -364,6 +367,12 @@ pub struct ZoneSummary {
     pub id: ZoneId,
     pub map: String,
     pub players: u32,
+    /// How many clients it takes; whether a browser can reach it; what it asks of a
+    /// character (a trust tier, one of these trials).
+    pub max_players: u32,
+    pub web: bool,
+    pub min_trust: i16,
+    pub requires: Vec<String>,
     pub addr: SocketAddr,
     /// FNV-1a 64 of the zone's certificate DER.
     pub cert_hash: u64,
@@ -430,11 +439,18 @@ pub enum HubRequest {
     ListZones {
         session: SessionId,
     },
+    /// The content pack a zone would send (abilities and preset builds): what a client
+    /// shows when a character is made, before any zone is entered (CLIENT.md 4.3).
+    Content {
+        session: SessionId,
+    },
     /// The trials a character of the session's account has passed (COMPANIONS.md 11).
     Trials {
         session: SessionId,
         character: CharacterId,
     },
+    /// A ticket for `zone`; an empty name asks for the zone the character was last in
+    /// if it is up, else the hub's start zone (CLIENT.md 7).
     Enter {
         session: SessionId,
         character: CharacterId,
@@ -458,6 +474,8 @@ pub enum HubRequest {
         /// Trials that open this zone: a character must have passed one of them to be let
         /// in (COMPANIONS.md 11); empty = open to all.
         requires: Vec<String>,
+        /// How many clients the zone takes: the hub sends nobody to a full one.
+        max_players: u32,
     },
     Heartbeat {
         players: u32,
@@ -475,6 +493,9 @@ pub enum HubRequest {
         character: CharacterId,
         state: CharacterState,
         to_zone: ZoneId,
+        /// The traveller's client is a browser: a zone without a web listener is not
+        /// somewhere it can follow its character to.
+        web: bool,
     },
     /// A character playing in this zone passed a trial (COMPANIONS.md 11).
     Trial {
@@ -541,6 +562,12 @@ pub enum HubRequest {
         reporter: CharacterId,
         target: CharacterId,
         reason: ReportReason,
+    },
+    /// This zone has no body for a character it claimed (it is full after all, the build
+    /// is not valid here, the client went away): the character is offline again, as it
+    /// came, and nothing else about it is written (HUB.md 3.8).
+    Release {
+        character: CharacterId,
     },
 }
 
@@ -824,6 +851,12 @@ pub enum HubResponse {
     /// `(trial key, best time in seconds)`.
     Trials(Vec<(String, u32)>),
     Zones(Vec<ZoneSummary>),
+    /// The content pack, and what each of its preset builds is in plain words, in the
+    /// pack's order (CLIENT.md 4.3).
+    Content {
+        pack: gm_core::build::ContentPack,
+        blurbs: Vec<String>,
+    },
     Ticket(ZoneTicket),
     ReplayStored {
         id: i64,
@@ -901,6 +934,16 @@ pub const TOKEN_VALID_SECS: u64 = 60;
 pub const CLOCK_SKEW_SECS: u64 = 5;
 pub const TRANSIT_ABANDON_SECS: u64 = 15;
 pub const SESSION_SECS: u64 = 24 * 3600;
+/// A session ends this many of its idle lifetimes after the login, however much it is
+/// used (thirty days), and an account has at most this many at once.
+pub const SESSION_LIFETIMES: u32 = 30;
+pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
+/// The version of the hub's messages (HUB.md 3: `HubRequest`, `HubResponse` and what they
+/// carry); any change to them is a new one. A stream that speaks them begins with it, in
+/// a frame of one byte, and the hub answers with its own before anything else: zones,
+/// tools and bots of another build are told so instead of being garbled at.
+pub const HUB_VERSION: u8 = 6;
+pub const HUB_PREAMBLE: [u8; 3] = [0, 1, HUB_VERSION];
 pub const HUB_BIDI_STREAMS: u32 = 1024;
 /// Password hashes running at once; more answer `Busy`.
 pub const HASH_PERMITS: usize = 8;

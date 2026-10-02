@@ -678,6 +678,16 @@ impl Conduct {
         .fetch_all(&mut *tx)
         .await
         .map_err(internal)?;
+        // Those on their way somewhere are nowhere from now on: a ticket in hand opens
+        // no door (the claim asks again), and its character is not left between two.
+        sqlx::query(
+            "update characters set location_kind = 'offline', location_zone = null, transit_to = null, \
+             transit_since = null, updated = now() where account_id = $1 and location_kind = 'transit'",
+        )
+        .bind(account)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
         tx.commit().await.map_err(internal)?;
         let mut kicked = Vec::new();
         for r in rows {

@@ -32,6 +32,7 @@ async fn zone(addr: std::net::SocketAddr, cert: &[u8], id: &str) -> HubClient {
             web: None,
             min_trust: 0,
             requires: Vec::new(),
+            max_players: 64,
         })
         .await
         .unwrap();
@@ -152,6 +153,8 @@ async fn the_economy_over_the_wire() {
             models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
             ingest: gm_hub::IngestMode::InProcess,
             ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
+            start_zone: None,
+            blurbs: Vec::new(),
         },
         db.clone(),
         endpoint,

@@ -97,6 +97,7 @@ async fn start_zone(
         web: web.as_ref().map(|(_, addr)| addr.clone()),
         min_trust: 0,
         requires: Vec::new(),
+        max_players: 64,
     })
     .await
     .expect("zone registers");
@@ -148,6 +149,8 @@ async fn login_zone_handoff_logout_round_trip() {
         models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
         ingest: gm_hub::IngestMode::InProcess,
         ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
+        start_zone: None,
+        blurbs: Vec::new(),
     };
     // Browsers reach the hub through a WebTransport listener beside the QUIC endpoint.
     let (hub_web_endpoint, hub_web) = gm_net::link::web_listener(
@@ -207,6 +210,7 @@ async fn login_zone_handoff_logout_round_trip() {
             stall_tile: None,
             aim: Default::default(),
             report_after_ticks: 0,
+            say: None,
         },
         play: Duration::from_secs(7),
         list_for_hire: None,
@@ -371,11 +375,12 @@ async fn login_zone_handoff_logout_round_trip() {
         .unwrap();
     hub.close();
 
-    // WEB.md 7: what a browser does, without a browser. The same requests on the streams of
-    // a WebTransport session to the hub's web listener; the ticket names the zone's web
-    // listener; the zone is entered through it; a zone without one gives a ticket without.
+    // WEB.md 7: what a browser does, without a browser. The players' messages (HUB.md 3.8)
+    // on the streams of a WebTransport session to the hub's web listener; the ticket names
+    // the zone's web listener; the zone is entered through it; a zone without one is
+    // refused to a browser.
     {
-        use gm_hub::protocol::{HubRequest, HubResponse};
+        use gm_hub::player::{self, PlayerRequest as HubRequest, PlayerResponse as HubResponse};
         use gm_net::control;
         let (_endpoint, hub) =
             gm_net::link::web_connect(&hub_web, gm_net::transport::hub_transport_config())
@@ -383,8 +388,12 @@ async fn login_zone_handoff_logout_round_trip() {
                 .expect("WebTransport session to the hub");
         let ask = async |req: HubRequest| -> HubResponse {
             let (mut send, mut recv) = hub.open_bi().await.expect("stream");
+            send.write_all(&player::PREAMBLE).await.expect("preamble");
             control::send_any(&mut send, &req).await.expect("request");
             let _ = send.finish();
+            // The hub's version of the players' messages first, then its answer.
+            let version = control::recv_frame(&mut recv).await.expect("version");
+            assert_eq!(version.as_deref(), Some(&[player::PLAYER_VERSION][..]));
             control::recv_any(&mut recv)
                 .await
                 .expect("response")
@@ -409,18 +418,20 @@ async fn login_zone_handoff_logout_round_trip() {
             HubResponse::Character(c) => c.id,
             other => panic!("{other:?}"),
         };
-        let plain = match ask(HubRequest::Enter {
+        // A zone without a web listener is not somewhere a browser is sent: the hub says
+        // so, and no transit is left hanging.
+        match ask(HubRequest::Enter {
             session,
             character,
             zone: "arena-a".into(),
         })
         .await
         {
-            HubResponse::Ticket(t) => t,
+            HubResponse::Err(gm_hub::protocol::HubError::Invalid(why)) => {
+                assert!(why.contains("browser"), "{why}")
+            }
             other => panic!("{other:?}"),
-        };
-        assert!(plain.web.is_none(), "arena-a has no web listener");
-        // That ticket is never used: the transit is given up by logging out and in again.
+        }
         assert!(matches!(
             ask(HubRequest::Logout { session }).await,
             HubResponse::Ok
@@ -465,6 +476,7 @@ async fn login_zone_handoff_logout_round_trip() {
                 stall_tile: None,
                 aim: Default::default(),
                 report_after_ticks: 0,
+                say: None,
             },
             bitcode::encode(&ticket.token),
             move |_| Ok(bsp.clone()),

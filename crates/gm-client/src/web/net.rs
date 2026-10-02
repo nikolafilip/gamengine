@@ -133,6 +133,16 @@ impl NetClient {
         }
     }
 
+    /// Begin to say goodbye without waiting for it: here that is all `close` ever does.
+    pub fn hang_up(&mut self) {
+        self.close();
+    }
+
+    /// Whether the connection has ended: nothing here is waited for.
+    pub fn gone(&self) -> bool {
+        true
+    }
+
     /// Everything that arrived since the last call.
     pub fn poll(&self) -> Vec<NetEvent> {
         let mut s = self.shared.borrow_mut();

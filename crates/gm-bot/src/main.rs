@@ -37,6 +37,9 @@ struct Args {
     aims: Vec<gm_bot::AimModel>,
     /// The first bot reports the first enemy it sees after this many seconds (0 = never).
     report_after: u64,
+    /// The first bot says this line in the zone's chat, every `say_every` seconds.
+    say: Option<String>,
+    say_every: u64,
     /// Play through the hub instead of connecting to a zone directly.
     hub: Option<SocketAddr>,
     hub_cert: PathBuf,
@@ -55,7 +58,7 @@ struct Args {
 }
 
 const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:PORT [--web-cert SHA256HEX]) [--map PATH] [--bots N] [--secs N] \
-[--behaviour wander|hunter|hold|duelist|stroll|raid] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick] [--aim brain|hand|lock|flick,...] [--report-after SECS]\n\
+[--behaviour wander|hunter|hold|duelist|stroll|raid] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick] [--aim brain|hand|lock|flick,...] [--report-after SECS] [--say TEXT [--say-every SECS]]\n\
        gm-bot --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME --zone ID \
 [--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...] \
 [--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall] \
@@ -78,6 +81,8 @@ fn parse_args() -> Result<Args, String> {
         counter_pick: false,
         aims: Vec::new(),
         report_after: 0,
+        say: None,
+        say_every: 5,
         hub: None,
         hub_cert: PathBuf::from("hub-cert.der"),
         user: String::new(),
@@ -147,6 +152,12 @@ fn parse_args() -> Result<Args, String> {
                             .ok_or_else(|| format!("--aim: {m} is not brain, hand, lock or flick"))
                     })
                     .collect::<Result<_, _>>()?
+            }
+            "--say" => a.say = Some(value("--say")?),
+            "--say-every" => {
+                a.say_every = value("--say-every")?
+                    .parse()
+                    .map_err(|e| format!("--say-every: {e}"))?
             }
             "--report-after" => {
                 a.report_after = value("--report-after")?
@@ -297,6 +308,7 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         0
                     },
+                    say: say_of(&args, i),
                 },
                 play: Duration::from_secs(args.secs),
                 list_for_hire: args.list_for_hire,
@@ -336,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
                 rep.own_deaths
             );
         }
+        print_heard(&reports);
         for rep in reports
             .iter()
             .filter(|r| r.squad_max > 0 || !r.cleared.is_empty())
@@ -444,6 +457,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 0
             },
+            say: say_of(&args, i),
         };
         let secs = args.secs;
         let web = web.clone();
@@ -503,6 +517,7 @@ async fn main() -> anyhow::Result<()> {
         reports.iter().map(|r| r.own_kills).sum::<u32>(),
         reports.iter().map(|r| r.own_deaths).sum::<u32>()
     );
+    print_heard(&reports.iter().collect::<Vec<_>>());
     for r in reports
         .iter()
         .filter(|r| r.squad_max > 0 || !r.cleared.is_empty())
@@ -516,6 +531,23 @@ async fn main() -> anyhow::Result<()> {
         println!("respecs {respecs}; final builds {finals:?}");
     }
     Ok(())
+}
+
+/// What bot `i` says in the chat, and every how many seconds: the first bot only.
+fn say_of(args: &Args, i: usize) -> Option<(String, f32)> {
+    match (&args.say, i) {
+        (Some(line), 0) => Some((line.clone(), args.say_every.max(1) as f32)),
+        _ => None,
+    }
+}
+
+/// What the bots heard in the chat: one line each, for whoever scripted the run.
+fn print_heard(reports: &[&gm_bot::BotReport]) {
+    for r in reports {
+        for (from, text) in &r.heard {
+            println!("heard: {} from {from}: {text}", r.name);
+        }
+    }
 }
 
 /// The aim model of bot `i`: the list cycled, the brain's own view without one.

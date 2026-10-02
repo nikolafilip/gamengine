@@ -21,10 +21,11 @@ use tracing::{debug, info, warn};
 
 use crate::db::Db;
 use gm_hub_proto::protocol::{
-    AccountId, BuildChoice, CharacterId, ContractOutcome, EconOp, EconReply, HASH_PERMITS,
-    HiredAvatar, HubError, HubNotice, HubRequest, HubResponse, ItemSummary, LocationSummary,
-    MAX_REPLAY_BYTES, ModOp, ModelRef, SessionId, StallSummary, TavernEntry, TradeOffer,
-    ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
+    AccountId, BuildChoice, CLOCK_SKEW_SECS, CharacterId, ContractOutcome, EconOp, EconReply,
+    HASH_PERMITS, HUB_PREAMBLE, HUB_VERSION, HiredAvatar, HubError, HubNotice, HubRequest,
+    HubResponse, ItemSummary, LocationSummary, MAX_REPLAY_BYTES, MAX_SESSIONS_PER_ACCOUNT, ModOp,
+    ModelRef, SESSION_LIFETIMES, SessionId, StallSummary, TOKEN_VALID_SECS, TavernEntry,
+    TradeOffer, ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
 };
 
 use crate::conduct::Conduct;
@@ -40,6 +41,7 @@ fn upload_body_timeout(len: u32) -> Duration {
 
 /// A zone whose last heartbeat is older than this gets no new players (HUB.md 2).
 const ZONE_STALE: Duration = Duration::from_secs(15);
+use gm_hub_proto::player::{self, PlayerRequest, PlayerResponse};
 use gm_hub_proto::token::{HubKey, TokenVerifier};
 
 pub struct HubConfig {
@@ -60,10 +62,20 @@ pub struct HubConfig {
     pub ingest: IngestMode,
     /// Wall clock of one ingestion (`models::INGEST_TIMEOUT` outside tests).
     pub ingest_timeout: Duration,
+    /// Where a character that names no zone and was in none enters (CLIENT.md 7); `None`:
+    /// the zone called `town` if there is one, else the first by name.
+    pub start_zone: Option<ZoneId>,
+    /// What each preset build of the content is, in plain words, in the content's order
+    /// (`gm_content::load_blurbs`).
+    pub blurbs: Vec<String>,
 }
 
 struct Session {
     account: AccountId,
+    /// When it was last used: a session ends `session_secs` after that.
+    seen: Instant,
+    /// When it began: it ends `SESSION_LIFETIMES` of those after that, however much it
+    /// is used (a session id that got out is not good for ever).
     created: Instant,
 }
 
@@ -73,6 +85,8 @@ struct ZoneEntry {
     web: Option<WebAddr>,
     /// The least trust tier the zone admits (ANTICHEAT.md 6).
     min_trust: i16,
+    /// How many clients it takes.
+    max_players: u32,
     map: String,
     #[allow(dead_code)]
     map_hash: u64,
@@ -110,6 +124,9 @@ struct Hub {
     conduct: Conduct,
     state: Mutex<State>,
     hashing: Semaphore,
+    /// The hash a login for an email nobody registered is checked against: of a password
+    /// nobody knows, made when the hub starts.
+    decoy_hash: String,
     /// Verifies our own tokens on `Claim` (defence in depth; the zone verified too).
     verifier: Mutex<HashMap<ZoneId, TokenVerifier>>,
 }
@@ -145,8 +162,18 @@ pub async fn run_with_web(
         cfg.ingest_timeout,
     )?;
     let conduct = Conduct::new(db.pool().clone(), &cfg.models_dir.join("replays"))?;
+    let decoy_hash = {
+        let (mut secret, mut salt) = ([0u8; 32], [0u8; 16]);
+        rand::fill(&mut secret);
+        rand::fill(&mut salt);
+        Argon2::default()
+            .hash_password_with_salt(&secret, &salt)
+            .map(|h: PasswordHash| h.to_string())
+            .map_err(|e| anyhow::anyhow!("hashing: {e}"))?
+    };
     let hub = Arc::new(Hub {
         conduct,
+        decoy_hash,
         hashing: Semaphore::new(HASH_PERMITS),
         verifier: Mutex::new(HashMap::new()),
         models,
@@ -179,6 +206,17 @@ pub async fn run_with_web(
                 if let Err(e) = hub.econ.contracts_expire().await {
                     warn!("contract sweep: {e}");
                 }
+                // A ticket nobody used: its character is offline again (HUB.md 3.8).
+                match hub
+                    .db
+                    .sweep_transits(TOKEN_VALID_SECS + CLOCK_SKEW_SECS)
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(n) => info!(characters = n, "transits nobody arrived from ended"),
+                    Err(e) => warn!("transit sweep: {e}"),
+                }
+                hub.sweep_sessions();
                 // Replays past their retention go (ANTICHEAT.md 3.3).
                 match hub.conduct.sweep().await {
                     Ok(0) => {}
@@ -280,6 +318,9 @@ async fn handle_connection(hub: Arc<Hub>, conn: Link) {
     }
 }
 
+/// How long a stream may take to say what it wants.
+const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(15);
+
 async fn handle_stream(
     hub: Arc<Hub>,
     auth: Arc<ConnAuth>,
@@ -288,9 +329,46 @@ async fn handle_stream(
     mut send: SendHalf,
     mut recv: RecvHalf,
 ) -> anyhow::Result<()> {
-    let req: HubRequest = match control::recv_any(&mut recv).await? {
-        Some(r) => r,
-        None => return Ok(()),
+    // What a stream begins with says what it speaks (HUB.md 3, 3.8): a frame of one byte,
+    // the version of the hub's messages (zones, tools, bots); or an empty frame and then
+    // the version of the players' messages. The hub's own version goes back before
+    // anything else: a peer of another build learns that much whatever else changed. A
+    // stream that says nothing for a while is dropped.
+    let head = async {
+        let Some(first) = control::recv_frame(&mut recv).await? else {
+            return Ok(None);
+        };
+        let player = first.is_empty();
+        let (version, ours, preamble) = if player {
+            let Some(version) = control::recv_frame(&mut recv).await? else {
+                return Ok(None);
+            };
+            (version, player::PLAYER_VERSION, &player::HUB_PREAMBLE)
+        } else {
+            (first, HUB_VERSION, &HUB_PREAMBLE)
+        };
+        send.write_all(preamble).await?;
+        if version != [ours] {
+            return Ok(None);
+        }
+        let Some(payload) = control::recv_frame(&mut recv).await? else {
+            return Ok(None);
+        };
+        let req: HubRequest = if player {
+            bitcode::decode::<PlayerRequest>(&payload)
+                .map_err(control::ControlError::from)?
+                .into()
+        } else {
+            bitcode::decode(&payload).map_err(control::ControlError::from)?
+        };
+        anyhow::Ok(Some((req, player)))
+    };
+    let Some((req, player)) = tokio::time::timeout(REQUEST_HEAD_TIMEOUT, head)
+        .await
+        .map_err(|_| anyhow::anyhow!("{remote}: a stream that asked nothing"))??
+    else {
+        let _ = send.finish();
+        return Ok(());
     };
     // Requests that carry or are answered with raw bytes on the stream (MODELS.md 6.2).
     let resp = match req {
@@ -313,7 +391,7 @@ async fn handle_stream(
                 hub.models.get(session, account, &model).await
             }
             .await;
-            return send_blob(&mut send, blob).await;
+            return send_blob(&mut send, blob, player).await;
         }
         // A zone's replay: the summary, then the file (ANTICHEAT.md 3.3).
         HubRequest::ZoneReplay { summary, len } => {
@@ -349,7 +427,7 @@ async fn handle_stream(
                 hub.conduct.replay_get(moderator, id).await
             }
             .await;
-            return send_blob(&mut send, blob).await;
+            return send_blob(&mut send, blob, false).await;
         }
         HubRequest::Mod {
             session,
@@ -360,35 +438,47 @@ async fn handle_stream(
                 hub.models.preview(&model)
             }
             .await;
-            return send_blob(&mut send, blob).await;
+            return send_blob(&mut send, blob, false).await;
         }
         req => match handle(&hub, &auth, &conn, remote, req).await {
             Ok(r) => r,
             Err(e) => HubResponse::Err(e),
         },
     };
-    control::send_any(&mut send, &resp).await?;
+    answer(&mut send, resp, player).await?;
     let _ = send.finish();
     Ok(())
+}
+
+/// Write the answer in the encoding the request came in.
+async fn answer(
+    send: &mut quinn::SendStream,
+    resp: HubResponse,
+    player: bool,
+) -> Result<(), control::ControlError> {
+    if player {
+        // An answer no player's request has would be this hub's own mistake.
+        let resp =
+            PlayerResponse::try_from(resp).unwrap_or(PlayerResponse::Err(HubError::Internal));
+        control::send_any(send, &resp).await
+    } else {
+        control::send_any(send, &resp).await
+    }
 }
 
 /// Answer with `Blob { len }` and the bytes, or with the error.
 async fn send_blob(
     send: &mut quinn::SendStream,
     blob: Result<Vec<u8>, HubError>,
+    player: bool,
 ) -> anyhow::Result<()> {
     match blob {
         Ok(bytes) => {
-            control::send_any(
-                send,
-                &HubResponse::Blob {
-                    len: bytes.len() as u32,
-                },
-            )
-            .await?;
+            let len = bytes.len() as u32;
+            answer(send, HubResponse::Blob { len }, player).await?;
             send.write_all(&bytes).await?;
         }
-        Err(e) => control::send_any(send, &HubResponse::Err(e)).await?,
+        Err(e) => answer(send, HubResponse::Err(e), player).await?,
     }
     let _ = send.finish();
     Ok(())
@@ -421,24 +511,61 @@ async fn upload(
 }
 
 impl Hub {
+    /// Whether a session has run out: idle for too long, or too old.
+    fn expired(&self, s: &Session) -> bool {
+        let ttl = Duration::from_secs(self.cfg.session_secs);
+        s.seen.elapsed() >= ttl || s.created.elapsed() >= ttl * SESSION_LIFETIMES
+    }
+
     fn session_account(&self, session: SessionId) -> Result<AccountId, HubError> {
         let mut st = self.state.lock().unwrap();
-        let ttl = Duration::from_secs(self.cfg.session_secs);
-        st.sessions.retain(|_, s| s.created.elapsed() < ttl);
-        st.sessions
-            .get(&session)
-            .map(|s| s.account)
-            .ok_or(HubError::Unauthorized)
+        // A session that is used lives on: a client left in a zone overnight still has
+        // one in the morning.
+        match st.sessions.get_mut(&session) {
+            Some(s) if !self.expired(s) => {
+                s.seen = Instant::now();
+                Ok(s.account)
+            }
+            Some(_) => {
+                st.sessions.remove(&session);
+                Err(HubError::Unauthorized)
+            }
+            None => Err(HubError::Unauthorized),
+        }
+    }
+
+    /// Sessions that have run out are forgotten (once a minute, by the sweeper).
+    fn sweep_sessions(&self) {
+        let mut st = self.state.lock().unwrap();
+        let before = st.sessions.len();
+        st.sessions.retain(|_, s| !self.expired(s));
+        let gone = before - st.sessions.len();
+        if gone > 0 {
+            debug!(gone, "sessions ended");
+        }
     }
 
     fn new_session(&self, account: AccountId) -> SessionId {
         let mut id = [0u8; 16];
         rand::fill(&mut id);
         let id = SessionId(id);
-        self.state.lock().unwrap().sessions.insert(
+        let mut st = self.state.lock().unwrap();
+        // An account has so many sessions at once: the one used longest ago gives way.
+        let mut own: Vec<(SessionId, Instant)> = st
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.account == account)
+            .map(|(id, s)| (*id, s.seen))
+            .collect();
+        own.sort_by_key(|(_, seen)| *seen);
+        while own.len() >= MAX_SESSIONS_PER_ACCOUNT {
+            st.sessions.remove(&own.remove(0).0);
+        }
+        st.sessions.insert(
             id,
             Session {
                 account,
+                seen: Instant::now(),
                 created: Instant::now(),
             },
         );
@@ -490,13 +617,54 @@ impl Hub {
         Ok(build)
     }
 
-    fn zone_live(&self, zone: &ZoneId) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .zones
-            .get(zone)
-            .is_some_and(|z| z.last_heartbeat.elapsed() < ZONE_STALE)
+    /// The zones an `Enter` that names none may go to, best first: where the character was,
+    /// the start zone, `town`, then whatever else is up, by name. Only zones that are up;
+    /// from a browser, only zones a browser can reach. (Whether one has room is asked of
+    /// each in turn, `zone_open`: a heartbeat's count is seconds old.)
+    fn default_zones(&self, last: Option<&str>, web: bool) -> Vec<ZoneId> {
+        let st = self.state.lock().unwrap();
+        let open = |id: &str| {
+            st.zones.get(id).is_some_and(|z| {
+                z.last_heartbeat.elapsed() < ZONE_STALE && (!web || z.web.is_some())
+            })
+        };
+        let mut order: Vec<ZoneId> = [last, self.cfg.start_zone.as_deref(), Some("town")]
+            .into_iter()
+            .flatten()
+            .map(str::to_string)
+            .collect();
+        let mut rest: Vec<&ZoneId> = st.zones.keys().collect();
+        rest.sort();
+        order.extend(rest.into_iter().cloned());
+        let mut seen = std::collections::HashSet::new();
+        order
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()) && open(id))
+            .collect()
+    }
+
+    /// Whether a client may be sent to `zone` now: it is up, it has room (counted from the
+    /// characters the database has in it: a heartbeat is seconds old), and a browser can
+    /// reach it if the client is one.
+    async fn zone_open(&self, zone: &ZoneId, web: bool) -> Result<(), HubError> {
+        let max_players = {
+            let st = self.state.lock().unwrap();
+            let z = st
+                .zones
+                .get(zone)
+                .filter(|z| z.last_heartbeat.elapsed() < ZONE_STALE)
+                .ok_or(HubError::NotFound)?;
+            if web && z.web.is_none() {
+                return Err(HubError::Invalid(
+                    "that zone cannot be reached from a browser".into(),
+                ));
+            }
+            z.max_players
+        };
+        if self.db.zone_population(zone).await? >= max_players as i64 {
+            return Err(HubError::Full);
+        }
+        Ok(())
     }
 
     /// The gate of a zone (COMPANIONS.md 11): a character that passed none of the trials the
@@ -656,8 +824,10 @@ async fn handle(
                 return Err(HubError::Busy);
             }
             let email = normalize_email(&email)?;
-            if password.len() < 8 || password.len() > 256 {
-                return Err(HubError::Invalid("password must be 8..=256 bytes".into()));
+            if password.chars().count() < 8 || password.len() > 256 {
+                return Err(HubError::Invalid(
+                    "a password is 8 characters or more, and 256 bytes at most".into(),
+                ));
             }
             let _permit = hub.hashing.try_acquire().map_err(|_| HubError::Busy)?;
             let hash = tokio::task::spawn_blocking(move || {
@@ -680,8 +850,12 @@ async fn handle(
                 return Err(HubError::Busy);
             }
             let email = normalize_email(&email)?;
-            let Some((account, hash)) = hub.db.account_by_email(&email).await? else {
-                return Err(HubError::Credentials);
+            // An email nobody registered costs what a wrong password costs: the answer's
+            // time does not say which accounts exist.
+            let found = hub.db.account_by_email(&email).await?;
+            let (account, hash) = match found {
+                Some((account, hash)) => (Some(account), hash),
+                None => (None, hub.decoy_hash.clone()),
             };
             let _permit = hub.hashing.try_acquire().map_err(|_| HubError::Busy)?;
             let ok = tokio::task::spawn_blocking(move || {
@@ -695,9 +869,9 @@ async fn handle(
             })
             .await
             .map_err(|_| HubError::Internal)?;
-            if !ok {
+            let Some(account) = account.filter(|_| ok) else {
                 return Err(HubError::Credentials);
-            }
+            };
             // A banned account is told why and until when (ANTICHEAT.md 6), after the
             // password: the reason is the account's own business.
             hub.conduct.check(account).await?;
@@ -726,9 +900,15 @@ async fn handle(
             build,
         } => {
             let account = hub.session_account(session)?;
-            let name = valid_name(&name).ok_or_else(|| HubError::Invalid("name".into()))?;
+            // What every client can draw, and no name another could be taken for.
+            let name = gm_hub_proto::names::character_name(&name)
+                .map_err(|why| HubError::Invalid(why.into()))?;
+            let key = gm_hub_proto::names::skeleton(&name);
             let build = hub.resolve_build(build)?;
-            let row = hub.db.create_character(account, &name, &build).await?;
+            let row = hub
+                .db
+                .create_character(account, &name, &key, &build)
+                .await?;
             Ok(HubResponse::Character(row.summary()))
         }
         HubRequest::SetBuild {
@@ -741,6 +921,16 @@ async fn handle(
             hub.db.set_build(account, character, &build).await?;
             Ok(HubResponse::Ok)
         }
+        HubRequest::Content { session } => {
+            hub.session_account(session)?;
+            // A blurb for every preset, whatever the configuration gave.
+            let mut blurbs = hub.cfg.blurbs.clone();
+            blurbs.resize(hub.cfg.content.builds.len(), String::new());
+            Ok(HubResponse::Content {
+                pack: hub.cfg.content.clone(),
+                blurbs,
+            })
+        }
         HubRequest::ListZones { session } => {
             hub.session_account(session)?;
             let st = hub.state.lock().unwrap();
@@ -752,6 +942,10 @@ async fn handle(
                     id: id.clone(),
                     map: z.map.clone(),
                     players: z.players,
+                    max_players: z.max_players,
+                    web: z.web.is_some(),
+                    min_trust: z.min_trust,
+                    requires: z.requires.clone(),
                     addr: z.addr,
                     cert_hash: fnv1a64(&z.cert_der),
                     up_secs: z.since.elapsed().as_secs(),
@@ -766,18 +960,48 @@ async fn handle(
             zone,
         } => {
             let account = hub.session_account(session)?;
-            if !hub.zone_live(&zone) {
-                return Err(HubError::NotFound);
-            }
-            if hub
+            let row = hub
                 .db
                 .character(character)
                 .await?
-                .is_none_or(|r| r.account_id != account)
-            {
-                return Err(HubError::NotFound);
-            }
-            hub.gate(&zone, character).await?;
+                .filter(|r| r.account_id == account)
+                .ok_or(HubError::NotFound)?;
+            // A build the content no longer takes is refused here, in words, and not at a
+            // zone's door after the claim.
+            row.build.validate(&hub.cfg.content).map_err(|e| {
+                HubError::Invalid(format!("this character's build is no longer valid: {e}"))
+            })?;
+            let web = conn.is_web();
+            let zone = if zone.is_empty() {
+                // Where it was, else the start zone, else whatever will have it: the
+                // first of them whose gate the character passes. With none, the refusal
+                // of the first is the one to tell.
+                let mut refusal = HubError::NotFound;
+                let mut found = None;
+                for (i, candidate) in hub
+                    .default_zones(row.pos_zone.as_deref(), web)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let open = match hub.zone_open(&candidate, web).await {
+                        Ok(()) => hub.gate(&candidate, character).await,
+                        Err(e) => Err(e),
+                    };
+                    match open {
+                        Ok(()) => {
+                            found = Some(candidate);
+                            break;
+                        }
+                        Err(e) if i == 0 => refusal = e,
+                        Err(_) => {}
+                    }
+                }
+                found.ok_or(refusal)?
+            } else {
+                hub.zone_open(&zone, web).await?;
+                hub.gate(&zone, character).await?;
+                zone
+            };
             hub.db.begin_enter(account, character, &zone).await?;
             Ok(HubResponse::Ticket(
                 hub.ticket_for(&zone, account, character)?,
@@ -785,7 +1009,15 @@ async fn handle(
         }
         HubRequest::Logout { session } => {
             let account = hub.session_account(session)?;
-            hub.state.lock().unwrap().sessions.remove(&session);
+            let others = {
+                let mut st = hub.state.lock().unwrap();
+                st.sessions.remove(&session);
+                st.sessions.values().any(|s| s.account == account)
+            };
+            // The account is logged in somewhere else too: that client's play goes on.
+            if others {
+                return Ok(HubResponse::Ok);
+            }
             // Characters still in a zone are kicked there and go offline here.
             let rows = hub.db.characters_of(account).await?;
             let in_zone: Vec<(CharacterId, ZoneId)> = rows
@@ -863,6 +1095,7 @@ async fn handle(
             web,
             min_trust,
             requires,
+            max_players,
         } => {
             if secret != hub.cfg.zone_secret || hub.cfg.zone_secret.is_empty() {
                 warn!(%remote, %zone, "zone hello with a wrong secret");
@@ -870,6 +1103,10 @@ async fn handle(
             }
             if valid_name(&zone).is_none() {
                 return Err(HubError::Invalid("zone id".into()));
+            }
+            // (A zone that takes nobody would be full for good.)
+            if max_players == 0 {
+                return Err(HubError::Invalid("a zone takes one client at least".into()));
             }
             if requires.len() > MAX_ZONE_REQUIRES
                 || requires
@@ -892,6 +1129,7 @@ async fn handle(
                         cert_der,
                         web,
                         min_trust,
+                        max_players,
                         map: map.clone(),
                         map_hash,
                         players: 0,
@@ -964,24 +1202,43 @@ async fn handle(
                 // The saved position is on another zone's map, or there is none: spawn here.
                 state.zone = None;
             }
-            // The owner is playing this character now: every hire of it as an avatar ends
-            // (ECONOMY.md 11), and the zones its hirers play in are told.
-            for (hire, hirer) in hub.econ.end_hires_of(row.id).await.map_err(econ_err)? {
-                if let Some(z) = hub.db.zone_of(hirer).await? {
-                    hub.notify(&z, HubNotice::HireEnded { hirer, hire }).await;
+            // What follows can fail after the character has been moved here; the zone would
+            // hear "claim failed" and have nothing to give back, so the hub does.
+            let rest = async {
+                // The owner is playing this character now: every hire of it as an avatar
+                // ends (ECONOMY.md 11), and the zones its hirers play in are told.
+                for (hire, hirer) in hub.econ.end_hires_of(row.id).await.map_err(econ_err)? {
+                    if let Some(z) = hub.db.zone_of(hirer).await? {
+                        hub.notify(&z, HubNotice::HireEnded { hirer, hire }).await;
+                    }
+                }
+                let squad = hub
+                    .hired(row.id, row.build.squad_capacity(&hub.cfg.content))
+                    .await?;
+                Ok::<_, HubError>((squad, hub.models.worn(row.id).await?))
+            }
+            .await;
+            match rest {
+                Ok((squad, model)) => Ok(HubResponse::Claimed {
+                    character: row.id,
+                    name: row.name.clone(),
+                    state,
+                    team: 0,
+                    model,
+                    squad,
+                }),
+                Err(e) => {
+                    let _ = hub.db.release(row.id, &zone).await;
+                    Err(e)
                 }
             }
-            let squad = hub
-                .hired(row.id, row.build.squad_capacity(&hub.cfg.content))
-                .await?;
-            Ok(HubResponse::Claimed {
-                character: row.id,
-                name: row.name.clone(),
-                state,
-                team: 0,
-                model: hub.models.worn(row.id).await?,
-                squad,
-            })
+        }
+        HubRequest::Release { character } => {
+            let zone = hub.zone_of_conn(auth)?;
+            if hub.db.release(character, &zone).await? {
+                info!(%zone, character, "a character the zone had no body for is offline again");
+            }
+            Ok(HubResponse::Ok)
         }
         HubRequest::Save {
             character,
@@ -1005,14 +1262,14 @@ async fn handle(
             character,
             state,
             to_zone,
+            web,
         } => {
             let zone = hub.zone_of_conn(auth)?;
             if to_zone == zone {
                 return Err(HubError::Invalid("already there".into()));
             }
-            if !hub.zone_live(&to_zone) {
-                return Err(HubError::NotFound);
-            }
+            // (The zone says whether its traveller is a browser.)
+            hub.zone_open(&to_zone, web).await?;
             state
                 .build
                 .validate(&hub.cfg.content)

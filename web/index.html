@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gamengine</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #101014; color: #d8d8e0; font: 14px/1.4 monospace; overflow: hidden; }
+  html, body, #stage { margin: 0; height: 100%; background: #101014; color: #d8d8e0; font: 14px/1.4 monospace; overflow: hidden; }
   #gm-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none; }
   #panel { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 21em; padding: 1.2em 1.4em;
            background: #1a1a22; border: 1px solid #3a3a4a; z-index: 2; }
@@ -14,6 +14,7 @@
   #panel input[type=text], #panel input[type=email], #panel input[type=password] {
     width: 100%; box-sizing: border-box; padding: .35em; background: #101014; color: #e8e8f0; border: 1px solid #3a3a4a; font: inherit; }
   #panel .row { display: flex; gap: .6em; margin-top: 1em; }
+  #notice { margin: .8em 0 0; min-height: 1.4em; color: #ffb060; }
   button { padding: .4em .9em; background: #2c2c3c; color: #e8e8f0; border: 1px solid #50506a; font: inherit; cursor: pointer; }
   button:hover { background: #3a3a50; }
   #status { position: fixed; left: 12px; bottom: 10px; z-index: 3; text-shadow: 0 0 3px #000; white-space: pre-wrap; max-width: 90vw; }
@@ -24,19 +25,24 @@
 </style>
 </head>
 <body>
+<!-- Everything a person looks at is inside the stage: fullscreen takes the stage, so the
+     form and the status line are still there when the client asks for them. -->
+<div id="stage">
 <canvas id="gm-canvas" tabindex="0"></canvas>
 <form id="panel" hidden>
   <h1>gamengine</h1>
   <label for="user">email</label><input id="user" type="email" autocomplete="username" required>
-  <label for="password">password</label><input id="password" type="password" autocomplete="current-password" required>
-  <label for="character">character</label><input id="character" type="text" required maxlength="24">
-  <label for="zone">zone</label><input id="zone" type="text" value="town">
-  <label for="build">build of a new character</label><input id="build" type="text" value="blade">
-  <label><input id="register" type="checkbox"> new account</label>
-  <div class="row"><button type="submit">enter</button><button type="button" id="offline">walk around offline</button></div>
+  <label for="password">password</label><input id="password" type="password" autocomplete="current-password" required minlength="8" maxlength="256">
+  <div id="again-row" hidden>
+    <label for="again">password again</label><input id="again" type="password" autocomplete="new-password" minlength="8" maxlength="256">
+  </div>
+  <label><input id="register" type="checkbox"> new account (the address is only a name here: no mail is sent, and a lost password stays lost)</label>
+  <p id="notice" aria-live="polite"></p>
+  <div class="row"><button type="submit" id="enter">log in</button><button type="button" id="offline">walk around offline</button></div>
 </form>
-<div id="status"></div>
+<div id="status" role="status"></div>
 <button id="fullscreen" type="button" hidden>fullscreen</button>
+</div>
 <script type="module" src="boot.js"></script>
 </body>
 </html>

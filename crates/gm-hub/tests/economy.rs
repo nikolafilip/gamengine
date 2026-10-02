@@ -60,7 +60,7 @@ async fn account_with_character(econ: &Economy) -> (i64, i64) {
 
 async fn character_of(econ: &Economy, account: i64) -> i64 {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    sqlx::query("insert into characters (account_id, name, build) values ($1, $2, '{}'::jsonb) returning id")
+    sqlx::query("insert into characters (account_id, name, name_key, build) values ($1, $2, lower($2), '{}'::jsonb) returning id")
         .bind(account)
         .bind(format!("Char{n}"))
         .fetch_one(econ_pool(econ))

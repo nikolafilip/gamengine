@@ -306,6 +306,7 @@ async fn main() -> anyhow::Result<()> {
                     web: web_addr.clone(),
                     min_trust: args.min_trust,
                     requires: args.requires.clone(),
+                    max_players: args.max_players as u32,
                 })
                 .await?,
             )

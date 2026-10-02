@@ -18,6 +18,7 @@ use gm_core::movement::{MoveInput, MoveVars, PlayerState, player_move, yaw_vecto
 use gm_core::sim::{Input as SimInput, buttons, view_dir};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Hull};
+use gm_hub_proto::player::PlayerRequest;
 use gm_model::ModelId;
 use gm_net::client::ClientState;
 use gm_net::control::{
@@ -34,20 +35,31 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::avatars::{Avatars, Body, OWN, stall_boxes, stall_keeper};
-use crate::hub::{HubLogin, HubSession, ticket_addr};
+use crate::front::{Action, Auto, Front, PANEL_UNITS};
+use crate::hub::{Account, Hub, HubApi, ticket_addr};
 use crate::hud::{self, Hud};
+use crate::menu::{Chat, GameMenu, MenuAction, Offers};
 use crate::net::{NetClient, NetEvent, ZoneAddr};
 use crate::render::{EntityDraw, Gpu, Renderer, view_proj};
+use crate::script::UiScript;
+use crate::settings::Settings;
 use crate::stats::FrameStats;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::stats::{print_bench, print_bench_avatars};
 use crate::tactical::{self, Tactical, pick_body, pick_ground, project};
+use crate::ui::{self, Key, Ui, UiInput, UiState};
 use crate::world::{self, WorldMesh};
 use crate::{Error, Options};
 
-/// Degrees per mouse count: Quake's `sensitivity 3` times `m_yaw 0.022`.
-const SENSITIVITY: f32 = 0.066;
 const MAX_STEPS_PER_FRAME: u32 = 8;
+/// Behind a screen with no zone being played, the camera turns this fast (CLIENT.md 2).
+const BACKDROP_DEG_PER_S: f32 = 4.0;
+/// While a zone is played the hub is asked something this often, so that the session is
+/// still there when the zone is left (it ends after a day of silence).
+const SESSION_TOUCH_SECS: u64 = 600;
+/// Two presses this close in time and place are a double click.
+const DOUBLE_CLICK_SECS: f32 = 0.4;
+const DOUBLE_CLICK_PIXELS: f32 = 6.0;
 const BENCH_YAW_DEG_PER_S: f32 = 20.0;
 /// With a crowd the bench camera swings across it instead of turning away from it.
 const BENCH_CROWD_SWING_DEG: f32 = 22.0;
@@ -159,18 +171,20 @@ pub(crate) struct Online {
     stalls: Vec<StallEntry>,
     kills: u32,
     deaths: u32,
+    /// The hash of the map this connection plays on: the one loaded when it began, and
+    /// from the zone's `Welcome` on the zone's (once that map is here).
     map_hash: u64,
     respec_note: String,
-    /// The hub session when playing through the hub (HUB.md); logged out on exit.
-    hub: Option<HubSession>,
     /// A travel ticket to act on: reconnect to another zone, reloading its map.
     pending_travel: Option<(String, ZoneAddr, Vec<u8>)>,
     zone_name: String,
     /// Events taken from the connection and not handled yet: while the zone's map is
     /// still on its way (a browser fetches it), everything after `Welcome` waits here.
     backlog: VecDeque<NetEvent>,
+    /// The zone's map is being fetched (a browser): its hash. It is the connection's
+    /// map only once it has arrived.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    awaiting_map: bool,
+    awaiting_map: Option<u64>,
 }
 
 /// How long a message stays on the HUD, and how many are kept.
@@ -336,8 +350,8 @@ struct App {
     bench_yaw0: f32,
     /// The aim resolved by the last third-person tick, for the HUD.
     aim: (f32, f32),
-    /// A map to switch to before the next frame (a zone change).
-    pending_map: Option<Bsp>,
+    /// A map to switch to before the next frame (a zone change), with its hash.
+    pending_map: Option<(Bsp, u64)>,
     palette: world::Palette,
     /// The script's aim (`--script fight`): the nearest living enemy as of the last frame,
     /// its id, position and velocity, and when it was seen.
@@ -365,6 +379,63 @@ struct App {
     squad_view: Vec<(Option<u16>, bool)>,
     /// The creature being fought: name, health, maximum.
     target_view: Option<(String, u16, u16)>,
+    /// The hub this client talks to, if it talks to one (CLIENT.md 2), and the session.
+    hub: Option<Hub>,
+    account: Option<Account>,
+    /// The screens before the game (CLIENT.md 4.1 to 4.3), and whether one is up.
+    front: Option<Front>,
+    front_up: bool,
+    /// A person started the client and there is no hub to talk to: the screen that says
+    /// so is up (it names the settings file, and what is wrong if a hub was named).
+    title: Option<crate::menu::Title>,
+    /// The game menu when it is open, and the chat (CLIENT.md 4.4, 5).
+    menu: Option<GameMenu>,
+    chat: Chat,
+    /// The toolkit's memory, and what happened since the last frame for it.
+    ui: UiState,
+    ui_input: UiInput,
+    /// The pointer, in pixels, and the last press (for the double click).
+    cursor: (f32, f32),
+    last_press: Option<(Instant, (f32, f32))>,
+    shift: bool,
+    /// Ctrl (or the command key) is held and Alt is not: what a shortcut is made with. (Ctrl
+    /// with Alt is how some keyboards type `@`.)
+    command: bool,
+    /// A paste on its way: the clipboard is read on a thread of its own (its owner may
+    /// take seconds to answer), and what it held is typed by the frame that finds it here.
+    #[cfg(not(target_arch = "wasm32"))]
+    pasting: Option<std::sync::mpsc::Receiver<String>>,
+    /// Zones being left: each says its goodbye on its own thread while the frames go on;
+    /// kept until it has, or for a second.
+    leaving: Vec<(NetClient, Instant)>,
+    /// When the hub last heard from this client while it plays: a session lives while it
+    /// is used (HUB.md 3.1), and a zone is played without a word to the hub.
+    hub_touched: Instant,
+    settings: Settings,
+    /// What the settings file holds: a change is written within a second (CLIENT.md 8).
+    settings_kept: Settings,
+    #[cfg(not(target_arch = "wasm32"))]
+    settings_path: Option<std::path::PathBuf>,
+    /// Somebody plays the person (CLIENT.md 9).
+    ui_script: Option<UiScript>,
+    /// Whether a screen was up in the last frame: the pointer follows the change.
+    was_up: bool,
+    /// The last frame drew the screens: a UI script acts on what was drawn, so it waits
+    /// through frames that drew nothing (a window that is covered, a surface being made).
+    ui_drawn: bool,
+    /// When the pointer was last asked for, and whether the browser had given it as of
+    /// the last frame (a browser gives and takes it by itself, WEB.md 3.4).
+    grab_asked: Option<Instant>,
+    #[cfg(target_arch = "wasm32")]
+    was_locked: bool,
+    /// What the page was last told about the screens (CLIENT.md 4.1).
+    #[cfg(target_arch = "wasm32")]
+    told: String,
+    /// The hash of the map that is loaded: what a zone's `Welcome` is compared with.
+    map_hash: u64,
+    /// The zone's connection ended and a person is at the client: the reason, for the
+    /// characters screen.
+    zone_ended: Option<String>,
 }
 
 /// A value a browser task delivers to the frame that waits for it.
@@ -375,7 +446,6 @@ type PendingSlot<T> = std::rc::Rc<std::cell::RefCell<Option<Result<T, String>>>>
 struct Entry {
     zone: ZoneAddr,
     token: Vec<u8>,
-    hub: Option<HubSession>,
     zone_name: String,
 }
 
@@ -408,34 +478,87 @@ fn online(opts: &Options, sim: &Sim, map_hash: u64, entry: Entry) -> Result<Onli
         deaths: 0,
         map_hash,
         respec_note: String::new(),
-        hub: entry.hub,
         pending_travel: None,
         zone_name: entry.zone_name,
         backlog: VecDeque::new(),
-        awaiting_map: false,
+        awaiting_map: None,
     })
 }
 
-fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, online: Option<Online>) -> App {
+/// What the command line (or the page) already said of the way in (CLIENT.md 2): with a
+/// user and a password the screens are taken by themselves as far as it reaches.
+fn auto_of(opts: &Options) -> Option<Auto> {
+    (!opts.user.is_empty()).then(|| Auto {
+        email: opts.user.clone(),
+        password: opts.password.clone(),
+        register: opts.register,
+        character: opts.character.clone(),
+        preset: opts.build.clone(),
+        zone: opts.zone.clone(),
+    })
+}
+
+/// What a client is started with besides its map (CLIENT.md 2).
+struct Start {
+    online: Option<Online>,
+    hub: Option<Hub>,
+    front: Option<Front>,
+    settings: Settings,
+    map_hash: u64,
+    ui_script: Option<UiScript>,
+}
+
+fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start) -> App {
     let mesh = world::build(&bsp, &palette);
     let faces_total = mesh
         .face_ranges
         .iter()
         .filter(|r| r.index_count > 0)
         .count();
-    let viewport = if opts.third_person {
+    let viewport = if opts.third_person || start.settings.third_person {
         Viewport::Third
     } else {
         Viewport::First
     };
     let mut app = App {
+        front_up: start.front.is_some() && start.online.is_none(),
+        title: None,
+        hub: start.hub,
+        account: None,
+        front: start.front,
+        menu: None,
+        chat: Chat::default(),
+        ui: UiState::default(),
+        ui_input: UiInput::default(),
+        cursor: (0.0, 0.0),
+        last_press: None,
+        shift: false,
+        command: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        pasting: None,
+        leaving: Vec::new(),
+        hub_touched: Instant::now(),
+        settings_kept: start.settings.clone(),
+        #[cfg(not(target_arch = "wasm32"))]
+        settings_path: None,
+        settings: start.settings,
+        ui_script: start.ui_script,
+        map_hash: start.map_hash,
+        was_up: false,
+        ui_drawn: false,
+        grab_asked: None,
+        #[cfg(target_arch = "wasm32")]
+        was_locked: false,
+        #[cfg(target_arch = "wasm32")]
+        told: String::new(),
+        zone_ended: None,
         opts,
         window: None,
         bsp,
         mesh: Some(mesh),
         active: None,
         sim,
-        online,
+        online: start.online,
         input: Input::default(),
         viewport,
         stats: FrameStats::new(),
@@ -524,71 +647,159 @@ pub fn run(mut opts: Options) -> Result<(), Error> {
     );
     let palette = world::load_palette(&opts.palette);
     let sim = Sim::at(&bsp, opts.start);
-    // Through the hub: log in and get a ticket first; the ticket names the zone, its address
-    // and its certificate. The map comes from `Welcome` and is loaded then.
-    let entry = match (opts.hub, opts.connect) {
-        (Some(hub_addr), _) => {
-            let cert_der = std::fs::read(&opts.hub_cert)
+    // A run that somebody scripted (a benchmark, a replay, a crowd) is not a person's: the
+    // person's settings do not send it to a login screen, and do not change what it
+    // measures either (a ticked "fullscreen"). It reads settings only when it names them.
+    let personal = opts.bench_frames.is_none()
+        && opts.seconds == 0.0
+        && opts.script.is_none()
+        && opts.replay.is_none()
+        && opts.crowd == 0
+        && opts.start.is_none()
+        && !opts.offline
+        && opts.connect.is_none();
+    let settings_path = match &opts.settings {
+        Some(path) => Some(path.clone()),
+        None if personal => crate::settings::default_path(),
+        None => None,
+    };
+    let settings = settings_path
+        .as_deref()
+        .map(Settings::load)
+        .unwrap_or_default();
+    // Where the hub is: the command line, else the person's settings, else what the build
+    // ships beside the program (CLIENT.md 2). `--offline` and `--connect` ask for none.
+    // A hub that is named and cannot be used is said on a screen, like one that is not
+    // named at all: nobody started this from a terminal.
+    let resolve = |hub: &str| {
+        use std::net::ToSocketAddrs;
+        hub.to_socket_addrs()
+            .ok()
+            .and_then(|mut found| found.next())
+    };
+    let read = |cert: &std::path::Path| {
+        std::fs::read(cert).map_err(|e| {
+            format!(
+                "The hub's certificate ({}) cannot be read: {e}.",
+                cert.display()
+            )
+        })
+    };
+    let named = |hub: &str, cert: std::path::PathBuf, by: &str| match resolve(hub) {
+        Some(addr) => read(&cert).map(|der| Some((addr, der))),
+        None => Err(format!("The hub {by} names ({hub}) cannot be found.")),
+    };
+    let hub_at: Result<Option<(std::net::SocketAddr, Vec<u8>)>, String> = match opts.hub {
+        // A command line that is wrong ends the program, with the reason.
+        Some(addr) => {
+            let cert = std::fs::read(&opts.hub_cert)
                 .map_err(|e| format!("reading hub certificate {}: {e}", opts.hub_cert.display()))?;
-            let (session, ticket) = HubSession::enter(HubLogin {
-                hub: ZoneAddr {
-                    addr: Some(hub_addr),
-                    cert_der,
-                    web: None,
-                },
-                email: opts.user.clone(),
-                password: opts.password.clone(),
-                register: opts.register,
-                character: opts.character.clone(),
-                new_preset: opts.build.clone(),
-                zone: opts.zone.clone(),
-            })?;
-            log::info!(
-                "hub ticket for zone {} at {} (character {})",
-                ticket.zone,
-                ticket.addr,
-                session.character
-            );
-            Some(Entry {
-                zone: ticket_addr(&ticket),
-                token: bitcode::encode(&ticket.token),
-                hub: Some(session),
-                zone_name: ticket.zone,
-            })
+            Ok(Some((addr, cert)))
         }
-        (None, Some(addr)) => {
+        None if !personal => Ok(None),
+        None if !settings.hub.is_empty() => named(
+            &settings.hub,
+            std::path::PathBuf::from(&settings.hub_cert),
+            "the settings file",
+        ),
+        None => match crate::settings::site_hub(&crate::install_root()) {
+            Some((hub, cert)) => named(&hub, cert, "this build"),
+            None => Ok(None),
+        },
+    };
+    // A person, and no hub to talk to: say so on a screen instead of walking off
+    // (CLIENT.md 2).
+    let title = match &hub_at {
+        Ok(Some(_)) => None,
+        _ if !personal => None,
+        found => Some(crate::menu::Title {
+            settings: settings_path
+                .as_deref()
+                .map_or_else(String::new, |p| p.display().to_string()),
+            why: found.as_ref().err().cloned(),
+        }),
+    };
+    let hub_at = hub_at.unwrap_or(None);
+    // The command line's password has done its work once the screens have it.
+    let auto = auto_of(&opts);
+    opts.password.clear();
+    let map_hash = fnv1a64(&map_bytes);
+    let ui_script = opts.ui_script.as_deref().map(UiScript::parse).transpose()?;
+    let start = match (hub_at, opts.connect) {
+        // Through the hub: the screens, or the command line in their place.
+        (Some((addr, cert_der)), _) if playback.is_none() => {
+            let hub = Hub::new(&ZoneAddr {
+                addr: Some(addr),
+                cert_der,
+                web: None,
+            })?;
+            let front = Front::new(
+                Box::new(hub.clone()),
+                settings.email.clone(),
+                settings.character.clone(),
+                auto,
+            );
+            Start {
+                online: None,
+                hub: Some(hub),
+                front: Some(front),
+                settings,
+                map_hash,
+                ui_script,
+            }
+        }
+        (_, Some(addr)) => {
             let cert = std::fs::read(&opts.cert)
                 .map_err(|e| format!("reading zone certificate {}: {e}", opts.cert.display()))?;
-            Some(Entry {
+            let entry = Entry {
                 zone: ZoneAddr {
                     addr: Some(addr),
                     cert_der: cert,
                     web: None,
                 },
                 token: Vec::new(),
-                hub: None,
                 zone_name: String::new(),
-            })
+            };
+            Start {
+                online: Some(online(&opts, &sim, map_hash, entry)?),
+                hub: None,
+                front: None,
+                settings,
+                map_hash,
+                ui_script,
+            }
         }
-        (None, None) => None,
-    };
-    let online = match entry {
-        Some(entry) => Some(online(&opts, &sim, fnv1a64(&map_bytes), entry)?),
-        None => None,
+        _ => Start {
+            online: None,
+            hub: None,
+            front: None,
+            settings,
+            map_hash,
+            ui_script,
+        },
     };
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = app(opts, bsp, palette, sim, online);
+    let mut app = app(opts, bsp, palette, sim, start);
     app.playback = playback;
+    app.title = title;
+    app.settings_path = settings_path;
     event_loop.run_app(&mut app)?;
     if let Some(o) = &mut app.online {
         o.net.close();
-        if let Some(hub) = &o.hub {
-            hub.logout();
-            log::info!("logged out of the hub");
-        }
     }
+    // Goodbyes still on their way are waited for: the zone frees the body now.
+    for (mut net, _) in app.leaving.drain(..) {
+        net.close();
+    }
+    if let Some(hub) = &app.hub {
+        if app.account.is_some() {
+            log::info!("logging out of the hub");
+        }
+        hub.logout();
+    }
+    app.keep_settings();
 
     let report = app.stats.report();
     let scripted = app.opts.bench_frames.is_some() || app.opts.seconds > 0.0;
@@ -691,6 +902,7 @@ pub async fn run_web() -> Result<(), String> {
         hub_web: web_addr("hub", "hub-cert")?,
         connect_web: web_addr("connect", "cert")?,
         assets: page.string("assets").unwrap_or_else(|| "assets".into()),
+        ui_script: page.string("ui-script"),
         ..Options::default()
     };
     if let Some(zone) = page.string("zone") {
@@ -712,58 +924,64 @@ pub async fn run_web() -> Result<(), String> {
             .as_deref(),
     );
     let sim = Sim::at(&bsp, opts.start);
-    let logging_in = !opts.user.is_empty() && opts.hub_web.is_some();
-    let entry = if logging_in {
-        tell_page("status", "logging in");
-        let (session, ticket) = HubSession::enter(HubLogin {
-            hub: ZoneAddr {
-                addr: None,
-                cert_der: Vec::new(),
-                web: opts.hub_web.clone(),
-            },
-            email: opts.user.clone(),
-            password: opts.password.clone(),
-            register: opts.register,
-            character: opts.character.clone(),
-            new_preset: opts.build.clone(),
-            zone: opts.zone.clone(),
+    let settings = Settings::load();
+    let ui_script = opts.ui_script.as_deref().map(UiScript::parse).transpose()?;
+    // Through the hub: the screens, or the page's options in their place (the page's form
+    // gave the email and the password, CLIENT.md 4.1).
+    let through_hub = opts.hub_web.is_some() && opts.connect_web.is_none();
+    let start = if through_hub {
+        let hub = Hub::new(&ZoneAddr {
+            addr: None,
+            cert_der: Vec::new(),
+            web: opts.hub_web.clone(),
         })
-        .await?;
+        .map_err(|e| e.to_string())?;
+        let front = Front::new(
+            Box::new(hub.clone()),
+            settings.email.clone(),
+            settings.character.clone(),
+            auto_of(&opts),
+        );
         // The password has done its work; nothing keeps it (WEB.md 5).
         opts.password.clear();
-        log::info!("hub ticket for zone {}", ticket.zone);
-        if ticket.web.is_none() {
-            return Err(format!("zone {} has no web listener", ticket.zone));
+        Start {
+            online: None,
+            hub: Some(hub),
+            front: Some(front),
+            settings,
+            map_hash,
+            ui_script,
         }
-        Some(Entry {
-            zone: ticket_addr(&ticket),
-            token: bitcode::encode(&ticket.token),
-            hub: Some(session),
-            zone_name: ticket.zone,
-        })
     } else {
-        opts.connect_web.clone().map(|web| Entry {
-            zone: ZoneAddr {
-                addr: None,
-                cert_der: Vec::new(),
-                web: Some(web),
-            },
-            token: Vec::new(),
+        let online = match opts.connect_web.clone() {
+            Some(web) => {
+                tell_page("status", "connecting to the zone");
+                let entry = Entry {
+                    zone: ZoneAddr {
+                        addr: None,
+                        cert_der: Vec::new(),
+                        web: Some(web),
+                    },
+                    token: Vec::new(),
+                    zone_name: String::new(),
+                };
+                Some(online(&opts, &sim, map_hash, entry).map_err(|e| e.to_string())?)
+            }
+            None => None,
+        };
+        Start {
+            online,
             hub: None,
-            zone_name: String::new(),
-        })
-    };
-    let online = match entry {
-        Some(entry) => {
-            tell_page("status", "connecting to the zone");
-            Some(online(&opts, &sim, map_hash, entry).map_err(|e| e.to_string())?)
+            front: None,
+            settings,
+            map_hash,
+            ui_script,
         }
-        None => None,
     };
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     // Frames come from `requestAnimationFrame`: each redraw asks for the next.
     event_loop.set_control_flow(ControlFlow::Wait);
-    event_loop.spawn_app(app(opts, bsp, palette, sim, online));
+    event_loop.spawn_app(app(opts, bsp, palette, sim, start));
     Ok(())
 }
 
@@ -920,17 +1138,29 @@ fn order_name(order: &Order) -> &'static str {
 /// The HUD of one frame (COMPANIONS.md 6): the own bars, the squad panel, the creature
 /// being fought and the messages in every viewport; in the tactical one also the health
 /// bars over the bodies and the keys.
+/// What the HUD draws besides the own bars: the health bars over bodies, the squad's
+/// health, the creature being fought, and the scale it is all drawn at.
+pub(crate) struct HudView<'a> {
+    pub bars: &'a [(Vec3, f32, [f32; 4])],
+    pub squad: &'a [(Option<u16>, bool)],
+    pub target: Option<&'a (String, u16, u16)>,
+    pub scale: f32,
+}
+
 pub(crate) fn build_hud(
     hud: &mut Hud,
     online: Option<&Online>,
     tac: &Tactical,
     vp: glam::Mat4,
-    bars: &[(Vec3, f32, [f32; 4])],
-    squad_view: &[(Option<u16>, bool)],
-    target: Option<&(String, u16, u16)>,
+    view: HudView<'_>,
 ) {
+    let HudView {
+        bars,
+        squad: squad_view,
+        target,
+        scale: s,
+    } = view;
     let (w, h) = hud.size;
-    let s = if h >= 1000.0 { 3.0 } else { 2.0 };
     let line = (hud::GLYPH_H + 5.0) * s;
     if tac.active {
         for (at, frac, colour) in bars {
@@ -940,8 +1170,10 @@ pub(crate) fn build_hud(
         }
         let hint = "tab back   1-5 ` select   lmb pick   rmb move / attack   f follow   h hold   wasd pan   q e turn   wheel zoom";
         // Bottom right: the own bars are bottom left.
-        let tw = Hud::text_width(s * 0.5, hint);
-        hud.label(w - tw - 16.0, h - 14.0 * s, s * 0.5, hud::DIM, hint);
+        // (Small print is half the scale, and never under one.)
+        let small = (s * 0.5).max(1.0);
+        let tw = Hud::text_width(small, hint);
+        hud.label(w - tw - 16.0, h - 14.0 * s, small, hud::DIM, hint);
         let title = "tactical";
         hud.label(
             w - Hud::text_width(s, title) - 16.0,
@@ -1040,10 +1272,11 @@ pub(crate) fn build_hud(
             hud::RED,
         );
         let count = format!("{health}/{max}");
+        let small = (s * 0.5).max(1.0);
         hud.text(
-            (w - Hud::text_width(s * 0.5, &count)) * 0.5,
+            (w - Hud::text_width(small, &count)) * 0.5,
             y + 0.75 * s,
-            s * 0.5,
+            small,
             hud::WHITE,
             &count,
         );
@@ -1134,12 +1367,8 @@ impl App {
         );
         let mesh = self.mesh.take().ok_or("world mesh already consumed")?;
         let mut renderer = Renderer::new(&gpu, view_format, &mesh, (config.width, config.height));
-        // Online, models come from the hub the session is logged in to.
-        let source = self
-            .online
-            .as_ref()
-            .and_then(|o| o.hub.as_ref())
-            .map(|h| h.model_source());
+        // Models come from the hub, on whatever session is logged in when one is wanted.
+        let source = self.hub.as_ref().map(|h| h.model_source());
         let avatars = Avatars::new(
             &gpu,
             &mut renderer.characters,
@@ -1159,14 +1388,11 @@ impl App {
             drawn_from: vec![usize::MAX],
         });
         // A browser gives the pointer only to a click (WEB.md 3.4): there the first click grabs.
-        if cfg!(not(target_arch = "wasm32"))
-            && self.opts.bench_frames.is_none()
-            && !self.tactical.active
-            && self.opts.script.is_none()
-            && self.opts.replay.is_none()
-        {
+        if cfg!(not(target_arch = "wasm32")) && self.wants_pointer() && self.focused() {
             self.set_grab(true);
         }
+        self.was_up = self.screen_up();
+        self.apply_settings();
         self.last_frame = Instant::now();
         self.started = Instant::now();
         // Offline there is nothing left to wait for; online the status clears at `Welcome`.
@@ -1176,6 +1402,380 @@ impl App {
         }
         window.request_redraw();
         Ok(())
+    }
+
+    /// A screen has the pointer and the keys: one before the game, or the game menu
+    /// (CLIENT.md 6).
+    fn screen_up(&self) -> bool {
+        self.front_up || self.menu.is_some() || self.title.is_some()
+    }
+
+    /// The keys are the toolkit's: a screen is up, or the chat line is open.
+    fn capturing(&self) -> bool {
+        self.screen_up() || self.chat.open
+    }
+
+    /// Whether the game would hold the pointer for mouse look if it had the window.
+    fn wants_pointer(&self) -> bool {
+        !self.screen_up()
+            && self.opts.bench_frames.is_none()
+            && !self.tactical.active
+            && self.opts.script.is_none()
+            && self.opts.replay.is_none()
+    }
+
+    /// The window has the keyboard. The pointer is taken by itself only then: a zone that
+    /// lets the character in while the person looks at another window does not confine
+    /// their pointer to this one. (A click on the window takes it whatever the focus.)
+    fn focused(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| a.window.has_focus())
+    }
+
+    /// A person is at the client: when a zone's connection ends, the characters are shown
+    /// again. A client on autopilot or joined directly ends with its connection.
+    fn returns_to_screens(&self) -> bool {
+        self.front.as_ref().is_some_and(|f| !f.on_autopilot())
+    }
+
+    /// Keys held when the toolkit takes the keyboard are not held for the game any more.
+    fn release_keys(&mut self) {
+        self.input.keys.clear();
+        self.input.just_pressed.clear();
+        self.input.mouse.clear();
+        self.input.clicks.clear();
+    }
+
+    /// A key the screens act on was pressed, by a person or by a script (CLIENT.md 6).
+    fn ui_key(&mut self, key: Key) {
+        if self.capturing() {
+            self.ui_input.keys.push(key);
+            return;
+        }
+        // In the game: Enter opens the chat line, Escape the menu (a replay has the menu too:
+        // it is where Quit is).
+        match key {
+            Key::Enter if self.online.as_ref().is_some_and(|o| o.client.is_some()) => {
+                self.chat.open = true;
+                self.release_keys();
+            }
+            Key::Escape if self.opts.bench_frames.is_none() => {
+                self.menu = Some(GameMenu::default());
+                self.release_keys();
+            }
+            _ => {}
+        }
+    }
+
+    /// Characters were typed.
+    fn ui_text(&mut self, text: &str) {
+        if self.capturing() {
+            self.ui_input
+                .text
+                .extend(text.chars().filter(|c| !c.is_control()));
+        }
+    }
+
+    /// The left button went down at `at` while a screen is up.
+    fn ui_press(&mut self, at: (f32, f32), double: bool) {
+        self.cursor = at;
+        self.ui_input.pressed = true;
+        self.ui_input.down = true;
+        self.ui_input.double = double;
+    }
+
+    fn ui_release(&mut self) {
+        self.ui_input.released = true;
+        self.ui_input.down = false;
+    }
+
+    /// What a person changed is written down; a run that changed nothing leaves the
+    /// file alone (CLIENT.md 8).
+    fn keep_settings(&mut self) {
+        if self.settings == self.settings_kept {
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = &self.settings_path {
+            self.settings.save(path);
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.settings.save();
+        self.settings_kept = self.settings.clone();
+    }
+
+    /// What the settings say, done: called when one changes and when the window is ready.
+    fn apply_settings(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(a) = &self.active {
+            let wanted = self
+                .settings
+                .fullscreen
+                .then_some(winit::window::Fullscreen::Borderless(None));
+            if a.window.fullscreen().is_some() != wanted.is_some() {
+                a.window.set_fullscreen(wanted);
+            }
+        }
+    }
+
+    /// The zone is left (the person chose to, or its connection ended): the characters are
+    /// shown again, with the reason if there is one.
+    fn leave_zone(&mut self, why: &str) {
+        self.hang_up();
+        self.menu = None;
+        self.chat.clear();
+        self.entities.clear();
+        self.bodies.clear();
+        self.bars.clear();
+        self.squad_view.clear();
+        self.target_view = None;
+        if self.tactical.active {
+            self.tactical.active = false;
+        }
+        if let Some(front) = &mut self.front {
+            front.back_to_characters(why);
+            self.front_up = true;
+        }
+    }
+
+    /// Hang up on the zone without waiting for it: the goodbye is said on the connection's
+    /// own thread while the frames go on.
+    fn hang_up(&mut self) {
+        // (The map that is loaded is whatever `switch_map` last loaded: a zone that was
+        // left while its map was still on the way has not changed it.)
+        if let Some(mut o) = self.online.take() {
+            o.net.hang_up();
+            self.leaving.push((o.net, Instant::now()));
+        }
+        // A map still being fetched for that zone arrives in a slot nobody reads.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.pending_fetch = Default::default();
+        }
+    }
+
+    /// Ctrl+V: what the clipboard holds goes where typing would (CLIENT.md 3). In a browser
+    /// the clipboard is the page's, and the page's own form is where a password goes.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn paste(&mut self) {
+        /// More than any field takes.
+        const MOST: usize = 1024;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let read = std::thread::Builder::new()
+            .name("gm-paste".into())
+            .spawn(
+                move || match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                    Ok(text) => {
+                        let _ = tx.send(text.chars().take(MOST).collect());
+                    }
+                    Err(e) => log::debug!("nothing to paste: {e}"),
+                },
+            );
+        if read.is_ok() {
+            self.pasting = Some(rx);
+        }
+    }
+
+    /// What a paste brought, typed where the keyboard is now.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pasted(&mut self) {
+        let Some(rx) = &self.pasting else { return };
+        match rx.try_recv() {
+            Ok(text) => {
+                self.pasting = None;
+                self.ui_text(&text);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pasting = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// The hub gave a ticket: connect to its zone as the character it is for.
+    fn enter_zone(
+        &mut self,
+        ticket: gm_hub_proto::protocol::ZoneTicket,
+        name: String,
+        event_loop: &ActiveEventLoop,
+    ) {
+        log::info!("hub ticket for zone {} at {}", ticket.zone, ticket.addr);
+        let reachable = if cfg!(target_arch = "wasm32") {
+            ticket.web.is_some()
+        } else {
+            true
+        };
+        let entered = if reachable {
+            self.opts.name = name.clone();
+            let entry = Entry {
+                zone: ticket_addr(&ticket),
+                token: bitcode::encode(&ticket.token),
+                zone_name: ticket.zone.clone(),
+            };
+            // What will be loaded when the zone answers: a map already on its way in.
+            let loaded = self.pending_map.as_ref().map_or(self.map_hash, |m| m.1);
+            online(&self.opts, &self.sim, loaded, entry).map_err(|e| e.to_string())
+        } else {
+            Err(format!("zone {} has no web listener", ticket.zone))
+        };
+        match entered {
+            Ok(online) => {
+                self.online = Some(online);
+                // Remembered for a person; a command line that named it leaves no trace.
+                if self.returns_to_screens() {
+                    self.settings.character = name;
+                }
+            }
+            Err(why) if self.returns_to_screens() => {
+                if let Some(front) = &mut self.front {
+                    front.back_to_characters(&why);
+                }
+            }
+            Err(why) => self.fail(event_loop, &why),
+        }
+    }
+
+    /// What the screens, the menu and the chat line asked for in this frame.
+    fn act(
+        &mut self,
+        front: Action,
+        menu: MenuAction,
+        said: Option<String>,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if let (Some(line), Some(o)) = (said, &mut self.online) {
+            o.net.send_control(Control::Chat(line));
+        }
+        match menu {
+            MenuAction::None => {}
+            MenuAction::Resume => self.menu = None,
+            MenuAction::Travel(zone) => {
+                if let Some(o) = &mut self.online {
+                    o.net.send_control(Control::Travel(zone.clone()));
+                    o.say(format!("travel to {zone} requested"), hud::DIM);
+                }
+                self.menu = None;
+            }
+            MenuAction::Leave => self.leave_zone(""),
+            MenuAction::Quit => event_loop.exit(),
+            MenuAction::Changed => self.apply_settings(),
+        }
+        match front {
+            Action::None => {}
+            Action::Session(account) => {
+                if let Some(hub) = &self.hub {
+                    hub.set_session(account.as_ref().map(|a| a.session));
+                }
+                if let Some(a) = &account
+                    && self.returns_to_screens()
+                {
+                    self.settings.email = a.email.clone();
+                }
+                self.account = account;
+            }
+            Action::Enter { ticket, name } => self.enter_zone(*ticket, name, event_loop),
+            Action::CancelEntering => self.hang_up(),
+            Action::Quit => event_loop.exit(),
+            Action::Failed(why) => self.fail(event_loop, &why),
+        }
+    }
+
+    /// What only a page has (CLIENT.md 4.1, WEB.md 3.4): its own form is the login screen,
+    /// and the browser gives and takes the pointer as it sees fit.
+    #[cfg(target_arch = "wasm32")]
+    fn page_frame(&mut self) {
+        use crate::front::Screen;
+        if let Some(front) = &mut self.front {
+            let at_login = self.front_up && front.screen == Screen::Login && !front.on_autopilot();
+            // The form is shown while the login screen is up, with the last refusal.
+            let tell = match (at_login, front.busy()) {
+                (true, false) => format!("login {}", front.notice()),
+                (true, true) => "login-wait ".to_string(),
+                (false, _) => "screen ".to_string(),
+            };
+            if tell != self.told {
+                if let Some((kind, text)) = tell.split_once(' ') {
+                    crate::web::tell_page(kind, text);
+                }
+                self.told = tell;
+            }
+            if at_login
+                && !front.busy()
+                && let Some((email, password, register)) = crate::web::take_login()
+            {
+                front.page_login(email, password, register);
+            }
+        }
+        // The pointer: Escape gives it back to the browser and never reaches the page, so
+        // losing it is what Escape is here: the menu opens, or the chat line is dropped.
+        let locked = crate::web::pointer_locked();
+        if self.grabbed && !locked {
+            let waited = self
+                .grab_asked
+                .is_none_or(|at| at.elapsed().as_secs_f32() > 0.5);
+            if self.was_locked {
+                self.grabbed = false;
+                if self.chat.open {
+                    self.chat.drop_line();
+                } else if !self.screen_up() && !self.tactical.active {
+                    self.ui_key(Key::Escape);
+                }
+            } else if waited {
+                // It was asked for and never given: the next click asks again.
+                self.grabbed = false;
+            }
+        }
+        // Given later than it was waited for: it is the game's all the same.
+        if locked && !self.grabbed && self.wants_pointer() {
+            self.grabbed = true;
+        }
+        self.was_locked = locked;
+    }
+
+    /// What the script does this frame goes in where a person's events would (CLIENT.md 9).
+    /// `false`: the script failed and the program is ending.
+    fn run_script(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let Some(script) = &mut self.ui_script else {
+            return true;
+        };
+        if !std::mem::take(&mut self.ui_drawn) {
+            return true;
+        }
+        let events = match script.step(&self.ui, Instant::now()) {
+            Ok(events) => events,
+            Err(e) => {
+                self.fail(event_loop, &e);
+                return false;
+            }
+        };
+        for event in events {
+            match event {
+                crate::script::Event::Press { at, double } => self.ui_press(at, double),
+                crate::script::Event::Release => self.ui_release(),
+                crate::script::Event::Text(text) => self.ui_text(&text),
+                crate::script::Event::Key(key) => self.ui_key(key),
+                crate::script::Event::Say(text) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    println!("ui-script: {text}");
+                    #[cfg(target_arch = "wasm32")]
+                    crate::web::tell_page("say", &text);
+                }
+                crate::script::Event::Quit => {
+                    log::info!("ui-script: ok");
+                    #[cfg(not(target_arch = "wasm32"))]
+                    println!("ui-script: ok");
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if let Some(o) = &mut self.online {
+                            o.net.close();
+                        }
+                        if let Some(hub) = &self.hub {
+                            hub.logout();
+                        }
+                        crate::web::tell_page("done", "ui-script: ok");
+                    }
+                    event_loop.exit();
+                }
+            }
+        }
+        true
     }
 
     /// Tab: into the tactical viewport, or back out of it.
@@ -1196,6 +1796,7 @@ impl App {
     fn set_grab(&mut self, grab: bool) {
         let Some(a) = &self.active else { return };
         if grab {
+            self.grab_asked = Some(Instant::now());
             let ok = a
                 .window
                 .set_cursor_grab(CursorGrabMode::Confined)
@@ -1302,6 +1903,7 @@ impl App {
         let size = self.active.as_ref().map_or((1280.0, 720.0), |a| {
             (a.config.width as f32, a.config.height as f32)
         });
+        let returns = self.returns_to_screens();
         let bsp = &self.bsp;
         let viewport = self.viewport;
         let o = self.online.as_mut()?;
@@ -1309,7 +1911,7 @@ impl App {
         // The zone's map is still being fetched (a browser): what the zone sent after its
         // `Welcome` waits, except snapshots, which would be stale by then anyway.
         #[cfg(target_arch = "wasm32")]
-        if o.awaiting_map {
+        if let Some(wanted) = o.awaiting_map {
             // The zone hung up meanwhile: say so now, not after a map nobody needs.
             if let Some(NetEvent::Disconnected(reason)) = o
                 .backlog
@@ -1317,6 +1919,10 @@ impl App {
                 .find(|e| matches!(e, NetEvent::Disconnected(_)))
             {
                 let why = format!("disconnected: {reason}");
+                if returns {
+                    self.zone_ended = Some(why);
+                    return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
+                }
                 self.fail(event_loop, &why);
                 return None;
             }
@@ -1325,10 +1931,11 @@ impl App {
                     o.backlog.retain(|e| !matches!(e, NetEvent::Snapshot(_)));
                     return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
                 }
-                Some(Ok((map, hash))) if hash == o.map_hash => {
-                    o.awaiting_map = false;
+                Some(Ok((map, hash))) if hash == wanted => {
+                    o.awaiting_map = None;
+                    o.map_hash = hash;
                     crate::web::tell_page("status", "");
-                    self.pending_map = Some(map);
+                    self.pending_map = Some((map, hash));
                     // The world is replaced at the start of the next frame.
                     return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
                 }
@@ -1338,6 +1945,10 @@ impl App {
                         Ok(_) => "this site's copy of the zone's map is another build".into(),
                     };
                     log::error!("{why}");
+                    if returns {
+                        self.zone_ended = Some(why);
+                        return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
+                    }
                     crate::web::tell_page("error", &why);
                     self.exit_requested = true;
                     event_loop.exit();
@@ -1362,6 +1973,10 @@ impl App {
                     if !valid_map_name(&map) {
                         let why =
                             format!("the zone named a map this client will not load: {map:?}");
+                        if returns {
+                            self.zone_ended = Some(why);
+                            return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
+                        }
                         self.fail(event_loop, &why);
                         return None;
                     }
@@ -1377,7 +1992,7 @@ impl App {
                             match loaded {
                                 Some(bsp) => {
                                     log::info!("zone runs map {map}; loading {}", path.display());
-                                    self.pending_map = Some(bsp);
+                                    self.pending_map = Some((bsp, map_hash));
                                     o.map_hash = map_hash;
                                 }
                                 None => {
@@ -1386,6 +2001,16 @@ impl App {
                                         o.map_hash,
                                         path.display()
                                     );
+                                    if returns {
+                                        self.zone_ended = Some(format!(
+                                            "this client does not have the zone's map ({map})"
+                                        ));
+                                        return Some((
+                                            self.sim.eye(),
+                                            self.sim.yaw,
+                                            self.sim.pitch,
+                                        ));
+                                    }
                                     self.exit_requested = true;
                                     event_loop.exit();
                                     return None;
@@ -1396,8 +2021,7 @@ impl App {
                         {
                             log::info!("zone runs map {map}; fetching it");
                             crate::web::tell_page("status", "loading the zone's map");
-                            o.map_hash = map_hash;
-                            o.awaiting_map = true;
+                            o.awaiting_map = Some(map_hash);
                             let (slot, assets) =
                                 (self.pending_fetch.clone(), self.opts.assets.clone());
                             wasm_bindgen_futures::spawn_local(async move {
@@ -1488,6 +2112,7 @@ impl App {
                     Control::TravelRefused(reason) => {
                         o.respec_note = format!("travel refused: {reason}");
                         log::info!("{}", o.respec_note);
+                        o.say(o.respec_note.clone(), hud::ORANGE);
                     }
                     Control::Roster(players) => {
                         o.names.clear();
@@ -1605,10 +2230,24 @@ impl App {
                         };
                         o.say(text, colour);
                     }
-                    Control::ChatFrom { from, text } => log::info!("<{from}> {text}"),
+                    Control::ChatFrom { from, text } => {
+                        // From nobody: the zone itself (a refusal, a notice).
+                        let who = (from != 0).then(|| {
+                            o.names
+                                .get(&from)
+                                .map_or_else(|| format!("#{from}"), |n| n.0.clone())
+                        });
+                        log::info!("<{}> {text}", who.as_deref().unwrap_or("zone"));
+                        self.chat.heard(who, text, &self.settings.ignored);
+                    }
                     other => log::debug!("control: {other:?}"),
                 },
                 NetEvent::Disconnected(reason) => {
+                    if returns {
+                        log::info!("disconnected: {reason}");
+                        self.zone_ended = Some(reason);
+                        return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
+                    }
                     log::error!("disconnected: {reason}");
                     #[cfg(target_arch = "wasm32")]
                     crate::web::tell_page("error", &format!("disconnected: {reason}"));
@@ -1621,11 +2260,12 @@ impl App {
         // A travel ticket: say goodbye here, connect there (the body stays as a ghost until
         // the other zone claims it, HUB.md 3.3).
         if let Some((zone, to, token)) = o.pending_travel.take() {
-            o.net.close();
+            o.net.hang_up();
             o.backlog.clear();
             match NetClient::connect(to, self.opts.name.clone(), None, self.opts.team, token) {
                 Ok(net) => {
-                    o.net = net;
+                    let old = std::mem::replace(&mut o.net, net);
+                    self.leaving.push((old, Instant::now()));
                     o.welcome = None;
                     o.client = None;
                     o.pack = None;
@@ -1638,6 +2278,7 @@ impl App {
                     self.entities.clear();
                     self.bodies.clear();
                 }
+                // The connection that was hung up says so in a moment, and that ends it.
                 Err(e) => log::error!("travel failed: {e}"),
             }
             return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
@@ -2107,7 +2748,8 @@ impl App {
     }
 
     /// Replace the world (BSP, mesh, renderer) with another map.
-    fn switch_map(&mut self, bsp: Bsp) {
+    fn switch_map(&mut self, bsp: Bsp, hash: u64) {
+        self.map_hash = hash;
         let mesh = world::build(&bsp, &self.palette);
         self.faces_total = mesh
             .face_ranges
@@ -2220,12 +2862,49 @@ impl App {
                 _ => {}
             }
         }
-        if let Some(bsp) = self.pending_map.take() {
-            self.switch_map(bsp);
+        if let Some((bsp, hash)) = self.pending_map.take() {
+            self.switch_map(bsp, hash);
         }
         let now = Instant::now();
         let frame_dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pasted();
+        if !self.run_script(event_loop) {
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.page_frame();
+        self.leaving
+            .retain(|(net, since)| !net.gone() && since.elapsed().as_secs_f32() < 1.0);
+        // A session lives while it is used, and a zone is played without a word to the hub:
+        // now and then the client says one (HUB.md 3.1).
+        if self.online.is_some()
+            && self.hub_touched.elapsed().as_secs() >= SESSION_TOUCH_SECS
+            && let (Some(hub), Some(account)) = (&self.hub, &self.account)
+        {
+            self.hub_touched = Instant::now();
+            let session = account.session;
+            // Nobody waits for the answer.
+            let _ = hub.call(PlayerRequest::ListZones { session });
+        }
+        let returns = self.returns_to_screens();
+        // The pointer follows the screens: free while one is up, the game's again after.
+        let up = self.screen_up();
+        if up != self.was_up {
+            self.was_up = up;
+            if up {
+                self.release_keys();
+                self.set_grab(false);
+            } else if self.wants_pointer() && self.focused() {
+                self.set_grab(true);
+            }
+        }
+        if self.capturing() {
+            // Whatever was held is not held for the game while the toolkit has the keys.
+            self.release_keys();
+            self.input.wheel = 0.0;
+        }
 
         // Mouse look is applied per frame for responsiveness; movement uses it at tick time.
         let bench = self.opts.bench_frames.is_some();
@@ -2234,10 +2913,11 @@ impl App {
             self.sim.yaw = self.bench_yaw0 + BENCH_CROWD_SWING_DEG * (t * 0.7).sin();
         } else if bench {
             self.sim.yaw += BENCH_YAW_DEG_PER_S * frame_dt;
-        } else if self.grabbed {
-            self.sim.yaw -= self.input.mouse_dx * SENSITIVITY;
-            self.sim.pitch =
-                (self.sim.pitch + self.input.mouse_dy * SENSITIVITY).clamp(-89.0, 89.0);
+        } else if self.grabbed && !up {
+            let turn = self.settings.sensitivity;
+            let tilt = if self.settings.invert { -turn } else { turn };
+            self.sim.yaw -= self.input.mouse_dx * turn;
+            self.sim.pitch = (self.sim.pitch + self.input.mouse_dy * tilt).clamp(-89.0, 89.0);
         }
         self.sim.yaw = self.sim.yaw.rem_euclid(360.0);
         self.input.mouse_dx = 0.0;
@@ -2255,10 +2935,29 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             unreachable!()
         } else if self.online.is_some() {
-            match self.online_frame(frame_dt, event_loop) {
+            let camera = match self.online_frame(frame_dt, event_loop) {
                 Some(cam) => cam,
                 None => return,
+            };
+            // The zone has the character: the screens step aside.
+            if self.front_up && self.online.as_ref().is_some_and(|o| o.client.is_some()) {
+                self.front_up = false;
+                self.chat.clear();
             }
+            // Its connection ended and a person is here: back to the characters.
+            if let Some(why) = self.zone_ended.take() {
+                self.leave_zone(&why);
+            }
+            camera
+        } else if self.front_up || self.title.is_some() {
+            // Behind a screen with no zone: the map, turning slowly (CLIENT.md 2).
+            self.input.wheel = 0.0;
+            self.entities.clear();
+            self.bodies.clear();
+            self.bars.clear();
+            self.tactical_leaves.clear();
+            let yaw = self.bench_yaw0 + BACKDROP_DEG_PER_S * self.started.elapsed().as_secs_f32();
+            (self.sim.eye(), yaw.rem_euclid(360.0), 0.0)
         } else {
             let input = if bench {
                 MoveInput {
@@ -2432,16 +3131,99 @@ impl App {
         if let Some(p) = &self.playback {
             p.hud(&mut a.renderer.hud);
         }
-        if !watching && (!bench || self.opts.tactical) {
+        // One scale for the HUD and the screens: what the window gives, or what was chosen.
+        let scale = ui::scale_for(a.renderer.hud.size, PANEL_UNITS, self.settings.ui_scale);
+        if !watching && (!bench || self.opts.tactical) && !self.front_up && self.title.is_none() {
             build_hud(
                 &mut a.renderer.hud,
                 self.online.as_ref(),
                 &self.tactical,
                 vp,
-                &self.bars,
-                &self.squad_view,
-                self.target_view.as_ref(),
+                HudView {
+                    bars: &self.bars,
+                    squad: &self.squad_view,
+                    target: self.target_view.as_ref(),
+                    scale,
+                },
             );
+        }
+        // The screens, the menu and the chat, over the HUD (CLIENT.md 4 to 6).
+        let mut front_actions = [Action::None, Action::None];
+        let (mut menu_action, mut said) = (MenuAction::None, None);
+        if !bench {
+            let playing = self.online.as_ref().is_some_and(|o| o.client.is_some());
+            let screen = match (&self.front, &self.menu) {
+                _ if self.title.is_some() => "title",
+                (Some(front), _) if self.front_up => front.screen.name(),
+                (_, Some(menu)) => menu.page.name(),
+                _ if self.chat.open => "chat",
+                _ => "game",
+            };
+            self.ui_input.cursor = self.cursor;
+            self.ui_input.time = self.started.elapsed().as_secs_f32();
+            let mut ui = Ui::begin_at(
+                &mut a.renderer.hud,
+                &mut self.ui,
+                &self.ui_input,
+                screen,
+                PANEL_UNITS,
+                self.settings.ui_scale,
+            );
+            if let Some(title) = &self.title {
+                match crate::menu::title(&mut ui, title) {
+                    Some(true) => self.title = None,
+                    Some(false) => front_actions[1] = Action::Quit,
+                    None => {}
+                }
+            } else if self.front_up {
+                if let Some(front) = &mut self.front {
+                    front_actions = front.frame(&mut ui);
+                }
+            } else {
+                if playing {
+                    said = self.chat.frame(&mut ui, &mut self.settings.ignored);
+                } else if self.chat.open {
+                    // Between two zones nothing is drawn of it: nor does it keep the keys.
+                    self.chat.drop_line();
+                }
+                match &mut self.menu {
+                    Some(menu) => {
+                        let hub = self
+                            .hub
+                            .as_ref()
+                            .zip(self.account.as_ref())
+                            .map(|(hub, account)| (hub as &dyn HubApi, account.session));
+                        // A page's tab is closed and made fullscreen by the browser.
+                        let offers = Offers {
+                            travel: playing && hub.is_some(),
+                            leave: returns && self.online.is_some(),
+                            fullscreen: cfg!(not(target_arch = "wasm32")),
+                            quit: cfg!(not(target_arch = "wasm32")),
+                        };
+                        let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
+                        menu_action = menu.frame(&mut ui, hub, offers, here, &mut self.settings);
+                    }
+                    None if playing && !self.chat.open && !self.tactical.active => {
+                        // Where this is, and the two keys nothing else tells of.
+                        let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
+                        let hint = if here.is_empty() {
+                            "Esc menu  Enter chat".to_string()
+                        } else {
+                            format!("{here}  Esc menu  Enter chat")
+                        };
+                        let (w, h) = ui.size();
+                        ui.small(w - 16.0, h - 14.0 * ui.scale, ui::FAINT, &hint);
+                    }
+                    None => {}
+                }
+            }
+            ui.end();
+            self.ui_drawn = true;
+            // What happened is used up; a button still held is still held.
+            self.ui_input = UiInput {
+                down: self.ui_input.down,
+                ..Default::default()
+            };
         }
         a.renderer
             .render(&a.gpu, &view, vp, &self.entities, &a.avatars.draws);
@@ -2522,6 +3304,7 @@ impl App {
             a.window.set_title(&title);
             self.title_frame = self.stats.frames();
             self.last_title = Instant::now();
+            self.keep_settings();
         }
         if let Some(n) = self.opts.bench_frames
             && self.stats.frames() >= n as usize
@@ -2544,14 +3327,17 @@ impl App {
                 let line = self.report_line();
                 if let Some(o) = &mut self.online {
                     o.net.close();
-                    if let Some(hub) = &o.hub {
-                        hub.logout();
-                    }
+                }
+                if let Some(hub) = &self.hub {
+                    hub.logout();
                 }
                 crate::web::tell_page("done", &line);
             }
             event_loop.exit();
         }
+        let [answered, clicked] = front_actions;
+        self.act(answered, menu_action, said, event_loop);
+        self.act(clicked, MenuAction::None, None, event_loop);
     }
 }
 
@@ -2566,7 +3352,9 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::PhysicalSize::new(
                 self.opts.width,
                 self.opts.height,
-            ));
+            ))
+            // The smallest frame the screens are made for (CLIENT.md 3).
+            .with_min_inner_size(winit::dpi::PhysicalSize::new(640, 360));
         // The page owns the canvas and its size (WEB.md 5).
         #[cfg(target_arch = "wasm32")]
         let attrs = {
@@ -2645,28 +3433,46 @@ impl ApplicationHandler for App {
                 self.input.mouse.clear();
                 self.set_grab(false);
             }
+            WindowEvent::ModifiersChanged(held) => {
+                let held = held.state();
+                self.shift = held.shift_key();
+                self.command = (held.control_key() || held.super_key()) && !held.alt_key();
+            }
             WindowEvent::Focused(true) => {
-                if cfg!(not(target_arch = "wasm32"))
-                    && self.opts.bench_frames.is_none()
-                    && !self.tactical.active
-                    && self.opts.script.is_none()
-                    && self.opts.replay.is_none()
-                {
+                if cfg!(not(target_arch = "wasm32")) && self.wants_pointer() {
                     self.set_grab(true);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.tactical.cursor = (position.x as f32, position.y as f32);
+                self.cursor = (position.x as f32, position.y as f32);
+                self.tactical.cursor = self.cursor;
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                self.input.wheel += match delta {
+                let turn = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
+                if self.screen_up() {
+                    self.ui_input.wheel += turn;
+                } else {
+                    self.input.wheel += turn;
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => match state {
                 ElementState::Pressed => {
-                    if self.tactical.active {
+                    if self.screen_up() {
+                        // The pointer is the screen's (CLIENT.md 3): a click is a widget's.
+                        if button == MouseButton::Left {
+                            let now = Instant::now();
+                            let double = self.last_press.is_some_and(|(at, where_)| {
+                                now.duration_since(at).as_secs_f32() < DOUBLE_CLICK_SECS
+                                    && (where_.0 - self.cursor.0).abs() < DOUBLE_CLICK_PIXELS
+                                    && (where_.1 - self.cursor.1).abs() < DOUBLE_CLICK_PIXELS
+                            });
+                            self.last_press = (!double).then_some((now, self.cursor));
+                            self.ui_press(self.cursor, double);
+                        }
+                    } else if self.tactical.active {
                         // The cursor is free here: a click picks or orders.
                         self.input.clicks.push(button);
                     } else if !self.grabbed && self.opts.bench_frames.is_none() {
@@ -2677,34 +3483,95 @@ impl ApplicationHandler for App {
                 }
                 ElementState::Released => {
                     self.input.mouse.remove(&button);
+                    if button == MouseButton::Left && self.ui_input.down {
+                        self.ui_release();
+                    }
                 }
             },
             WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    match event.state {
-                        ElementState::Pressed => {
-                            if self.input.keys.insert(code) {
-                                self.input.just_pressed.insert(code);
+                let pressed = event.state == ElementState::Pressed;
+                let code = match event.physical_key {
+                    PhysicalKey::Code(code) => Some(code),
+                    PhysicalKey::Unidentified(_) => None,
+                };
+                // The keys the screens act on (CLIENT.md 6).
+                let key = match code {
+                    Some(KeyCode::Enter | KeyCode::NumpadEnter) => Some(Key::Enter),
+                    Some(KeyCode::Escape) => Some(Key::Escape),
+                    Some(KeyCode::Tab) if self.shift => Some(Key::BackTab),
+                    Some(KeyCode::Tab) => Some(Key::Tab),
+                    Some(KeyCode::Backspace) => Some(Key::Backspace),
+                    Some(KeyCode::Delete) => Some(Key::Delete),
+                    Some(KeyCode::ArrowLeft) => Some(Key::Left),
+                    Some(KeyCode::ArrowRight) => Some(Key::Right),
+                    Some(KeyCode::ArrowUp) => Some(Key::Up),
+                    Some(KeyCode::ArrowDown) => Some(Key::Down),
+                    Some(KeyCode::Home) => Some(Key::Home),
+                    Some(KeyCode::End) => Some(Key::End),
+                    Some(KeyCode::PageUp) => Some(Key::PageUp),
+                    Some(KeyCode::PageDown) => Some(Key::PageDown),
+                    _ => None,
+                };
+                if self.capturing() {
+                    // The toolkit has the keyboard: the game gets nothing.
+                    if !pressed {
+                        return;
+                    }
+                    // Ctrl+V and Shift+Insert paste (the key that types `v`, whatever
+                    // the layout; the V key where the layout has no such letter).
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let v = match event.logical_key.as_ref() {
+                            winit::keyboard::Key::Character(c) if c.is_ascii() => {
+                                c.eq_ignore_ascii_case("v")
                             }
-                            match code {
-                                KeyCode::Escape => self.set_grab(false),
-                                // Q turns the tactical camera; elsewhere it quits.
-                                #[cfg(not(target_arch = "wasm32"))]
-                                KeyCode::KeyQ if !self.tactical.active => event_loop.exit(),
-                                KeyCode::Tab if !event.repeat => self.toggle_tactical(),
-                                KeyCode::KeyV if !event.repeat => {
-                                    self.viewport = match self.viewport {
-                                        Viewport::First => Viewport::Third,
-                                        Viewport::Third => Viewport::First,
-                                    };
-                                    log::info!("viewport: {:?}", self.viewport);
-                                }
-                                _ => {}
+                            _ => code == Some(KeyCode::KeyV),
+                        };
+                        if (self.command && v) || (self.shift && code == Some(KeyCode::Insert)) {
+                            self.paste();
+                            return;
+                        }
+                    }
+                    match (key, &event.text) {
+                        // A key held down does not press Enter or Escape again: the
+                        // line it opened would close, the login it sent be sent again.
+                        (Some(Key::Enter | Key::Escape), _) if event.repeat => {}
+                        (Some(key), _) => self.ui_key(key),
+                        // With Ctrl held a key is a shortcut, not a letter (and a key
+                        // that has no place on this keyboard's map still has its text:
+                        // a program that types for a person sends such).
+                        (None, Some(text)) if !self.command => self.ui_text(text),
+                        _ => {}
+                    }
+                    return;
+                }
+                let Some(code) = code else { return };
+                match event.state {
+                    ElementState::Pressed => {
+                        if self.input.keys.insert(code) {
+                            self.input.just_pressed.insert(code);
+                        }
+                        match (code, key) {
+                            // Enter opens the chat line, Escape the menu.
+                            (_, Some(key @ (Key::Enter | Key::Escape))) if !event.repeat => {
+                                self.ui_key(key)
                             }
+                            _ => {}
                         }
-                        ElementState::Released => {
-                            self.input.keys.remove(&code);
+                        match code {
+                            KeyCode::Tab if !event.repeat => self.toggle_tactical(),
+                            KeyCode::KeyV if !event.repeat => {
+                                self.viewport = match self.viewport {
+                                    Viewport::First => Viewport::Third,
+                                    Viewport::Third => Viewport::First,
+                                };
+                                log::info!("viewport: {:?}", self.viewport);
+                            }
+                            _ => {}
                         }
+                    }
+                    ElementState::Released => {
+                        self.input.keys.remove(&code);
                     }
                 }
             }

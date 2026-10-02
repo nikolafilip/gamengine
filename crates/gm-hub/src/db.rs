@@ -56,6 +56,7 @@ impl CharacterRow {
                 },
                 _ => LocationSummary::Offline,
             },
+            last_zone: self.pos_zone.clone(),
             play_seconds: self.play_seconds.max(0) as u32,
             model: self.model.clone().and_then(|m| m.try_into().ok()),
         }
@@ -190,6 +191,53 @@ impl Db {
         rows.iter().map(row_to_character).collect()
     }
 
+    /// Characters that are in `zone`: what its room is counted by. Whoever is on the way
+    /// is not counted: a ticket nobody uses would hold a seat, for as long as somebody
+    /// cared to ask for one. Two that race for the last seat are told apart at the zone's
+    /// own door, which gives back the one it cannot take (`release`).
+    pub async fn zone_population(&self, zone: &ZoneId) -> Result<i64, HubError> {
+        sqlx::query(
+            "select count(*) as n from characters where location_kind = 'zone' and location_zone = $1",
+        )
+        .bind(zone)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(internal)?
+        .try_get("n")
+        .map_err(internal)
+    }
+
+    /// `zone` has no body for a character it claimed: the character is offline again, as
+    /// it came. Nothing else is written: it never stood there.
+    pub async fn release(&self, id: CharacterId, zone: &ZoneId) -> Result<bool, HubError> {
+        Ok(sqlx::query(
+            "update characters set location_kind = 'offline', location_zone = null, transit_to = null, \
+             transit_since = null, updated = now() where id = $1 and location_kind = 'zone' and location_zone = $2",
+        )
+        .bind(id)
+        .bind(zone)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?
+        .rows_affected()
+            > 0)
+    }
+
+    /// Transits whose ticket can no longer be used go offline: the client never arrived.
+    /// (A handoff that was not claimed is put right by the zone it left, sooner than this.)
+    pub async fn sweep_transits(&self, older_than_secs: u64) -> Result<u64, HubError> {
+        Ok(sqlx::query(
+            "update characters set location_kind = 'offline', location_zone = null, transit_to = null, \
+             transit_since = null, updated = now() where location_kind = 'transit' \
+             and extract(epoch from (now() - transit_since)) > $1",
+        )
+        .bind(older_than_secs as f64)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?
+        .rows_affected())
+    }
+
     pub async fn character(&self, id: CharacterId) -> Result<Option<CharacterRow>, HubError> {
         let row = sqlx::query(AssertSqlSafe(format!(
             "select {CHARACTER_COLUMNS} from characters where id = $1"
@@ -201,10 +249,13 @@ impl Db {
         row.as_ref().map(row_to_character).transpose()
     }
 
+    /// `name_key` is the name's skeleton (`gm_hub_proto::names`): unique, so that no two
+    /// names can be told apart only by a second look.
     pub async fn create_character(
         &self,
         account: AccountId,
         name: &str,
+        name_key: &str,
         build: &Build,
     ) -> Result<CharacterRow, HubError> {
         let mut tx = self.pool.begin().await.map_err(internal)?;
@@ -228,10 +279,11 @@ impl Db {
         }
         let build_json = serde_json::to_value(build).map_err(|_| HubError::Internal)?;
         let inserted = sqlx::query(AssertSqlSafe(format!(
-            "insert into characters (account_id, name, build) values ($1, $2, $3) returning {CHARACTER_COLUMNS}"
+            "insert into characters (account_id, name, name_key, build) values ($1, $2, $3, $4) returning {CHARACTER_COLUMNS}"
         )))
         .bind(account)
         .bind(name)
+        .bind(name_key)
         .bind(build_json)
         .fetch_one(&mut *tx)
         .await;

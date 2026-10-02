@@ -50,6 +50,9 @@ pub struct BotConfig {
     pub aim: crate::aim::AimModel,
     /// Report the first enemy seen after this many ticks (0 = never; ANTICHEAT.md 5).
     pub report_after_ticks: u32,
+    /// Say this line in the zone's chat every so many seconds, at the zone's own tick
+    /// rate (CLIENT.md 5).
+    pub say: Option<(String, f32)>,
 }
 
 /// Why the bot loop ended.
@@ -112,6 +115,11 @@ pub struct BotReport {
     pub raid_done: bool,
     /// The zone took this bot's report (ANTICHEAT.md 5).
     pub report_accepted: bool,
+    /// Chat lines heard, the first 32 of them: the speaker's entity (0 = the zone) and
+    /// the text.
+    pub heard: Vec<(u32, String)>,
+    /// The zone kicked the bot: why.
+    pub kicked: Option<String>,
     /// Bodies the zone announced as creatures, and the most seen with their health.
     pub creatures_announced: usize,
     pub creature_health_seen: usize,
@@ -217,6 +225,11 @@ pub async fn run_bot_on_link(
     };
     let rate = TickRate::new(hz as u32);
     info!(name = %cfg.name, entity, hz, team, "bot joined");
+    // How often it speaks, in this zone's ticks.
+    let say = cfg
+        .say
+        .as_ref()
+        .map(|(line, secs)| (line.clone(), ((secs * hz as f32).round() as u32).max(1)));
 
     let build_name = |b: &gm_core::build::Build| -> String {
         pack.builds
@@ -327,6 +340,11 @@ pub async fn run_bot_on_link(
                     &others,
                     client.tick.wrapping_add(1),
                 );
+                if let Some((line, every)) = &say
+                    && ticks.is_multiple_of(*every)
+                {
+                    let _ = control::send(&mut send, &Control::Chat(line.clone())).await;
+                }
                 if cfg.report_after_ticks > 0
                     && !reported
                     && ticks >= cfg.report_after_ticks
@@ -471,6 +489,7 @@ pub async fn run_bot_on_link(
                     }
                     Ok(Some(Control::Kick(reason))) => {
                         info!(name = %cfg.name, "kicked: {reason}");
+                        report.kicked = Some(reason);
                         break;
                     }
                     Ok(Some(Control::StallResult(result))) => {
@@ -502,6 +521,14 @@ pub async fn run_bot_on_link(
                     Ok(Some(Control::ReportResult(result))) => {
                         info!(name = %cfg.name, ?result, "report answered");
                         report.report_accepted = result.is_ok();
+                    }
+                    Ok(Some(Control::ChatFrom { from, text })) => {
+                        if from != entity && report.heard.len() < 32 {
+                            // Said as it is heard: whoever scripted the run need not
+                            // wait for the bot's end to know.
+                            info!(name = %cfg.name, from, %text, "heard");
+                            report.heard.push((from, text));
+                        }
                     }
                     Ok(Some(Control::Roster(players))) => {
                         report.creatures_announced = players

@@ -283,6 +283,15 @@ pub async fn send_any<T: Encode>(
 pub async fn recv_any<T: for<'a> Decode<'a>>(
     stream: &mut quinn::RecvStream,
 ) -> Result<Option<T>, ControlError> {
+    match recv_frame(stream).await? {
+        Some(payload) => Ok(Some(bitcode::decode(&payload)?)),
+        None => Ok(None),
+    }
+}
+
+/// Read one frame's payload, whatever it encodes; `Ok(None)` on a clean end of stream.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn recv_frame(stream: &mut quinn::RecvStream) -> Result<Option<Vec<u8>>, ControlError> {
     let mut len = [0u8; 2];
     match stream.read_exact(&mut len).await {
         Ok(()) => {}
@@ -292,7 +301,7 @@ pub async fn recv_any<T: for<'a> Decode<'a>>(
     let len = u16::from_be_bytes(len) as usize;
     let mut payload = vec![0u8; len];
     stream.read_exact(&mut payload).await?;
-    Ok(Some(bitcode::decode(&payload)?))
+    Ok(Some(payload))
 }
 
 /// Decode one framed message from `buf`, returning it and the bytes consumed; `None` when the
@@ -321,13 +330,51 @@ pub async fn recv(stream: &mut quinn::RecvStream) -> Result<Option<Control>, Con
     recv_any(stream).await
 }
 
+/// The longest chat line, in characters (PROTOCOL.md 8, CLIENT.md 5).
+pub const MAX_CHAT_CHARS: usize = 200;
+/// A client's chat bucket: this many lines at once, one more every `CHAT_REFILL_SECS`.
+pub const CHAT_BURST: u32 = 5;
+pub const CHAT_REFILL_SECS: f32 = 2.0;
+
+/// A character that cannot be seen: a control character, one that takes no room, or one
+/// that changes the order of those around it. A line or a name that carries one is not
+/// what it looks like.
+pub fn unseen(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
+/// Validate a chat line: 1..=`MAX_CHAT_CHARS` characters after trimming, none of them one
+/// that cannot be seen (a line break in a line would draw as somebody else's line).
+pub fn valid_chat(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_CHAT_CHARS {
+        return None;
+    }
+    if trimmed.chars().any(unseen) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// Validate a `Hello.name` (PROTOCOL.md 8): 1..=24 bytes of printable UTF-8 after trimming.
 pub fn valid_name(name: &str) -> Option<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() || trimmed.len() > 24 {
         return None;
     }
-    if trimmed.chars().any(|c| c.is_control()) {
+    if trimmed.chars().any(unseen) {
         return None;
     }
     Some(trimmed.to_string())
@@ -447,5 +494,29 @@ mod tests {
         assert_eq!(valid_name("a\u{7}b"), None);
         assert_eq!(valid_name(&"x".repeat(25)), None);
         assert!(valid_name("Žanamarija Škrinjarić").is_some());
+        // What cannot be seen is in no name and in no line: a zero-width space, a mark
+        // that turns the letters around, a line break.
+        assert_eq!(valid_name("Mar\u{200b}ko"), None);
+        assert_eq!(valid_chat("hello"), Some("hello".into()));
+        assert_eq!(valid_chat("  hello  there "), Some("hello  there".into()));
+        assert_eq!(valid_chat("   "), None);
+        assert_eq!(
+            valid_chat(&"x".repeat(MAX_CHAT_CHARS)).map(|l| l.len()),
+            Some(200)
+        );
+        assert_eq!(valid_chat(&"x".repeat(MAX_CHAT_CHARS + 1)), None);
+        assert_eq!(
+            valid_chat(&"š".repeat(MAX_CHAT_CHARS)).map(|l| l.chars().count()),
+            Some(200)
+        );
+        for unseen in [
+            "a\nZone: you win",
+            "a\u{202e}b",
+            "a\u{200d}b",
+            "a\u{feff}",
+            "x\u{2028}x",
+        ] {
+            assert_eq!(valid_chat(unseen), None, "{unseen:?}");
+        }
     }
 }

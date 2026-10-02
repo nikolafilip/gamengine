@@ -1,6 +1,6 @@
 # Hub: accounts, characters, zones, handoff
 
-Status: v1.5 (Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
+Status: v1.6 (Phase 10: what the client's screens lean on, section 3.8; Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
 saved position's zone of Phase 6; squads, trials and gated zones of Phase 7, section 3.5). This document is the contract between `gm-hub`, `gm-server` and the
 clients for everything that outlives a zone process: accounts, characters, where a character is,
 and how it moves between zones. PLAN.md 2.1 (Postgres via sqlx, in-memory session state), 11.3
@@ -49,7 +49,12 @@ Certificates: the hub presents a self-signed certificate written at start (`--ce
 clients and zones trust exactly that file. Every request is one bidirectional stream: the
 requester writes one framed `HubRequest` and finishes; the hub writes one framed `HubResponse`
 and finishes. Framing is PROTOCOL.md 8 (big-endian u16 length + `bitcode`). Messages over
-65,535 bytes are protocol errors. Two requests carry bytes that are not messages (MODELS.md
+65,535 bytes are protocol errors. Since v1.6 a stream **begins with the version** of these
+messages in a frame of one byte (`HUB_VERSION`, 6), and the hub answers with its own in the
+same way before anything else, going on to the response only when the two are equal: a
+zone, a tool or a bot of another build is told so ("the hub speaks version N") instead of
+failing to decode. A stream that begins with an empty frame speaks the players' messages
+(3.8), with a version of their own. A stream that asks nothing within 15 s is dropped. Two requests carry bytes that are not messages (MODELS.md
 6.2): `ModelUpload` is followed on the same stream by `len` raw bytes, checked against the
 limit before one of them is read, and the answer to `ModelGet` and `Mod(Preview)` is
 `Blob { len }` followed by `len` raw bytes. A zone's connection also carries hub-initiated
@@ -65,16 +70,20 @@ enum HubRequest {
     CreateCharacter { session: SessionId, name: String, build: BuildChoice },  // preset name or full build
     SetBuild { session: SessionId, character: CharacterId, build: BuildChoice },
     ListZones { session: SessionId },
+    Content { session: SessionId },                              // the pack and the presets' blurbs (3.8)
     Trials { session: SessionId, character: CharacterId },       // what it has passed (3.5)
-    Enter { session: SessionId, character: CharacterId, zone: ZoneId },
+    Enter { session: SessionId, character: CharacterId, zone: ZoneId },   // "" = where it was, else the start zone (3.8)
     Logout { session: SessionId },
     // zones (authenticated by the zone secret in ZoneHello, once per connection)
     ZoneHello { secret: String, zone: ZoneId, map: String, map_hash: u64, addr: SocketAddr, cert_der: Vec<u8>,
-                requires: Vec<String> },         // trials that open the zone; empty = open to all (3.5)
+                requires: Vec<String>,           // trials that open the zone; empty = open to all (3.5)
+                max_players: u32 },              // how many clients it takes (3.8)
     Heartbeat { players: u32, tick_mean_us: f32 },
     Claim { token: SessionToken },
     Save { character: CharacterId, state: CharacterState, leaving: bool },
-    Handoff { character: CharacterId, state: CharacterState, to_zone: ZoneId },
+    Release { character: CharacterId },          // claimed, and no body for it here (3.8)
+    Handoff { character: CharacterId, state: CharacterState, to_zone: ZoneId,
+              web: bool },                       // the traveller's client is a browser (3.8)
     Trial { character: CharacterId, trial: String, secs: u32 },  // a character here passed it (3.5)
     // the economy (ECONOMY.md): a session for one of its own characters; a zone for itself
     Econ { session: SessionId, character: CharacterId, op: EconOp },
@@ -106,7 +115,9 @@ enum HubResponse {
     Characters(Vec<CharacterSummary>),
     Character(CharacterSummary),
     Trials(Vec<(String, u32)>),    // trial key, best time in seconds
-    Zones(Vec<ZoneSummary>),       // id, map, players, address, cert hash, up for ms
+    Zones(Vec<ZoneSummary>),       // id, map, players, max_players, web, min_trust, requires, address,
+                                   // cert hash, up for ms
+    Content { pack: ContentPack, blurbs: Vec<String> },   // 3.8
     Ticket(ZoneTicket),            // addr, cert_der, token
     Claimed { character: CharacterId, name: String, state: CharacterState, team: u8,
               model: Option<ModelRef>,    // what the character wears, while it is active
@@ -121,10 +132,11 @@ enum HubResponse {
 }
 ```
 
-`SessionId` is 16 random bytes; sessions live in hub memory for 24 h or until `Logout`.
+`SessionId` is 16 random bytes; sessions live in hub memory until 24 h after their last use
+or until `Logout` (3.8).
 `CharacterId`, `AccountId` are database ids (i64). `ZoneId` is the zone's configured name.
-Character names follow PROTOCOL.md 8 (1..=24 bytes of printable UTF-8, trimmed) and are unique
-case-insensitively; an account holds at most **10** characters. Password hashing runs on the
+Character names follow 3.8 (2..=24 bytes, letters first, unique by what they look like); an
+account holds at most **10** characters. Password hashing runs on the
 blocking pool behind a semaphore of 8 permits; a ninth concurrent `Register`/`Login` answers
 `Busy` rather than stalling the executor that carries the zones' heartbeats. `Register` and
 `Login` are rate limited per source address (a token bucket of 10 per minute).
@@ -135,9 +147,9 @@ belongs to the session's account. `ZoneEcon` is refused with `Unauthorized` on a
 that has not said `ZoneHello`; a zone grants only to characters playing in it and decides only
 contracts whose instance it is.
 
-`Logout` while the character is in a zone also tells that zone to drop the player
-(`HubNotice::Kick`); a session cannot be used to leave a character playing after the account
-has logged out.
+`Logout` of an account's **last** session while a character is in a zone also tells that zone
+to drop the player (`HubNotice::Kick`): nobody is left playing for an account that has logged
+out everywhere. Logging out of one client leaves the account's other client alone (3.8).
 
 ### 3.1 Tokens
 
@@ -275,6 +287,74 @@ advisory for the zone's bookkeeping; the database is already updated when they a
 - Migration 0006 (`conduct`): `replays`, `replay_participants`, `aim_weeks`, `aim_reports`,
   `flags`, `reports`, `reputation`, `bans`, `mod_log`, `accounts.reputation`.
 
+### 3.8 What the client's screens lean on (CLIENT.md 7)
+
+- **The players' messages** (`gm_hub_proto::player`). `PlayerRequest` is the nine requests a
+  player's client makes (`Register`, `Login`, `Characters`, `CreateCharacter`, `ListZones`,
+  `Content`, `Enter`, `Logout`, `ModelGet`) and `PlayerResponse` their answers (`Ok`, `Err`,
+  `Session`, `Characters`, `Character`, `Zones`, `Content`, `Ticket`, `Blob`), as enums of
+  their own: the same requests, handled by the same code, in an encoding that does not carry
+  what zones, moderators and the economy say. (A browser client that spoke `HubRequest` paid
+  89 KB of its megabyte for codecs it never uses.) On the wire a stream that speaks them
+  begins with an **empty frame** (`00 00`: no `HubRequest` encodes to nothing) and a frame
+  of one byte, the **version** of the players' messages (`PLAYER_VERSION`, 1); the hub
+  answers with its own version in a frame of one byte, and then, if the two are the same,
+  with the framed `PlayerResponse`. A client of another version is told so in words it can
+  show, whatever else changed between the builds. The two versions are apart on purpose:
+  the hub's messages change with every phase, and a player's installed client need not
+  care unless the nine it speaks did.
+- `Content` answers the content pack the hub loaded and one line or two of plain words for
+  each of its preset builds (`blurb` in `assets/content/builds.toml`, at most 160
+  characters, required), in the pack's order. The blurbs are not part of the pack.
+- `CharacterSummary.last_zone` is the zone the saved position belongs to (3.2).
+- `Enter` with an empty zone name tries, in order: the zone the character was last in; the
+  hub's `--start-zone ID`; the zone called `town`; every other zone by name. It takes the
+  first that is up, has room, asks for no trial or trust tier the character lacks, and has
+  a web listener if the request came from a browser. With none: `NotFound`. A zone named
+  outright is refused for what is wrong with it (`NotFound`, `Full`, `Locked`, `Invalid`
+  for a browser and a zone without a web listener).
+- **Room.** A zone says how many clients it takes (`ZoneHello.max_players`, one at least);
+  the hub counts the characters whose location is that zone, in the database, and answers
+  `Full` to `Enter` and to `Handoff` when there are that many. Characters in transit are
+  **not** counted: a ticket costs nothing to ask for, and counting them would let a
+  handful of accounts hold every seat with tickets they never use. Two that race for the
+  last seat both get a ticket, and the zone's own count decides at its door.
+- **`Release { character }`** (zones): the zone claimed the character and has no body for
+  it (it is full after all, the build is not valid there, the client went away before the
+  handshake ended). The character is offline again and nothing else about it changes: it
+  never stood there, so where it last stood is what it was. A claim that fails at the hub
+  after the character was moved gives it back the same way. A zone also answers a `Kick`
+  for a character it has no body for with `Release`, unless that character's leaving save
+  is on its way (a logout races the save of the character it logs out); and a zone drops a
+  body whose periodic save the hub refuses as not being there.
+- **Transits end.** A character in transit whose ticket has run out (65 s) is offline
+  again, by the sweeper once a minute; so are a banned account's transits, at the ban.
+- `Enter` refuses a character whose stored build the content no longer takes, in words,
+  before any ticket is cut. `Handoff` says whether the traveller is a browser, and a zone
+  without a web listener is refused to one (`Invalid`).
+- `ZoneSummary` gains `max_players`, `web` (a browser can reach it), `min_trust` and
+  `requires`: the travel screen says why a zone cannot be gone to before anybody asks.
+- **Sessions slide**: every request that names a session renews it. The client says
+  something every ten minutes while it plays (a zone is played without a word to the hub).
+  A session ends 24 h after its last use, 30 days after its login whatever its use
+  (`SESSION_LIFETIMES`), at its `Logout`, and at a ban; an account has eight at once, and
+  a ninth login ends the one used longest ago. Sessions that have run out are forgotten
+  once a minute.
+- **Login timing.** An email no account has costs the same password hash as one that has
+  (a fixed decoy), so the time to `Credentials` does not say which emails exist.
+- **Names** (`gm_hub_proto::names`): trimmed; two characters or more, 24 bytes at most; a
+  letter first (ASCII or one of `č ć đ š ž` and their capitals); then letters, digits,
+  and single spaces, hyphens and apostrophes between them. Not a reserved word (`zone`,
+  `system`, `server`, `admin`, `admins`, `administrator`, `moderator`, `moderators`, `mod`,
+  `mods`, `gm`, `gms`, `gamemaster`, `staff`, `support`, `official`, `hub`, `gamengine`,
+  `nobody`), nor one as a word of its own or with a number behind it (`Zone 2`, `GM Bob`,
+  `Moderator7`). Unique by **skeleton**: small letters without their marks, `i I l L 1` as
+  `l`, `0 O o` as `o`, joiners removed. The skeleton is stored in `characters.name_key`
+  (migration 0007, which keys the names made before it the same way and keeps both owners
+  of two that are alike; they are not judged by the new rules). A name that is refused is
+  refused with the rule it broke, in words (`Invalid`). A password is 8 characters or
+  more and 256 bytes at most.
+
 ## 4. Database (PLAN.md 11.4)
 
 ```
@@ -295,12 +375,15 @@ every zone of a deployment load the same `assets/content`, and the hub refuses a
 ledger arrive in Phase 5 as separate tables (ECONOMY.md); Phase 6 adds `models`,
 `model_holders`, `model_events`, `characters.model` and three account columns (MODELS.md 6.1),
 and `characters.pos_zone` (section 3.2); Phase 7 adds `hires.ended`, `trials (character_id,
-trial, zone, secs, passed_at)` and `kills (zone, ref)` (migration 0005). Migrations are embedded in the binary and run at
+trial, zone, secs, passed_at)` and `kills (zone, ref)` (migration 0005); Phase 10 adds
+`characters.name_key`, unique (migration 0007, section 3.8) and an index for a zone's
+room count (0008). Migrations are embedded in the binary and run at
 start in order; the hub refuses to start on an unknown newer schema.
 
 Passwords: argon2id with the crate defaults (19 MiB, 2 iterations, parallelism 1), one hash per
 account, never logged. Emails are stored lowercase and trimmed. A `Register` with an existing
-email answers `Taken` without timing leaks worth defending in Phase 4.
+email answers `Taken`: an address is not a secret here (nothing is ever mailed to it), and
+`Login` no longer tells which exist by its timing (3.8).
 
 ## 5. Budgets and acceptance (PLAN.md 11.8 Phase 4)
 

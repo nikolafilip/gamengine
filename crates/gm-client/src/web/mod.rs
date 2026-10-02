@@ -112,6 +112,33 @@ impl PageOptions {
     }
 }
 
+/// What the page's login form sent, once (CLIENT.md 4.1): the email, the password and
+/// whether a new account is wanted. The page leaves it in `globalThis.gmLogin`; it is
+/// deleted as it is read, so the password lives in one place at a time.
+pub fn take_login() -> Option<(String, String, bool)> {
+    let global = js_sys::global();
+    let login = Reflect::get(&global, &"gmLogin".into()).ok()?;
+    if login.is_undefined() || login.is_null() {
+        return None;
+    }
+    let _ = Reflect::delete_property(&global, &"gmLogin".into());
+    let text = |key: &str| {
+        Reflect::get(&login, &key.into())
+            .ok()
+            .and_then(|v| v.as_string())
+    };
+    let register = Reflect::get(&login, &"register".into()).is_ok_and(|v| v.is_truthy());
+    Some((text("user")?, text("password")?, register))
+}
+
+/// Whether the page's canvas holds the pointer (the browser gives it up by itself when
+/// Escape is pressed, and that key press never reaches the page, WEB.md 3.4).
+pub fn pointer_locked() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .is_some_and(|d| d.pointer_lock_element().is_some())
+}
+
 /// A SHA-256 as 64 hex digits.
 pub fn parse_hash(hex: &str) -> Option<[u8; 32]> {
     gm_model::id_from_hex(hex)

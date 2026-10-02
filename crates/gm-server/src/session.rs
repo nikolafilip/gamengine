@@ -324,6 +324,13 @@ impl Session {
         }
     }
 
+    /// Queue a message that may be lost: a chat line. A client whose queue is half full
+    /// misses it and stays connected: the room that is left is for what must arrive.
+    pub fn send_droppable(&self, msg: Control) -> bool {
+        self.control.capacity() > self.control.max_capacity() / 2
+            && self.control.try_send(msg).is_ok()
+    }
+
     /// Record an ack; anything we did not send (or no longer hold) counts as no ack.
     pub fn on_ack(&mut self, ack: u32) {
         self.acked = if ack != 0 && self.history.iter().any(|s| s.server_tick == ack) {

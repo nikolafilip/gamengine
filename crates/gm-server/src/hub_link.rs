@@ -36,6 +36,8 @@ pub struct HubLinkConfig {
     pub min_trust: i16,
     /// Trials that open this zone (COMPANIONS.md 11); empty = open to all.
     pub requires: Vec<String>,
+    /// How many clients the zone takes: the hub sends nobody to a full one.
+    pub max_players: u32,
 }
 
 pub struct HubLink {
@@ -75,6 +77,7 @@ impl HubLink {
                 web: cfg.web,
                 min_trust: cfg.min_trust,
                 requires: cfg.requires,
+                max_players: cfg.max_players,
             })
             .await?;
         let HubResponse::Registered { public_key } = resp else {
@@ -125,8 +128,10 @@ impl HubLink {
         }
     }
 
-    pub async fn save(&self, character: CharacterId, state: CharacterState, leaving: bool) {
-        if let Err(e) = self
+    /// Save a character. `false`: the hub says the character is not this zone's to save
+    /// (it was taken out of here, or never arrived as far as the hub knows).
+    pub async fn save(&self, character: CharacterId, state: CharacterState, leaving: bool) -> bool {
+        match self
             .client
             .ok(&HubRequest::Save {
                 character,
@@ -135,7 +140,22 @@ impl HubLink {
             })
             .await
         {
-            warn!(character, leaving, "save refused: {e}");
+            Ok(()) => true,
+            Err(e) => {
+                warn!(character, leaving, "save refused: {e}");
+                !matches!(
+                    e,
+                    HubClientError::Refused(gm_hub_proto::protocol::HubError::NotFound)
+                )
+            }
+        }
+    }
+
+    /// The zone has no body for a character it claimed: the hub takes it back, offline
+    /// as it came (HUB.md 3.8).
+    pub async fn release(&self, character: CharacterId) {
+        if let Err(e) = self.client.ok(&HubRequest::Release { character }).await {
+            warn!(character, "release refused: {e}");
         }
     }
 
@@ -144,6 +164,7 @@ impl HubLink {
         character: CharacterId,
         state: CharacterState,
         to_zone: ZoneId,
+        web: bool,
     ) -> Result<ZoneTicket, String> {
         match self
             .client
@@ -151,6 +172,7 @@ impl HubLink {
                 character,
                 state,
                 to_zone,
+                web,
             })
             .await
         {

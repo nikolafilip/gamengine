@@ -65,11 +65,11 @@ round_trip_ms = 2000
 # symmetric: on WebGPU wgpu is a thin binding, for WebGL2 it links its GLES backend and the
 # shader translator. Sizes are of the .wasm after wasm-opt; "packed" is brotli -q 11 (what a
 # static host serves), gzip -9 where brotli is not installed.
-max_webgpu_wasm_bytes = 1048576         # measured 899,300
-max_webgpu_packed_bytes = 393216        # measured 296,216
-max_webgl_wasm_bytes = 3407872          # measured 2,892,353
-max_webgl_packed_bytes = 1048576        # measured 869,258
-max_js_bytes = 180224                   # wasm-bindgen glue + loader + page, per build; measured 164,411 (webgl)
+max_webgpu_wasm_bytes = 1048576         # measured 967,052 (with the screens of Phase 10)
+max_webgpu_packed_bytes = 393216        # measured 324,017
+max_webgl_wasm_bytes = 3407872          # measured 2,956,609
+max_webgl_packed_bytes = 1048576        # measured 896,912
+max_js_bytes = 180224                   # wasm-bindgen glue + loader + page, per build; measured 170,358 (webgl)
 max_wasm_memory_bytes = 67108864        # linear memory in the 8v8 arena; measured 3.3 MiB
 min_snapshots_per_s = 55                # of the zone's 64, as the browser client counts them
 min_fps = 55                            # headless Chromium presents at 60 on the reference iGPU
@@ -84,3 +84,14 @@ secs = 90
 max_record_us = 150                 # recorder + sight + aim analysis, mean per tick, 16 players; measured 55-69 (200 players: 592-626)
 max_replay_bytes_per_minute = 1572864   # a 16-player fight's .gmr; measured 0.29-0.33 MB
 max_ring_bytes = 67108864           # the 30 s the recorder always holds; measured 0.32-0.38 MB with 16 players
+
+[screens]
+# CLIENT.md 10 (scripts/check-screens.sh): the client's screens, by UI script and by real
+# input, on the software GPU of a display of its own. The times are bounds on a run that
+# works, generous because that GPU is slow and CI machines differ: a screen that wedges
+# never gets there at all.
+rounds = 20                           # of Play and Leave, one after the other
+max_secs_to_town = 20                 # from the program's start: account, character, entry; measured 0.5-0.6 (2.6 on a loaded machine)
+max_round_ms = 3000                   # one Play and one Leave, mean; measured 121-154 (577 loaded)
+max_rounds_rss_growth_bytes = 16777216   # what the rounds may leave behind in the client; measured 2.9 MB for 20, 60 and 150
+max_rounds_threads_added = 2          # a connection's thread that outlived its connection would add one a round

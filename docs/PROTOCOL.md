@@ -441,8 +441,24 @@ body the client is being sent, `MoveTo` a point with a way to it. Anything else 
 encounter's creatures; `Loot` and `Trial` to the human they concern (`detail` says why a trial
 was not passed, or, for a pass, what the ledger said).
 
-A reliable message is never dropped: a client whose queue of 256 undelivered messages is full
-is disconnected.
+Chat (CLIENT.md 5): `Chat(text)` is relayed to everybody in the zone as `ChatFrom { from,
+text }`, `from` being the speaker's entity id. The zone checks it where it arrives, in the
+connection's own task, before the zone's thread sees it: a line is 1 to **200** characters
+after trimming, with no control character and none that cannot be seen (zero-width and
+directional marks). An **account** may say **5 lines in 10 seconds** (a bucket of 5, one
+back every 2 s; under a hub the bucket is the account's, shared by its characters and kept
+a minute past its last connection, so that coming back does not fill it; without a hub it
+is the connection's). A line over that, and a line that is not one, is not relayed but
+answered to its sender alone (`ChatFrom` with `from` 0: the zone's own voice, which is
+also how a client tells such a line from a player's). Refusals are forgotten one every
+ten seconds; **thirty** that are not end the connection (`Kick` "flooding the chat"). The
+zone as a whole relays at most **10 lines a second** (a burst of 30); a line over that is
+dropped and its sender told. A character the receiver's font lacks is drawn as `?`.
+
+A reliable message is never dropped, with one exception: a client whose queue of 256
+undelivered messages is full is disconnected, but a chat line is not queued for a client
+whose queue is half full (somebody else's talk is not worth a connection, and the room
+that is left is for what must arrive).
 
 ## 9. Budgets and the acceptance test
 
@@ -580,3 +596,15 @@ implementation; verdicts are ours):
   document's snapshot codec (section 5) and its own event list; the file format
   (ANTICHEAT.md 3.2) carries its own codec version, so a later change to the control
   messages leaves recorded fights readable.
+
+## 17. Changes in Phase 10 (still v5)
+
+- No message changed. What the zone does with `Chat` did (section 8): it is checked and
+  limited where it arrives, the zone has a ceiling, a full queue drops chat instead of the
+  client, and a flood is kicked.
+- A join the zone refuses after it claimed the character at the hub (no body free after
+  all), and a client that goes away before `Welcome` and `Content` were written, give the
+  character back to the hub at once (`Release`, HUB.md 3.8). A character that joins again
+  replaces its own body before the zone's room is counted.
+- A client now speaks to the hub in the players' messages (HUB.md 3.8) and shows screens
+  (CLIENT.md); nothing a zone sees of it is different.
