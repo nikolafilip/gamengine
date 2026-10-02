@@ -997,8 +997,27 @@ impl Models {
             "update accounts set upload_strikes = greatest(0, upload_strikes + $2) where id in \
              (select distinct account_id from model_holders where hash = any($1))",
         )
-        .bind(hashes)
+        .bind(&hashes)
         .bind(delta)
+        .execute(&mut **tx)
+        .await
+        .map_err(internal)?;
+        // A strike is reputation too (ANTICHEAT.md 6), and its return gives it back: a row
+        // each way, the sum moved in the same transaction.
+        let (kind, points) = if delta > 0 {
+            ("model_strike", crate::conduct::MODEL_STRIKE * delta as i32)
+        } else {
+            (
+                "model_strike_returned",
+                -crate::conduct::MODEL_STRIKE * (-delta) as i32,
+            )
+        };
+        sqlx::query(
+            "with holders as (select distinct account_id from model_holders where hash = any($1)),                   rows as (insert into reputation (account_id, kind, delta, reference)                            select account_id, $2, $3, 'model' from holders returning account_id)              update accounts set reputation = reputation + $3 where id in (select account_id from rows)",
+        )
+        .bind(&hashes)
+        .bind(kind)
+        .bind(points)
         .execute(&mut **tx)
         .await
         .map_err(internal)?;

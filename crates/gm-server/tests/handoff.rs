@@ -95,6 +95,7 @@ async fn start_zone(
         public_addr: addr,
         zone_cert_der: identity.cert_der().to_vec(),
         web: web.as_ref().map(|(_, addr)| addr.clone()),
+        min_trust: 0,
         requires: Vec::new(),
     })
     .await
@@ -204,6 +205,8 @@ async fn login_zone_handoff_logout_round_trip() {
             travel_to: None,
             travel_after_ticks: 0,
             stall_tile: None,
+            aim: Default::default(),
+            report_after_ticks: 0,
         },
         play: Duration::from_secs(7),
         list_for_hire: None,
@@ -460,6 +463,8 @@ async fn login_zone_handoff_logout_round_trip() {
                 travel_to: None,
                 travel_after_ticks: 0,
                 stall_tile: None,
+                aim: Default::default(),
+                report_after_ticks: 0,
             },
             bitcode::encode(&ticket.token),
             move |_| Ok(bsp.clone()),

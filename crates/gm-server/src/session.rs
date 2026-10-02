@@ -167,6 +167,7 @@ pub struct Session {
     pub last_udp_rx: u64,
     stall_gate: RequestGate,
     travel_gate: RequestGate,
+    report_gate: RequestGate,
     /// Squad entries last told to this client, so an unchanged squad is not sent again.
     pub squad_told: Vec<gm_net::control::SquadEntry>,
     /// The zone tick at which the last input datagram arrived (or the join), and whether
@@ -193,6 +194,8 @@ pub const KICK_GRACE: Duration = Duration::from_millis(500);
 /// one in this long.
 pub const STALL_REQUEST_GAP: Duration = Duration::from_secs(1);
 pub const TRAVEL_REQUEST_GAP: Duration = Duration::from_secs(1);
+/// A report writes a replay: one per client in this long (ANTICHEAT.md 5).
+pub const REPORT_GAP: Duration = Duration::from_secs(30);
 
 /// What a client may ask of the hub through the zone: one request at a time and at most one
 /// per gap, so that a flood of messages costs the hub one request per gap and not one each.
@@ -244,6 +247,7 @@ impl Session {
             last_udp_rx: 0,
             stall_gate: RequestGate::default(),
             travel_gate: RequestGate::default(),
+            report_gate: RequestGate::default(),
             squad_told: Vec::new(),
             last_input_at: 0,
             had_input: false,
@@ -280,6 +284,13 @@ impl Session {
 
     pub fn end_stall_request(&mut self) {
         self.stall_gate.end();
+    }
+
+    /// May this player report somebody now (one report in `REPORT_GAP`)?
+    pub fn may_report(&mut self) -> bool {
+        let ok = self.report_gate.begin(Instant::now(), REPORT_GAP);
+        self.report_gate.end();
+        ok
     }
 
     /// The same for `Travel`: a handoff is a hub transaction.

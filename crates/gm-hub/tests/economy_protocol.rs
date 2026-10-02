@@ -30,6 +30,7 @@ async fn zone(addr: std::net::SocketAddr, cert: &[u8], id: &str) -> HubClient {
             addr: "127.0.0.1:9".parse().unwrap(),
             cert_der: vec![1, 2, 3],
             web: None,
+            min_trust: 0,
             requires: Vec::new(),
         })
         .await

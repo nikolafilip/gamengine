@@ -1309,6 +1309,7 @@ dependencies = [
  "gm-core",
  "gm-hub-proto",
  "gm-net",
+ "gm-replay",
  "quinn",
  "tokio",
  "tracing",
@@ -1338,6 +1339,7 @@ dependencies = [
  "gm-hub-proto",
  "gm-model",
  "gm-net",
+ "gm-replay",
  "js-sys",
  "log",
  "pollster",
@@ -1385,6 +1387,7 @@ dependencies = [
  "gm-ingest",
  "gm-model",
  "gm-net",
+ "gm-replay",
  "quinn",
  "rand 0.9.5",
  "rlimit",
@@ -1406,6 +1409,7 @@ dependencies = [
  "ed25519-dalek",
  "gm-core",
  "gm-net",
+ "gm-replay",
  "quinn",
  "rand 0.9.5",
  "thiserror 2.0.21",
@@ -1461,6 +1465,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gm-replay"
+version = "0.1.0"
+dependencies = [
+ "bitcode",
+ "glam",
+ "gm-core",
+ "gm-net",
+ "miniz_oxide 0.9.1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "gm-server"
 version = "0.1.0"
 dependencies = [
@@ -1478,6 +1494,7 @@ dependencies = [
  "gm-ingest",
  "gm-model",
  "gm-net",
+ "gm-replay",
  "quinn",
  "rayon",
  "tokio",
@@ -1498,6 +1515,7 @@ dependencies = [
  "gm-hub-proto",
  "gm-ingest",
  "gm-model",
+ "gm-replay",
  "image",
  "serde",
  "serde_json",

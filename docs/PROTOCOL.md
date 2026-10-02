@@ -1,14 +1,14 @@
 # Wire Protocol
 
-Status: v4 (Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+Status: v5 (Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
 and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
 document disagree, the document wins and the code is wrong; changes to either go in one commit.
 
-Protocol version byte: **4**. Any change to sections 2–5 or to the layout of a `Control`
+Protocol version byte: **5**. Any change to sections 2–5 or to the layout of a `Control`
 message bumps it. Section 11 lists what v2 changed over v1, section 14 what v3 changed over
-v2, section 15 what v4 changed over v3.
+v2, section 15 what v4 changed over v3, section 16 what v5 changed over v4.
 
 Section 10 records the independent design review this version went through and what changed.
 
@@ -565,3 +565,18 @@ implementation; verdicts are ours):
   5.5: HTTP/3 datagram framing and the browser's acknowledgements make the difference); 0 or
   1 unexplained correction in 40 s. A QUIC bot and a WebTransport bot in one zone over real
   UDP: 9.4–9.5 KB/s down and 9.6–9.7 KB/s up each in the test room.
+
+## 16. Changes in v5 (Phase 9)
+
+- Control: `Report { target, reason }` (client → zone; reasons `aim`, `griefing`, `other`)
+  and `ReportResult(Result<(), String>)` (zone → client). `docs/ANTICHEAT.md` 5 is the
+  contract: one report per client per 30 s, of a client-driven body in the zone or one that
+  left within two minutes. The version byte is 5.
+- Nothing in sections 2 to 7 changed. What the zone *keeps* changed: each executed frame's
+  claimed view tick is remembered beside the clamped one of 7.4 (`Player.view_claimed`,
+  bounded to 32 ticks). Hits and projectiles are still resolved against the clamped tick;
+  the aim statistics of ANTICHEAT.md 4 read the claimed one.
+- A zone started with `--replay-dir` records every tick as a full-zone snapshot with this
+  document's snapshot codec (section 5) and its own event list; the file format
+  (ANTICHEAT.md 3.2) carries its own codec version, so a later change to the control
+  messages leaves recorded fights readable.

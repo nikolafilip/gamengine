@@ -39,6 +39,11 @@ struct Args {
     web_url: Option<String>,
     web_origins: Vec<String>,
     web_info_out: Option<PathBuf>,
+    /// Record fights between players and reports here (ANTICHEAT.md 3).
+    replay_dir: Option<PathBuf>,
+    replay_mb_per_hour: u64,
+    /// The least trust tier the zone admits (ANTICHEAT.md 6).
+    min_trust: i16,
 }
 
 const USAGE: &str = "gm-server [--map PATH] [--content DIR] [--default-build NAME] [--listen ADDR] \
@@ -47,7 +52,7 @@ const USAGE: &str = "gm-server [--map PATH] [--content DIR] [--default-build NAM
 [--hub ADDR --hub-cert PATH --zone-id NAME --zone-secret S [--public-addr ADDR] \
 [--requires TRIAL,TRIAL,...]] \
 [--web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url https://HOST:PORT] [--web-origin ORIGIN]... \
-[--web-info-out PATH]]   (env: GM_ZONE_SECRET)";
+[--web-info-out PATH]] [--replay-dir DIR [--replay-mb-per-hour N]] [--min-trust N]   (env: GM_ZONE_SECRET)";
 
 /// A comma-separated list of names.
 fn names(list: &str) -> Vec<String> {
@@ -86,6 +91,9 @@ fn parse_args() -> Result<Args, String> {
         web_url: None,
         web_origins: Vec::new(),
         web_info_out: None,
+        replay_dir: None,
+        replay_mb_per_hour: 512,
+        min_trust: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -151,6 +159,17 @@ fn parse_args() -> Result<Args, String> {
             "--web-url" => args.web_url = Some(value("--web-url")?),
             "--web-origin" => args.web_origins.push(value("--web-origin")?),
             "--web-info-out" => args.web_info_out = Some(PathBuf::from(value("--web-info-out")?)),
+            "--replay-dir" => args.replay_dir = Some(PathBuf::from(value("--replay-dir")?)),
+            "--replay-mb-per-hour" => {
+                args.replay_mb_per_hour = value("--replay-mb-per-hour")?
+                    .parse()
+                    .map_err(|e| format!("--replay-mb-per-hour: {e}"))?
+            }
+            "--min-trust" => {
+                args.min_trust = value("--min-trust")?
+                    .parse()
+                    .map_err(|e| format!("--min-trust: {e}"))?
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -231,6 +250,9 @@ async fn main() -> anyhow::Result<()> {
     if !args.recruits.is_empty() && !args.squads {
         anyhow::bail!("--recruits needs --squads");
     }
+    if args.min_trust != 0 && args.hub.is_none() {
+        anyhow::bail!("--min-trust needs --hub: the hub is what knows accounts");
+    }
     if !args.requires.is_empty() && args.hub.is_none() {
         anyhow::bail!("--requires needs --hub: the hub is what remembers trials");
     }
@@ -282,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
                     public_addr: args.public_addr.unwrap_or(endpoint.local_addr()?),
                     zone_cert_der: identity.cert_der().to_vec(),
                     web: web_addr.clone(),
+                    min_trust: args.min_trust,
                     requires: args.requires.clone(),
                 })
                 .await?,
@@ -305,6 +328,11 @@ async fn main() -> anyhow::Result<()> {
         arrive_at_entry: args.arrive_at_entry,
         squads: args.squads,
         recruits: args.recruits,
+        replay: args.replay_dir.map(|dir| gm_server::ReplayConfig {
+            dir,
+            bytes_per_hour: args.replay_mb_per_hour * 1024 * 1024,
+            zone: args.zone_id.clone(),
+        }),
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

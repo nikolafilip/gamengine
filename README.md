@@ -23,6 +23,7 @@ crates/gm-hub       accounts, characters, zone registry, handoff, the economy, a
 crates/gm-hub-proto hub messages, entry tokens and the hub connection used by zones, bots and the client.
 crates/gm-model     avatar models: the standard rig, the .gmm container, the shared animation set, the mannequin.
 crates/gm-ingest    model ingestion: a glTF upload validated against budgets and the frame envelope, re-encoded.
+crates/gm-replay    replays: the .gmr file a zone records, its playback, the aim statistics computed from its frames.
 crates/gm-ai        minds: companions, creatures, the nav grid, encounters with their ledger, loot split and trial verdicts.
 crates/gm-tools     CLI: map build and generators, WAD generation, budget lint, model and moderation tools.
 crates/gm-bot       headless bots: the client's prediction code with scripted behaviour, for tests and load.
@@ -32,7 +33,7 @@ assets/textures     generated palette and WAD (gm-tools wad make)
 assets/content      abilities, preset builds, creatures, trials and items (TOML), the v1 content
 web/                the browser client's page and loader (index.html, boot.js)
 docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md, WEB.md,
-                    BUILDING.md
+                    ANTICHEAT.md, BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
@@ -111,6 +112,19 @@ cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --cert-out
 # http://localhost:8080/?connect=https://127.0.0.1:4434&cert=<cert_sha256 from zone-web.json>&map=arena&build=blade
 ```
 
+Fair play (Phase 9): a zone records every fight between players and every report as a
+replay, computes each client's aim statistics from the same frames (where its view pointed
+around each shot, judged against the world as it saw it), and reports both to the hub, which
+keeps a reputation ledger, flags accounts whose numbers are not a hand's, and gives a
+moderator the list, the replays and the verdicts ([`docs/ANTICHEAT.md`](docs/ANTICHEAT.md)).
+Statistics rank; people decide.
+
+```sh
+cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --cert-out zone-cert.der --replay-dir replays
+cargo run --release -p gm-tools -- replay aim replays/arena-*.gmr
+cargo run --release -p gm-client -- --replay replays/arena-*.gmr --follow NAME
+```
+
 ## CI gates
 
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then:
@@ -145,6 +159,11 @@ cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --cert-out
   three hires paid and burned, the squad by name, the drop and the trial in the database,
   the ledger sound, the gated zone, a hire ended by its avatar's owner.
 
+- `scripts/check-anticheat.sh` — the aim analysis on traces whose answer is known; then a
+  recorded arena of twelve bots whose view moves like a hand and four that aim by program:
+  every program flagged, no hand flagged, the fight's replay reads back and recomputes to
+  the numbers the zone logged, the client renders it from a program's eyes; with `--online`
+  through the hub: flags, replays, a report upheld, a ban, a trust-gated zone.
 - `scripts/check-web.sh` — the browser client: both `.wasm` under their size budgets, a QUIC
   bot and a WebTransport bot in one zone; with `--browser` headless Chromium plays in an
   arena with fifteen native bots on each build (snapshots, corrections, damage both ways,

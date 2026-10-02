@@ -1,0 +1,16 @@
+[package]
+name = "gm-replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine replays: the .gmr file a zone records, its playback, and the aim statistics computed from its frames."
+
+[dependencies]
+bitcode = { workspace = true }
+glam = { workspace = true }
+gm-core = { workspace = true }
+gm-net = { workspace = true }
+miniz_oxide = { workspace = true }
+thiserror = { workspace = true }

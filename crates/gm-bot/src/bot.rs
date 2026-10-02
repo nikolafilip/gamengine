@@ -46,6 +46,10 @@ pub struct BotConfig {
     /// Walk to this tile of the map's market (counted across its grids) and open a stall
     /// there, or on the next free one (ECONOMY.md 7).
     pub stall_tile: Option<u32>,
+    /// How the view moves (ANTICHEAT.md 10): the brain's wish at once, a hand, or a cheat.
+    pub aim: crate::aim::AimModel,
+    /// Report the first enemy seen after this many ticks (0 = never; ANTICHEAT.md 5).
+    pub report_after_ticks: u32,
 }
 
 /// Why the bot loop ended.
@@ -106,6 +110,8 @@ pub struct BotReport {
     pub coin: u32,
     pub trials: Vec<(String, bool, String)>,
     pub raid_done: bool,
+    /// The zone took this bot's report (ANTICHEAT.md 5).
+    pub report_accepted: bool,
     /// Bodies the zone announced as creatures, and the most seen with their health.
     pub creatures_announced: usize,
     pub creature_health_seen: usize,
@@ -222,6 +228,8 @@ pub async fn run_bot_on_link(
     let mut client = ClientState::new(entity, rate, Sheet::new(own, &pack, team));
     let mut brain = Brain::new(cfg.seed, cfg.behaviour);
     brain.hz = rate.hz();
+    let mut aimer = crate::aim::Aimer::new(cfg.aim, cfg.seed);
+    let mut reported = false;
     // A raid leader thinks with `gm_ai` instead: the nav grid is flooded here, once.
     let mut raid = (cfg.behaviour == Behaviour::Raid).then(|| Raid::new(&world, cfg.seed));
     // The tick the raid was finished at: the loop runs two seconds more, for the last
@@ -310,6 +318,32 @@ pub async fn run_bot_on_link(
                         tick: client.tick.wrapping_add(1),
                     }),
                 };
+                // The view goes where this bot's aim model takes it.
+                let input = aimer.apply(
+                    input,
+                    &client,
+                    world.as_ref(),
+                    team,
+                    &others,
+                    client.tick.wrapping_add(1),
+                );
+                if cfg.report_after_ticks > 0
+                    && !reported
+                    && ticks >= cfg.report_after_ticks
+                    && let Some(enemy) = others.iter().find(|e| {
+                        e.kind == gm_net::snapshot::EntityKind::Player
+                            && e.alive()
+                            && (team == 0 || e.team() != team)
+                    })
+                {
+                    reported = true;
+                    info!(name = %cfg.name, target = enemy.id, "reporting");
+                    let report = Control::Report {
+                        target: enemy.id,
+                        reason: gm_net::control::ReportReason::Aim,
+                    };
+                    let _ = control::send(&mut send, &report).await;
+                }
                 if let Some(to) = &cfg.travel_to
                     && cfg.travel_after_ticks > 0
                     && ticks == cfg.travel_after_ticks
@@ -464,6 +498,10 @@ pub async fn run_bot_on_link(
                     }
                     Ok(Some(Control::StallClosed(id))) => {
                         stalls_seen.remove(&id);
+                    }
+                    Ok(Some(Control::ReportResult(result))) => {
+                        info!(name = %cfg.name, ?result, "report answered");
+                        report.report_accepted = result.is_ok();
                     }
                     Ok(Some(Control::Roster(players))) => {
                         report.creatures_announced = players

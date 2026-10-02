@@ -53,6 +53,9 @@ pub enum Driver {
     Mind,
 }
 
+/// The furthest back a frame's claimed view is believed for statistics (half a second).
+pub const MAX_CLAIMED_VIEW_LAG: Tick = 32;
+
 /// A body as the server sees it: a player, a companion or a creature.
 #[derive(Clone, Debug)]
 pub struct Player {
@@ -67,10 +70,18 @@ pub struct Player {
     pub view_tick: Tick,
     /// `min(13, half_rtt_ticks + 8)`; the server sets it from the measured RTT.
     pub max_rewind: Tick,
+    /// The client's one-way latency in ticks as the server measured it (0 until told).
+    pub half_rtt_ticks: Tick,
     pub last_input_tick: u32,
     credits: f32,
-    /// `(client tick, input, clamped view tick)` waiting to run, ascending by tick.
-    queue: VecDeque<(u32, Input, Tick)>,
+    /// `(client tick, input, clamped view tick, claimed view tick)` waiting to run,
+    /// ascending by tick.
+    queue: VecDeque<(u32, Input, Tick, Tick)>,
+    /// The world tick the last executed frame says it was looking at, bounded to
+    /// `MAX_CLAIMED_VIEW_LAG` but not to `max_rewind`: hits are resolved against the clamped
+    /// tick (a client cannot buy stale targets), statistics about where a client aimed read
+    /// this one (ANTICHEAT.md 4.1).
+    pub view_claimed: Tick,
     pub starved_ticks: u64,
     pub executed_frames: u64,
     pub dropped_frames: u64,
@@ -250,6 +261,19 @@ pub enum ZoneEvent {
         id: EntityId,
         owner: EntityId,
         input_tick: u32,
+        /// Ticks the projectile was stepped forward at once: how far behind the present
+        /// the shooter's view of the world was, as far as the zone honours it (PROTOCOL.md
+        /// 7.4).
+        lag: Tick,
+        /// How far behind the present the shooter's frame says its view was, bounded only
+        /// by `MAX_CLAIMED_VIEW_LAG`: what its aim is judged against.
+        view_lag: Tick,
+        speed: f32,
+        gravity: f32,
+        /// Ticks it flies at most.
+        lifetime: Tick,
+        /// Where it left from: the muzzle, or the eye when the muzzle was in a wall.
+        origin: Vec3,
     },
     ProjectileRemoved(EntityId),
     AreaSpawned {
@@ -390,7 +414,9 @@ impl Zone {
             respawn_at: 0,
             anim: anim::IDLE,
             view_tick: self.tick,
+            view_claimed: self.tick,
             max_rewind: MAX_REWIND_TICKS,
+            half_rtt_ticks: 0,
             last_input_tick: 0,
             credits: CREDIT_BURST,
             queue: VecDeque::new(),
@@ -556,11 +582,21 @@ impl Zone {
         };
         let pos = p
             .queue
-            .partition_point(|(t, _, _)| tick_delta(*t, input_tick) < 0);
-        if p.queue.get(pos).is_some_and(|(t, _, _)| *t == input_tick) {
+            .partition_point(|(t, _, _, _)| tick_delta(*t, input_tick) < 0);
+        if p.queue
+            .get(pos)
+            .is_some_and(|(t, _, _, _)| *t == input_tick)
+        {
             return;
         }
-        p.queue.insert(pos, (input_tick, input, clamped_view));
+        let claimed_view = if view_tick == 0 {
+            now
+        } else {
+            let lag = tick_delta(now, view_tick).clamp(0, MAX_CLAIMED_VIEW_LAG as i32);
+            now.wrapping_sub(lag as Tick)
+        };
+        p.queue
+            .insert(pos, (input_tick, input, clamped_view, claimed_view));
         p.view_tick = clamped_view;
         while p.queue.len() > MAX_QUEUED_FRAMES {
             p.queue.pop_front();
@@ -572,6 +608,7 @@ impl Zone {
     pub fn set_half_rtt_ticks(&mut self, id: EntityId, half_rtt_ticks: Tick) {
         if let Some(p) = self.players.get_mut(&id) {
             p.max_rewind = (half_rtt_ticks + REWIND_ALLOWANCE_TICKS).min(MAX_REWIND_TICKS);
+            p.half_rtt_ticks = half_rtt_ticks;
         }
     }
 
@@ -619,6 +656,7 @@ impl Zone {
                     p.last_input_tick = t;
                     p.executed_frames += 1;
                     p.view_tick = now;
+                    p.view_claimed = now;
                     executed = 1;
                     if p.alive {
                         let sheet = &p.sheet;
@@ -635,9 +673,10 @@ impl Zone {
                 }
             }
             while allowed > 0 && executed < MAX_FRAMES_PER_TICK && p.credits >= 1.0 {
-                let Some((t, input, view)) = p.queue.pop_front() else {
+                let Some((t, input, view, claimed)) = p.queue.pop_front() else {
                     break;
                 };
+                p.view_claimed = claimed;
                 allowed -= 1;
                 p.credits -= 1.0;
                 executed += 1;
@@ -881,6 +920,8 @@ impl Zone {
         };
         let owner_vel = p.mover.mv.velocity;
         let lag = tick_delta(self.tick, view_tick).clamp(0, p.max_rewind as i32) as Tick;
+        let view_lag =
+            tick_delta(self.tick, p.view_claimed).clamp(0, MAX_CLAIMED_VIEW_LAG as i32) as Tick;
         for _ in 0..def.count.max(1) {
             let shot_dir = if def.spread_deg > 0.0 {
                 let a = self.rng.range_f32(0.0, core::f32::consts::TAU);
@@ -919,6 +960,12 @@ impl Zone {
                 id,
                 owner,
                 input_tick,
+                lag,
+                view_lag,
+                speed: def.speed,
+                gravity: def.gravity_scale,
+                lifetime: def.lifetime,
+                origin,
             });
             // Forward step (PROTOCOL.md 7.4): the projectile exists at the time the attacker saw,
             // and each caught-up tick is swept against where the targets *were* at that tick, so

@@ -17,6 +17,16 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const WARM_UP: Duration = Duration::from_secs(60);
 
 pub fn run(opts: &Options) -> Result<(), Error> {
+    // A replay names its own map.
+    let mut opts_with_map;
+    let mut playback = None;
+    let opts = if opts.replay.is_some() {
+        opts_with_map = clone_for_replay(opts);
+        playback = crate::app::open_replay(&mut opts_with_map)?;
+        &opts_with_map
+    } else {
+        opts
+    };
     let bsp = Bsp::load(&opts.map).map_err(|e| format!("loading {}: {e}", opts.map.display()))?;
     let palette = world::load_palette(&opts.palette);
     let mesh = world::build(&bsp, &palette);
@@ -75,10 +85,31 @@ pub fn run(opts: &Options) -> Result<(), Error> {
         } else {
             sim.yaw += 20.0 * dt;
         }
-        let eye = sim.eye();
+        let mut eye = sim.eye();
+        let mut bodies: Vec<crate::avatars::Body> = Vec::new();
+        boxes.clear();
+        // A replay: the scene of its next moment, from the followed body's eyes or from
+        // behind it.
+        let mut replay_camera = None;
+        if let Some(p) = &mut playback {
+            p.advance(dt);
+            let (at, yaw, pitch) = p.scene(opts.third_person, &mut bodies, &mut boxes);
+            eye = at;
+            replay_camera = Some(if opts.third_person {
+                (
+                    crate::app::third_person_camera(&bsp, at, yaw, pitch),
+                    yaw,
+                    pitch,
+                )
+            } else {
+                (at, yaw, pitch)
+            });
+        }
         // The tactical viewport: the camera above the body, the world drawn from the
         // body's leaf (the camera itself hangs in the rock over the ceiling).
-        let (camera, cam_yaw, cam_pitch) = if opts.tactical {
+        let (camera, cam_yaw, cam_pitch) = if let Some(cam) = replay_camera {
+            cam
+        } else if opts.tactical {
             tactical.steer(0.0, 0.0, 0.2, 0.0, dt);
             (
                 tactical.camera(sim.origin()),
@@ -97,12 +128,16 @@ pub fn run(opts: &Options) -> Result<(), Error> {
                 renderer.set_visible_faces(&gpu, Some(&bsp.visible_faces(l)));
             }
         }
-        boxes.clear();
         avatars.begin_frame();
+        for body in &bodies {
+            avatars.push(body, dt, &bsp, &renderer.characters, &mut boxes);
+        }
         avatars.push_crowd(time, dt, camera, &bsp, &renderer.characters, &mut boxes);
         let vp = view_proj(camera, cam_yaw, cam_pitch, w as f32 / h as f32);
         renderer.hud.begin((w, h));
-        if opts.tactical {
+        if let Some(p) = &playback {
+            p.hud(&mut renderer.hud);
+        } else if opts.tactical {
             crate::app::build_hud(&mut renderer.hud, None, &tactical, vp, &[], &[], None);
         }
         renderer.render(&gpu, &view, vp, &boxes, &avatars.draws);
@@ -135,6 +170,30 @@ pub fn run(opts: &Options) -> Result<(), Error> {
     );
     print_bench_avatars(&report, &avatars, &renderer);
     Ok(())
+}
+
+/// The options with their own `map`, for a replay to point at its map.
+fn clone_for_replay(o: &Options) -> Options {
+    Options {
+        map: o.map.clone(),
+        palette: o.palette.clone(),
+        maps_dir: o.maps_dir.clone(),
+        replay: o.replay.clone(),
+        follow: o.follow.clone(),
+        from: o.from,
+        third_person: o.third_person,
+        tactical: o.tactical,
+        bench_frames: o.bench_frames,
+        headless: o.headless,
+        software: o.software,
+        width: o.width,
+        height: o.height,
+        screenshot: o.screenshot.clone(),
+        cache_dir: o.cache_dir.clone(),
+        cache_mb: o.cache_mb,
+        vram_mb: o.vram_mb,
+        ..Options::default()
+    }
 }
 
 fn write_ppm(

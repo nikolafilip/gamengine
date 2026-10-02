@@ -22,11 +22,12 @@ use tracing::{debug, info, warn};
 use crate::db::Db;
 use gm_hub_proto::protocol::{
     AccountId, BuildChoice, CharacterId, ContractOutcome, EconOp, EconReply, HASH_PERMITS,
-    HiredAvatar, HubError, HubNotice, HubRequest, HubResponse, ItemSummary, LocationSummary, ModOp,
-    ModelRef, SessionId, StallSummary, TavernEntry, TradeOffer, ZoneEconOp, ZoneId, ZoneSummary,
-    ZoneTicket, now_secs,
+    HiredAvatar, HubError, HubNotice, HubRequest, HubResponse, ItemSummary, LocationSummary,
+    MAX_REPLAY_BYTES, ModOp, ModelRef, SessionId, StallSummary, TavernEntry, TradeOffer,
+    ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
 };
 
+use crate::conduct::Conduct;
 use crate::economy::{EconError, Economy, Outcome, TradeStatus};
 use crate::models::{IngestMode, Models};
 
@@ -70,6 +71,8 @@ struct ZoneEntry {
     addr: SocketAddr,
     cert_der: Vec<u8>,
     web: Option<WebAddr>,
+    /// The least trust tier the zone admits (ANTICHEAT.md 6).
+    min_trust: i16,
     map: String,
     #[allow(dead_code)]
     map_hash: u64,
@@ -104,6 +107,7 @@ struct Hub {
     db: Db,
     econ: Economy,
     models: Models,
+    conduct: Conduct,
     state: Mutex<State>,
     hashing: Semaphore,
     /// Verifies our own tokens on `Claim` (defence in depth; the zone verified too).
@@ -140,7 +144,9 @@ pub async fn run_with_web(
         cfg.ingest.clone(),
         cfg.ingest_timeout,
     )?;
+    let conduct = Conduct::new(db.pool().clone(), &cfg.models_dir.join("replays"))?;
     let hub = Arc::new(Hub {
+        conduct,
         hashing: Semaphore::new(HASH_PERMITS),
         verifier: Mutex::new(HashMap::new()),
         models,
@@ -172,6 +178,12 @@ pub async fn run_with_web(
                 }
                 if let Err(e) = hub.econ.contracts_expire().await {
                     warn!("contract sweep: {e}");
+                }
+                // Replays past their retention go (ANTICHEAT.md 3.3).
+                match hub.conduct.sweep().await {
+                    Ok(0) => {}
+                    Ok(n) => info!(replays = n, "replays past their retention deleted"),
+                    Err(e) => warn!("replay sweep: {e}"),
                 }
             }
         })
@@ -299,6 +311,42 @@ async fn handle_stream(
             let blob = async {
                 let account = hub.session_account(session)?;
                 hub.models.get(session, account, &model).await
+            }
+            .await;
+            return send_blob(&mut send, blob).await;
+        }
+        // A zone's replay: the summary, then the file (ANTICHEAT.md 3.3).
+        HubRequest::ZoneReplay { summary, len } => {
+            let stored = async {
+                let zone = hub.zone_of_conn(&auth)?;
+                if len == 0 || len > MAX_REPLAY_BYTES {
+                    return Err(HubError::Invalid("replay size".into()));
+                }
+                let mut body = vec![0u8; len as usize];
+                match tokio::time::timeout(upload_body_timeout(len), recv.read_exact(&mut body))
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    _ => return Err(HubError::Invalid("the replay was cut short".into())),
+                }
+                hub.conduct.replay_put(&zone, &summary, body).await
+            }
+            .await;
+            match stored {
+                Ok(id) => HubResponse::ReplayStored { id },
+                Err(e) => {
+                    recv.stop(0);
+                    HubResponse::Err(e)
+                }
+            }
+        }
+        HubRequest::Mod {
+            session,
+            op: ModOp::ReplayGet { id },
+        } => {
+            let blob = async {
+                let moderator = hub.moderator(session).await?;
+                hub.conduct.replay_get(moderator, id).await
             }
             .await;
             return send_blob(&mut send, blob).await;
@@ -454,14 +502,28 @@ impl Hub {
     /// The gate of a zone (COMPANIONS.md 11): a character that passed none of the trials the
     /// zone names is not let in, by `Enter` or by a handoff.
     async fn gate(&self, zone: &ZoneId, character: CharacterId) -> Result<(), HubError> {
-        let requires = self
+        let (requires, min_trust) = self
             .state
             .lock()
             .unwrap()
             .zones
             .get(zone)
-            .map(|z| z.requires.clone())
+            .map(|z| (z.requires.clone(), z.min_trust))
             .unwrap_or_default();
+        // A banned account enters nothing; a zone may ask for a trust tier (ANTICHEAT.md 6).
+        let account = self
+            .db
+            .character(character)
+            .await?
+            .ok_or(HubError::NotFound)?
+            .account_id;
+        self.conduct.check(account).await?;
+        if min_trust > 0 {
+            self.conduct.promote(account).await?;
+        }
+        if min_trust > 0 && self.conduct.trust_tier(account).await? < min_trust {
+            return Err(HubError::Locked(format!("trust tier {min_trust}")));
+        }
         if requires.is_empty() {
             return Ok(());
         }
@@ -636,7 +698,19 @@ async fn handle(
             if !ok {
                 return Err(HubError::Credentials);
             }
+            // A banned account is told why and until when (ANTICHEAT.md 6), after the
+            // password: the reason is the account's own business.
+            hub.conduct.check(account).await?;
             let session = hub.new_session(account);
+            // A ban that landed between the check and the session ends the session.
+            if let Err(e) = hub.conduct.check(account).await {
+                hub.state
+                    .lock()
+                    .unwrap()
+                    .sessions
+                    .retain(|_, s| s.account != account);
+                return Err(e);
+            }
             Ok(HubResponse::Session { session, account })
         }
         HubRequest::Characters { session } => {
@@ -787,6 +861,7 @@ async fn handle(
             addr,
             cert_der,
             web,
+            min_trust,
             requires,
         } => {
             if secret != hub.cfg.zone_secret || hub.cfg.zone_secret.is_empty() {
@@ -816,6 +891,7 @@ async fn handle(
                         addr,
                         cert_der,
                         web,
+                        min_trust,
                         map: map.clone(),
                         map_hash,
                         players: 0,
@@ -873,6 +949,8 @@ async fn handle(
                     .accept(&token, now_secs())
                     .map_err(|e| HubError::Invalid(e.to_string()))?
             };
+            // A ticket issued before a ban does not outlive it.
+            hub.conduct.check(payload.account).await?;
             let row = hub.db.claim(payload.character, &zone).await?;
             // A handoff: the origin zone drops its ghost.
             if let Some(from) = &row.location_zone
@@ -916,6 +994,11 @@ async fn handle(
                 .validate(&hub.cfg.content)
                 .map_err(|e| HubError::Invalid(e.to_string()))?;
             hub.db.save(character, &zone, &state, leaving).await?;
+            // Play time is what makes an account established (ANTICHEAT.md 6): looked at
+            // when a character leaves, whether or not it ever shot at anybody.
+            if leaving && let Some(row) = hub.db.character(character).await? {
+                hub.conduct.promote(row.account_id).await?;
+            }
             Ok(HubResponse::Ok)
         }
         HubRequest::Handoff {
@@ -1048,8 +1131,116 @@ async fn handle(
                     hub.models.clear_strikes(moderator, &email).await?;
                     Ok(HubResponse::Ok)
                 }
+                ModOp::AimReport { weeks, min_shots } => Ok(HubResponse::AimReport(
+                    hub.conduct.aim_report(moderator, weeks, min_shots).await?,
+                )),
+                ModOp::Replays {
+                    email,
+                    reported,
+                    flagged,
+                    limit,
+                } => Ok(HubResponse::Replays(
+                    hub.conduct
+                        .replays(moderator, email.as_deref(), reported, flagged, limit)
+                        .await?,
+                )),
+                // Answered on the stream itself (`handle_stream`): a blob.
+                ModOp::ReplayGet { .. } => Err(HubError::Internal),
+                ModOp::Reports { open_only } => Ok(HubResponse::Reports(
+                    hub.conduct.reports(moderator, open_only).await?,
+                )),
+                ModOp::ReportVerdict { id, verdict, note } => {
+                    hub.conduct
+                        .report_verdict(moderator, id, verdict, &note)
+                        .await?;
+                    Ok(HubResponse::Ok)
+                }
+                ModOp::Ban {
+                    email,
+                    days,
+                    reason,
+                    cheat,
+                } => {
+                    let (account, kicked) = hub
+                        .conduct
+                        .ban(moderator, &email, days, &reason, cheat)
+                        .await?;
+                    // The account's sessions end here, its characters leave their zones,
+                    // and its stalls close (ANTICHEAT.md 6).
+                    hub.state
+                        .lock()
+                        .unwrap()
+                        .sessions
+                        .retain(|_, s| s.account != account);
+                    for k in kicked {
+                        hub.notify(
+                            &k.zone,
+                            HubNotice::Kick {
+                                character: k.character,
+                                reason: format!("banned: {reason}"),
+                            },
+                        )
+                        .await;
+                    }
+                    // The ban stands whatever happens to the tidying after it.
+                    match hub.db.characters_of(account).await {
+                        Ok(rows) => {
+                            for row in rows {
+                                if let Ok((stall, zone)) = hub.econ.stall_close(row.id).await {
+                                    hub.notify(&zone, HubNotice::StallClosed { stall }).await;
+                                }
+                            }
+                        }
+                        Err(e) => warn!(account, "closing a banned account's stalls: {e}"),
+                    }
+                    info!(account, days, "account banned");
+                    Ok(HubResponse::Ok)
+                }
+                ModOp::Unban { email, note } => {
+                    hub.conduct.unban(moderator, &email, &note).await?;
+                    Ok(HubResponse::Ok)
+                }
+                ModOp::Reputation { email } => Ok(HubResponse::Standing(
+                    hub.conduct.standing(moderator, &email).await?,
+                )),
+                ModOp::Adjust { email, delta, note } => {
+                    hub.conduct.adjust(moderator, &email, delta, &note).await?;
+                    Ok(HubResponse::Ok)
+                }
             }
         }
+        // Zones: conduct (ANTICHEAT.md 8).
+        HubRequest::ZoneAim {
+            nonce,
+            character,
+            stats,
+        } => {
+            let zone = hub.zone_of_conn(auth)?;
+            // A zone speaks for the characters that play or played in it (a leaver's
+            // numbers arrive after it went): the character must exist, no more.
+            if hub.db.character(character).await?.is_none() {
+                return Err(HubError::NotFound);
+            }
+            hub.conduct.aim(&zone, nonce, character, &stats).await?;
+            Ok(HubResponse::Ok)
+        }
+        HubRequest::ZoneReport {
+            reporter,
+            target,
+            reason,
+        } => {
+            let zone = hub.zone_of_conn(auth)?;
+            if hub.db.zone_of(reporter).await?.as_deref() != Some(zone.as_str()) {
+                return Err(HubError::Unauthorized);
+            }
+            let id = hub
+                .conduct
+                .report_open(&zone, reporter, target, reason)
+                .await?;
+            Ok(HubResponse::ReportOpened { id })
+        }
+        // Answered on the stream itself (`handle_stream`): it carries raw bytes.
+        HubRequest::ZoneReplay { .. } => Err(HubError::Internal),
     }
 }
 
@@ -1362,10 +1553,19 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
                 ContractOutcome::Wipe => Outcome::Wipe,
                 ContractOutcome::Abandon => Outcome::Abandon,
             };
-            e.contract_report(contract, outcome)
+            let decided = e
+                .contract_report(contract, outcome)
                 .await
-                .map(EconReply::Decided)
-                .map_err(econ_err)
+                .map_err(econ_err)?;
+            // A contract that ended is reputation for its sellers (ANTICHEAT.md 6): paid, or
+            // abandoned. A wipe is nobody's fault.
+            if decided && outcome != Outcome::Wipe {
+                let paid = outcome == Outcome::Completed;
+                if let Err(e) = hub.conduct.contract_decided(contract, paid).await {
+                    warn!(contract, "contract reputation: {e}");
+                }
+            }
+            Ok(EconReply::Decided(decided))
         }
     }
 }

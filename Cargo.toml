@@ -19,6 +19,7 @@ gm-content = { path = "crates/gm-content" }
 gm-hub-proto = { path = "crates/gm-hub-proto" }
 gm-model = { path = "crates/gm-model" }
 gm-ingest = { path = "crates/gm-ingest" }
+gm-replay = { path = "crates/gm-replay" }
 
 # math / data
 glam = "0.33.11"

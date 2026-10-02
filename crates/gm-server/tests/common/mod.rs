@@ -193,6 +193,7 @@ pub fn play(m: Match) -> Outcome {
                     squads,
                     recruits,
                     arrive_at_entry: false,
+                    replay: None,
                 };
                 let report =
                     gm_server::run(cfg, zone_world, endpoint, std::future::pending()).await?;
@@ -248,6 +249,8 @@ pub fn play(m: Match) -> Outcome {
                 travel_to: None,
                 travel_after_ticks: 0,
                 stall_tile: None,
+                aim: Default::default(),
+                report_after_ticks: 0,
             };
             let report = run_bot(
                 &endpoint,

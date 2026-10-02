@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use gm_ai::director::{CompanionSpec, CreatureSpawn, Director, DirectorEvent, EncounterState};
 use gm_core::build::{Build, ContentPack};
-use gm_core::sim::{HitKind, Zone, ZoneEvent};
+use gm_core::sim::{HitKind, MAX_CLAIMED_VIEW_LAG, Zone, ZoneEvent};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Contents, Hull};
 use gm_core::vocab::EntityId;
@@ -20,10 +20,12 @@ use tracing::{info, warn};
 
 use crate::hub_link::HubLink;
 use crate::net::{ClientEvent, EVENT_CHANNEL, JoinInfo, NetConfig, accept_loop};
+use crate::recorder::{Recorder, RecorderConfig, Written};
 use crate::session::{PvsCache, Session, TickTable};
 use gm_hub_proto::protocol::{
     CharacterId, CharacterState, ModelId, ModelRef, StallSummary, now_secs,
 };
+use gm_replay::RosterEntry;
 
 /// Zones save every character this often (HUB.md 3.2).
 pub const SAVE_EVERY: Duration = Duration::from_secs(30);
@@ -61,6 +63,19 @@ pub struct ZoneConfig {
     /// Every arrival starts at the map's spawns; a saved position is not resumed. For
     /// dungeons: nobody logs out past the gate and comes back at the boss's feet.
     pub arrive_at_entry: bool,
+    /// Record fights between players and reports as replays (ANTICHEAT.md 3); the live aim
+    /// statistics run with it.
+    pub replay: Option<ReplayConfig>,
+}
+
+/// Where replays go and how much of them an hour may hold.
+#[derive(Clone, Debug)]
+pub struct ReplayConfig {
+    pub dir: std::path::PathBuf,
+    /// Bytes of fight files per hour, before compression; reports are always written.
+    pub bytes_per_hour: u64,
+    /// The zone's name in file names and headers.
+    pub zone: String,
 }
 
 impl Default for ZoneConfig {
@@ -80,7 +95,104 @@ impl Default for ZoneConfig {
             squads: false,
             recruits: Vec::new(),
             arrive_at_entry: false,
+            replay: None,
         }
+    }
+}
+
+/// A body that left can still be reported for this long (ANTICHEAT.md 5).
+const REPORTABLE_AFTER_LEAVE: Duration = Duration::from_secs(120);
+
+/// What a replay keeps of a simulation event (ANTICHEAT.md 3.1).
+fn replay_event(ev: &ZoneEvent) -> Option<gm_replay::Event> {
+    use gm_replay::{Event, Hit};
+    Some(match *ev {
+        ZoneEvent::Hit {
+            attacker,
+            target,
+            amount,
+            kind,
+            absorbed,
+        } => Event::Hit {
+            attacker,
+            target,
+            amount,
+            kind: match kind {
+                HitKind::Melee => Hit::Melee,
+                HitKind::Projectile => Hit::Projectile,
+                HitKind::Area => Hit::Area,
+                HitKind::Dot => Hit::Dot,
+            },
+            absorbed,
+        },
+        ZoneEvent::Killed { victim, killer } => Event::Killed { victim, killer },
+        ZoneEvent::Parried { defender, attacker } => Event::Parried { defender, attacker },
+        ZoneEvent::GuardBroken(id) => Event::GuardBroken(id),
+        ZoneEvent::Respawned(id) => Event::Respawned(id),
+        ZoneEvent::ProjectileSpawned {
+            id,
+            owner,
+            view_lag: lag,
+            lag: honoured,
+            speed,
+            gravity,
+            lifetime,
+            origin,
+            ..
+        } => Event::Shot {
+            projectile: id,
+            owner,
+            origin: origin.into(),
+            speed,
+            gravity,
+            lifetime,
+            lag,
+            honoured,
+        },
+        _ => return None,
+    })
+}
+
+/// Say what a replay file holds: one line for the file, one per participant.
+/// A client's body leaves the zone for good (its session ended, another zone claimed it,
+/// its ghost ran out, it joined again): its aim numbers are logged and go to the hub
+/// (ANTICHEAT.md 4.3), and it can still be reported for a while.
+fn depart(
+    recorder: &mut Option<Recorder>,
+    hub: Option<&Arc<HubLink>>,
+    recent_left: &mut Vec<(EntityId, CharacterId, Instant)>,
+    id: EntityId,
+    character: Option<CharacterId>,
+) {
+    recent_left.retain(|(_, _, at)| at.elapsed() < REPORTABLE_AFTER_LEAVE);
+    recent_left.push((id, character.unwrap_or(0), Instant::now()));
+    let Some(rec) = recorder else {
+        return;
+    };
+    let name = rec.entry(id).map_or_else(String::new, |e| e.name.clone());
+    let aim = rec.analyser.take(id);
+    info!(entity = id, name = %name, "aim at leave: {}", aim.line());
+    if let (Some(link), Some(character)) = (hub, character)
+        && !aim.is_empty()
+    {
+        let link = link.clone();
+        tokio::spawn(async move { link.aim(character, aim).await });
+    }
+}
+
+fn replay_written(w: &Written) {
+    info!(
+        path = %w.path.display(),
+        reason = ?w.header.reason,
+        bytes = w.bytes.len(),
+        seconds = format_args!("{:.1}", w.seconds),
+        kills = w.kills,
+        damage = w.damage,
+        participants = w.participants.len(),
+        "replay written"
+    );
+    for (who, aim) in &w.participants {
+        info!(file = %w.path.display(), name = %who.name, "replay aim: {}", aim.line());
     }
 }
 
@@ -251,6 +363,15 @@ pub struct ZoneReport {
     pub trials_passed: u64,
     pub orders: u64,
     pub orders_refused: u64,
+    /// The recorder and the aim analysis (ANTICHEAT.md 10): mean microseconds per tick over
+    /// the window, frames and their bytes since start, files written, what the ring holds.
+    pub record_us_mean: f64,
+    /// The part of it that is the line-of-sight sweep (ANTICHEAT.md 4.2).
+    pub sight_us_mean: f64,
+    pub replay_frames: u64,
+    pub replay_frame_bytes: u64,
+    pub replays_written: u64,
+    pub replay_ring_bytes: usize,
 }
 
 /// Run the zone until `shutdown` resolves or `max_ticks` is reached. The endpoint must already
@@ -370,6 +491,43 @@ pub async fn run_with_web(
     let mut scheduler = TickScheduler::new(rate, Instant::now());
     let mut metrics = TickMetrics::new(rate.period());
     let mut phases = Phases::default();
+    // The recorder (ANTICHEAT.md 3) and what it measures as it records.
+    let mut recorder = cfg.replay.as_ref().map(|r| {
+        Recorder::new(RecorderConfig {
+            dir: r.dir.clone(),
+            zone: r.zone.clone(),
+            map: world.name.clone(),
+            map_hash: world.hash,
+            hz: rate.hz() as u16,
+            teams: !cfg.wild,
+            content_hash: gm_net::fnv1a64(&bitcode::encode(&cfg.content)),
+            bytes_per_hour: r.bytes_per_hour,
+        })
+    });
+    let mut sight = crate::sight::Sight::default();
+    let (written_tx, mut written_rx) = mpsc::unbounded_channel::<Written>();
+    let mut writing: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // What an earlier zone left in the directory goes to the hub now: listed before this
+    // zone writes anything of its own, read and sent one at a time.
+    if let (Some(link), Some(r)) = (&cfg.hub, &cfg.replay) {
+        let (link, left) = (link.clone(), Written::leftovers(&r.dir));
+        if !left.is_empty() {
+            tokio::spawn(async move {
+                for path in left {
+                    match tokio::task::spawn_blocking(move || Written::read(path)).await {
+                        Ok(Ok(w)) => {
+                            info!(file = %w.path.display(), "a replay left by an earlier zone");
+                            link.replay(w).await;
+                        }
+                        Ok(Err(e)) => warn!("a leftover replay is not uploaded: {e}"),
+                        Err(_) => {}
+                    }
+                }
+            });
+        }
+    }
+    // Bodies that left a moment ago can still be reported: entity, character, when.
+    let mut recent_left: Vec<(EntityId, CharacterId, Instant)> = Vec::new();
     let mut report = ZoneReport::default();
     let mut last_report = Instant::now();
     let shutdown = std::pin::pin!(shutdown);
@@ -428,6 +586,13 @@ pub async fn run_with_web(
                             s.conn.close(4, b"character joined again");
                         }
                         hub_slots.remove(&old);
+                        depart(
+                            &mut recorder,
+                            cfg.hub.as_ref(),
+                            &mut recent_left,
+                            old,
+                            Some(h.character),
+                        );
                     }
                     let build = match resolve(&zone, build.as_ref()) {
                         Ok(b) => b,
@@ -681,6 +846,13 @@ pub async fn run_with_web(
                             s.conn.close(0, b"travelled");
                         }
                         hub_slots.remove(&id);
+                        depart(
+                            &mut recorder,
+                            cfg.hub.as_ref(),
+                            &mut recent_left,
+                            id,
+                            Some(character),
+                        );
                         // The body leaves here: said once, counted once (the `Leave` that
                         // follows the closed connection finds nothing left to announce).
                         for s in sessions.values() {
@@ -854,7 +1026,76 @@ pub async fn run_with_web(
                         }
                     }
                 }
+                ClientEvent::Report { id, target, reason } => {
+                    let Some(s) = sessions.get_mut(&id) else {
+                        continue;
+                    };
+                    let refuse = |s: &Session, why: &str| {
+                        s.send_control(Control::ReportResult(Err(why.to_string())));
+                    };
+                    let Some(rec) = &mut recorder else {
+                        refuse(s, "this zone keeps no replays");
+                        continue;
+                    };
+                    // A client's body here now, or one that left within two minutes.
+                    recent_left.retain(|(_, _, at)| at.elapsed() < REPORTABLE_AFTER_LEAVE);
+                    let target_character = rec
+                        .entry(target)
+                        .filter(|e| e.human() && e.id != id)
+                        .map(|e| e.character)
+                        .or_else(|| {
+                            recent_left
+                                .iter()
+                                .find(|(body, _, _)| *body == target && *body != id)
+                                .map(|(_, character, _)| *character)
+                        });
+                    if target_character.is_none() {
+                        refuse(s, "nobody to report by that id");
+                        continue;
+                    }
+                    if !s.may_report() {
+                        refuse(s, "one report in thirty seconds");
+                        continue;
+                    }
+                    if !rec.may_report() {
+                        refuse(s, "too many reports in this zone this hour");
+                        continue;
+                    }
+                    match (&cfg.hub, target_character, hub_slots.get(&id)) {
+                        (None, Some(_), _) => {
+                            rec.report(zone.tick, None);
+                            info!(reporter = id, target, reason = reason.name(), "report");
+                            s.send_control(Control::ReportResult(Ok(())));
+                        }
+                        // The hub opens the report first (its limits are the hub's); the
+                        // replay is written when it has.
+                        (Some(link), Some(target_character), Some(slot)) => {
+                            let (link, reporter, tx) =
+                                (link.clone(), slot.character, event_tx.clone());
+                            tokio::spawn(async move {
+                                let result = link.report(reporter, target_character, reason).await;
+                                let _ = tx.send(ClientEvent::ReportOpened { id, result }).await;
+                            });
+                        }
+                        _ => refuse(s, "nobody to report by that id"),
+                    }
+                }
+                ClientEvent::ReportOpened { id, result } => {
+                    let answer = match (result, &mut recorder) {
+                        (Ok(report), Some(rec)) => {
+                            rec.report(zone.tick, Some(report));
+                            info!(reporter = id, report, "report opened");
+                            Ok(())
+                        }
+                        (Ok(_), None) => Err("this zone keeps no replays".to_string()),
+                        (Err(why), _) => Err(why),
+                    };
+                    if let Some(s) = sessions.get(&id) {
+                        s.send_control(Control::ReportResult(answer));
+                    }
+                }
                 ClientEvent::Leave { id } => {
+                    let leaving_character = hub_slots.get(&id).map(|s| s.character);
                     // A ghost's connection ends with its `Bye` on the way to another zone: the
                     // body and the hub's transit stay until the claim or the timeout (HUB.md 3.3).
                     if hub_slots.get(&id).is_some_and(|s| s.ghost_since.is_some()) {
@@ -876,6 +1117,15 @@ pub async fn run_with_web(
                     }
                     director.human_left(&mut zone, id);
                     let body = zone.remove_player(id);
+                    if body.is_some() {
+                        depart(
+                            &mut recorder,
+                            cfg.hub.as_ref(),
+                            &mut recent_left,
+                            id,
+                            leaving_character,
+                        );
+                    }
                     if let Some(p) = &body {
                         info!(
                             entity = id,
@@ -978,7 +1228,15 @@ pub async fn run_with_web(
                 }
             }
             for id in expired_ghosts {
-                if let Some(slot) = hub_slots.remove(&id)
+                let slot = hub_slots.remove(&id);
+                depart(
+                    &mut recorder,
+                    Some(link),
+                    &mut recent_left,
+                    id,
+                    slot.as_ref().map(|s| s.character),
+                );
+                if let Some(slot) = slot
                     && let Some(state) = character_state(&zone, link, id, &slot)
                 {
                     let link = link.clone();
@@ -1028,6 +1286,10 @@ pub async fn run_with_web(
         phases.sim += t_sim.elapsed();
 
         let events: Vec<ZoneEvent> = zone.events.drain(..).collect();
+        let mut recorded: Vec<gm_replay::Event> = match &recorder {
+            Some(_) => events.iter().filter_map(replay_event).collect(),
+            None => Vec::new(),
+        };
         let t_minds = Instant::now();
         director.post_step(&mut zone, &world.bsp, &events);
         phases.minds += t_minds.elapsed();
@@ -1285,6 +1547,79 @@ pub async fn run_with_web(
             }
         }
         phases.send += t_send.elapsed();
+
+        // Record the tick: the frame, the reactions the zone can see, the aim analysis.
+        if let Some(rec) = &mut recorder {
+            let t_sight = Instant::now();
+            sight.tick(
+                &zone,
+                &world.bsp,
+                !cfg.wild,
+                &|id| sessions.contains_key(&id),
+                &mut recorded,
+            );
+            phases.sight += t_sight.elapsed();
+            let t_record = Instant::now();
+            let describe = |id: EntityId| -> Option<RosterEntry> {
+                let p = zone.player(id)?;
+                let (name, kind) = match sessions.get(&id) {
+                    Some(s) => (s.name.clone(), BodyKind::Human),
+                    None => director
+                        .driven()
+                        .into_iter()
+                        .find(|(body, _, _)| *body == id)
+                        .map(|(_, name, kind)| (name, wire_kind(kind)))?,
+                };
+                Some(RosterEntry {
+                    id,
+                    name,
+                    team: p.team(),
+                    kind,
+                    party: p.party,
+                    build: cfg
+                        .content
+                        .builds
+                        .iter()
+                        .find(|b| b.build == p.sheet.build)
+                        .map_or_else(|| "custom".to_string(), |b| b.name.clone()),
+                    character: hub_slots.get(&id).map_or(0, |h| h.character),
+                })
+            };
+            // How far behind this tick each client's frames say they look.
+            let view_lag = |id: EntityId| -> Option<u8> {
+                sessions.contains_key(&id).then_some(())?;
+                let p = zone.player(id)?;
+                Some(tick.wrapping_sub(p.view_claimed).min(MAX_CLAIMED_VIEW_LAG) as u8)
+            };
+            let done = rec.tick(
+                tick,
+                &table,
+                std::mem::take(&mut recorded),
+                &describe,
+                &view_lag,
+            );
+            phases.record += t_record.elapsed();
+            for finished in done {
+                let tx = written_tx.clone();
+                // Compressing and writing a file is not the tick loop's work.
+                writing.retain(|t| !t.is_finished());
+                writing.push(tokio::task::spawn_blocking(move || {
+                    match finished.write() {
+                        Ok(w) => {
+                            let _ = tx.send(w);
+                        }
+                        Err(e) => warn!("writing a replay: {e}"),
+                    }
+                }));
+            }
+        }
+        while let Ok(w) = written_rx.try_recv() {
+            replay_written(&w);
+            if let Some(link) = &cfg.hub {
+                let link = link.clone();
+                tokio::spawn(async move { link.replay(w).await });
+            }
+        }
         phases.ticks += 1;
 
         metrics.record(
@@ -1305,6 +1640,12 @@ pub async fn run_with_web(
             );
             phases.fill(&mut report);
             report.minds = director.minds();
+            if let Some(rec) = &recorder {
+                report.replay_frames = rec.stats.frames;
+                report.replay_frame_bytes = rec.stats.frame_bytes;
+                report.replays_written = rec.stats.fights_written + rec.stats.reports_written;
+                report.replay_ring_bytes = rec.stats.ring_bytes;
+            }
             phases = Phases::default();
             *hub_stats.lock().unwrap() = (report.players as u32, report.tick_mean_us as f32);
             info!(
@@ -1324,6 +1665,11 @@ pub async fn run_with_web(
                 send_us = format_args!("{:.0}", report.send_us_mean),
                 minds = report.minds,
                 minds_us = format_args!("{:.0}", report.minds_us_mean),
+                record_us = format_args!("{:.0}", report.record_us_mean),
+                sight_us = format_args!("{:.0}", report.sight_us_mean),
+                replay_ring_bytes = report.replay_ring_bytes,
+                replay_frame_bytes = report.replay_frame_bytes,
+                replays = report.replays_written,
                 starved = report.starved_ticks + report.live_starved_ticks,
                 executed = report.executed_frames + report.live_executed_frames,
                 hits = report.hits_melee + report.hits_projectile + report.hits_area,
@@ -1360,6 +1706,55 @@ pub async fn run_with_web(
             {
                 link.save(slot.character, state, true).await;
             }
+        }
+    }
+    // What the recorder still holds is written before the zone goes, and everybody still
+    // here gets the line a leaver gets.
+    // The hub gets one try at each: a zone that stops does not wait an hour for a hub that
+    // is away, and what it could not send stays on disk for the next zone.
+    if let Some(rec) = &mut recorder {
+        // Files still being written when the loop ended.
+        for task in writing.drain(..) {
+            let _ = task.await;
+        }
+        let mut last: Vec<Written> = Vec::new();
+        while let Ok(w) = written_rx.try_recv() {
+            last.push(w);
+        }
+        for finished in rec.flush() {
+            match finished.write() {
+                Ok(w) => last.push(w),
+                Err(e) => warn!("writing a replay: {e}"),
+            }
+        }
+        // Sent side by side: each has its own five seconds, and the zone waits for the
+        // slowest of them, not for their sum.
+        let mut last_words = Vec::new();
+        for w in last {
+            replay_written(&w);
+            if let Some(link) = &cfg.hub {
+                let link = link.clone();
+                last_words.push(tokio::spawn(async move { link.replay_once(w).await }));
+            }
+        }
+        // Everybody still here, and the bodies waiting for another zone to claim them.
+        let present: std::collections::BTreeSet<EntityId> =
+            sessions.keys().chain(hub_slots.keys()).copied().collect();
+        for id in present {
+            let name = rec.entry(id).map_or_else(String::new, |e| e.name.clone());
+            let aim = rec.analyser.take(id);
+            info!(entity = id, name = %name, "aim at leave: {}", aim.line());
+            if let (Some(link), Some(slot)) = (&cfg.hub, hub_slots.get(&id))
+                && !aim.is_empty()
+            {
+                let (link, character) = (link.clone(), slot.character);
+                last_words.push(tokio::spawn(
+                    async move { link.aim_once(character, aim).await },
+                ));
+            }
+        }
+        for task in last_words {
+            let _ = task.await;
         }
     }
     for s in sessions.values() {
@@ -1445,6 +1840,8 @@ struct Phases {
     sim: Duration,
     snapshot: Duration,
     send: Duration,
+    record: Duration,
+    sight: Duration,
 }
 
 impl Phases {
@@ -1455,6 +1852,8 @@ impl Phases {
         report.snapshot_us_mean = self.snapshot.as_secs_f64() * 1e6 / n;
         report.send_us_mean = self.send.as_secs_f64() * 1e6 / n;
         report.minds_us_mean = self.minds.as_secs_f64() * 1e6 / n;
+        report.record_us_mean = (self.record + self.sight).as_secs_f64() * 1e6 / n;
+        report.sight_us_mean = self.sight.as_secs_f64() * 1e6 / n;
     }
 }
 

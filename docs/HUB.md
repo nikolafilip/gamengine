@@ -1,6 +1,6 @@
 # Hub: accounts, characters, zones, handoff
 
-Status: v1.4 (Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
+Status: v1.5 (Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
 saved position's zone of Phase 6; squads, trials and gated zones of Phase 7, section 3.5). This document is the contract between `gm-hub`, `gm-server` and the
 clients for everything that outlives a zone process: accounts, characters, where a character is,
 and how it moves between zones. PLAN.md 2.1 (Postgres via sqlx, in-memory session state), 11.3
@@ -249,6 +249,31 @@ advisory for the zone's bookkeeping; the database is already updated when they a
   client `addr` and `cert_der`.
 - Rate limits and sessions do not know the transport. The `Origin` allow-list of the web
   listener is not authentication (WEB.md 2.1).
+
+### 3.7 Conduct (ANTICHEAT.md)
+
+- Zones: `ZoneAim { nonce, character, stats }` (a client's aim numbers since its last
+  report, added to its account's week; the nonce makes a repeat count once),
+  `ZoneReplay { summary, len }` followed by the file's bytes (answered `ReplayStored { id }`;
+  stored by hash under `<models-dir>/replays/`, the same bytes twice being one replay; the
+  summary names the reports the file was written for and each is given the replay),
+  `ZoneReport { reporter, target, reason }` (answered `ReportOpened { id }` within the
+  reporter's limits). `ZoneHello` gains `min_trust`. A zone speaks for any existing
+  character here: a leaver's numbers arrive after it went.
+- Everyone: `Login` answers `Err(Banned { until, reason })` for a banned account, after the
+  password. `Enter`, `Claim` and `Handoff` refuse a banned account and one below the
+  destination's `min_trust` (`Locked("trust tier N")`).
+- Moderators (`Mod`): `AimReport`, `Replays`, `ReplayGet` (a blob), `Reports`,
+  `ReportVerdict`, `Ban`, `Unban`, `Reputation`, `Adjust`; each is a `mod_log` row. A ban
+  ends the account's sessions, kicks its characters from their zones (the `Kick` notice)
+  and closes its stalls.
+- Once a minute the hub's sweeper also deletes replays past their retention, closes flags
+  older than 90 days, and removes files in the replay store that no row names.
+- An account is promoted from trust tier 0 to 1 (ten hours played, a reputation that is not
+  negative, no report upheld in 30 days) when a character's leaving save arrives, when aim
+  numbers arrive, and at the door of a zone that asks for a tier.
+- Migration 0006 (`conduct`): `replays`, `replay_participants`, `aim_weeks`, `aim_reports`,
+  `flags`, `reports`, `reputation`, `bans`, `mod_log`, `accounts.reputation`.
 
 ## 4. Database (PLAN.md 11.4)
 

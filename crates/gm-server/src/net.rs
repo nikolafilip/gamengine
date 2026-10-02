@@ -95,6 +95,17 @@ pub enum ClientEvent {
         id: EntityId,
         build: BuildChoice,
     },
+    /// The client reports a body (ANTICHEAT.md 5).
+    Report {
+        id: EntityId,
+        target: EntityId,
+        reason: control::ReportReason,
+    },
+    /// The hub opened the report (its id), or refused it.
+    ReportOpened {
+        id: EntityId,
+        result: Result<i64, String>,
+    },
     /// An order for the client's squad (COMPANIONS.md 5.3).
     Order {
         id: EntityId,
@@ -394,6 +405,11 @@ async fn handle_connection(
                     }
                     Ok(Some(Control::StallClose)) => {
                         if tx.send(ClientEvent::StallClose { id }).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(Control::Report { target, reason })) => {
+                        if tx.send(ClientEvent::Report { id, target, reason }).await.is_err() {
                             break;
                         }
                     }

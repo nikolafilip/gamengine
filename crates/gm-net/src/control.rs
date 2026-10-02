@@ -63,6 +63,26 @@ pub enum EncounterState {
 }
 
 /// An open stall as a zone shows it (ECONOMY.md 7): where it stands and who keeps it. The
+/// Why a client reports a body (ANTICHEAT.md 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum ReportReason {
+    /// Its aim is not a hand's.
+    Aim,
+    /// It plays to spoil the game for its own side.
+    Griefing,
+    Other,
+}
+
+impl ReportReason {
+    pub fn name(self) -> &'static str {
+        match self {
+            ReportReason::Aim => "aim",
+            ReportReason::Griefing => "griefing",
+            ReportReason::Other => "other",
+        }
+    }
+}
+
 /// Where a WebTransport listener is and how a browser may trust it (WEB.md 2.3).
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct WebAddr {
@@ -192,6 +212,14 @@ pub enum Control {
         items: Vec<String>,
         coin: u32,
     },
+    /// Client → zone: report the body `target` (ANTICHEAT.md 5): one the client is being
+    /// sent, or one that left within the last two minutes.
+    Report {
+        target: u32,
+        reason: ReportReason,
+    },
+    /// The zone's answer: the report was taken and the fight around it is kept, or why not.
+    ReportResult(Result<(), String>),
     /// A trial's verdict on this client (COMPANIONS.md 11): passed, or why not.
     Trial {
         key: String,

@@ -32,6 +32,8 @@ pub struct HubLinkConfig {
     pub zone_cert_der: Vec<u8>,
     /// The zone's WebTransport listener (WEB.md 2.3).
     pub web: Option<gm_net::control::WebAddr>,
+    /// The least trust tier the zone admits (ANTICHEAT.md 6); 0 = everybody.
+    pub min_trust: i16,
     /// Trials that open this zone (COMPANIONS.md 11); empty = open to all.
     pub requires: Vec<String>,
 }
@@ -55,6 +57,9 @@ pub struct Claimed {
     pub squad: Vec<HiredAvatar>,
 }
 
+/// How long a stopping zone waits for the hub to take one last thing.
+const LAST_WORDS: Duration = Duration::from_secs(5);
+
 impl HubLink {
     /// Connect and register; fails if the hub refuses.
     pub async fn connect(cfg: HubLinkConfig) -> anyhow::Result<Arc<HubLink>> {
@@ -68,6 +73,7 @@ impl HubLink {
                 addr: cfg.public_addr,
                 cert_der: cfg.zone_cert_der,
                 web: cfg.web,
+                min_trust: cfg.min_trust,
                 requires: cfg.requires,
             })
             .await?;
@@ -270,6 +276,148 @@ impl HubLink {
                 }
             }
         });
+    }
+
+    /// A client's aim numbers since the last report (ANTICHEAT.md 4.3). The nonce makes a
+    /// repeated report count once; three tries, then the numbers of this stretch are lost.
+    pub async fn aim(&self, character: CharacterId, stats: gm_hub_proto::protocol::AimStats) {
+        self.aim_tries(character, stats, 3).await
+    }
+
+    /// The same with one try and a short patience: for a zone that is stopping.
+    pub async fn aim_once(&self, character: CharacterId, stats: gm_hub_proto::protocol::AimStats) {
+        if tokio::time::timeout(LAST_WORDS, self.aim_tries(character, stats, 1))
+            .await
+            .is_err()
+        {
+            warn!(
+                character,
+                "aim numbers not reported: the hub did not answer"
+            );
+        }
+    }
+
+    async fn aim_tries(
+        &self,
+        character: CharacterId,
+        stats: gm_hub_proto::protocol::AimStats,
+        tries: u32,
+    ) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64)
+            ^ (character as u64).rotate_left(40);
+        let req = HubRequest::ZoneAim {
+            nonce,
+            character,
+            stats,
+        };
+        for attempt in 0..tries {
+            match self.client.request(&req).await {
+                Ok(_) => return,
+                Err(HubClientError::Refused(e)) => {
+                    warn!(character, "the hub refused aim numbers: {e}");
+                    return;
+                }
+                Err(e) if attempt + 1 == tries => {
+                    warn!(character, "aim numbers not reported: {e}")
+                }
+                Err(_) => tokio::time::sleep(Duration::from_secs(2 << attempt)).await,
+            }
+        }
+    }
+
+    /// Upload a replay (ANTICHEAT.md 3.3): once a minute for an hour, then the file stays
+    /// where the zone wrote it (the next zone started on that directory sends it).
+    pub async fn replay(&self, w: crate::recorder::Written) {
+        self.replay_tries(w, 60).await
+    }
+
+    /// The same with one try and a short patience: for a zone that is stopping.
+    pub async fn replay_once(&self, w: crate::recorder::Written) {
+        let file = w.path.clone();
+        if tokio::time::timeout(LAST_WORDS, self.replay_tries(w, 1))
+            .await
+            .is_err()
+        {
+            warn!(file = %file.display(), "replay not uploaded, it stays on disk: the hub did not answer");
+        }
+    }
+
+    async fn replay_tries(&self, w: crate::recorder::Written, tries: u32) {
+        let summary = gm_hub_proto::protocol::ReplaySummary {
+            started_unix: w.header.started_unix,
+            seconds: w.seconds,
+            reported: w.header.reason == gm_replay::Reason::Report,
+            reports: w.header.reports.clone(),
+            kills: w.kills,
+            damage: w.damage,
+            participants: w
+                .participants
+                .iter()
+                .filter(|(who, _)| who.character != 0)
+                .map(|(who, aim)| (who.character, aim.clone()))
+                .collect(),
+        };
+        let req = HubRequest::ZoneReplay {
+            summary,
+            len: w.bytes.len() as u32,
+        };
+        for attempt in 0..tries {
+            match self.client.upload(&req, &w.bytes).await {
+                Ok(HubResponse::ReplayStored { id }) => {
+                    info!(replay = id, file = %w.path.display(), "replay stored at the hub");
+                    // The hub has it: the zone's copy has done its work.
+                    let _ = std::fs::remove_file(&w.path);
+                    return;
+                }
+                Ok(other) => {
+                    warn!("unexpected hub answer to a replay: {other:?}");
+                    return;
+                }
+                Err(HubClientError::Refused(e)) => {
+                    // Set aside under another name: the next zone started on this
+                    // directory does not offer it again.
+                    warn!(file = %w.path.display(), "the hub refused a replay: {e}");
+                    let _ = std::fs::rename(&w.path, w.path.with_extension("refused"));
+                    return;
+                }
+                Err(e) if attempt + 1 == tries => {
+                    warn!(file = %w.path.display(), "replay not uploaded, it stays on disk: {e}")
+                }
+                Err(_) => tokio::time::sleep(Duration::from_secs(60)).await,
+            }
+        }
+    }
+
+    /// Open a player's report at the hub (ANTICHEAT.md 5): its id, within the reporter's
+    /// limits.
+    pub async fn report(
+        &self,
+        reporter: CharacterId,
+        target: CharacterId,
+        reason: gm_net::control::ReportReason,
+    ) -> Result<i64, String> {
+        match self
+            .client
+            .request(&HubRequest::ZoneReport {
+                reporter,
+                target,
+                reason,
+            })
+            .await
+        {
+            Ok(HubResponse::ReportOpened { id }) => Ok(id),
+            Ok(other) => Err(format!("unexpected hub answer {other:?}")),
+            Err(HubClientError::Refused(gm_hub_proto::protocol::HubError::Taken)) => {
+                Err("you have already reported this player".into())
+            }
+            Err(HubClientError::Refused(gm_hub_proto::protocol::HubError::Busy)) => {
+                Err("you have too many open reports".into())
+            }
+            Err(HubClientError::Refused(e)) => Err(e.to_string()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// Forward hub notices to the tick loop.

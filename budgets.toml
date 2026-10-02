@@ -74,3 +74,13 @@ max_wasm_memory_bytes = 67108864        # linear memory in the 8v8 arena; measur
 min_snapshots_per_s = 55                # of the zone's 64, as the browser client counts them
 min_fps = 55                            # headless Chromium presents at 60 on the reference iGPU
 max_first_frame_ms = 3000               # navigation to the first frame on loopback
+
+[anticheat]
+# ANTICHEAT.md 10 (scripts/check-anticheat.sh): the arena with `honest` bots whose view moves
+# like a hand and `cheats` that aim by program (half lock, half flick), recorded.
+honest = 12
+cheats = 4
+secs = 90
+max_record_us = 150                 # recorder + sight + aim analysis, mean per tick, 16 players; measured 55-69 (200 players: 592-626)
+max_replay_bytes_per_minute = 1572864   # a 16-player fight's .gmr; measured 0.29-0.33 MB
+max_ring_bytes = 67108864           # the 30 s the recorder always holds; measured 0.32-0.38 MB with 16 players

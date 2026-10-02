@@ -59,6 +59,10 @@ jobs:
         run: BOTS=32 SECS=10 scripts/check-swarm.sh
       - name: Dungeon gate (a leader and three companions clear it on a real zone; 4 leaders at once)
         run: SKIP_TESTS=1 LEADERS=4 scripts/check-dungeon.sh
+      - name: System packages (software Vulkan, for the replay screenshot)
+        run: sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1
+      - name: Anti-cheat gate (hands and programs in a recorded arena; flags, replays, the hub path)
+        run: scripts/check-anticheat.sh --online
 
   gates:
     name: binary size, RAM, software render

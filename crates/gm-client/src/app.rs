@@ -352,6 +352,9 @@ struct App {
     /// Milliseconds from navigation to the first frame presented (WEB.md 9).
     #[cfg(target_arch = "wasm32")]
     first_frame_ms: f64,
+    /// A replay being watched instead of a game being played (ANTICHEAT.md 3.4).
+    #[cfg(not(target_arch = "wasm32"))]
+    playback: Option<crate::playback::Playback>,
     /// The tactical viewport (COMPANIONS.md 6): over either of the other two.
     tactical: Tactical,
     /// Leaves the world is drawn from in the tactical view (the squad's sight).
@@ -461,6 +464,8 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, online: Optio
         pending_fetch: Default::default(),
         #[cfg(target_arch = "wasm32")]
         first_frame_ms: 0.0,
+        #[cfg(not(target_arch = "wasm32"))]
+        playback: None,
         tactical: Tactical::new(),
         tactical_leaves: Vec::new(),
         bars: Vec::new(),
@@ -474,8 +479,40 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, online: Optio
     app
 }
 
+/// Open the replay named on the command line and point the options at its map.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run(opts: Options) -> Result<(), Error> {
+pub fn open_replay(opts: &mut Options) -> Result<Option<crate::playback::Playback>, Error> {
+    let Some(path) = opts.replay.clone() else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let playback = crate::playback::Playback::open(&bytes, opts.follow.as_deref(), opts.from)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let header = &playback.replay.header;
+    opts.map = opts.maps_dir.join(format!("{}.bsp", header.map));
+    match std::fs::read(&opts.map) {
+        Ok(map) if fnv1a64(&map) == header.map_hash => {}
+        Ok(_) => log::warn!(
+            "{} is not the build of the map the replay was recorded on: bodies may stand in walls",
+            opts.map.display()
+        ),
+        Err(e) => return Err(format!("the replay's map {}: {e}", opts.map.display()).into()),
+    }
+    log::info!(
+        "replay {}: {} on {}, {:.1} s, {} frames, following {}",
+        path.display(),
+        header.zone,
+        header.map,
+        playback.seconds(),
+        playback.replay.frames.len(),
+        playback.name(playback.follow)
+    );
+    Ok(Some(playback))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run(mut opts: Options) -> Result<(), Error> {
+    let playback = open_replay(&mut opts)?;
     let map_bytes =
         std::fs::read(&opts.map).map_err(|e| format!("loading {}: {e}", opts.map.display()))?;
     let bsp = Bsp::load(&opts.map).map_err(|e| format!("loading {}: {e}", opts.map.display()))?;
@@ -543,6 +580,7 @@ pub fn run(opts: Options) -> Result<(), Error> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = app(opts, bsp, palette, sim, online);
+    app.playback = playback;
     event_loop.run_app(&mut app)?;
     if let Some(o) = &mut app.online {
         o.net.close();
@@ -730,7 +768,12 @@ pub async fn run_web() -> Result<(), String> {
 }
 
 /// Third-person camera position: pulled in by a point trace so it never enters a wall.
-fn third_person_camera(world: &dyn CollisionWorld, eye: Vec3, yaw: f32, pitch: f32) -> Vec3 {
+pub(crate) fn third_person_camera(
+    world: &dyn CollisionWorld,
+    eye: Vec3,
+    yaw: f32,
+    pitch: f32,
+) -> Vec3 {
     let fwd = view_dir(yaw, pitch);
     let (_, right) = yaw_vectors(yaw);
     let desired = eye - fwd * CAMERA_BACK + right * CAMERA_RIGHT + Vec3::Z * CAMERA_UP;
@@ -1120,6 +1163,7 @@ impl App {
             && self.opts.bench_frames.is_none()
             && !self.tactical.active
             && self.opts.script.is_none()
+            && self.opts.replay.is_none()
         {
             self.set_grab(true);
         }
@@ -1198,6 +1242,33 @@ impl App {
             o.net.send_control(Control::Travel(target.clone()));
             o.respec_note = format!("travel to {target} requested");
             log::info!("{}", o.respec_note);
+        }
+        // F9 reports the player nearest the crosshair (ANTICHEAT.md 5): the zone keeps the
+        // last half minute and the next ten seconds for a moderator.
+        if self.input.just_pressed.remove(&KeyCode::F9)
+            && let Some(c) = &o.client
+        {
+            let eye = c.mover.eye();
+            let view = view_dir(self.sim.yaw, self.sim.pitch);
+            let t = c.render_tick(0.0);
+            let aimed = c
+                .others_at(t)
+                .into_iter()
+                .filter(|e| e.kind == EntityKind::Player)
+                .filter(|e| matches!(o.kinds.get(&e.id), Some(BodyKind::Human) | None))
+                .map(|e| (e.id, view.dot((e.pos - eye).normalize_or_zero())))
+                .filter(|(_, facing)| *facing > 0.94)
+                .max_by(|a, b| a.1.total_cmp(&b.1));
+            match aimed {
+                Some((target, _)) => {
+                    o.net.send_control(Control::Report {
+                        target,
+                        reason: gm_net::control::ReportReason::Other,
+                    });
+                    o.respec_note = "report sent".into();
+                }
+                None => o.respec_note = "look at the player to report, then F9".into(),
+            }
         }
         // B opens a stall on the market tile underfoot, N closes the own stall.
         if self.input.just_pressed.remove(&KeyCode::KeyB) {
@@ -1523,6 +1594,16 @@ impl App {
                                 .unwrap_or_else(|| format!("#{id}"))
                         };
                         log::info!("{} killed {}", name(killer), name(victim));
+                    }
+                    Control::ReportResult(result) => {
+                        let (text, colour) = match result {
+                            Ok(()) => (
+                                "report taken: the fight is kept for a moderator".to_string(),
+                                hud::GREEN,
+                            ),
+                            Err(why) => (format!("report refused: {why}"), hud::ORANGE),
+                        };
+                        o.say(text, colour);
                     }
                     Control::ChatFrom { from, text } => log::info!("<{from}> {text}"),
                     other => log::debug!("control: {other:?}"),
@@ -1952,6 +2033,79 @@ impl App {
         }
     }
 
+    /// A frame of a replay (ANTICHEAT.md 3.4): its keys, its time, its scene, and the camera
+    /// in the followed body's eyes, behind it, or above it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn playback_frame(&mut self, frame_dt: f32) -> (Vec3, f32, f32) {
+        let Some(p) = &mut self.playback else {
+            return (self.sim.eye(), self.sim.yaw, self.sim.pitch);
+        };
+        let pressed = |k: KeyCode, input: &mut Input| input.just_pressed.remove(&k);
+        if pressed(KeyCode::BracketLeft, &mut self.input) {
+            p.cycle(-1);
+        }
+        if pressed(KeyCode::BracketRight, &mut self.input) {
+            p.cycle(1);
+        }
+        if pressed(KeyCode::Space, &mut self.input) {
+            p.paused = !p.paused;
+        }
+        if p.paused {
+            if pressed(KeyCode::Comma, &mut self.input) {
+                p.step(-1);
+            }
+            if pressed(KeyCode::Period, &mut self.input) {
+                p.step(1);
+            }
+        }
+        if pressed(KeyCode::ArrowLeft, &mut self.input) {
+            p.seek(p.time - 5.0);
+        }
+        if pressed(KeyCode::ArrowRight, &mut self.input) {
+            p.seek(p.time + 5.0);
+        }
+        for (key, speed) in [
+            (KeyCode::Digit1, 0.25),
+            (KeyCode::Digit2, 0.5),
+            (KeyCode::Digit3, 1.0),
+            (KeyCode::Digit4, 2.0),
+        ] {
+            if pressed(key, &mut self.input) {
+                p.speed = speed;
+            }
+        }
+        if self.tactical.active {
+            let (forward, side) = self.input.axes();
+            let turn =
+                self.input.down(KeyCode::KeyE) as i32 - self.input.down(KeyCode::KeyQ) as i32;
+            self.tactical
+                .steer(forward, side, turn as f32, self.input.wheel, frame_dt);
+        }
+        self.input.wheel = 0.0;
+        self.input.clicks.clear();
+        self.input.just_pressed.clear();
+        p.advance(frame_dt);
+        self.entities.clear();
+        self.bodies.clear();
+        self.bars.clear();
+        let outside = self.tactical.active || self.viewport == Viewport::Third;
+        let (eye, yaw, pitch) = p.scene(outside, &mut self.bodies, &mut self.entities);
+        self.tactical_leaves = vec![self.bsp.leaf_for_point(eye)];
+        self.tactical_leaves.retain(|l| *l != 0);
+        if self.tactical.active {
+            let centre = eye - Vec3::Z * Hull::Player.eye_height();
+            (
+                self.tactical.camera(centre),
+                self.tactical.yaw,
+                tactical::PITCH,
+            )
+        } else if self.viewport == Viewport::Third {
+            (third_person_camera(&self.bsp, eye, yaw, pitch), yaw, pitch)
+        } else {
+            (eye, yaw, pitch)
+        }
+    }
+
     /// Replace the world (BSP, mesh, renderer) with another map.
     fn switch_map(&mut self, bsp: Bsp) {
         let mesh = world::build(&bsp, &self.palette);
@@ -2089,7 +2243,18 @@ impl App {
         self.input.mouse_dx = 0.0;
         self.input.mouse_dy = 0.0;
 
-        let (camera, cam_yaw, cam_pitch) = if self.online.is_some() {
+        #[cfg(not(target_arch = "wasm32"))]
+        let watching = self.playback.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let watching = false;
+        let (camera, cam_yaw, cam_pitch) = if watching {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.playback_frame(frame_dt)
+            }
+            #[cfg(target_arch = "wasm32")]
+            unreachable!()
+        } else if self.online.is_some() {
             match self.online_frame(frame_dt, event_loop) {
                 Some(cam) => cam,
                 None => return,
@@ -2263,7 +2428,11 @@ impl App {
         );
         let vp = view_proj(camera, cam_yaw, cam_pitch, aspect);
         a.renderer.hud.begin((a.config.width, a.config.height));
-        if !bench || self.opts.tactical {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(p) = &self.playback {
+            p.hud(&mut a.renderer.hud);
+        }
+        if !watching && (!bench || self.opts.tactical) {
             build_hud(
                 &mut a.renderer.hud,
                 self.online.as_ref(),
@@ -2481,6 +2650,7 @@ impl ApplicationHandler for App {
                     && self.opts.bench_frames.is_none()
                     && !self.tactical.active
                     && self.opts.script.is_none()
+                    && self.opts.replay.is_none()
                 {
                     self.set_grab(true);
                 }

@@ -21,4 +21,5 @@ gm-core = { workspace = true }
 gm-hub-proto = { workspace = true }
 gm-ingest = { workspace = true }
 gm-model = { workspace = true }
+gm-replay = { workspace = true }
 tokio = { workspace = true }

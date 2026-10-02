@@ -55,6 +55,8 @@ async fn zone_and_bots_over_real_udp() {
                     travel_to: None,
                     travel_after_ticks: 0,
                     stall_tile: None,
+                    aim: Default::default(),
+                    report_after_ticks: 0,
                 },
                 bsp,
                 std::future::pending(),
@@ -140,6 +142,8 @@ async fn quic_and_webtransport_bots_share_a_zone() {
         travel_to: None,
         travel_after_ticks: 0,
         stall_tile: None,
+        aim: Default::default(),
+        report_after_ticks: 0,
     };
 
     let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();

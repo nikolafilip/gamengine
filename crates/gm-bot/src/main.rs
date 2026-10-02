@@ -33,6 +33,10 @@ struct Args {
     /// Teams, cycled over the bots (empty: let the zone balance).
     teams: Vec<u8>,
     counter_pick: bool,
+    /// How each bot's view moves, cycled like the builds (ANTICHEAT.md 10).
+    aims: Vec<gm_bot::AimModel>,
+    /// The first bot reports the first enemy it sees after this many seconds (0 = never).
+    report_after: u64,
     /// Play through the hub instead of connecting to a zone directly.
     hub: Option<SocketAddr>,
     hub_cert: PathBuf,
@@ -51,7 +55,7 @@ struct Args {
 }
 
 const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:PORT [--web-cert SHA256HEX]) [--map PATH] [--bots N] [--secs N] \
-[--behaviour wander|hunter|hold|duelist|stroll|raid] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]\n\
+[--behaviour wander|hunter|hold|duelist|stroll|raid] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick] [--aim brain|hand|lock|flick,...] [--report-after SECS]\n\
        gm-bot --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME --zone ID \
 [--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...] \
 [--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall] \
@@ -72,6 +76,8 @@ fn parse_args() -> Result<Args, String> {
         builds: Vec::new(),
         teams: Vec::new(),
         counter_pick: false,
+        aims: Vec::new(),
+        report_after: 0,
         hub: None,
         hub_cert: PathBuf::from("hub-cert.der"),
         user: String::new(),
@@ -133,6 +139,20 @@ fn parse_args() -> Result<Args, String> {
                     .collect()
             }
             "--counter-pick" => a.counter_pick = true,
+            "--aim" => {
+                a.aims = value("--aim")?
+                    .split(',')
+                    .map(|m| {
+                        gm_bot::AimModel::parse(m.trim())
+                            .ok_or_else(|| format!("--aim: {m} is not brain, hand, lock or flick"))
+                    })
+                    .collect::<Result<_, _>>()?
+            }
+            "--report-after" => {
+                a.report_after = value("--report-after")?
+                    .parse()
+                    .map_err(|e| format!("--report-after: {e}"))?
+            }
             "--hub" => a.hub = Some(value("--hub")?.parse().map_err(|e| format!("--hub: {e}"))?),
             "--hub-cert" => a.hub_cert = PathBuf::from(value("--hub-cert")?),
             "--user" => a.user = value("--user")?,
@@ -271,6 +291,12 @@ async fn main() -> anyhow::Result<()> {
                     travel_after_ticks: 0,
                     // Every other tile, so the market fills evenly.
                     stall_tile: (i < args.stalls).then_some(i as u32 * 2),
+                    aim: aim_of(&args.aims, i),
+                    report_after_ticks: if i == 0 {
+                        (args.report_after * 64) as u32
+                    } else {
+                        0
+                    },
                 },
                 play: Duration::from_secs(args.secs),
                 list_for_hire: args.list_for_hire,
@@ -394,7 +420,10 @@ async fn main() -> anyhow::Result<()> {
         let endpoint = endpoint.clone();
         let world = world.clone();
         let cfg = BotConfig {
-            name: format!("bot{i:02}"),
+            name: match aim_of(&args.aims, i) {
+                gm_bot::AimModel::Brain => format!("bot{i:02}"),
+                model => format!("{model:?}{i:02}").to_lowercase(),
+            },
             seed: args.seed * 1000 + i as u64,
             behaviour: args.behaviour,
             rate: TickRate::COMBAT,
@@ -409,6 +438,12 @@ async fn main() -> anyhow::Result<()> {
             travel_to: None,
             travel_after_ticks: 0,
             stall_tile: None,
+            aim: aim_of(&args.aims, i),
+            report_after_ticks: if i == 0 {
+                (args.report_after * 64) as u32
+            } else {
+                0
+            },
         };
         let secs = args.secs;
         let web = web.clone();
@@ -481,6 +516,15 @@ async fn main() -> anyhow::Result<()> {
         println!("respecs {respecs}; final builds {finals:?}");
     }
     Ok(())
+}
+
+/// The aim model of bot `i`: the list cycled, the brain's own view without one.
+fn aim_of(aims: &[gm_bot::AimModel], i: usize) -> gm_bot::AimModel {
+    if aims.is_empty() {
+        gm_bot::AimModel::Brain
+    } else {
+        aims[i % aims.len()]
+    }
 }
 
 /// 64 hex digits as 32 bytes.

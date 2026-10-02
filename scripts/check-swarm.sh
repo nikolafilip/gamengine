@@ -5,7 +5,7 @@
 #
 #   scripts/check-swarm.sh            200 bots for 20 s (the reference gate)
 #   BOTS=32 scripts/check-swarm.sh    a smaller smoke run (CI)
-# Environment: BOTS (default 200), SECS (default 20), SKIP_BUILD=1.
+# Environment: BOTS (default 200), SECS (default 20), SKIP_BUILD=1, REPLAY=1 (record while it runs).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -22,8 +22,10 @@ MAX_BPS="$(budget net max_bytes_per_player_s)"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"; kill $SERVER_PID 2>/dev/null || true' EXIT
 port=$((20000 + RANDOM % 20000))
 ticks=$(( (SECS + 8) * 64 ))
+# REPLAY=1: with the recorder and the aim analysis on (ANTICHEAT.md 10).
+replay=(); [[ "${REPLAY:-}" == 1 ]] && replay=(--replay-dir "$tmp/replays")
 target/release/gm-server --map assets/maps/built/arena.bsp --listen 127.0.0.1:$port --cert-out "$tmp/cert.der" \
-  --max-players $((BOTS + 8)) --ticks $ticks --report-secs 5 > "$tmp/server.log" 2>&1 &
+  --max-players $((BOTS + 8)) --ticks $ticks --report-secs 5 "${replay[@]}" > "$tmp/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 1.5
 target/release/gm-bot --connect 127.0.0.1:$port --cert "$tmp/cert.der" --map assets/maps/built/arena.bsp \

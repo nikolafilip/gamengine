@@ -11,6 +11,7 @@ description = "gamengine hub protocol: messages, entry tokens and the hub connec
 bitcode = { workspace = true }
 gm-core = { workspace = true, features = ["bitcode"] }
 gm-net = { workspace = true }
+gm-replay = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

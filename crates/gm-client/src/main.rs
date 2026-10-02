@@ -15,6 +15,8 @@ mod headless;
 mod hub;
 mod hud;
 mod net;
+#[cfg(not(target_arch = "wasm32"))]
+mod playback;
 mod render;
 mod stats;
 mod tactical;
@@ -82,6 +84,11 @@ pub struct Options {
     pub script: Option<String>,
     /// Print a line of statistics every second (`stats: ...`).
     pub report: bool,
+    /// Watch a replay (ANTICHEAT.md 3.4) instead of playing: the file, whose eyes to begin
+    /// in, and where to begin, seconds from its start.
+    pub replay: Option<PathBuf>,
+    pub follow: Option<String>,
+    pub from: f32,
     /// The zone `T` asks to travel to; with `travel_after` seconds, asked once by itself.
     pub travel_to: Option<String>,
     pub travel_after: f32,
@@ -96,6 +103,7 @@ const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --c
 [--third-person] [--tactical] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
 [--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--crowd N [--crowd-dir DIR]] \
 [--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW] [--script fight] [--report] [--travel-to ZONE [--travel-after SECS]]\n\
+       gm-client --replay FILE.gmr [--follow NAME] [--from SECS] [--maps-dir DIR] [--third-person] [--headless --screenshot out.ppm]\n\
        gm-client --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME [--zone ID] [--build NAME] \
 [--maps-dir DIR] [--third-person]";
 
@@ -138,6 +146,9 @@ impl Default for Options {
             tactical: false,
             script: None,
             report: false,
+            replay: None,
+            follow: None,
+            from: 0.0,
             travel_to: std::env::var("GM_TRAVEL_TO").ok(),
             travel_after: 0.0,
             hub_web: None,
@@ -231,6 +242,13 @@ fn parse_args() -> Result<Options, String> {
             }
             "--script" => o.script = Some(value("--script")?),
             "--report" => o.report = true,
+            "--replay" => o.replay = Some(PathBuf::from(value("--replay")?)),
+            "--follow" => o.follow = Some(value("--follow")?),
+            "--from" => {
+                o.from = value("--from")?
+                    .parse()
+                    .map_err(|e| format!("--from: {e}"))?
+            }
             "--travel-to" => o.travel_to = Some(value("--travel-to")?),
             "--travel-after" => {
                 o.travel_after = value("--travel-after")?

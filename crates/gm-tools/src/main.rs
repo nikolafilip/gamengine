@@ -9,6 +9,7 @@ mod hubcli;
 mod mapbuild;
 mod mapgen;
 mod model;
+mod replay;
 mod town;
 mod wad;
 
@@ -59,6 +60,11 @@ enum Cmd {
     Hub {
         #[command(subcommand)]
         cmd: hubcli::HubCmd,
+    },
+    /// Replays (docs/ANTICHEAT.md 3): what a .gmr holds and its aim statistics.
+    Replay {
+        #[command(subcommand)]
+        cmd: replay::ReplayCmd,
     },
 }
 
@@ -175,6 +181,21 @@ enum BudgetCmd {
 }
 
 fn main() -> Result<()> {
+    // A reader that closes the pipe (`gm-tools replay aim F --shots all | head`) has read
+    // what it wanted: that is not a panic worth a message.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if message.contains("failed printing to stdout") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Wad {
@@ -270,5 +291,6 @@ fn main() -> Result<()> {
         } => hubcli::model(cmd),
         Cmd::Mod { cmd } => hubcli::moderate(cmd),
         Cmd::Hub { cmd } => hubcli::hub(cmd),
+        Cmd::Replay { cmd } => replay::run(cmd),
     }
 }

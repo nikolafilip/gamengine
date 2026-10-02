@@ -5,7 +5,9 @@
 
 pub mod hub_link;
 pub mod net;
+pub mod recorder;
 pub mod session;
+pub mod sight;
 pub mod tick;
 pub mod world;
 pub mod zone;
@@ -13,4 +15,4 @@ pub mod zone;
 pub use hub_link::{HubLink, HubLinkConfig};
 pub use net::WebListener;
 pub use world::ZoneWorld;
-pub use zone::{ZoneConfig, ZoneReport, run, run_with_web};
+pub use zone::{ReplayConfig, ZoneConfig, ZoneReport, run, run_with_web};

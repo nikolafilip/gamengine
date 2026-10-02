@@ -299,6 +299,34 @@ Flags of both servers: `--web-listen ADDR`, `--web-cert PEM --web-key PEM`, `--w
 without it any), `--web-info-out FILE`. `gm-bot --web URL [--web-cert HEX]` runs bots through
 a zone's web listener.
 
+## Replays, aim statistics and moderation (Phase 9)
+
+`docs/ANTICHEAT.md` is the contract. A zone records fights between players and reports when
+started with `--replay-dir`; it logs each client's aim numbers when it leaves.
+
+```sh
+cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --cert-out zone-cert.der \
+    --replay-dir replays
+# twelve bots whose view moves like a hand, four that aim by program
+cargo run --release -p gm-bot -- --connect 127.0.0.1:4433 --cert zone-cert.der --map assets/maps/built/arena.bsp \
+    --bots 16 --secs 90 --behaviour duelist --builds blade,frostweaver,shade,ironclad --teams 1,2 \
+    --aim hand,sharp,hand,sharp,hand,sharp,lock,flick
+cargo run --release -p gm-tools -- replay info replays/arena-*.gmr
+cargo run --release -p gm-tools -- replay aim replays/arena-*.gmr --shots lock06
+cargo run --release -p gm-client -- --replay replays/arena-*.gmr --follow lock06
+```
+
+In the viewer: `[` `]` change the player, `Space` pauses, `,` `.` step a tick, the arrows seek
+5 s, `1`–`4` set the speed, `V` third person, `Tab` the tactical camera. In play, `F9`
+reports the player under the crosshair.
+
+Flags: `gm-server --replay-dir DIR [--replay-mb-per-hour N] [--min-trust N]`;
+`gm-bot --aim brain|hand|sharp|lock|flick,... [--report-after SECS]`;
+`gm-client --replay FILE [--follow NAME] [--from SECS]` (with `--headless --screenshot`).
+Under a hub the zone uploads its replays and aim numbers, and a moderator works with
+`gm-tools mod aim-report | replays | replay-get | reports | report | ban | unban |
+reputation | adjust` (ANTICHEAT.md 7).
+
 ## CI gates locally
 
 ```sh
@@ -316,6 +344,8 @@ scripts/check-avatars.sh --software   # what CI runs: 48 avatars, 16 MiB cap, so
 scripts/check-avatars.sh --online     # hub + town zone + 100 bots wearing uploads + the client (needs a database and a display)
 scripts/check-dungeon.sh              # a leader and three companions clear the tutorial dungeon; 16 leaders at once (COMPANIONS.md 14)
 scripts/check-dungeon.sh --online     # the same through the hub with hired avatars, loot, the trial and a gated zone (needs a database)
+scripts/check-anticheat.sh            # aim statistics on known traces; a recorded arena: programs flagged, hands not; the replay reads back
+scripts/check-anticheat.sh --online   # also through the hub: flags, replays, a report upheld, a ban, a trust-gated zone (needs a database)
 scripts/check-web.sh                  # the browser build: sizes of both .wasm, QUIC and WebTransport clients in one zone
 scripts/check-web.sh --browser        # also headless Chromium in a zone with 15 native bots, per build (--software: no GPU)
 scripts/check-web.sh --browser --hub  # also login, 48 avatars through the browser's cache and a travel (needs a database)

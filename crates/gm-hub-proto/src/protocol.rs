@@ -208,6 +208,148 @@ pub enum ModOp {
     ClearStrikes {
         email: String,
     },
+    // Conduct (ANTICHEAT.md 7). Every one of these is a row in `mod_log`.
+    /// Who stands out by aim over the last `weeks`, most suspicious first.
+    AimReport {
+        weeks: u8,
+        min_shots: u32,
+    },
+    /// Replays, newest first: of one account, or the reported or flagged ones.
+    Replays {
+        email: Option<String>,
+        reported: bool,
+        flagged: bool,
+        limit: u32,
+    },
+    /// The bytes of a replay (answered with a blob).
+    ReplayGet {
+        id: i64,
+    },
+    Reports {
+        open_only: bool,
+    },
+    /// `open → upheld | not_proven | abusive`.
+    ReportVerdict {
+        id: i64,
+        verdict: Verdict,
+        note: String,
+    },
+    /// Ban the account for `days`; `cheat` writes `cheat_confirmed` to its reputation.
+    Ban {
+        email: String,
+        days: u32,
+        reason: String,
+        cheat: bool,
+    },
+    Unban {
+        email: String,
+        note: String,
+    },
+    /// The account's reputation ledger, its tier, its flags and its ban.
+    Reputation {
+        email: String,
+    },
+    /// A reputation row by hand.
+    Adjust {
+        email: String,
+        delta: i32,
+        note: String,
+    },
+}
+
+/// A moderator's word on a report (ANTICHEAT.md 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum Verdict {
+    /// The report was right.
+    Upheld,
+    /// Nothing to see either way: no consequence for anybody.
+    NotProven,
+    /// The report was made to harm.
+    Abusive,
+}
+
+pub use gm_net::control::ReportReason;
+pub use gm_replay::aim::AimStats;
+
+/// What a zone tells the hub about a replay it wrote (ANTICHEAT.md 3.3).
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct ReplaySummary {
+    pub started_unix: u64,
+    pub seconds: f32,
+    /// Written for a report rather than as a fight.
+    pub reported: bool,
+    /// The reports this file was written for.
+    pub reports: Vec<i64>,
+    pub kills: u32,
+    /// Damage between clients' parties.
+    pub damage: u64,
+    /// Every character in it and its aim numbers over the file.
+    pub participants: Vec<(CharacterId, AimStats)>,
+}
+
+/// One account of the aim report (ANTICHEAT.md 4.4).
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct AimRow {
+    pub account: AccountId,
+    pub email: String,
+    pub stats: AimStats,
+    /// Rules broken: `lock`, `flick`, `laser`, `reaction`, `outlier`.
+    pub rules: Vec<String>,
+    /// Robust z-scores against the accounts of the report: hit rate on hard shots, lock
+    /// rate, flick rate.
+    pub z_hard_hits: f32,
+    pub z_lock: f32,
+    pub z_flick: f32,
+    /// The account's most recent replays.
+    pub replays: Vec<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct ReplayRow {
+    pub id: i64,
+    pub zone: String,
+    pub started_unix: u64,
+    pub seconds: f32,
+    pub reported: bool,
+    pub kills: u32,
+    pub damage: u64,
+    pub bytes: u32,
+    /// `(character name, rules its numbers in this file break)`.
+    pub participants: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct ReportRow {
+    pub id: i64,
+    pub reporter: String,
+    pub target: String,
+    pub zone: String,
+    pub reason: String,
+    pub state: String,
+    pub replay: Option<i64>,
+    pub created_unix: u64,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct ReputationRow {
+    pub kind: String,
+    pub delta: i32,
+    pub reference: String,
+    pub note: String,
+    pub at_unix: u64,
+}
+
+/// An account as a moderator sees it.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct Standing {
+    pub reputation: i32,
+    pub trust_tier: i16,
+    /// `(until, reason)` of the ban in force.
+    pub ban: Option<(u64, String)>,
+    /// `(rule, week, detail)` of the open flags.
+    pub flags: Vec<(String, String, String)>,
+    pub ledger: Vec<ReputationRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -311,6 +453,8 @@ pub enum HubRequest {
         cert_der: Vec<u8>,
         /// The zone's WebTransport listener, if it has one (WEB.md 2.3).
         web: Option<WebAddr>,
+        /// The least trust tier the zone admits (ANTICHEAT.md 6); 0 = everybody.
+        min_trust: i16,
         /// Trials that open this zone: a character must have passed one of them to be let
         /// in (COMPANIONS.md 11); empty = open to all.
         requires: Vec<String>,
@@ -377,6 +521,26 @@ pub enum HubRequest {
     Mod {
         session: SessionId,
         op: ModOp,
+    },
+    // zones: conduct (ANTICHEAT.md 8)
+    /// A client's aim numbers since the last report: added to its account's week. `nonce`
+    /// makes a repeated report count once.
+    ZoneAim {
+        nonce: u64,
+        character: CharacterId,
+        stats: AimStats,
+    },
+    /// A replay: the summary, then `len` raw bytes on the stream. Answered `ReplayStored`.
+    ZoneReplay {
+        summary: ReplaySummary,
+        len: u32,
+    },
+    /// A client's report of another body. Answered `ReportOpened` when it is within the
+    /// reporter's limits; the zone then records and uploads the replay that belongs to it.
+    ZoneReport {
+        reporter: CharacterId,
+        target: CharacterId,
+        reason: ReportReason,
     },
 }
 
@@ -616,6 +780,11 @@ pub enum HubError {
     Gone,
     /// The zone opens only to characters that passed one of these trials.
     Locked(String),
+    /// The account is banned until this unix second, for this reason (ANTICHEAT.md 6).
+    Banned {
+        until: u64,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for HubError {
@@ -633,6 +802,9 @@ impl std::fmt::Display for HubError {
             HubError::Cooldown => write!(f, "too soon after the last change"),
             HubError::Gone => write!(f, "removed"),
             HubError::Locked(trials) => write!(f, "locked: pass one of {trials} first"),
+            HubError::Banned { until, reason } => {
+                write!(f, "this account is banned until unix {until}: {reason}")
+            }
         }
     }
 }
@@ -653,6 +825,16 @@ pub enum HubResponse {
     Trials(Vec<(String, u32)>),
     Zones(Vec<ZoneSummary>),
     Ticket(ZoneTicket),
+    ReplayStored {
+        id: i64,
+    },
+    ReportOpened {
+        id: i64,
+    },
+    AimReport(Vec<AimRow>),
+    Replays(Vec<ReplayRow>),
+    Reports(Vec<ReportRow>),
+    Standing(Standing),
     Claimed {
         character: CharacterId,
         name: String,
@@ -705,6 +887,13 @@ pub enum HubNotice {
         hire: i64,
     },
 }
+
+/// The largest replay the hub stores (ANTICHEAT.md 3.3).
+pub const MAX_REPLAY_BYTES: u32 = 48 * 1024 * 1024;
+/// Open reports one account may have, and how long a replay is kept, days.
+pub const MAX_OPEN_REPORTS: i64 = 5;
+pub const REPLAY_KEEP_DAYS: i32 = 14;
+pub const CASE_KEEP_DAYS: i32 = 90;
 
 /// Limits (HUB.md 3).
 pub const MAX_CHARACTERS_PER_ACCOUNT: i64 = 10;

@@ -64,6 +64,7 @@ async fn start_zone(
         public_addr: endpoint.local_addr().unwrap(),
         zone_cert_der: identity.cert_der().to_vec(),
         web: None,
+        min_trust: 0,
         requires: spec.requires,
     })
     .await
@@ -114,6 +115,8 @@ fn flow(
             travel_to: None,
             travel_after_ticks: 0,
             stall_tile: None,
+            aim: Default::default(),
+            report_after_ticks: 0,
         },
         play: Duration::ZERO,
         list_for_hire: None,

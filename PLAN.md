@@ -358,6 +358,9 @@ gamengine/
                  melee, projectile sim, AI companions, loot/contract state machines, zone handoff.
     gm-hub       account/auth service, character DB, shard registry, escrow ledger, asset ingestion API.
     gm-hub-proto hub messages, entry tokens and the hub connection (what zones, bots and the client link).
+    gm-replay    replays: the `.gmr` file a zone records (every entity every tick, and the tick's events),
+                 its reader and playback, and the aim analysis computed from its frames: the same code
+                 runs live in the zone and offline over a file.
     gm-ai        minds: companions (heal/tank/scout/dps, read from the build) and creatures driving gm-core
                  inputs like a player, the nav grid, and the director a zone runs them with: squads, orders,
                  encounters with their ledger, the loot split of a kill, trial verdicts.
@@ -369,7 +372,7 @@ gamengine/
   web/           the browser client's page and loader (index.html, boot.js); scripts/build-web.sh
                  assembles target/web/ from it
   docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md,
-                 WEB.md, BUILDING.md
+                 WEB.md, ANTICHEAT.md, BUILDING.md
   PLAN.md        this file stays at the repository root (it is the entry point; README links it)
   budgets.toml   every number CI enforces; read by gm-tools and scripts/
   scripts/       CI gates, the pinned fetches (ericw-tools; wasm-bindgen and wasm-opt), the web build
@@ -482,7 +485,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 6 | Custom models: ingestion, hash cache, LRU, silhouette fallback, takedown flag, moderation queue | 100 unique uploaded avatars in a town at 60 fps on iGPU, no disk growth past cap. **Done 2026-10-01** (11.10) |
 | 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars. **Done 2026-10-01** (11.10) |
 | 8 | WASM/WebGPU/WebTransport build | browser client joins the same zone as native clients. **Done 2026-10-02** (11.10) |
-| 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account |
+| 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account. **Done 2026-10-02** (11.10) |
 | ∞ | Content, balance, ops, community | permanent |
 
 ### 11.9 First concrete step
@@ -939,6 +942,85 @@ final build, none estimated; ranges are the spread over repeated runs):
   takes the WebGL2 build; on a software GPU the WebGL2 build runs at 41 fps and costs the zone
   19.6 KB/s; there is still no UI beyond the HUD and a login form on the page.
 
+**2026-10-02, Phase 9 done** (same machine; all numbers measured with the final build, none estimated;
+ranges are the spread over repeated runs):
+- `docs/ANTICHEAT.md` v1 is the contract. **Statistics rank, people decide**: nothing here bans, kicks or
+  demotes by itself. A zone started with `--replay-dir` records every tick as one frame of *every* entity
+  (the snapshot codec, no PVS, no bands) plus the tick's events, holds the last 30 s in memory, and writes a
+  `.gmr` file for **every fight between players** (opened by a hit between two clients' parties, closed
+  10 s after the last, cut every 2 minutes, with 10 s of lead-in) and for **every report** (the ring and the
+  next 10 s). New crate `gm-replay`: the file, its reader and playback, and the aim analysis, **one piece
+  of code fed the same frames live in the zone and offline from a file**.
+- **Aim statistics per shot** (ranged weapons are projectiles, so a shot has an ideal aim): the view against
+  the direction that would hit the nearest hostile body from the muzzle with first-order lead, judged
+  **against the world the shooter's view was of** (the tick its frames say they look at, per tick, so the
+  numbers do not depend on how evenly frames arrive), and against the view the zone honoured too (the
+  better fit counts: a client that lies about its view must still aim at the world its hits are resolved
+  in). Flags: **flick** (≥ 35° within 4 ticks, at rest ≤ 3 ticks, on the body), **lock** (the view rides a
+  moving body's ideal aim within 0.8° for 8 ticks, whatever the offset), **laser** (≤ 0.2° at ≥ 600 u),
+  **spin** (a melee hit on a body 120° off the view 6 ticks before). **Reaction**: measured by the zone by
+  line of sight, in the client's own view time. Rules are Wilson lower bounds (95%) on rates, so a rate on
+  few shots is not a rate; `outlier` is two of three robust z-scores ≥ 4 against the week's accounts.
+- **The hub's conduct module** (migration 0006, hub v1.5): aim numbers per account and week, flags (one per
+  rule and week), replays stored by hash, players' reports (`Control::Report`, protocol v5; the hub opens
+  the report first, the zone records after), three verdicts, a **reputation ledger** (team kills capped at
+  5 a day, contracts paid or abandoned, reports upheld or abusive, model strikes, a confirmed cheat), trust
+  tiers (only 0 → 1 is automatic: 10 h played, reputation ≥ 0, nothing upheld in 30 days; a zone may ask
+  for a tier with `--min-trust`), account bans (login, enter, claim and handoff refused; sessions ended,
+  characters kicked, stalls closed), and a log of everything a moderator does or looks at.
+- **What a moderator has**: `gm-tools mod aim-report | replays | replay-get | reports | report | ban | unban
+  | reputation | adjust`, `gm-tools replay info | aim [--shots NAME]`, and **`gm-client --replay FILE --follow
+  NAME`**: the fight through the ordinary renderer from anybody's eyes (or third person, or the tactical
+  camera), with pause, tick stepping, seeking and each shot's numbers on the HUD. In play, `F9` reports the
+  player under the crosshair.
+- **Acceptance: a replay of any contested fight is reviewable; an aim-outlier report per account**
+  (`scripts/check-anticheat.sh --online --swarm`). The arena with 12 bots whose view moves like a hand
+  (reaction time, turn rate, corrections a handful of times a second, a shake, no sight through walls; half
+  of them lead their shots) and 4 that aim by program (2 locks, 2 flicks), 90 s: **all four programs
+  flagged by the rule made for them, none of the twelve hands by any**, in five of five runs on a quiet
+  machine and two of two under threefold CPU oversubscription. Lower bounds measured: lock programs 58–80% (51–76%
+  loaded) against 6% or less for any hand; flick programs 90–94% (76–91% loaded) against 0%. The fight's
+  replay (101 s, 16 players: **0.29–0.33 MB a minute**) reads back, **recomputes to exactly the line the
+  zone logged for every participant**, and renders from a program's eyes. Through the hub: the two locks
+  are flagged by `lock` in the aim report and neither hand is, a third lock that travels on to another
+  zone keeps the numbers it made in the arena; the replay comes back as the bytes the zone
+  wrote; a report is filed, gets its replay, is upheld once and only once, and both reputations move; a ban
+  refuses the login with its reason; a `--min-trust 1` zone refuses a new account and admits it after a
+  moderator's word; seven team kills are five ledger rows however often the zone repeats itself.
+- **Cost**: recorder + sight + analysis **55–69 µs a tick with 16 players, 592–626 µs with 200** (the
+  swarm gate with recording on: 6.4–6.6 ms mean / 8.7–9.1 ms p99, inside `[server]`); the ring holds
+  0.32–0.38 MB for 16 players.
+- **Found by running it** (ANTICHEAT.md 12.3): judged against the zone's clamped view tick a lock looked
+  like a hand (the clamp is a tick or two off what the client saw); locks are a rate among shots at
+  *moving* targets; **the first honest bots were cheats** (they turned towards bodies behind pillars, and
+  the reaction rule said so); a hand that follows smoothly is a lock with an offset (the hand model now
+  corrects a handful of times a second); the sight sweep was quadratic (3.5 ms a tick at 200 players:
+  now the four nearest on screen, 0.3 ms); **uneven frame delivery hid the lock** (one gate run in nine:
+  under load four of six lock programs escaped, until each tick's view was held against its own world and
+  the cheat model stopped counting its own frames).
+- Reviews (ANTICHEAT.md 12). **Google AI Studio again answered HTTP 402** (credits depleted), so both
+  reviews were done by independent agents. Design review: 19 findings, 13 accepted, 5 in part, 1 rejected
+  (view-time targets, the muzzle, party-only hostility in wild zones, steadiness instead of error for the
+  lock, line-of-sight reactions, hub-first reports, three verdicts, no automatic demotion). Code review: 14
+  findings, 13 fixed, 1 in part (aim numbers lost on a handoff; a lying view tick; a zone that waited an
+  hour for a dead hub at shutdown; colliding report files; flags that never closed; unbounded reports; a
+  week of numbers lost to a race; gate checks that compared a file with itself). Gemini should be run over
+  the document and the diff once the account has credit.
+- Tests: the workspace suite green (266 tests); every earlier gate green on the final build: netcode,
+  matrix, swarm 6.2 ms mean / 8.5 ms p99 with 200 bots, perf 2,433 fps, 100 avatars at 712 fps
+  offline and 243 fps through the hub (cap 250), dungeon, web (both builds in headless Chromium, and
+  through the hub).
+- Binaries (release, LTO): `gm-client` **9,168,512 bytes (8.74 MiB)**, +177,760 for the replay
+  viewer and the analysis it shows; baseline updated. `gm-server` 6.51 MB, `gm-hub` 7.95 MB, `gm-bot` 4.85 MB, `gm-tools` 4.84
+  MB. Browser builds: WebGPU 938,472 bytes, WebGL2 2,930,902 (the report key and its messages).
+- Known limits (ANTICHEAT.md 9, 11): **the thresholds were tuned on models, not on people**, and the first
+  weeks of real play are their calibration; aim assistance tuned to stay inside a hand's distribution, a
+  triggerbot, ESP inside the PVS by a patient cheat, and anything in melee beyond spin are not caught; a
+  build that barely shoots gives the rules nothing; one fight per zone at a time (a busy contested zone
+  records continuously); no replay browser in the client and no replays for players; no asset freeze on a
+  ban; anybody with an account can report (five open reports each); the privacy notice, the impact
+  assessment and a self-service export of an account's record are the operator's to do before launch.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -958,4 +1040,11 @@ The web numbers are **proposed** in `docs/WEB.md` 9 and 2.1 (the size budgets of
 without input and 60 s for the first, the grace after `Reject` and `Kick`, a 128 MiB default cache in
 the browser, 13-day pinned certificates), and so is **what a link may set** on a production site
 (WEB.md 5: only what is seen).
+The anti-cheat numbers are **proposed** in `docs/ANTICHEAT.md` 12 (every threshold of the aim rules and
+their minimum samples, the recorder's windows and its byte ceiling, retention of 14 and 90 days and 26
+weeks, the reputation weights, ten hours of play for tier 1, five open reports per account, who may
+report at all), and so are two readings of section 8: in a wild zone a "team kill" is a kill inside one's
+own party only (every human is on one team there and kills between parties are the game), and a flag
+never does anything by itself. **Who moderates** is open: today an account whose `accounts.moderator`
+flag an operator has set in the database.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

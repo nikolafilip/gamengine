@@ -132,7 +132,7 @@ impl Db {
 
     /// Drop every row (tests).
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        sqlx::query("truncate kills, trials, model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
+        sqlx::query("truncate mod_log, bans, reputation, reports, flags, aim_reports, aim_weeks, replay_participants, replays, kills, trials, model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
             .execute(&self.pool)
             .await?;
         // The cascade empties `holders` too; the two singletons come back at zero.

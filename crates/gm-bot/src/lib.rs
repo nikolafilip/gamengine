@@ -9,6 +9,8 @@ pub mod brain;
 pub mod hub_flow;
 pub mod raid;
 
+pub mod aim;
+pub use aim::AimModel;
 pub use bot::{
     BotConfig, BotExit, BotReport, run_bot, run_bot_on_link, run_bot_web, run_bot_with_token,
 };

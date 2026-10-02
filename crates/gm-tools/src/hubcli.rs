@@ -146,6 +146,90 @@ pub enum ModCmd {
         #[command(flatten)]
         hub: HubArgs,
     },
+    // Conduct (docs/ANTICHEAT.md 7). Everything here is logged with the moderator's name.
+    /// Who stands out by aim, most suspicious first.
+    AimReport {
+        #[arg(long, default_value_t = 4)]
+        weeks: u8,
+        #[arg(long, default_value_t = 40)]
+        min_shots: u32,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
+    /// Replays, newest first: of one account, or only the reported or flagged ones.
+    Replays {
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        reported: bool,
+        #[arg(long)]
+        flagged: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
+    /// Fetch a replay: then `gm-client --replay FILE --follow NAME`.
+    ReplayGet {
+        id: i64,
+        #[arg(long)]
+        out: PathBuf,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
+    /// Players' reports.
+    Reports {
+        /// Decided ones too.
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
+    /// Decide a report: uphold, not-proven or abusive.
+    Report {
+        id: i64,
+        verdict: String,
+        #[arg(long, default_value = "")]
+        note: String,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
+    /// Ban an account: it is logged out, kicked, and told the reason at its next login.
+    Ban {
+        email: String,
+        #[arg(long)]
+        days: u32,
+        #[arg(long)]
+        reason: String,
+        /// A confirmed cheat: also written to the account's reputation.
+        #[arg(long)]
+        cheat: bool,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
+    Unban {
+        email: String,
+        #[arg(long, default_value = "")]
+        note: String,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
+    /// An account's reputation ledger, trust tier, open flags and ban.
+    Reputation {
+        email: String,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
+    /// A reputation row by hand.
+    Adjust {
+        email: String,
+        #[arg(allow_hyphen_values = true)]
+        delta: i32,
+        #[arg(long)]
+        note: String,
+        #[command(flatten)]
+        hub: HubArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -516,6 +600,200 @@ pub fn moderate(cmd: ModCmd) -> Result<()> {
             }
             ModCmd::ClearStrikes { email, hub } => {
                 mod_op(&hub, ModOp::ClearStrikes { email }).await?;
+                println!("done");
+            }
+            ModCmd::AimReport {
+                weeks,
+                min_shots,
+                hub,
+            } => {
+                let HubResponse::AimReport(rows) =
+                    mod_op(&hub, ModOp::AimReport { weeks, min_shots }).await?
+                else {
+                    bail!("unexpected answer");
+                };
+                for r in &rows {
+                    let s = &r.stats;
+                    println!(
+                        "aim: account={} rules={} analysed={} hit_rate={:.2} hard_hit_rate={:.2} lock_rate={:.2} flick_rate={:.2} laser_rate={:.2} median_error={} median_reaction_ms={} z_hard_hits={:.1} z_lock={:.1} z_flick={:.1} replays={:?}",
+                        r.email,
+                        if r.rules.is_empty() { "-".to_string() } else { r.rules.join(",") },
+                        s.analysed,
+                        s.hit_rate(),
+                        s.hard_hit_rate(),
+                        s.lock_rate(),
+                        s.flick_rate(),
+                        s.laser_rate(),
+                        s.median_error().map_or_else(|| "-".into(), |m| format!("{m}")),
+                        s.median_reaction_ms().map_or_else(|| "-".into(), |m| format!("{m:.0}")),
+                        r.z_hard_hits,
+                        r.z_lock,
+                        r.z_flick,
+                        r.replays,
+                    );
+                }
+                println!(
+                    "{} accounts, {} flagged",
+                    rows.len(),
+                    rows.iter().filter(|r| !r.rules.is_empty()).count()
+                );
+            }
+            ModCmd::Replays {
+                account,
+                reported,
+                flagged,
+                limit,
+                hub,
+            } => {
+                let HubResponse::Replays(rows) = mod_op(
+                    &hub,
+                    ModOp::Replays {
+                        email: account,
+                        reported,
+                        flagged,
+                        limit,
+                    },
+                )
+                .await?
+                else {
+                    bail!("unexpected answer");
+                };
+                for r in &rows {
+                    println!(
+                        "replay: id={} zone={} started_unix={} seconds={:.1} reported={} kills={} damage={} bytes={} participants={}",
+                        r.id,
+                        r.zone,
+                        r.started_unix,
+                        r.seconds,
+                        r.reported,
+                        r.kills,
+                        r.damage,
+                        r.bytes,
+                        r.participants
+                            .iter()
+                            .map(|(name, rules)| if rules.is_empty() {
+                                name.clone()
+                            } else {
+                                format!("{name}[{rules}]")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                }
+                println!("{} replays", rows.len());
+            }
+            ModCmd::ReplayGet { id, out, hub } => {
+                let (client, session) = login(&hub).await?;
+                let bytes = client
+                    .download(
+                        &HubRequest::Mod {
+                            session,
+                            op: ModOp::ReplayGet { id },
+                        },
+                        gm_hub_proto::protocol::MAX_REPLAY_BYTES as usize,
+                    )
+                    .await
+                    .map_err(refusal)?;
+                std::fs::write(&out, &bytes)?;
+                println!(
+                    "wrote {} ({} bytes): gm-client --replay {} --follow NAME",
+                    out.display(),
+                    bytes.len(),
+                    out.display()
+                );
+            }
+            ModCmd::Reports { all, hub } => {
+                let HubResponse::Reports(rows) =
+                    mod_op(&hub, ModOp::Reports { open_only: !all }).await?
+                else {
+                    bail!("unexpected answer");
+                };
+                for r in &rows {
+                    println!(
+                        "report: id={} state={} reporter={} target={} zone={} reason={} replay={} created_unix={} note={:?}",
+                        r.id,
+                        r.state,
+                        r.reporter,
+                        r.target,
+                        r.zone,
+                        r.reason,
+                        r.replay.map_or_else(|| "-".into(), |id| id.to_string()),
+                        r.created_unix,
+                        r.note
+                    );
+                }
+                println!("{} reports", rows.len());
+            }
+            ModCmd::Report {
+                id,
+                verdict,
+                note,
+                hub,
+            } => {
+                use gm_hub_proto::protocol::Verdict;
+                let verdict = match verdict.as_str() {
+                    "uphold" | "upheld" => Verdict::Upheld,
+                    "not-proven" | "not_proven" => Verdict::NotProven,
+                    "abusive" => Verdict::Abusive,
+                    other => bail!("{other}: a verdict is uphold, not-proven or abusive"),
+                };
+                mod_op(&hub, ModOp::ReportVerdict { id, verdict, note }).await?;
+                println!("done");
+            }
+            ModCmd::Ban {
+                email,
+                days,
+                reason,
+                cheat,
+                hub,
+            } => {
+                mod_op(
+                    &hub,
+                    ModOp::Ban {
+                        email,
+                        days,
+                        reason,
+                        cheat,
+                    },
+                )
+                .await?;
+                println!("done");
+            }
+            ModCmd::Unban { email, note, hub } => {
+                mod_op(&hub, ModOp::Unban { email, note }).await?;
+                println!("done");
+            }
+            ModCmd::Reputation { email, hub } => {
+                let HubResponse::Standing(s) =
+                    mod_op(&hub, ModOp::Reputation { email: email.clone() }).await?
+                else {
+                    bail!("unexpected answer");
+                };
+                println!(
+                    "standing: account={email} reputation={} trust_tier={} ban={}",
+                    s.reputation,
+                    s.trust_tier,
+                    s.ban
+                        .as_ref()
+                        .map_or_else(|| "-".to_string(), |(until, why)| format!("until {until}: {why}"))
+                );
+                for (rule, week, detail) in &s.flags {
+                    println!("flag: rule={rule} week={week} {detail}");
+                }
+                for r in &s.ledger {
+                    println!(
+                        "ledger: kind={} delta={} reference={:?} note={:?} at_unix={}",
+                        r.kind, r.delta, r.reference, r.note, r.at_unix
+                    );
+                }
+            }
+            ModCmd::Adjust {
+                email,
+                delta,
+                note,
+                hub,
+            } => {
+                mod_op(&hub, ModOp::Adjust { email, delta, note }).await?;
                 println!("done");
             }
         }

@@ -3,6 +3,7 @@
 //! ticket from here. The protocol, tokens and the connection live in `gm-hub-proto`.
 #![forbid(unsafe_code)]
 
+pub mod conduct;
 pub mod db;
 pub mod economy;
 pub mod hub;
