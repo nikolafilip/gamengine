@@ -52,6 +52,7 @@ async fn start_zone(
     hub_addr: std::net::SocketAddr,
     hub_cert: Vec<u8>,
     content: gm_core::build::ContentPack,
+    web: bool,
 ) -> (
     std::net::SocketAddr,
     tokio::task::JoinHandle<anyhow::Result<gm_server::ZoneReport>>,
@@ -64,6 +65,26 @@ async fn start_zone(
     )
     .unwrap();
     let addr = endpoint.local_addr().unwrap();
+    // A WebTransport listener beside the QUIC endpoint (WEB.md 2): the hub is told of it.
+    let web = if web {
+        let (endpoint, addr) = gm_net::link::web_listener(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            None,
+            gm_net::transport::web_transport_config(),
+        )
+        .await
+        .expect("web listener");
+        Some((
+            gm_server::WebListener {
+                endpoint,
+                origins: Vec::new(),
+            },
+            addr,
+        ))
+    } else {
+        None
+    };
     let link = HubLink::connect(HubLinkConfig {
         addr: hub_addr,
         cert_der: hub_cert,
@@ -73,6 +94,7 @@ async fn start_zone(
         map_hash: world.hash,
         public_addr: addr,
         zone_cert_der: identity.cert_der().to_vec(),
+        web: web.as_ref().map(|(_, addr)| addr.clone()),
         requires: Vec::new(),
     })
     .await
@@ -84,7 +106,13 @@ async fn start_zone(
         hub: Some(link),
         ..ZoneConfig::default()
     };
-    let task = tokio::spawn(gm_server::run(cfg, world, endpoint, std::future::pending()));
+    let task = tokio::spawn(gm_server::run_with_web(
+        cfg,
+        world,
+        endpoint,
+        web.map(|(listener, _)| listener),
+        std::future::pending(),
+    ));
     (addr, task)
 }
 
@@ -120,16 +148,34 @@ async fn login_zone_handoff_logout_round_trip() {
         ingest: gm_hub::IngestMode::InProcess,
         ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
     };
-    let hub_task = tokio::spawn(gm_hub::run(
+    // Browsers reach the hub through a WebTransport listener beside the QUIC endpoint.
+    let (hub_web_endpoint, hub_web) = gm_net::link::web_listener(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        None,
+        gm_net::transport::hub_transport_config(),
+    )
+    .await
+    .expect("hub web listener");
+    let hub_task = tokio::spawn(gm_hub::run_with_web(
         hub_cfg,
         db.clone(),
         endpoint,
+        Some((hub_web_endpoint, Vec::new())),
         std::future::pending(),
     ));
 
     // Two zones on the same map.
-    let (_a, zone_a) = start_zone("arena-a", hub_addr, hub_cert.clone(), content.clone()).await;
-    let (_b, zone_b) = start_zone("arena-b", hub_addr, hub_cert.clone(), content.clone()).await;
+    let (_a, zone_a) = start_zone(
+        "arena-a",
+        hub_addr,
+        hub_cert.clone(),
+        content.clone(),
+        false,
+    )
+    .await;
+    let (_b, zone_b) =
+        start_zone("arena-b", hub_addr, hub_cert.clone(), content.clone(), true).await;
 
     // The trip: register, create a character, enter A, travel to B after 3 s, play 3 s more,
     // log out. Meanwhile the character's location is checked at the hub.
@@ -321,6 +367,120 @@ async fn login_zone_handoff_logout_round_trip() {
         .await
         .unwrap();
     hub.close();
+
+    // WEB.md 7: what a browser does, without a browser. The same requests on the streams of
+    // a WebTransport session to the hub's web listener; the ticket names the zone's web
+    // listener; the zone is entered through it; a zone without one gives a ticket without.
+    {
+        use gm_hub::protocol::{HubRequest, HubResponse};
+        use gm_net::control;
+        let (_endpoint, hub) =
+            gm_net::link::web_connect(&hub_web, gm_net::transport::hub_transport_config())
+                .await
+                .expect("WebTransport session to the hub");
+        let ask = async |req: HubRequest| -> HubResponse {
+            let (mut send, mut recv) = hub.open_bi().await.expect("stream");
+            control::send_any(&mut send, &req).await.expect("request");
+            let _ = send.finish();
+            control::recv_any(&mut recv)
+                .await
+                .expect("response")
+                .expect("an answer")
+        };
+        let session = match ask(HubRequest::Register {
+            email: "web@example.com".into(),
+            password: "a browser's password".into(),
+        })
+        .await
+        {
+            HubResponse::Session { session, .. } => session,
+            other => panic!("{other:?}"),
+        };
+        let character = match ask(HubRequest::CreateCharacter {
+            session,
+            name: "Webby".into(),
+            build: gm_hub::protocol::BuildChoice::Preset("blade".into()),
+        })
+        .await
+        {
+            HubResponse::Character(c) => c.id,
+            other => panic!("{other:?}"),
+        };
+        let plain = match ask(HubRequest::Enter {
+            session,
+            character,
+            zone: "arena-a".into(),
+        })
+        .await
+        {
+            HubResponse::Ticket(t) => t,
+            other => panic!("{other:?}"),
+        };
+        assert!(plain.web.is_none(), "arena-a has no web listener");
+        // That ticket is never used: the transit is given up by logging out and in again.
+        assert!(matches!(
+            ask(HubRequest::Logout { session }).await,
+            HubResponse::Ok
+        ));
+        let session = match ask(HubRequest::Login {
+            email: "web@example.com".into(),
+            password: "a browser's password".into(),
+        })
+        .await
+        {
+            HubResponse::Session { session, .. } => session,
+            other => panic!("{other:?}"),
+        };
+        let ticket = match ask(HubRequest::Enter {
+            session,
+            character,
+            zone: "arena-b".into(),
+        })
+        .await
+        {
+            HubResponse::Ticket(t) => t,
+            other => panic!("{other:?}"),
+        };
+        let web = ticket
+            .web
+            .clone()
+            .expect("arena-b advertises its web listener");
+        let bsp = Arc::new(gm_bsp::Bsp::load(Path::new(ARENA)).unwrap());
+        let (report, _, map) = gm_bot::run_bot_web(
+            &web,
+            BotConfig {
+                name: String::new(),
+                seed: 9,
+                behaviour: Behaviour::Wander,
+                rate: TickRate::COMBAT,
+                run_ticks: 128,
+                build: None,
+                team: 0,
+                counter_pick: false,
+                travel_to: None,
+                travel_after_ticks: 0,
+                stall_tile: None,
+            },
+            bitcode::encode(&ticket.token),
+            move |_| Ok(bsp.clone()),
+            std::future::pending(),
+        )
+        .await
+        .expect("a WebTransport client plays in the zone");
+        assert_eq!(map, "arena");
+        assert!(report.client.snapshots > 60, "{}", report.client.snapshots);
+        assert_eq!(report.client.decode_errors, 0);
+        let rows = db.characters_of(2).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.name == "Webby"),
+            "the web account's character is in the database: {rows:?}"
+        );
+        assert!(matches!(
+            ask(HubRequest::Logout { session }).await,
+            HubResponse::Ok
+        ));
+        hub.close(0, b"bye");
+    }
 
     hub_task.abort();
     zone_a.abort();

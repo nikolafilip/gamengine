@@ -16,7 +16,8 @@ crates/gm-core      shared simulation: entity vocabulary, matrix, builds, status
 crates/gm-content   content loader: abilities, builds, creatures and trials in TOML, compiled and validated into gm-core packs.
 crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
 crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
-crates/gm-client    wgpu forward renderer, skinned characters, model cache, Quake movement, zone connection.
+crates/gm-client    wgpu forward renderer, skinned characters, model cache, Quake movement, zone connection;
+                    the same crate is the browser client (wasm, WebGPU or WebGL2, WebTransport).
 crates/gm-server    authoritative tokio zone server: tick loop, sessions, PVS snapshots, lag compensation.
 crates/gm-hub       accounts, characters, zone registry, handoff, the economy, avatar models and their moderation.
 crates/gm-hub-proto hub messages, entry tokens and the hub connection used by zones, bots and the client.
@@ -29,7 +30,9 @@ assets/maps/src     TrenchBroom .map sources and gamengine.fgd (test_room, the 8
 assets/maps/built   compiled .bsp (+ .lit colored lightmaps)
 assets/textures     generated palette and WAD (gm-tools wad make)
 assets/content      abilities, preset builds, creatures, trials and items (TOML), the v1 content
-docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md, BUILDING.md
+web/                the browser client's page and loader (index.html, boot.js)
+docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md, WEB.md,
+                    BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
@@ -95,6 +98,19 @@ cargo run --release -p gm-client -- --map assets/maps/built/dungeon.bsp --connec
     --cert zone-cert.der --build blade --third-person
 ```
 
+The browser (Phase 8): the same client compiled to wasm joins the same zones through a
+WebTransport listener the zone and the hub open beside their QUIC endpoint
+([`docs/WEB.md`](docs/WEB.md)). 0.9 MB of `.wasm` on WebGPU (0.3 MB compressed), 2.9 MB on
+WebGL2; the loader picks.
+
+```sh
+scripts/build-web.sh
+cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --cert-out zone-cert.der \
+    --web-listen 127.0.0.1:4434 --web-info-out zone-web.json
+(cd target/web && python3 -m http.server 8080 --bind 127.0.0.1)
+# http://localhost:8080/?connect=https://127.0.0.1:4434&cert=<cert_sha256 from zone-web.json>&map=arena&build=blade
+```
+
 ## CI gates
 
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then:
@@ -128,6 +144,12 @@ cargo run --release -p gm-client -- --map assets/maps/built/dungeon.bsp --connec
 - `crates/gm-server/tests/companions.rs` — the same through hub and Postgres in a test:
   three hires paid and burned, the squad by name, the drop and the trial in the database,
   the ledger sound, the gated zone, a hire ended by its avatar's owner.
+
+- `scripts/check-web.sh` — the browser client: both `.wasm` under their size budgets, a QUIC
+  bot and a WebTransport bot in one zone; with `--browser` headless Chromium plays in an
+  arena with fifteen native bots on each build (snapshots, corrections, damage both ways,
+  bytes, memory, frame rate); with `--hub` it logs in, fills its model cache under a cap
+  smaller than the town's avatars, comes back to find them cached, and travels.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

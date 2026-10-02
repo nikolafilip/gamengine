@@ -1,8 +1,10 @@
 //! Frame timing and memory measurements. Every `bench:` line is parsed by scripts/check-perf.sh.
 
-use std::time::Instant;
+use web_time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::avatars::Avatars;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::render::Renderer;
 
 #[derive(Default)]
@@ -78,6 +80,7 @@ impl FrameStats {
 }
 
 /// `(VmRSS, VmHWM)` in bytes from /proc; zeros where unavailable.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn rss_bytes() -> (u64, u64) {
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
         return (0, 0);
@@ -98,6 +101,7 @@ pub fn rss_bytes() -> (u64, u64) {
     (field("VmRSS:"), field("VmHWM:"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn binary_bytes() -> u64 {
     std::env::current_exe()
         .and_then(std::fs::metadata)
@@ -105,6 +109,7 @@ pub fn binary_bytes() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn print_bench(
     report: &Report,
     info: &wgpu::AdapterInfo,
@@ -138,6 +143,7 @@ pub fn print_bench(
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The avatar line of a run (MODELS.md 11), parsed by scripts/check-avatars.sh. Printed when
 /// any character was drawn.
 pub fn print_bench_avatars(report: &Report, avatars: &Avatars, renderer: &Renderer) {
@@ -149,7 +155,7 @@ pub fn print_bench_avatars(report: &Report, avatars: &Avatars, renderer: &Render
     let (cache_bytes, cache_cap) = avatars
         .cache
         .as_ref()
-        .map_or((0, 0), |c| (c.disk.total(), c.disk.cap()));
+        .map_or((0, 0), |c| (c.loader.disk.total(), c.loader.disk.cap()));
     let (_, peak) = rss_bytes();
     println!(
         "avatars: characters={} with_model={} triangles={} models_ready={} models_pending={} gpu_bytes={} model_gpu_bytes={} \

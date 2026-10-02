@@ -20,10 +20,19 @@ struct Args {
     models_dir: PathBuf,
     grant_moderator: Option<String>,
     auth_per_minute: f64,
+    /// A WebTransport listener for browsers beside the QUIC one (WEB.md 2).
+    web_listen: Option<SocketAddr>,
+    web_cert: Option<PathBuf>,
+    web_key: Option<PathBuf>,
+    web_url: Option<String>,
+    web_origins: Vec<String>,
+    web_info_out: Option<PathBuf>,
 }
 
 const USAGE: &str = "gm-hub --database-url URL [--listen ADDR] [--cert-out PATH] [--key PATH] [--content DIR] \
-[--zone-secret S] [--models-dir DIR] [--auth-per-minute N] [--migrate-only] [--wipe]   (env: DATABASE_URL, GM_ZONE_SECRET)\n\
+[--zone-secret S] [--models-dir DIR] [--auth-per-minute N] [--migrate-only] [--wipe] \
+[--web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url https://HOST:PORT] [--web-origin ORIGIN]... [--web-info-out PATH]]   \
+(env: DATABASE_URL, GM_ZONE_SECRET)\n\
        gm-hub --database-url URL --grant-moderator EMAIL     make an existing account a moderator, then exit\n\
        gm-hub ingest-worker --frame NAME --in FILE --out DIR   (run by the hub itself, MODELS.md 6.2)";
 
@@ -40,6 +49,12 @@ fn parse_args() -> Result<Args, String> {
         models_dir: PathBuf::from("models"),
         grant_moderator: None,
         auth_per_minute: 10.0,
+        web_listen: None,
+        web_cert: None,
+        web_key: None,
+        web_url: None,
+        web_origins: Vec::new(),
+        web_info_out: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -62,6 +77,18 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--auth-per-minute: {e}"))?
             }
+            "--web-listen" => {
+                a.web_listen = Some(
+                    value("--web-listen")?
+                        .parse()
+                        .map_err(|e| format!("--web-listen: {e}"))?,
+                )
+            }
+            "--web-cert" => a.web_cert = Some(PathBuf::from(value("--web-cert")?)),
+            "--web-key" => a.web_key = Some(PathBuf::from(value("--web-key")?)),
+            "--web-url" => a.web_url = Some(value("--web-url")?),
+            "--web-origin" => a.web_origins.push(value("--web-origin")?),
+            "--web-info-out" => a.web_info_out = Some(PathBuf::from(value("--web-info-out")?)),
             "--migrate-only" => a.migrate_only = true,
             "--wipe" => a.wipe = true,
             "-h" | "--help" => {
@@ -70,6 +97,9 @@ fn parse_args() -> Result<Args, String> {
             }
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
+    }
+    if a.web_cert.is_some() != a.web_key.is_some() {
+        return Err("--web-cert and --web-key go together".into());
     }
     if a.database_url.is_empty() {
         return Err("--database-url (or DATABASE_URL) is required".into());
@@ -180,5 +210,24 @@ async fn run() -> anyhow::Result<()> {
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
-    gm_hub::run(cfg, db, endpoint, shutdown).await
+    let web = match args.web_listen {
+        Some(listen) => {
+            let (endpoint, addr) = gm_net::link::web_listener(
+                listen,
+                args.web_cert.as_deref().zip(args.web_key.as_deref()),
+                args.web_url.clone(),
+                gm_net::transport::hub_transport_config(),
+            )
+            .await?;
+            if args.web_origins.is_empty() {
+                tracing::warn!("the web listener accepts sessions from any origin (--web-origin)");
+            }
+            if let Some(path) = &args.web_info_out {
+                std::fs::write(path, gm_net::link::web_info_json(&addr))?;
+            }
+            Some((endpoint, args.web_origins.clone()))
+        }
+        None => None,
+    };
+    gm_hub::run_with_web(cfg, db, endpoint, web, shutdown).await
 }

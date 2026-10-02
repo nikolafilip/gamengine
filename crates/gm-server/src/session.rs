@@ -153,7 +153,7 @@ pub struct Session {
     /// (present only while the player's frame is the model's, MODELS.md 7).
     pub model: Option<ModelRef>,
     pub announced: Option<ModelId>,
-    pub conn: quinn::Connection,
+    pub conn: gm_net::link::Link,
     /// Bounded: a client that stops reading its control stream is kicked, not buffered forever.
     pub control: mpsc::Sender<Control>,
     history: VecDeque<Snapshot>,
@@ -169,7 +169,25 @@ pub struct Session {
     travel_gate: RequestGate,
     /// Squad entries last told to this client, so an unchanged squad is not sent again.
     pub squad_told: Vec<gm_net::control::SquadEntry>,
+    /// The zone tick at which the last input datagram arrived (or the join), and whether
+    /// any has arrived yet.
+    pub last_input_at: u64,
+    pub had_input: bool,
+    /// Damage this client's body dealt and took, and the hits it landed.
+    pub damage_dealt: u64,
+    pub damage_taken: u64,
+    pub hits_landed: u32,
 }
+
+/// A client that sends no input for this long is kicked (WEB.md 3.3): a QUIC connection
+/// stays alive on keep-alives alone, so a hidden browser tab or a frozen client would
+/// otherwise stand in the world for good.
+pub const INPUT_IDLE_SECS: u64 = 10;
+/// A client that has joined may take this long to send its first input: a browser fetches
+/// the zone's map after `Welcome` and predicts nothing until it has it.
+pub const FIRST_INPUT_SECS: u64 = 60;
+/// How long a kicked client has to read its `Kick` before the connection is closed.
+pub const KICK_GRACE: Duration = Duration::from_millis(500);
 
 /// A player's stall and travel requests go to the hub: one of a kind at a time, and at most
 /// one in this long.
@@ -205,7 +223,7 @@ impl Session {
     pub fn new(
         id: EntityId,
         name: String,
-        conn: quinn::Connection,
+        conn: gm_net::link::Link,
         control: mpsc::Sender<Control>,
     ) -> Session {
         Session {
@@ -227,7 +245,25 @@ impl Session {
             stall_gate: RequestGate::default(),
             travel_gate: RequestGate::default(),
             squad_told: Vec::new(),
+            last_input_at: 0,
+            had_input: false,
+            damage_dealt: 0,
+            damage_taken: 0,
+            hits_landed: 0,
         }
+    }
+
+    /// Tell the client why, then close: the close waits a moment, because a connection
+    /// closed in the same instant can take the unread `Kick` with it (a browser discards
+    /// what its stream had queued when the session errors).
+    pub fn kick(&self, reason: &str, code: u32) {
+        self.send_control(Control::Kick(reason.to_string()));
+        let conn = self.conn.clone();
+        let why = reason.as_bytes().to_vec();
+        tokio::spawn(async move {
+            tokio::time::sleep(KICK_GRACE).await;
+            conn.close(code, &why);
+        });
     }
 
     /// Whether the client is being sent `id` (it was in the last snapshot built for it):
@@ -270,7 +306,7 @@ impl Session {
         match self.control.try_send(msg) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.conn.close(3u32.into(), b"control stream not read");
+                self.conn.close(3, b"control stream not read");
                 false
             }
             Err(mpsc::error::TrySendError::Closed(_)) => false,

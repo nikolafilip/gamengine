@@ -17,7 +17,7 @@ gm-bsp = { workspace = true }
 gm-content = { workspace = true }
 gm-core = { workspace = true }
 gm-hub-proto = { workspace = true }
-gm-net = { workspace = true }
+gm-net = { workspace = true, features = ["web"] }
 quinn = { workspace = true }
 rayon = { workspace = true }
 tokio = { workspace = true }
@@ -31,5 +31,5 @@ gm-bot = { path = "../gm-bot" }
 gm-content = { workspace = true }
 gm-ingest = { workspace = true }
 gm-model = { workspace = true }
-gm-net = { workspace = true, features = ["turmoil"] }
+gm-net = { workspace = true, features = ["turmoil", "web"] }
 turmoil = { workspace = true }

@@ -1,6 +1,6 @@
 # Hub: accounts, characters, zones, handoff
 
-Status: v1.3 (Phase 4; the economy requests of Phase 5; models, stalls in the world and the
+Status: v1.4 (Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
 saved position's zone of Phase 6; squads, trials and gated zones of Phase 7, section 3.5). This document is the contract between `gm-hub`, `gm-server` and the
 clients for everything that outlives a zone process: accounts, characters, where a character is,
 and how it moves between zones. PLAN.md 2.1 (Postgres via sqlx, in-memory session state), 11.3
@@ -236,6 +236,19 @@ advisory for the zone's bookkeeping; the database is already updated when they a
   answer `Locked` with the trials' names otherwise.
 - **A kill** is reported with `ZoneEconOp::GrantKill` (ECONOMY.md 9): one transaction, once
   per `(zone, reference)`.
+
+### 3.6 Browsers (WEB.md 2)
+
+- `gm-hub --web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url URL] [--web-origin
+  ORIGIN]... [--web-info-out FILE]` opens a WebTransport listener beside the QUIC endpoint.
+  A session's bidirectional streams carry the same requests with the same framing, one per
+  stream; uploads and downloads write their bytes raw on the stream as before. Zones keep
+  talking QUIC.
+- `ZoneHello` gains `web: Option<WebAddr>`: the zone's own WebTransport listener. `ZoneTicket`
+  carries it on, so a ticket names both ways into a zone; a browser needs `web`, a native
+  client `addr` and `cert_der`.
+- Rate limits and sessions do not know the transport. The `Origin` allow-list of the web
+  listener is not authentication (WEB.md 2.1).
 
 ## 4. Database (PLAN.md 11.4)
 

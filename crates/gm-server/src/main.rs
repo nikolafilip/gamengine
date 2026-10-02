@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gm_core::tick::TickRate;
-use gm_net::transport::{Identity, server_config};
+use gm_net::transport::{Identity, server_config, web_transport_config};
 use gm_server::{ZoneConfig, ZoneWorld};
 use tracing::info;
 
@@ -32,13 +32,22 @@ struct Args {
     squads: bool,
     recruits: Vec<String>,
     requires: Vec<String>,
+    /// A WebTransport listener for browsers beside the QUIC one (WEB.md 2).
+    web_listen: Option<SocketAddr>,
+    web_cert: Option<PathBuf>,
+    web_key: Option<PathBuf>,
+    web_url: Option<String>,
+    web_origins: Vec<String>,
+    web_info_out: Option<PathBuf>,
 }
 
 const USAGE: &str = "gm-server [--map PATH] [--content DIR] [--default-build NAME] [--listen ADDR] \
 [--cert-out PATH] [--hz 64|20] [--report-secs N] [--ticks N] [--max-players N] [--seed N] \
 [--wild] [--arrive-at-entry] [--squads] [--recruits BUILD,BUILD,...] \
 [--hub ADDR --hub-cert PATH --zone-id NAME --zone-secret S [--public-addr ADDR] \
-[--requires TRIAL,TRIAL,...]]   (env: GM_ZONE_SECRET)";
+[--requires TRIAL,TRIAL,...]] \
+[--web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url https://HOST:PORT] [--web-origin ORIGIN]... \
+[--web-info-out PATH]]   (env: GM_ZONE_SECRET)";
 
 /// A comma-separated list of names.
 fn names(list: &str) -> Vec<String> {
@@ -71,6 +80,12 @@ fn parse_args() -> Result<Args, String> {
         squads: false,
         recruits: Vec::new(),
         requires: Vec::new(),
+        web_listen: None,
+        web_cert: None,
+        web_key: None,
+        web_url: None,
+        web_origins: Vec::new(),
+        web_info_out: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -124,6 +139,18 @@ fn parse_args() -> Result<Args, String> {
             "--squads" => args.squads = true,
             "--recruits" => args.recruits = names(&value("--recruits")?),
             "--requires" => args.requires = names(&value("--requires")?),
+            "--web-listen" => {
+                args.web_listen = Some(
+                    value("--web-listen")?
+                        .parse()
+                        .map_err(|e| format!("--web-listen: {e}"))?,
+                )
+            }
+            "--web-cert" => args.web_cert = Some(PathBuf::from(value("--web-cert")?)),
+            "--web-key" => args.web_key = Some(PathBuf::from(value("--web-key")?)),
+            "--web-url" => args.web_url = Some(value("--web-url")?),
+            "--web-origin" => args.web_origins.push(value("--web-origin")?),
+            "--web-info-out" => args.web_info_out = Some(PathBuf::from(value("--web-info-out")?)),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -133,6 +160,14 @@ fn parse_args() -> Result<Args, String> {
     }
     if args.hz == 0 {
         return Err("--hz must be positive".into());
+    }
+    if args.web_cert.is_some() != args.web_key.is_some() {
+        return Err("--web-cert and --web-key go together".into());
+    }
+    if args.web_listen.is_none()
+        && (args.web_cert.is_some() || args.web_url.is_some() || !args.web_origins.is_empty())
+    {
+        return Err("--web-cert, --web-url and --web-origin need --web-listen".into());
     }
     Ok(args)
 }
@@ -206,6 +241,29 @@ async fn main() -> anyhow::Result<()> {
     info!(cert = %args.cert_out.display(), "zone certificate written; clients pass it with --cert");
     let endpoint = quinn::Endpoint::server(server_config(&identity)?, args.listen)?;
     info!(listen = %endpoint.local_addr()?, map = %world.name, hash = format_args!("{:016x}", world.hash), "listening");
+    let (web, web_addr) = match args.web_listen {
+        Some(listen) => {
+            let (endpoint, addr) = gm_net::link::web_listener(
+                listen,
+                args.web_cert.as_deref().zip(args.web_key.as_deref()),
+                args.web_url.clone(),
+                web_transport_config(),
+            )
+            .await?;
+            if args.web_origins.is_empty() {
+                tracing::warn!("the web listener accepts sessions from any origin (--web-origin)");
+            }
+            if let Some(path) = &args.web_info_out {
+                std::fs::write(path, gm_net::link::web_info_json(&addr))?;
+            }
+            let listener = gm_server::WebListener {
+                endpoint,
+                origins: args.web_origins.clone(),
+            };
+            (Some(listener), Some(addr))
+        }
+        None => (None, None),
+    };
     let hub = match args.hub {
         Some(addr) => {
             if args.zone_secret.is_empty() {
@@ -223,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
                     map_hash: world.hash,
                     public_addr: args.public_addr.unwrap_or(endpoint.local_addr()?),
                     zone_cert_der: identity.cert_der().to_vec(),
+                    web: web_addr.clone(),
                     requires: args.requires.clone(),
                 })
                 .await?,
@@ -250,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
-    let report = gm_server::run(cfg, world, endpoint, shutdown).await?;
+    let report = gm_server::run_with_web(cfg, world, endpoint, web, shutdown).await?;
     info!(
         ticks = report.tick,
         joins = report.joins,

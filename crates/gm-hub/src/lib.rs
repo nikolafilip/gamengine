@@ -12,5 +12,5 @@ pub use db::Db;
 pub use gm_hub_proto::{
     HUB_SERVER_NAME, HubClient, HubClientError, HubKey, TokenError, TokenVerifier, protocol, token,
 };
-pub use hub::{HubConfig, run};
+pub use hub::{HubConfig, run, run_with_web};
 pub use models::IngestMode;

@@ -24,63 +24,80 @@ pub struct Gpu {
 }
 
 impl Gpu {
+    /// Blocking, for programs with a thread to block (everything but a browser).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         instance: &wgpu::Instance,
         surface: Option<&wgpu::Surface<'_>>,
         software: bool,
     ) -> Result<Gpu, Error> {
-        pollster::block_on(async {
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::from_env()
-                        .unwrap_or(wgpu::PowerPreference::HighPerformance),
-                    force_fallback_adapter: software,
-                    compatible_surface: surface,
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| {
-                    format!("no compatible GPU adapter (is a Vulkan driver installed?): {e}")
-                })?;
-            let info = adapter.get_info();
-            log::info!(
-                "adapter: {} ({:?}, {:?}, driver {} {})",
-                info.name,
-                info.backend,
-                info.device_type,
-                info.driver,
-                info.driver_info
-            );
-            let bc = adapter
-                .features()
-                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
-            if !bc {
-                log::warn!(
-                    "no BC texture compression on this GPU: model atlases are decoded on the CPU"
-                );
-            }
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("gm-client"),
-                    required_features: if bc {
-                        wgpu::Features::TEXTURE_COMPRESSION_BC
-                    } else {
-                        wgpu::Features::empty()
-                    },
-                    required_limits: wgpu::Limits::downlevel_defaults(),
-                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                    memory_hints: wgpu::MemoryHints::Performance,
-                    trace: wgpu::Trace::Off,
-                })
-                .await
-                .map_err(|e| format!("device creation failed: {e}"))?;
-            Ok(Gpu {
-                adapter,
-                device,
-                queue,
-                info,
-                bc,
+        pollster::block_on(Gpu::request(instance, surface, software))
+    }
+
+    pub async fn request(
+        instance: &wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+        software: bool,
+    ) -> Result<Gpu, Error> {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::from_env()
+                    .unwrap_or(wgpu::PowerPreference::HighPerformance),
+                force_fallback_adapter: software,
+                compatible_surface: surface,
+                ..Default::default()
             })
+            .await
+            .map_err(|e| {
+                format!("no compatible GPU adapter (is a Vulkan driver installed?): {e}")
+            })?;
+        let info = adapter.get_info();
+        log::info!(
+            "adapter: {} ({:?}, {:?}, driver {} {})",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver,
+            info.driver_info
+        );
+        let bc = adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+        if !bc {
+            log::warn!(
+                "no BC texture compression on this GPU: model atlases are decoded on the CPU"
+            );
+        }
+        // The renderer stays inside the downlevel limits (PLAN.md 11.2); WebGL2 has a
+        // smaller set of its own (no storage buffers, no compute), and asking it for more
+        // fails the request.
+        let limits = if info.backend == wgpu::Backend::Gl {
+            wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            wgpu::Limits::downlevel_defaults()
+        }
+        .using_resolution(adapter.limits());
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("gm-client"),
+                required_features: if bc {
+                    wgpu::Features::TEXTURE_COMPRESSION_BC
+                } else {
+                    wgpu::Features::empty()
+                },
+                required_limits: limits,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .map_err(|e| format!("device creation failed: {e}"))?;
+        Ok(Gpu {
+            adapter,
+            device,
+            queue,
+            info,
+            bc,
         })
     }
 }

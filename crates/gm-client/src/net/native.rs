@@ -11,19 +11,8 @@ use gm_net::transport::{SERVER_NAME, client_config};
 use quinn::rustls::pki_types::CertificateDer;
 use tokio::sync::mpsc;
 
+use super::{NetEvent, ZoneAddr};
 use crate::Error;
-
-pub enum NetEvent {
-    Welcome {
-        entity: u32,
-        hz: u16,
-        map: String,
-        map_hash: u64,
-    },
-    Snapshot(Bytes),
-    Control(Control),
-    Disconnected(String),
-}
 
 /// Outbound traffic from the render thread.
 pub enum Outbound {
@@ -40,13 +29,14 @@ pub struct NetClient {
 impl NetClient {
     /// Connect in the background; events arrive through `poll`.
     pub fn connect(
-        addr: SocketAddr,
-        cert_der: Vec<u8>,
+        zone: ZoneAddr,
         name: String,
         build: Option<String>,
         team: u8,
         token: Vec<u8>,
     ) -> Result<NetClient, Error> {
+        let addr = zone.addr.ok_or("the zone has no QUIC address")?;
+        let cert_der = zone.cert_der;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -170,7 +160,7 @@ async fn session(
             dg = conn.read_datagram() => {
                 match dg {
                     Ok(bytes) => {
-                        if events.send(NetEvent::Snapshot(bytes)).is_err() {
+                        if events.send(NetEvent::Snapshot(bytes.to_vec())).is_err() {
                             break;
                         }
                     }

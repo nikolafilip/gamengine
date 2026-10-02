@@ -8,6 +8,8 @@
   "no compatible GPU adapter"; `--software` selects the CPU adapter explicitly.
 - `curl`, `unzip` (or `python3`) for `scripts/fetch-ericw-tools.sh`.
 - Optional: [TrenchBroom](https://trenchbroom.github.io/) to edit maps.
+- For the browser build: `rustup target add wasm32-unknown-unknown`; Node 22+ and a Chromium
+  only for the browser gate.
 
 ## First build
 
@@ -264,6 +266,39 @@ cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --
 `scripts/check-avatars.sh --online` does all of the above against `GM_TEST_DATABASE_URL` (which
 it wipes) and checks the result.
 
+## The browser client (Phase 8)
+
+`docs/WEB.md` is the contract. The browser client is `gm-client` compiled to wasm; zones and
+the hub accept browsers on a WebTransport listener beside their QUIC endpoint.
+
+```sh
+scripts/build-web.sh                         # fetches the pinned wasm-bindgen and wasm-opt, builds target/web/
+(cd target/web && python3 -m http.server 8080 --bind 127.0.0.1)   # any static server; localhost is a secure context
+
+# a zone with a web listener, and what a page needs to reach it
+cargo run --release -p gm-server -- --map assets/maps/built/arena.bsp --cert-out zone-cert.der \
+    --web-listen 127.0.0.1:4434 --web-info-out zone-web.json
+cat zone-web.json     # {"url": "https://127.0.0.1:4434", "cert_sha256": "…"}
+```
+
+Open `http://localhost:8080/?connect=https://127.0.0.1:4434&cert=<the hash>&map=arena&build=blade&third-person=1`
+(a zone directly: allowed because the default `config.json` marks the site as a development
+one). Chromium on Linux needs `--enable-unsafe-webgpu --enable-features=Vulkan` for WebGPU;
+without it the loader takes the WebGL2 build. Click the canvas to take the pointer; guard is
+on `C` as well as `Ctrl` (a browser keeps `Ctrl+W`).
+
+Through the hub: start `gm-hub` with `--web-listen ADDR --web-info-out hub-web.json`, start
+the zones with `--hub … --web-listen ADDR`, and put the hub's address into the page's
+`config.json`: `{"hub": "<url>", "hub_cert_sha256": "<hash>", "dev": false}`
+(`scripts/build-web.sh --config FILE` copies one). The page then shows its login form. A
+self-signed web certificate is valid for 13 days and its hash changes at every restart; for
+anything but development pass `--web-cert PEM --web-key PEM --web-url https://name:port`.
+
+Flags of both servers: `--web-listen ADDR`, `--web-cert PEM --web-key PEM`, `--web-url URL`
+(the address to advertise), `--web-origin ORIGIN` (repeatable: the pages that may connect;
+without it any), `--web-info-out FILE`. `gm-bot --web URL [--web-cert HEX]` runs bots through
+a zone's web listener.
+
 ## CI gates locally
 
 ```sh
@@ -281,6 +316,9 @@ scripts/check-avatars.sh --software   # what CI runs: 48 avatars, 16 MiB cap, so
 scripts/check-avatars.sh --online     # hub + town zone + 100 bots wearing uploads + the client (needs a database and a display)
 scripts/check-dungeon.sh              # a leader and three companions clear the tutorial dungeon; 16 leaders at once (COMPANIONS.md 14)
 scripts/check-dungeon.sh --online     # the same through the hub with hired avatars, loot, the trial and a gated zone (needs a database)
+scripts/check-web.sh                  # the browser build: sizes of both .wasm, QUIC and WebTransport clients in one zone
+scripts/check-web.sh --browser        # also headless Chromium in a zone with 15 native bots, per build (--software: no GPU)
+scripts/check-web.sh --browser --hub  # also login, 48 avatars through the browser's cache and a travel (needs a database)
 ```
 
 `check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and

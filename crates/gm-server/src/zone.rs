@@ -261,6 +261,17 @@ pub async fn run(
     endpoint: quinn::Endpoint,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<ZoneReport> {
+    run_with_web(cfg, world, endpoint, None, shutdown).await
+}
+
+/// `run`, with a WebTransport listener beside the QUIC endpoint (WEB.md 2.1).
+pub async fn run_with_web(
+    cfg: ZoneConfig,
+    world: Arc<ZoneWorld>,
+    endpoint: quinn::Endpoint,
+    web: Option<crate::net::WebListener>,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<ZoneReport> {
     let rate = cfg.rate;
     let (tx, mut rx) = mpsc::channel::<ClientEvent>(EVENT_CHANNEL);
     let net_cfg = Arc::new(NetConfig {
@@ -271,6 +282,8 @@ pub async fn run(
         content: Arc::new(cfg.content.clone()),
         hub: cfg.hub.clone(),
     });
+    let web_acceptor =
+        web.map(|w| tokio::spawn(crate::net::accept_loop_web(w, tx.clone(), net_cfg.clone())));
     let acceptor = tokio::spawn(accept_loop(endpoint.clone(), tx.clone(), net_cfg));
     let hub_stats: Arc<std::sync::Mutex<(u32, f32)>> = Arc::new(std::sync::Mutex::new((0, 0.0)));
     if let Some(link) = &cfg.hub {
@@ -412,7 +425,7 @@ pub async fn run(
                     {
                         zone.remove_player(old);
                         if let Some(s) = sessions.remove(&old) {
-                            s.conn.close(4u32.into(), b"character joined again");
+                            s.conn.close(4, b"character joined again");
                         }
                         hub_slots.remove(&old);
                     }
@@ -483,6 +496,7 @@ pub async fn run(
                         team,
                     }));
                     let mut session = Session::new(id, name.clone(), conn, control);
+                    session.last_input_at = scheduler.tick();
                     session.model = model;
                     session.announced = zone.player(id).and_then(|p| session.wears(p.frame()));
                     for s in sessions.values() {
@@ -638,6 +652,7 @@ pub async fn run(
                                 addr: ticket.addr.to_string(),
                                 cert_der: ticket.cert_der,
                                 token: bitcode::encode(&ticket.token),
+                                web: ticket.web,
                             });
                             zone.set_ghost(id, true);
                             director.human_left(&mut zone, id);
@@ -663,7 +678,7 @@ pub async fn run(
                         zone.remove_player(id);
                         if let Some(s) = sessions.remove(&id) {
                             s.send_control(Control::Kick("claimed by another zone".into()));
-                            s.conn.close(0u32.into(), b"travelled");
+                            s.conn.close(0, b"travelled");
                         }
                         hub_slots.remove(&id);
                         // The body leaves here: said once, counted once (the `Leave` that
@@ -681,8 +696,7 @@ pub async fn run(
                         .map(|(id, _)| *id)
                         && let Some(s) = sessions.get(&id)
                     {
-                        s.send_control(Control::Kick(reason));
-                        s.conn.close(3u32.into(), b"kicked by the hub");
+                        s.kick(&reason, 3);
                     }
                 }
                 ClientEvent::HubModelRevoked { model } => {
@@ -813,6 +827,8 @@ pub async fn run(
                 }
                 ClientEvent::Input { id, datagram } => {
                     if let Some(s) = sessions.get_mut(&id) {
+                        s.last_input_at = scheduler.tick();
+                        s.had_input = true;
                         s.on_ack(datagram.ack_tick);
                         for (t, frame) in datagram.frames() {
                             zone.queue_input(id, t, frame.to_sim(), datagram.view_tick);
@@ -824,7 +840,7 @@ pub async fn run(
                         s.malformed += 1;
                         report.malformed += 1;
                         if s.malformed > 100 {
-                            s.conn.close(2u32.into(), b"malformed datagrams");
+                            s.conn.close(2, b"malformed datagrams");
                         }
                     }
                 }
@@ -879,6 +895,19 @@ pub async fn run(
                     if let Some(s) = &session {
                         report.oversize_drops += s.oversize_drops;
                         report.send_failures += s.send_failures;
+                        let st = s.conn.stats();
+                        info!(
+                            entity = id,
+                            name = %s.name,
+                            web = s.conn.is_web(),
+                            damage_dealt = s.damage_dealt,
+                            damage_taken = s.damage_taken,
+                            hits_landed = s.hits_landed,
+                            udp_tx_bytes = st.udp_tx.bytes,
+                            udp_rx_bytes = st.udp_rx.bytes,
+                            rtt_ms = format_args!("{:.1}", s.conn.rtt().as_secs_f64() * 1000.0),
+                            "session at leave"
+                        );
                     }
                     // Claimed by another zone a moment ago: that said and counted it.
                     if body.is_none() && session.is_none() {
@@ -888,6 +917,26 @@ pub async fn run(
                         s.send_control(Control::PlayerLeft(id));
                     }
                     report.leaves += 1;
+                }
+            }
+        }
+
+        // Once a second: a client that has sent no input for `INPUT_IDLE_SECS` leaves (one
+        // that has not sent its first yet has `FIRST_INPUT_SECS`: it may be loading the
+        // map). A ghost is waiting for another zone's claim and owes no input.
+        if scheduler.tick().is_multiple_of(rate.hz() as u64) {
+            let hz = rate.hz() as u64;
+            for (id, s) in &sessions {
+                let secs = if s.had_input {
+                    crate::session::INPUT_IDLE_SECS
+                } else {
+                    crate::session::FIRST_INPUT_SECS
+                };
+                let ghost = hub_slots.get(id).is_some_and(|h| h.ghost_since.is_some());
+                let idle = scheduler.tick().saturating_sub(s.last_input_at);
+                if !ghost && (secs * hz..(secs + 1) * hz).contains(&idle) {
+                    info!(entity = *id, name = %s.name, "kicked: no input");
+                    s.kick(&format!("no input for {secs} seconds"), 5);
                 }
             }
         }
@@ -1126,12 +1175,30 @@ pub async fn run(
         }
         for ev in events {
             match ev {
-                ZoneEvent::Hit { kind, .. } => match kind {
-                    HitKind::Melee => report.hits_melee += 1,
-                    HitKind::Projectile => report.hits_projectile += 1,
-                    HitKind::Area => report.hits_area += 1,
-                    HitKind::Dot => report.hits_dot += 1,
-                },
+                ZoneEvent::Hit {
+                    kind,
+                    attacker,
+                    target,
+                    amount,
+                    ..
+                } => {
+                    match kind {
+                        HitKind::Melee => report.hits_melee += 1,
+                        HitKind::Projectile => report.hits_projectile += 1,
+                        HitKind::Area => report.hits_area += 1,
+                        HitKind::Dot => report.hits_dot += 1,
+                    }
+                    let amount = amount.max(0) as u64;
+                    if attacker != target
+                        && let Some(s) = sessions.get_mut(&attacker)
+                    {
+                        s.damage_dealt += amount;
+                        s.hits_landed += 1;
+                    }
+                    if let Some(s) = sessions.get_mut(&target) {
+                        s.damage_taken += amount;
+                    }
+                }
                 ZoneEvent::Killed { victim, killer } => {
                     report.kills += 1;
                     let team = zone.player(killer).map_or(0, |p| p.team()) as usize;
@@ -1297,7 +1364,7 @@ pub async fn run(
     }
     for s in sessions.values() {
         s.send_control(Control::Kick("zone stopped".into()));
-        s.conn.close(0u32.into(), b"zone stopped");
+        s.conn.close(0, b"zone stopped");
     }
     // Fold the live sessions' counters into the totals.
     for p in zone.players() {
@@ -1314,6 +1381,10 @@ pub async fn run(
     }
     endpoint.close(0u32.into(), b"zone stopped");
     acceptor.abort();
+    // The web listener closes with its task: the sessions were closed one by one above.
+    if let Some(task) = web_acceptor {
+        task.abort();
+    }
     info!(ticks = report.tick, "zone stopped");
     Ok(report)
 }

@@ -3,18 +3,21 @@
 //! crowd used to benchmark a town full of avatars.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use gm_bsp::Bsp;
 use gm_core::sim::anim;
 use gm_core::trace::{CollisionWorld, Hull};
 use gm_core::vocab::Status;
+#[cfg(not(target_arch = "wasm32"))]
+use gm_model::Model;
 use gm_model::anim::{Animator, armour_weight};
 use gm_model::mannequin::{self, ARMOUR_TINTS, MANNEQUIN_TEXTURE_SIZE, Shape};
-use gm_model::{Model, ModelId, rig};
+use gm_model::{ModelId, rig};
 
-use crate::cache::{CacheStats, DirSource, ModelCache, ModelSource, default_cache_dir};
+use crate::cache::{CacheStats, ModelCache};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cache::{DirSource, ModelSource, default_cache_dir};
 use crate::characters::{CharacterDraw, Characters};
 use crate::render::{EntityDraw, Gpu};
 use crate::{Error, Options};
@@ -37,6 +40,13 @@ pub const ASPECT_COLOURS: [[f32; 3]; 5] = [
     [0.40, 0.85, 1.0],
     [0.62, 0.50, 0.34],
 ];
+
+/// Where models come from when the store does not have them: a blocking source for the
+/// loader threads natively, an async one in the browser (WEB.md 4).
+#[cfg(not(target_arch = "wasm32"))]
+pub type Source = std::sync::Arc<dyn ModelSource>;
+#[cfg(target_arch = "wasm32")]
+pub type Source = std::rc::Rc<dyn crate::web::store::WebSource>;
 
 /// One body to draw this frame.
 #[derive(Clone, Copy, Debug)]
@@ -106,7 +116,7 @@ impl Avatars {
         characters: &mut Characters,
         opts: &Options,
         bsp: &Bsp,
-        source: Option<Arc<dyn ModelSource>>,
+        source: Option<Source>,
     ) -> Result<Avatars, Error> {
         let texture = mannequin::mannequin_texture();
         let mannequins = rig::FRAMES.map(|frame| {
@@ -117,6 +127,7 @@ impl Avatars {
                 &texture,
             )
         });
+        #[cfg(not(target_arch = "wasm32"))]
         let own_slot = match &opts.avatar {
             Some(path) => {
                 let bytes =
@@ -134,7 +145,10 @@ impl Avatars {
             }
             None => None,
         };
+        #[cfg(target_arch = "wasm32")]
+        let own_slot = None;
         // The crowd's models come from a directory; online, from the hub.
+        #[cfg(not(target_arch = "wasm32"))]
         let (source, crowd_ids) = match (&opts.crowd_dir, source) {
             (Some(dir), _) if opts.crowd > 0 => {
                 let (src, ids) =
@@ -142,11 +156,14 @@ impl Avatars {
                 if ids.is_empty() {
                     return Err(format!("no .gmm files in {}", dir.display()).into());
                 }
-                let src: Arc<dyn ModelSource> = Arc::new(src);
+                let src: Source = std::sync::Arc::new(src);
                 (Some(src), ids)
             }
             (_, source) => (source, Vec::new()),
         };
+        #[cfg(target_arch = "wasm32")]
+        let crowd_ids: Vec<ModelId> = Vec::new();
+        #[cfg(not(target_arch = "wasm32"))]
         let cache = if source.is_some() {
             let dir = opts.cache_dir.clone().unwrap_or_else(default_cache_dir);
             let cache = ModelCache::new(
@@ -159,13 +176,21 @@ impl Avatars {
             log::info!(
                 "model cache {}: {:.1} of {} MiB on disk",
                 dir.display(),
-                cache.disk.total() as f64 / 1048576.0,
-                cache.disk.cap() / 1048576
+                cache.loader.disk.total() as f64 / 1048576.0,
+                cache.loader.disk.cap() / 1048576
             );
             Some(cache)
         } else {
             None
         };
+        // The browser's store opens in the background (WEB.md 4).
+        #[cfg(target_arch = "wasm32")]
+        let cache = source.map(|source| {
+            ModelCache::with_loader(
+                crate::cache::Loader::new(opts.cache_mb * 1024 * 1024, Some(source)),
+                opts.vram_mb as usize * 1024 * 1024,
+            )
+        });
         let crowd = place_crowd(bsp, opts.crowd, &crowd_ids);
         if !crowd.is_empty() {
             log::info!(
@@ -327,7 +352,10 @@ impl Avatars {
         if self.pinned != Some(*id) {
             self.pinned = Some(*id);
             if let Some(cache) = &self.cache {
-                cache.disk.pin(id);
+                #[cfg(not(target_arch = "wasm32"))]
+                cache.loader.disk.pin(id);
+                #[cfg(target_arch = "wasm32")]
+                cache.loader.store.pin(id);
             }
         }
     }

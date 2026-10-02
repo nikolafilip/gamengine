@@ -7,10 +7,14 @@ authors.workspace = true
 license = "GPL-3.0-or-later"
 description = "gamengine client: wgpu forward renderer, Quake movement, fixed-step loop."
 
+[features]
+default = []
+# The browser build for browsers without WebGPU (WEB.md 3.2): wgpu's GLES backend on WebGL2.
+webgl = ["wgpu/webgl"]
+
 [dependencies]
 wgpu = { workspace = true }
 winit = { workspace = true }
-pollster = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 bitcode = { workspace = true }
@@ -20,6 +24,23 @@ gm-bsp = { workspace = true }
 gm-net = { workspace = true }
 gm-hub-proto = { workspace = true }
 gm-model = { workspace = true }
+web-time = "1.1.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = { workspace = true }
 tokio = { workspace = true }
 quinn = { workspace = true }
 bytes = { workspace = true }
+
+# The browser client (WEB.md 3): the browser is the transport, the timer and the file system.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { workspace = true, features = ["webgpu"] }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = [
+    "Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Location",
+    "UrlSearchParams", "Performance", "console",
+    "Request", "RequestInit", "RequestCache", "Response", "ResponseInit", "Headers",
+    "Cache", "CacheStorage",
+] }

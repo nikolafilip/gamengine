@@ -3,11 +3,14 @@
 //! Phase 1: load a compiled map, render it with lightmaps through a wgpu forward renderer, and
 //! walk around with Quake movement predicted locally at 64 Hz with interpolated rendering.
 #![forbid(unsafe_code)]
+// The browser build leaves the native-only flags and reports unused.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 mod app;
 mod avatars;
 mod cache;
 mod characters;
+#[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod hub;
 mod hud;
@@ -15,6 +18,8 @@ mod net;
 mod render;
 mod stats;
 mod tactical;
+#[cfg(target_arch = "wasm32")]
+mod web;
 mod world;
 
 use std::path::PathBuf;
@@ -72,52 +77,79 @@ pub struct Options {
     pub start: Option<[f32; 4]>,
     /// Start in the tactical viewport (COMPANIONS.md 6); Tab toggles it.
     pub tactical: bool,
+    /// A scripted player instead of the keyboard (acceptance runs, WEB.md 8): `fight` walks
+    /// at the nearest enemy and attacks.
+    pub script: Option<String>,
+    /// Print a line of statistics every second (`stats: ...`).
+    pub report: bool,
+    /// The zone `T` asks to travel to; with `travel_after` seconds, asked once by itself.
+    pub travel_to: Option<String>,
+    pub travel_after: f32,
+    /// The browser: where the hub's and a zone's web listeners are (WEB.md 2.3, 5), and
+    /// where the page keeps maps and textures.
+    pub hub_web: Option<gm_net::control::WebAddr>,
+    pub connect_web: Option<gm_net::control::WebAddr>,
+    pub assets: String,
 }
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
 [--third-person] [--tactical] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
 [--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--crowd N [--crowd-dir DIR]] \
-[--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW]\n\
+[--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW] [--script fight] [--report] [--travel-to ZONE [--travel-after SECS]]\n\
        gm-client --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME [--zone ID] [--build NAME] \
 [--maps-dir DIR] [--third-person]";
 
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            map: PathBuf::from("assets/maps/built/test_room.bsp"),
+            palette: PathBuf::from("assets/textures/palette.lmp"),
+            connect: None,
+            cert: PathBuf::from("zone-cert.der"),
+            name: std::env::var("USER").unwrap_or_else(|_| "player".into()),
+            build: None,
+            team: 0,
+            third_person: false,
+            hub: None,
+            hub_cert: PathBuf::from("hub-cert.der"),
+            user: String::new(),
+            password: String::new(),
+            register: false,
+            character: String::new(),
+            zone: "arena".into(),
+            maps_dir: PathBuf::from("assets/maps/built"),
+            bench_frames: None,
+            vsync: true,
+            present: None,
+            max_fps: 250,
+            headless: false,
+            software: false,
+            width: 1280,
+            height: 720,
+            screenshot: None,
+            seconds: 0.0,
+            avatar: None,
+            crowd: 0,
+            crowd_dir: None,
+            cache_dir: None,
+            cache_mb: 2048,
+            vram_mb: 256,
+            start: None,
+            tactical: false,
+            script: None,
+            report: false,
+            travel_to: std::env::var("GM_TRAVEL_TO").ok(),
+            travel_after: 0.0,
+            hub_web: None,
+            connect_web: None,
+            assets: "assets".into(),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_args() -> Result<Options, String> {
-    let mut o = Options {
-        map: PathBuf::from("assets/maps/built/test_room.bsp"),
-        palette: PathBuf::from("assets/textures/palette.lmp"),
-        connect: None,
-        cert: PathBuf::from("zone-cert.der"),
-        name: std::env::var("USER").unwrap_or_else(|_| "player".into()),
-        build: None,
-        team: 0,
-        third_person: false,
-        hub: None,
-        hub_cert: PathBuf::from("hub-cert.der"),
-        user: String::new(),
-        password: String::new(),
-        register: false,
-        character: String::new(),
-        zone: "arena".into(),
-        maps_dir: PathBuf::from("assets/maps/built"),
-        bench_frames: None,
-        vsync: true,
-        present: None,
-        max_fps: 250,
-        headless: false,
-        software: false,
-        width: 1280,
-        height: 720,
-        screenshot: None,
-        seconds: 0.0,
-        avatar: None,
-        crowd: 0,
-        crowd_dir: None,
-        cache_dir: None,
-        cache_mb: 2048,
-        vram_mb: 256,
-        start: None,
-        tactical: false,
-    };
+    let mut o = Options::default();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -197,6 +229,14 @@ fn parse_args() -> Result<Options, String> {
                     .parse()
                     .map_err(|e| format!("--vram-mb: {e}"))?
             }
+            "--script" => o.script = Some(value("--script")?),
+            "--report" => o.report = true,
+            "--travel-to" => o.travel_to = Some(value("--travel-to")?),
+            "--travel-after" => {
+                o.travel_after = value("--travel-after")?
+                    .parse()
+                    .map_err(|e| format!("--travel-after: {e}"))?
+            }
             "--start" => {
                 let v = value("--start")?;
                 let n: Vec<f32> = v
@@ -225,9 +265,11 @@ fn parse_args() -> Result<Options, String> {
     Ok(o)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Minimal stderr logger: our crates at `GM_LOG` level (default info), wgpu/naga at warn.
 struct Logger;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl log::Log for Logger {
     fn enabled(&self, m: &log::Metadata) -> bool {
         let noisy = m.target().starts_with("wgpu") || m.target().starts_with("naga");
@@ -248,8 +290,26 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static LOGGER: Logger = Logger;
 
+/// The browser client (WEB.md 3): the loader put the options in `globalThis.gmOptions`;
+/// everything else happens on the page's event loop.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    static LOGGER: web::ConsoleLogger = web::ConsoleLogger;
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Info);
+    web::install_panic_hook();
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(e) = app::run_web().await {
+            log::error!("{e}");
+            web::tell_page("error", &e);
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let level = match std::env::var("GM_LOG").as_deref() {
         Ok("error") => log::LevelFilter::Error,

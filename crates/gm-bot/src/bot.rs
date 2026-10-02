@@ -13,8 +13,10 @@ use gm_core::tick::TickRate;
 use gm_core::vocab::EntityId;
 use gm_net::PROTOCOL_VERSION;
 use gm_net::client::{ClientState, ClientStats};
+use gm_net::control::WebAddr;
 use gm_net::control::{self, BodyKind, BuildChoice, Control, EncounterState};
-use gm_net::transport::SERVER_NAME;
+use gm_net::link::{Link, web_connect};
+use gm_net::transport::{SERVER_NAME, web_transport_config};
 use tokio::time::Instant;
 use tracing::{debug, info};
 
@@ -150,6 +152,32 @@ pub async fn run_bot_with_token(
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<(BotReport, BotExit, String)> {
     let conn = endpoint.connect(server, SERVER_NAME)?.await?;
+    run_bot_on_link(Link::Quic(conn), cfg, token, load_map, shutdown).await
+}
+
+/// The same bot through a zone's WebTransport listener (WEB.md 7): what a browser's
+/// session carries, without a browser.
+pub async fn run_bot_web(
+    web: &WebAddr,
+    cfg: BotConfig,
+    token: Vec<u8>,
+    load_map: impl Fn(&str) -> anyhow::Result<Arc<Bsp>>,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<(BotReport, BotExit, String)> {
+    let (endpoint, conn) = web_connect(web, web_transport_config()).await?;
+    let result = run_bot_on_link(conn, cfg, token, load_map, shutdown).await;
+    endpoint.wait_idle().await;
+    result
+}
+
+/// The bot on an established connection of either transport.
+pub async fn run_bot_on_link(
+    conn: Link,
+    cfg: BotConfig,
+    token: Vec<u8>,
+    load_map: impl Fn(&str) -> anyhow::Result<Arc<Bsp>>,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<(BotReport, BotExit, String)> {
     let (mut send, mut recv) = conn.open_bi().await?;
     control::send(
         &mut send,
@@ -382,7 +410,7 @@ pub async fn run_bot_with_token(
                             client.set_sheet(Sheet::new(build, &pack, team));
                         }
                     }
-                    Ok(Some(Control::TravelTicket { zone, addr, cert_der, token })) => {
+                    Ok(Some(Control::TravelTicket { zone, addr, cert_der, token, web })) => {
                         let addr: SocketAddr = match addr.parse() {
                             Ok(a) => a,
                             Err(e) => {
@@ -400,6 +428,7 @@ pub async fn run_bot_with_token(
                             addr,
                             cert_der,
                             token,
+                            web,
                         }));
                         break;
                     }
@@ -519,7 +548,7 @@ pub async fn run_bot_with_token(
     report.stalls_seen = stalls_seen.len();
     report.own_model = own_model;
     let _ = control::send(&mut send, &Control::Bye).await;
-    conn.close(0u32.into(), b"done");
+    conn.close(0, b"done");
     // Give the Bye a moment to leave before the endpoint is dropped.
     tokio::time::sleep(Duration::from_millis(20)).await;
     Ok((report, exit, map_name))

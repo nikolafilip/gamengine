@@ -139,6 +139,16 @@ pub fn transport_config() -> TransportConfig {
     t
 }
 
+/// The zone's transport for a WebTransport listener or client (WEB.md 2.1): the same
+/// parameters, plus room for the unidirectional streams HTTP/3 itself opens (its control
+/// stream and the two QPACK streams; with none allowed the session never establishes).
+pub fn web_transport_config() -> TransportConfig {
+    let mut t = transport_config();
+    t.max_concurrent_uni_streams(VarInt::from_u32(8));
+    t.max_concurrent_bidi_streams(VarInt::from_u32(8));
+    t
+}
+
 /// The hub's transport (HUB.md 3): the zones' idle timeout and keep-alives, and room for a
 /// thousand concurrent request streams, so a zone saving many characters never blocks on a
 /// stream limit.
@@ -194,15 +204,7 @@ pub fn client_config(trusted: &[CertificateDer<'static>]) -> Result<ClientConfig
     Ok(cfg)
 }
 
-/// FNV-1a 64 of a byte string; the map hash in `Welcome` (PROTOCOL.md 8).
-pub fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
+pub use crate::fnv1a64;
 
 #[cfg(test)]
 mod tests {

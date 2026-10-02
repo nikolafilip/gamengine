@@ -13,7 +13,8 @@ use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use gm_core::build::{Build, ContentPack};
 use gm_core::tick::TickRate;
-use gm_net::control::{self, valid_name};
+use gm_net::control::{self, WebAddr, valid_name};
+use gm_net::link::{Link, RecvHalf, SendHalf, WebEndpoint, web_accept};
 use gm_net::transport::fnv1a64;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
@@ -68,6 +69,7 @@ struct Session {
 struct ZoneEntry {
     addr: SocketAddr,
     cert_der: Vec<u8>,
+    web: Option<WebAddr>,
     map: String,
     #[allow(dead_code)]
     map_hash: u64,
@@ -76,7 +78,7 @@ struct ZoneEntry {
     tick_mean_us: f32,
     since: Instant,
     last_heartbeat: Instant,
-    conn: quinn::Connection,
+    conn: Link,
     /// Trials that open the zone; empty = open to all (COMPANIONS.md 11).
     requires: Vec<String>,
 }
@@ -118,6 +120,18 @@ pub async fn run(
     cfg: HubConfig,
     db: Db,
     endpoint: quinn::Endpoint,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
+    run_with_web(cfg, db, endpoint, None, shutdown).await
+}
+
+/// `run`, with a WebTransport listener for browsers beside the QUIC endpoint (WEB.md 2.1):
+/// the endpoint and the `Origin`s a session may come from (empty = any).
+pub async fn run_with_web(
+    cfg: HubConfig,
+    db: Db,
+    endpoint: quinn::Endpoint,
+    web: Option<(WebEndpoint, Vec<String>)>,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
     let models = Models::new(
@@ -171,8 +185,29 @@ pub async fn run(
                 tokio::spawn(async move {
                     let remote = incoming.remote_address();
                     match incoming.await {
-                        Ok(conn) => handle_connection(hub, conn).await,
+                        Ok(conn) => handle_connection(hub, Link::Quic(conn)).await,
                         Err(e) => debug!(%remote, "handshake failed: {e}"),
+                    }
+                });
+            }
+        }
+    };
+    // Browsers: the same requests on the streams of a WebTransport session.
+    let accept_web = {
+        let hub = hub.clone();
+        async move {
+            let Some((endpoint, origins)) = web else {
+                return std::future::pending::<()>().await;
+            };
+            loop {
+                let incoming = web_accept(&endpoint, &origins).await;
+                let hub = hub.clone();
+                tokio::spawn(async move {
+                    let remote = incoming.remote_address();
+                    match tokio::time::timeout(Duration::from_secs(5), incoming.accept()).await {
+                        Ok(Ok(conn)) => handle_connection(hub, conn).await,
+                        Ok(Err(e)) => debug!(%remote, "web session refused: {e}"),
+                        Err(_) => debug!(%remote, "web session: no request in time"),
                     }
                 });
             }
@@ -180,6 +215,7 @@ pub async fn run(
     };
     tokio::select! {
         _ = accept => {}
+        _ = accept_web => {}
         _ = shutdown => {}
     }
     sweeper.abort();
@@ -188,7 +224,7 @@ pub async fn run(
     Ok(())
 }
 
-async fn handle_connection(hub: Arc<Hub>, conn: quinn::Connection) {
+async fn handle_connection(hub: Arc<Hub>, conn: Link) {
     let remote = conn.remote_address();
     let auth = Arc::new(ConnAuth::default());
     debug!(%remote, "connection");
@@ -235,10 +271,10 @@ async fn handle_connection(hub: Arc<Hub>, conn: quinn::Connection) {
 async fn handle_stream(
     hub: Arc<Hub>,
     auth: Arc<ConnAuth>,
-    conn: quinn::Connection,
+    conn: Link,
     remote: SocketAddr,
-    mut send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
+    mut send: SendHalf,
+    mut recv: RecvHalf,
 ) -> anyhow::Result<()> {
     let req: HubRequest = match control::recv_any(&mut recv).await? {
         Some(r) => r,
@@ -255,7 +291,7 @@ async fn handle_stream(
             let r = upload(&hub, session, frame, tos_version, len, &mut recv).await;
             if r.is_err() {
                 // Refused, perhaps before the body was read: tell the sender to stop.
-                let _ = recv.stop(0u32.into());
+                recv.stop(0);
             }
             r.unwrap_or_else(HubResponse::Err)
         }
@@ -492,6 +528,7 @@ impl Hub {
             zone: zone.clone(),
             addr: entry.addr,
             cert_der: entry.cert_der.clone(),
+            web: entry.web.clone(),
             token: self.cfg.key.issue(account, character, zone),
         })
     }
@@ -547,7 +584,7 @@ fn normalize_email(email: &str) -> Result<String, HubError> {
 async fn handle(
     hub: &Arc<Hub>,
     auth: &ConnAuth,
-    conn: &quinn::Connection,
+    conn: &Link,
     remote: SocketAddr,
     req: HubRequest,
 ) -> Result<HubResponse, HubError> {
@@ -749,6 +786,7 @@ async fn handle(
             map_hash,
             addr,
             cert_der,
+            web,
             requires,
         } => {
             if secret != hub.cfg.zone_secret || hub.cfg.zone_secret.is_empty() {
@@ -777,6 +815,7 @@ async fn handle(
                     ZoneEntry {
                         addr,
                         cert_der,
+                        web,
                         map: map.clone(),
                         map_hash,
                         players: 0,
@@ -792,7 +831,7 @@ async fn handle(
             if let Some(old) = previous
                 && old.stable_id() != conn.stable_id()
             {
-                old.close(1u32.into(), b"replaced by a new zone process");
+                old.close(1, b"replaced by a new zone process");
             }
             hub.verifier.lock().unwrap().insert(
                 zone.clone(),

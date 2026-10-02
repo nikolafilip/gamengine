@@ -253,7 +253,11 @@ pub struct ZoneTicket {
     pub addr: SocketAddr,
     pub cert_der: Vec<u8>,
     pub token: SessionToken,
+    /// Where a browser reaches the zone (WEB.md 2.3); `None`: the zone has no web listener.
+    pub web: Option<WebAddr>,
 }
+
+pub use gm_net::control::WebAddr;
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub enum HubRequest {
@@ -305,6 +309,8 @@ pub enum HubRequest {
         map_hash: u64,
         addr: SocketAddr,
         cert_der: Vec<u8>,
+        /// The zone's WebTransport listener, if it has one (WEB.md 2.3).
+        web: Option<WebAddr>,
         /// Trials that open this zone: a character must have passed one of them to be let
         /// in (COMPANIONS.md 11); empty = open to all.
         requires: Vec<String>,
@@ -724,7 +730,9 @@ pub const TRUSTED_TIER: i16 = 2;
 /// Ingestion workers running at once; more answer `Busy`.
 pub const INGEST_PERMITS: usize = 2;
 
-/// Unix seconds now.
+/// Unix seconds now. Hub and zones only: the browser client has no use for the wall clock,
+/// and the std clock panics there.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -63,6 +63,15 @@ pub enum EncounterState {
 }
 
 /// An open stall as a zone shows it (ECONOMY.md 7): where it stands and who keeps it. The
+/// Where a WebTransport listener is and how a browser may trust it (WEB.md 2.3).
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct WebAddr {
+    /// `https://host:port`.
+    pub url: String,
+    /// The pinned certificate's SHA-256; `None` means a publicly trusted certificate.
+    pub cert_sha256: Option<[u8; 32]>,
+}
+
 /// keeper is drawn as a body that never moves; it costs no snapshot bytes.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub struct StallEntry {
@@ -133,6 +142,8 @@ pub enum Control {
         addr: String,
         cert_der: Vec<u8>,
         token: Vec<u8>,
+        /// The zone's WebTransport listener, if it has one (WEB.md 2.3).
+        web: Option<WebAddr>,
     },
     /// The travel request failed.
     TravelRefused(String),
@@ -199,10 +210,15 @@ pub enum ControlError {
     TooLarge,
     #[error("control message did not decode: {0}")]
     Decode(#[from] bitcode::Error),
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("stream read failed: {0}")]
     Read(#[from] quinn::ReadExactError),
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("stream write failed: {0}")]
     Write(#[from] quinn::WriteError),
+    /// The browser's stream failed (WEB.md 2.1).
+    #[error("stream failed: {0}")]
+    Stream(String),
 }
 
 /// Length-prefixed bytes for one message of any `bitcode` type (the hub protocol uses the
@@ -224,6 +240,7 @@ pub fn encode_framed(msg: &Control) -> Result<Vec<u8>, ControlError> {
 }
 
 /// Write one message of any `bitcode` type to a QUIC stream.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn send_any<T: Encode>(
     stream: &mut quinn::SendStream,
     msg: &T,
@@ -234,6 +251,7 @@ pub async fn send_any<T: Encode>(
 }
 
 /// Read one message of any `bitcode` type; `Ok(None)` on a clean end of stream.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn recv_any<T: for<'a> Decode<'a>>(
     stream: &mut quinn::RecvStream,
 ) -> Result<Option<T>, ControlError> {
@@ -264,11 +282,13 @@ pub fn decode_framed(buf: &[u8]) -> Result<Option<(Control, usize)>, ControlErro
 }
 
 /// Write one message to a QUIC stream.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn send(stream: &mut quinn::SendStream, msg: &Control) -> Result<(), ControlError> {
     send_any(stream, msg).await
 }
 
 /// Read one message from a QUIC stream; `Ok(None)` on a clean end of stream.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn recv(stream: &mut quinn::RecvStream) -> Result<Option<Control>, ControlError> {
     recv_any(stream).await
 }

@@ -16,7 +16,7 @@ gm-ai = { workspace = true }
 gm-bsp = { workspace = true }
 gm-core = { workspace = true }
 gm-hub-proto = { workspace = true }
-gm-net = { workspace = true }
+gm-net = { workspace = true, features = ["web"] }
 quinn = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

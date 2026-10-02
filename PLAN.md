@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-10-01 (Phases 0–4 implemented; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-10-02 (Phases 0–8 implemented; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -114,8 +114,10 @@ Full type matrix. Currency purchasing-power table. License split. Name.
   Unlit / half-lambert shading, AO baked into textures. No SSR, no volumetrics, no multi-pass PBR.
 - **Server:** authoritative Rust on `tokio`. Fixed tick, 64 Hz combat zones, 20 Hz towns/slow zones.
   Client prediction, reconciliation, lag compensation for melee (projectiles need none).
-- **Transport:** QUIC (`quinn`) natively, WebTransport (`wtransport`) in browser. Unreliable datagrams for
-  snapshots/inputs, reliable streams for chat/inventory/contracts.
+- **Transport:** QUIC (`quinn`) natively, WebTransport in the browser. Unreliable datagrams for
+  snapshots/inputs, reliable streams for chat/inventory/contracts. **[CORRECTED]** in Phase 8: `wtransport`
+  is the *server's* WebTransport listener (beside the quinn endpoint, on a second port); in the browser
+  the transport is the browser's own `WebTransport`, so the `.wasm` carries no QUIC stack (`docs/WEB.md` 2).
 - **Persistence:** Postgres via `sqlx` (accounts, characters, items, contracts, escrow), in-memory session state.
 - **Level pipeline:** TrenchBroom `.map` → `ericw-tools` (qbsp, vis, light) → BSP with lightmaps and PVS.
   We do not write a lightmapper or a visibility compiler in year one; we load the Quake BSP format.
@@ -153,6 +155,10 @@ real iGPU on a self-hosted runner), bytes/player/second under a 200-bot swarm, p
 
 ### 2.8 Cross-platform
 Windows/Linux/macOS via wgpu+winit. Browser via WASM + WebGPU + WebTransport is a priority on-ramp.
+*(Phase 8 built it: the same `gm-client` compiled to wasm, in two builds the page's loader chooses
+between, because the cost is not symmetric: 0.9 MB of `.wasm` for WebGPU, where wgpu is a thin binding,
+2.9 MB for WebGL2, where it links its GLES backend and the shader translator; 0.30 and 0.87 MB
+compressed. `docs/WEB.md`.)*
 Android later (third-person and tactical viewports suit touch; FPS does not). Consoles skipped.
 
 ### 2.9 Custom model streaming [DECIDED; container CORRECTED in Phase 6]
@@ -337,9 +343,12 @@ gamengine/
                  gm-core packs. Zones load it; clients receive the compiled pack over the wire.
     gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing. Used by client and server.
     gm-net       protocol: bit writer/reader, snapshot delta encoding, input frames, reliable messages.
-                 Transport abstraction over quinn (native) and wtransport (wasm).
+                 `link`: one connection type over quinn and a wtransport (WebTransport) session, for
+                 zones and the hub. On wasm only the codecs and the prediction are built.
     gm-client    winit, wgpu renderer, input, prediction/reconciliation, interpolation, audio (kira),
                  dev UI (egui), game HUD, asset cache (LRU), viewport modules (fps, tps, tactical).
+                 The same crate is the browser client (`src/web/`: the browser's WebTransport, its
+                 Cache API as the model store, fetch for maps).
     gm-model     avatar models as the client needs them: the standard rig, the `.gmm` container and its
                  strict reader, the shared animation set, the mannequin. Small on purpose (the client
                  links it); nothing here parses an upload.
@@ -357,11 +366,13 @@ gamengine/
     gm-bot       headless client for load tests and soak tests.
   assets/        maps (.map source + built .bsp/.lit + gamengine.fgd), textures (generated palette + WAD),
                  content (abilities, builds, creatures, trials, items; TOML), later models/audio
+  web/           the browser client's page and loader (index.html, boot.js); scripts/build-web.sh
+                 assembles target/web/ from it
   docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md,
-                 BUILDING.md
+                 WEB.md, BUILDING.md
   PLAN.md        this file stays at the repository root (it is the entry point; README links it)
   budgets.toml   every number CI enforces; read by gm-tools and scripts/
-  scripts/       CI gates and the pinned ericw-tools fetch
+  scripts/       CI gates, the pinned fetches (ericw-tools; wasm-bindgen and wasm-opt), the web build
   ci/baselines/  binary-size baseline for the regression gate
 ```
 
@@ -371,7 +382,7 @@ gamengine/
 | Rendering | `wgpu`, `winit`, `glam`, `bytemuck` | forward renderer, lightmap + diffuse; skinned characters, one draw call each, their 24 matrices in a block of a shared uniform buffer selected by dynamic offset (**[CORRECTED]** from "a storage buffer": uniform buffers with dynamic offsets exist on every backend including WebGL2-class ones, and a block is 1.6 KB) |
 | ECS | `hecs` | fallback `bevy_ecs`. **Not used yet:** the Phase 2 zone holds players in a `BTreeMap` and projectiles in a `Vec` (deterministic iteration, a handful of entity kinds); `hecs` enters when Phase 3 adds statuses, areas and many entity kinds |
 | Async/server | `tokio` | one runtime per zone process |
-| Transport | `quinn` (native), `wtransport` (browser) | QUIC datagrams + streams; the hub API is the same QUIC with one request per stream (HUB.md 3), no HTTP stack in the client |
+| Transport | `quinn` (native), `wtransport` (the servers' WebTransport listener) | QUIC datagrams + streams; the hub API is the same QUIC with one request per stream (HUB.md 3), no HTTP stack in the client. **[CORRECTED]** the browser side is the browser's `WebTransport`, bound by hand in `gm-client/src/web/wt.rs` (fifteen declarations; web-sys keeps it behind an unstable-API flag) |
 | Serialization | hand-rolled bit packing for snapshots; `bitcode` for reliable messages | snapshots must be byte-tight |
 | DB | `sqlx` 0.9 + Postgres, embedded sqlx migrations | typed location columns with a check constraint (HUB.md 4); items normalized, components as rows, escrow as transactions (Phase 5) |
 | Auth | `argon2`, signed entry tokens (`ed25519-dalek`) | hub issues, zones verify offline; 60 s, single use, zone-bound (HUB.md 3.1). **[CORRECTED]** not JWT: `bitcode` payload + raw signature, no header, no algorithm negotiation |
@@ -379,7 +390,7 @@ gamengine/
 | Audio | `kira` | |
 | Dev UI | `egui` + `egui-wgpu` | not shipped in HUD |
 | Testing | `turmoil` (simulated network for tokio), `proptest`, `criterion` | |
-| WASM | `wasm-bindgen`, `trunk` | |
+| WASM | `wasm-bindgen`, `wasm-bindgen-futures`, `web-sys`, `web-time`; `wasm-opt` | **[CORRECTED]** no `trunk`: `scripts/build-web.sh` runs cargo, the pinned `wasm-bindgen` CLI and `wasm-opt` (fetched like ericw-tools) and copies one page and one loader script |
 | Map compile | `ericw-tools` 2.0.0-alpha11 (external binaries: qbsp, vis, light) | **[CORRECTED]** not vendored: the Linux archive is 18 MB and this repo is measured in MB. `scripts/fetch-ericw-tools.sh` downloads the pinned release with SHA-256 verification into `tools/` (gitignored); `gm-tools map build` wraps it. CI runs the fetch. |
 
 ### 11.3 Simulation and netcode design
@@ -470,7 +481,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 5 | Economy: stalls, escrow contracts, component drops with corrected split, crafting, decomposition, account storage caps, guild halls, tavern hires, ledger | every coin/item movement is a DB transaction; scam test suite passes (mutation lock, escrow, floors). **Done 2026-10-01** (11.10) |
 | 6 | Custom models: ingestion, hash cache, LRU, silhouette fallback, takedown flag, moderation queue | 100 unique uploaded avatars in a town at 60 fps on iGPU, no disk growth past cap. **Done 2026-10-01** (11.10) |
 | 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars. **Done 2026-10-01** (11.10) |
-| 8 | WASM/WebGPU/WebTransport build | browser client joins the same zone as native clients |
+| 8 | WASM/WebGPU/WebTransport build | browser client joins the same zone as native clients. **Done 2026-10-02** (11.10) |
 | 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account |
 | ∞ | Content, balance, ops, community | permanent |
 
@@ -860,6 +871,74 @@ estimated; ranges are the spread over repeated runs):
   boss may be farmed is not decided (the Warden is back 120 s after it falls); markers in the
   tactical view are flat boxes, and an area is a square plate.
 
+**2026-10-02, Phase 8 done** (same machine; Chromium 150 headless given the real GPU with
+`--enable-unsafe-webgpu --enable-features=Vulkan --use-angle=vulkan`; all numbers measured with the
+final build, none estimated; ranges are the spread over repeated runs):
+- `docs/WEB.md` v1 is the contract. **The browser client is `gm-client` compiled to wasm**: the same
+  prediction, interpolation, renderer, HUD and viewports; what differs is what a browser forbids
+  (sockets, threads, files, blocking). Zones and the hub open a **WebTransport listener beside their
+  QUIC endpoint** (`--web-listen`; `wtransport`, on the same quinn) and a session carries the same
+  bytes: PROTOCOL.md's datagrams, the control stream, the hub's one request per stream. One type,
+  `gm_net::link::Link`, hides the difference from the tick loop, the sessions and the hub's handler.
+  In the browser the transport is the browser's own `WebTransport`, bound by hand (2.1 and 11.2
+  [CORRECTED]): no QUIC stack, no RNG and no tokio in the `.wasm`.
+- **Two builds, chosen by the page's loader**, because the cost is not symmetric: on WebGPU wgpu is
+  a thin binding (**905,937 bytes** of `.wasm`, **298,756** with brotli); for WebGL2 it links its GLES
+  backend and the shader translator (**2,899,339 / 871,977**). A browser with WebGPU never downloads
+  the second. JavaScript (wasm-bindgen glue, the loader, the page): 111 KB and 166 KB uncompressed.
+  No framework, no bundler, no npm; the two build tools (wasm-bindgen CLI, wasm-opt) are fetched
+  pinned and hash-checked like ericw-tools.
+- **Certificates.** A browser takes a WebTransport server with a public certificate chain
+  (`--web-cert/--web-key`) or with a pinned hash, for which the certificate must be ECDSA P-256 and
+  valid for at most 14 days: without a certificate the listener makes one for 13 days and advertises
+  its hash, and such a process must be restarted before it expires. Tickets carry the zone's web
+  address beside its QUIC one (`ZoneTicket.web`, `TravelTicket.web`: protocol v4, hub v1.4).
+- **The model cache without a filesystem**: the Cache API under the same rules as the directory
+  (our own byte cap that holds at all times, room made before a write, the hash before the parser, a
+  revoked model gone for the session); async fetches for the four loader threads; models parsed on
+  the main thread, one a frame. The cache's state machine is shared with the native client.
+- New for every client, found by asking what a hidden browser tab does: **a client that sends no
+  input for 10 s is kicked** (60 s for its first input: it may be loading the map). A QUIC
+  connection lives on keep-alives alone, which a browser's network stack answers whether or not
+  the page runs. And a `Reject` or `Kick` is now followed by the close, not accompanied by it.
+- **Acceptance: a browser client joins the same zone as native clients** (`scripts/check-web.sh
+  --browser`): the arena with 15 native duelist bots and headless Chromium playing by script for
+  40 s, once per build. Both builds: **64 snapshots a second with no gap, 60.0 fps** (the display's
+  rate; p99 17.6–17.9 ms), 0 or 1 unexplained correction, damage dealt (30–312) and taken (291–768)
+  as the zone counts it, zone → browser **7.0–8.7 KB/s** and browser → zone **6.6–6.7 KB/s** as the
+  zone's QUIC statistics count UDP bytes (a native client sends 5.5), first frame **142–192 ms**
+  after navigation on WebGPU and 258–292 ms on WebGL2, wasm linear memory **3.3 MiB** and 4.5 MiB.
+  Without a browser: a QUIC bot and a WebTransport bot in one zone over real UDP
+  (`tests/loopback.rs`), and the handoff test's second half, which registers, enters and plays
+  through the hub's and a zone's web listeners.
+- **Through the hub** (`--browser --hub`): login from the page over WebTransport, a town of 48 bots
+  wearing uploaded avatars at the budget ceiling (18.3 MB) against a **16 MiB cache cap: 16,715,540
+  bytes held** (44 models; read back entry by entry through the DevTools protocol, and the client's
+  own count agrees to the byte), all 48 drawn at **60.0 fps** (p99 18.2–18.6 ms) with 8.6–9.3 MiB
+  of wasm memory; on the next visit 32–37 of the 48 come from the cache; a travel to the arena
+  fetches its map and ends there on a WebTransport session.
+- Reviews (WEB.md 12). **Google AI Studio refused every request of the session with HTTP 402
+  (prepayment credits depleted)**, so both reviews were done by independent agents given only the
+  document or the diff. Design review: 15 findings, 13 accepted, 2 in part (the hidden tab that is
+  never disconnected; Chromium's datagram queue of one; WebGL2 limits; lost `Reject`s; `connect=`
+  links on a production site). Code review: 13 findings, 11 fixed, 1 accepted as intended, 1
+  rejected for now (the idle kick hitting a browser still fetching its map; link options that could
+  play a visitor's character; gate checks that passed on empty values; sessions never closed; a
+  cache entry orphaned by a takedown during its write; a zone-chosen map name in a URL). Gemini
+  should be run over both once the account has credit.
+- Tests: the workspace suite green (252 tests); every earlier gate green on the final build: swarm
+  5.9 ms mean / 8.6 ms p99 with 200 bots, netcode, matrix, perf, avatars, dungeon, handoff.
+- Binaries (release, LTO): `gm-client` **8,990,752 bytes (8.57 MiB)**, +27,192 for the shared hub
+  flow and the split cache (it links no WebTransport); baseline updated. `gm-server` 6.03 MB
+  (+0.54 MB: wtransport and HTTP/3), `gm-hub` 7.67 MB, `gm-bot` 4.75 MB, `gm-tools` 4.59 MB.
+- Known limits: the gate runs Chromium only (Firefox and Safari have the APIs; untested); pinned
+  certificates are not rotated without a restart; one UDP port per transport; no threads in the
+  browser (models parse on the main thread); two tabs of one browser can together hold twice the
+  cache cap and the last-use order does not survive a reload; no touch controls; mouse acceleration
+  under pointer lock is the system's; Chromium on Linux needs flags for WebGPU today and otherwise
+  takes the WebGL2 build; on a software GPU the WebGL2 build runs at 41 fps and costs the zone
+  19.6 KB/s; there is still no UI beyond the HUD and a login form on the page.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -875,4 +954,8 @@ their thresholds, respawns of 120 s and 600 s, creature health on the wire, one 
 dungeons putting every arrival at their entry) and so is the reading of 5.2 noted there. **How often a boss
 may be farmed** is open: the plan keeps a daily cap only as a bot-farm brake and asked to revisit it after
 load testing; nothing limits it today but the fight's length and the respawn.
+The web numbers are **proposed** in `docs/WEB.md` 9 and 2.1 (the size budgets of both builds, 10 s
+without input and 60 s for the first, the grace after `Reject` and `Kick`, a 128 MiB default cache in
+the browser, 13-day pinned certificates), and so is **what a link may set** on a production site
+(WEB.md 5: only what is seen).
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

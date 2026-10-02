@@ -295,6 +295,14 @@ without its largest mip (a quarter of the memory: 1.4 MB instead of 5.6 MB for a
 disk cache and never requested again this session, also when the takedown arrives while the
 model is being downloaded (the file the download writes is deleted when it lands).
 
+**In a browser** (Phase 8) there is no directory: the same cache logic runs over the Cache
+API with the same rules (a byte cap of its own that holds at all times, room made before a
+write, the own avatar last to go, the hash before the parser, a revoked model gone for the
+session) and async fetches in place of the four threads; models are parsed on the main
+thread, one a frame. `docs/WEB.md` 4 is the contract; measured there: 48 ceiling avatars
+(18.3 MB) under a 16 MiB cap, never above it, 32–37 of them served from the cache on the
+next visit.
+
 ## 9. Drawing and animation
 
 One draw call per character (PLAN.md 2.6): one vertex buffer, one index buffer, one texture,

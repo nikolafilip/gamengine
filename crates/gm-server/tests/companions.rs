@@ -63,6 +63,7 @@ async fn start_zone(
         map_hash: world.hash,
         public_addr: endpoint.local_addr().unwrap(),
         zone_cert_der: identity.cert_der().to_vec(),
+        web: None,
         requires: spec.requires,
     })
     .await

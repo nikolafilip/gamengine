@@ -11,19 +11,26 @@ description = "gamengine wire protocol: bit packing, snapshot deltas, input fram
 default = []
 # Adapter that runs quinn over turmoil's simulated UDP (tests only).
 turmoil = ["dep:turmoil"]
+# WebTransport beside QUIC (WEB.md 2): the `Link::Web` variant, the listener and a native
+# client. Zones, the hub and bots enable it; the native client does not link it.
+web = ["dep:wtransport"]
 
 [dependencies]
 gm-core = { workspace = true, features = ["bitcode"] }
 glam = { workspace = true }
 bitcode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# The browser build (WEB.md 3) has no sockets: there the transport is the browser's.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bytes = { workspace = true }
 quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 turmoil = { workspace = true, optional = true }
+wtransport = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

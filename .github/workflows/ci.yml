@@ -82,6 +82,30 @@ jobs:
       - name: Avatar gate smoke (48 distinct avatars, 16 MiB cache cap, software Vulkan)
         run: scripts/check-avatars.sh --software
 
+  web:
+    name: browser client (wasm sizes, WebTransport, headless Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: System packages (brotli for the size gate, software Vulkan for Chromium's WebGPU)
+        run: sudo apt-get update -q && sudo apt-get install -y -q brotli mesa-vulkan-drivers libvulkan1
+      - name: Clippy for the browser target, both builds
+        run: |
+          cargo clippy -p gm-client --target wasm32-unknown-unknown --locked -- -D warnings
+          cargo clippy -p gm-client --target wasm32-unknown-unknown --features webgl --locked -- -D warnings
+      - name: Web gate (sizes, QUIC and WebTransport in one zone, headless Chromium on its software GPU)
+        run: CHROME=google-chrome scripts/check-web.sh --browser --software
+
   # Frame time on a real integrated GPU (PLAN.md 2.7). Enabled once a self-hosted runner exists.
   # perf-igpu:
   #   runs-on: [self-hosted, igpu]

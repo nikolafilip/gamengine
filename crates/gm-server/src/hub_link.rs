@@ -30,6 +30,8 @@ pub struct HubLinkConfig {
     /// What clients connect to.
     pub public_addr: SocketAddr,
     pub zone_cert_der: Vec<u8>,
+    /// The zone's WebTransport listener (WEB.md 2.3).
+    pub web: Option<gm_net::control::WebAddr>,
     /// Trials that open this zone (COMPANIONS.md 11); empty = open to all.
     pub requires: Vec<String>,
 }
@@ -65,6 +67,7 @@ impl HubLink {
                 map_hash: cfg.map_hash,
                 addr: cfg.public_addr,
                 cert_der: cfg.zone_cert_der,
+                web: cfg.web,
                 requires: cfg.requires,
             })
             .await?;

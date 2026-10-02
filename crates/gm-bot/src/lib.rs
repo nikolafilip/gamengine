@@ -9,6 +9,8 @@ pub mod brain;
 pub mod hub_flow;
 pub mod raid;
 
-pub use bot::{BotConfig, BotExit, BotReport, run_bot, run_bot_with_token};
+pub use bot::{
+    BotConfig, BotExit, BotReport, run_bot, run_bot_on_link, run_bot_web, run_bot_with_token,
+};
 pub use brain::{Behaviour, Brain, View};
 pub use hub_flow::{HubFlowConfig, HubFlowReport, run_hub_flow};

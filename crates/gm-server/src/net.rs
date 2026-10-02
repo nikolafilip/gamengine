@@ -1,4 +1,4 @@
-//! QUIC connection handling (PROTOCOL.md 1, 8): handshake on the control stream, datagram
+//! Connection handling for QUIC and WebTransport clients alike (PROTOCOL.md 1, 8; WEB.md 2): handshake on the control stream, datagram
 //! receive loop, control message writer. Everything the tick loop needs arrives as
 //! [`ClientEvent`]s on one channel.
 
@@ -12,6 +12,7 @@ use gm_hub_proto::protocol::{CharacterId, HiredAvatar, ModelId, ModelRef, StallS
 use gm_net::PROTOCOL_VERSION;
 use gm_net::control::{self, BuildChoice, Control};
 use gm_net::input::InputDatagram;
+use gm_net::link::{Link, WebEndpoint, web_accept};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -43,7 +44,7 @@ pub enum ClientEvent {
         build: Option<BuildChoice>,
         team: u8,
         hub: Option<HubJoin>,
-        conn: quinn::Connection,
+        conn: Link,
         control: mpsc::Sender<Control>,
         reply: oneshot::Sender<Result<JoinInfo, String>>,
     },
@@ -149,19 +150,83 @@ pub async fn accept_loop(
         let cfg = cfg.clone();
         tokio::spawn(async move {
             let remote = incoming.remote_address();
-            if let Err(e) = handle_connection(incoming, tx, cfg).await {
+            let conn = match incoming.await {
+                Ok(c) => Link::Quic(c),
+                Err(e) => {
+                    debug!(%remote, "handshake failed: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = handle_connection(conn, tx, cfg).await {
                 debug!(%remote, "connection ended: {e:#}");
             }
         });
     }
 }
 
+/// A WebTransport listener beside the QUIC one (WEB.md 2.1).
+pub struct WebListener {
+    pub endpoint: WebEndpoint,
+    /// `Origin`s a session may come from; empty = any.
+    pub origins: Vec<String>,
+}
+
+/// Accept WebTransport sessions for as long as the zone runs: browsers, and bots with
+/// `--web`. Past the accept they are clients like any other.
+pub async fn accept_loop_web(
+    listener: WebListener,
+    tx: mpsc::Sender<ClientEvent>,
+    cfg: Arc<NetConfig>,
+) {
+    loop {
+        let incoming = web_accept(&listener.endpoint, &listener.origins).await;
+        if tx.is_closed() {
+            break;
+        }
+        let tx = tx.clone();
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            let remote = incoming.remote_address();
+            let conn = match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming.accept()).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    debug!(%remote, "web session refused: {e}");
+                    return;
+                }
+                Err(_) => {
+                    debug!(%remote, "web session: no request within the handshake timeout");
+                    return;
+                }
+            };
+            // A session that cannot carry a full snapshot datagram is refused now rather
+            // than starved later (WEB.md 2.1).
+            if conn.max_datagram_size().unwrap_or(0) < gm_net::MAX_DATAGRAM_PAYLOAD {
+                debug!(%remote, "web session: datagrams too small or unsupported");
+                conn.close(1, b"datagrams unsupported");
+                return;
+            }
+            if let Err(e) = handle_connection(conn, tx, cfg).await {
+                debug!(%remote, "web connection ended: {e:#}");
+            }
+        });
+    }
+}
+
+/// Send a `Reject` and close, in that order as the client sees it: the stream is finished
+/// and the client is given a moment to read and hang up first, because a connection closed
+/// under an unread message can take the message with it (WEB.md 2.1).
+async fn refuse(conn: &Link, send: &mut gm_net::link::SendHalf, msg: &Control) {
+    let _ = control::send(send, msg).await;
+    let _ = send.finish();
+    let _ = tokio::time::timeout(Duration::from_secs(1), conn.closed()).await;
+    conn.close(1, b"rejected");
+}
+
 async fn handle_connection(
-    incoming: quinn::Incoming,
+    conn: Link,
     tx: mpsc::Sender<ClientEvent>,
     cfg: Arc<NetConfig>,
 ) -> anyhow::Result<()> {
-    let conn = incoming.await?;
     let remote = conn.remote_address();
     let (mut send, mut recv) = tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.accept_bi())
         .await
@@ -188,16 +253,14 @@ async fn handle_connection(
         None
     };
     if let Some(r) = rejection {
-        control::send(&mut send, &r).await?;
-        conn.close(1u32.into(), b"rejected");
+        refuse(&conn, &mut send, &r).await;
         return Ok(());
     }
     // Under a hub the token names the character; `Hello.name` is ignored (HUB.md 3.1).
     let (name, build, hub_join) = match &cfg.hub {
         Some(hub) if !token.is_empty() => {
             if let Err(e) = hub.verify(&token) {
-                control::send(&mut send, &reject(&e)).await?;
-                conn.close(1u32.into(), b"rejected");
+                refuse(&conn, &mut send, &reject(&e)).await;
                 return Ok(());
             }
             match hub.claim(&token).await {
@@ -217,8 +280,7 @@ async fn handle_connection(
                     )
                 }
                 Err(e) => {
-                    control::send(&mut send, &reject(&format!("claim failed: {e}"))).await?;
-                    conn.close(1u32.into(), b"rejected");
+                    refuse(&conn, &mut send, &reject(&format!("claim failed: {e}"))).await;
                     return Ok(());
                 }
             }
@@ -226,8 +288,7 @@ async fn handle_connection(
         _ => match control::valid_name(&name) {
             Some(n) => (n, build, None),
             None => {
-                control::send(&mut send, &reject("invalid name")).await?;
-                conn.close(1u32.into(), b"rejected");
+                refuse(&conn, &mut send, &reject("invalid name")).await;
                 return Ok(());
             }
         },
@@ -249,8 +310,7 @@ async fn handle_connection(
     let info = match reply_rx.await {
         Ok(Ok(info)) => info,
         Ok(Err(reason)) => {
-            control::send(&mut send, &Control::Reject(reason)).await?;
-            conn.close(1u32.into(), b"rejected");
+            refuse(&conn, &mut send, &Control::Reject(reason)).await;
             return Ok(());
         }
         Err(_) => anyhow::bail!("zone stopped during join"),
@@ -275,7 +335,7 @@ async fn handle_connection(
         },
     )
     .await?;
-    info!(%remote, entity = info.entity, %name, team = info.team, "player joined");
+    info!(%remote, entity = info.entity, %name, team = info.team, web = conn.is_web(), "player joined");
     let id = info.entity;
 
     let writer = tokio::spawn(async move {

@@ -43,19 +43,28 @@ pub struct WorldMesh {
 pub type Palette = [[u8; 3]; 256];
 
 /// Load a 768-byte palette; a neutral ramp when the file is missing.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_palette(path: &std::path::Path) -> Palette {
+    let bytes = std::fs::read(path).ok();
+    if bytes.as_ref().is_none_or(|b| b.len() < 768) {
+        log::warn!(
+            "palette {} missing or short; using a gray ramp",
+            path.display()
+        );
+    }
+    palette_from_bytes(bytes.as_deref())
+}
+
+/// A palette from its 768 bytes; a neutral ramp without them.
+pub fn palette_from_bytes(bytes: Option<&[u8]>) -> Palette {
     let mut pal = [[0u8; 3]; 256];
-    match std::fs::read(path) {
-        Ok(bytes) if bytes.len() >= 768 => {
+    match bytes {
+        Some(bytes) if bytes.len() >= 768 => {
             for (i, c) in pal.iter_mut().enumerate() {
                 c.copy_from_slice(&bytes[i * 3..i * 3 + 3]);
             }
         }
         _ => {
-            log::warn!(
-                "palette {} missing or short; using a gray ramp",
-                path.display()
-            );
             for (i, c) in pal.iter_mut().enumerate() {
                 *c = [i as u8; 3];
             }

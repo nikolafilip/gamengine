@@ -59,3 +59,18 @@ max_bytes_per_player_s = 30720  # as [net]; measured 17,900 mean with 67 bodies 
 [hub]
 # HUB.md 5: the hub's share of login -> zone -> handoff -> logout on loopback, milliseconds.
 round_trip_ms = 2000
+
+[web]
+# WEB.md 9 (scripts/check-web.sh): the browser client. Two builds, because the cost is not
+# symmetric: on WebGPU wgpu is a thin binding, for WebGL2 it links its GLES backend and the
+# shader translator. Sizes are of the .wasm after wasm-opt; "packed" is brotli -q 11 (what a
+# static host serves), gzip -9 where brotli is not installed.
+max_webgpu_wasm_bytes = 1048576         # measured 899,300
+max_webgpu_packed_bytes = 393216        # measured 296,216
+max_webgl_wasm_bytes = 3407872          # measured 2,892,353
+max_webgl_packed_bytes = 1048576        # measured 869,258
+max_js_bytes = 180224                   # wasm-bindgen glue + loader + page, per build; measured 164,411 (webgl)
+max_wasm_memory_bytes = 67108864        # linear memory in the 8v8 arena; measured 3.3 MiB
+min_snapshots_per_s = 55                # of the zone's 64, as the browser client counts them
+min_fps = 55                            # headless Chromium presents at 60 on the reference iGPU
+max_first_frame_ms = 3000               # navigation to the first frame on loopback

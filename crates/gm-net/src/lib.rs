@@ -6,8 +6,12 @@
 //! - [`snapshot`]: delta-compressed snapshots (section 5).
 //! - [`client`]: prediction, reconciliation and interpolation shared by client and bots (7).
 //! - [`control`]: reliable `Control` messages with u16 framing (section 8).
-//! - [`transport`]: quinn configuration, certificates, map hashing (section 1).
+//! - [`transport`]: quinn configuration, certificates (section 1).
+//! - [`link`]: one connection type over QUIC and WebTransport, for servers (WEB.md 2.1).
 //! - [`sim`] (feature `turmoil`): quinn over turmoil's simulated UDP with loss injection.
+//!
+//! On `wasm32` (the browser client, WEB.md 3) only the codecs and the prediction are built:
+//! the transport there is the browser's `WebTransport`.
 #![forbid(unsafe_code)]
 
 pub mod bits;
@@ -16,13 +20,22 @@ pub mod control;
 pub mod input;
 pub mod quant;
 pub mod snapshot;
-pub mod transport;
 
-#[cfg(feature = "turmoil")]
+#[cfg(not(target_arch = "wasm32"))]
+pub mod link;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod transport;
+/// On `wasm32` only the map hash of `transport` exists.
+#[cfg(target_arch = "wasm32")]
+pub mod transport {
+    pub use crate::fnv1a64;
+}
+
+#[cfg(all(feature = "turmoil", not(target_arch = "wasm32")))]
 pub mod sim;
 
 /// Protocol version byte (PROTOCOL.md header). Bumped on any wire change.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Largest datagram payload we ever send (PROTOCOL.md 1): well under the 1,200-byte initial
 /// QUIC MTU minus framing, so nothing depends on MTU discovery.
@@ -84,4 +97,14 @@ pub fn read_header(r: &mut bits::BitReader<'_>) -> Result<Kind, NetError> {
 pub fn peek_kind(bytes: &[u8]) -> Result<Kind, NetError> {
     let mut r = bits::BitReader::new(bytes);
     read_header(&mut r)
+}
+
+/// FNV-1a 64 of a byte string; the map hash in `Welcome` (PROTOCOL.md 8).
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }

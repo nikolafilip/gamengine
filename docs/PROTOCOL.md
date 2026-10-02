@@ -1,19 +1,22 @@
 # Wire Protocol
 
-Status: v3 (Phase 7: companions and command, section 14; v2 of Phase 3 with the reliable
-messages of Phases 4 and 6, sections 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
+Status: v4 (Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
+12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
 document disagree, the document wins and the code is wrong; changes to either go in one commit.
 
-Protocol version byte: **3**. Any change to sections 2–5 bumps it. Section 11 lists what v2
-changed over v1, section 14 what v3 changed over v2.
+Protocol version byte: **4**. Any change to sections 2–5 or to the layout of a `Control`
+message bumps it. Section 11 lists what v2 changed over v1, section 14 what v3 changed over
+v2, section 15 what v4 changed over v3.
 
 Section 10 records the independent design review this version went through and what changed.
 
 ## 1. Transport
 
-- QUIC. Native clients use `quinn`; browsers will use WebTransport (`wtransport`, Phase 8). Same
-  datagram and stream semantics, one protocol.
+- QUIC. Native clients use `quinn`; browsers use WebTransport, a session of which carries the
+  same datagrams and the same control stream (`docs/WEB.md` 2: the zone listens for it on a
+  second port; what differs there is listed in section 15). Same semantics, one protocol.
 - **Unreliable datagrams**: input frames (client → server), snapshots (server → client), pings.
   One datagram is one message; a message never spans datagrams. Payloads are capped at
   **1,100 bytes** (`MAX_DATAGRAM_PAYLOAD`), well under the 1,200-byte initial QUIC MTU minus
@@ -32,7 +35,15 @@ Section 10 records the independent design review this version went through and w
 - Certificates: the zone presents a self-signed certificate generated at start (or loaded from a
   file). Clients trust a certificate DER passed on the command line or, in Phase 4, receive the
   zone's certificate hash from the hub in the session token. There is no "accept anything" mode.
-- Idle timeout 10 s, QUIC keep-alive every 2 s.
+- Idle timeout 10 s, QUIC keep-alive every 2 s. Keep-alives keep a connection alive whether
+  or not its client still plays, so the zone has a rule of its own: **a client that has sent
+  no input datagram for 10 s is kicked** (`Kick("no input for 10 seconds")`; 60 s for the
+  first input after a join, because a client may be loading the map; a ghost waiting for
+  another zone's claim is exempt).
+- A `Reject` or a `Kick` is followed by the close, not accompanied by it: after `Reject` the
+  zone finishes the stream and waits up to 1 s for the client to hang up, after `Kick` it
+  closes 0.5 s later. A connection closed under an unread message can take the message with
+  it.
 - The entry token (hub-signed, ed25519, HUB.md 3.1) rides in `Hello.token`. A zone started
   without `--hub` accepts an empty token (development and tests); under a hub the token is
   mandatory, the zone verifies it offline, claims the character at the hub, and takes the
@@ -534,3 +545,23 @@ implementation; verdicts are ours):
   3% loss) 4.7–5.3 KB/s down, 5.5 KB/s up, 0 unexplained corrections in 24 runs of two to four
   minutes; 16 leaders with their squads in the dungeon (loopback, 67 bodies) 17.9 KB/s down on
   average, 19.3 KB/s for the worst. The arena test of section 9 is unchanged (10.3 KB/s down).
+
+## 15. Changes in v4 (Phase 8)
+
+- **A second carrier.** A WebTransport session (HTTP/3) carries exactly sections 3 to 8: the
+  datagrams as WebTransport datagrams, the control stream as one bidirectional stream opened
+  by the client. `docs/WEB.md` 2 is the contract for the listener, its certificates and what
+  a browser does with it. What differs from section 1 on that listener: eight unidirectional
+  and eight bidirectional streams are allowed (HTTP/3 opens three unidirectional streams of
+  its own and the session's CONNECT is a bidirectional one), and a session whose peer cannot
+  take a 1,100-byte datagram is refused. A zone treats clients of both kinds alike.
+- Control: `TravelTicket` gains `web: Option<WebAddr>` (the destination's WebTransport
+  listener: its URL and, for a pinned certificate, its SHA-256). The version byte is 4: the
+  message's layout changed.
+- The input-idle kick and the grace after `Reject` and `Kick` (section 1).
+- Measured (headless Chromium, loopback, the arena with 15 native duelists): the browser
+  client receives 64 snapshots a second with no gap; zone → browser 7.0–8.7 KB/s, browser →
+  zone 6.6–6.7 KB/s as the zone's QUIC statistics count UDP bytes (a native client sends
+  5.5: HTTP/3 datagram framing and the browser's acknowledgements make the difference); 0 or
+  1 unexplained correction in 40 s. A QUIC bot and a WebTransport bot in one zone over real
+  UDP: 9.4–9.5 KB/s down and 9.6–9.7 KB/s up each in the test room.

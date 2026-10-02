@@ -6,9 +6,9 @@
 //! world point and re-aims it from the eyes ("camera-to-muzzle re-aim").
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+
+use web_time::Instant;
 
 use glam::Vec3;
 use gm_bsp::Bsp;
@@ -34,11 +34,13 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::avatars::{Avatars, Body, OWN, stall_boxes, stall_keeper};
-use crate::hub::{HubLogin, HubSession};
+use crate::hub::{HubLogin, HubSession, ticket_addr};
 use crate::hud::{self, Hud};
-use crate::net::{NetClient, NetEvent};
+use crate::net::{NetClient, NetEvent, ZoneAddr};
 use crate::render::{EntityDraw, Gpu, Renderer, view_proj};
-use crate::stats::{FrameStats, print_bench, print_bench_avatars};
+use crate::stats::FrameStats;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::stats::{print_bench, print_bench_avatars};
 use crate::tactical::{self, Tactical, pick_body, pick_ground, project};
 use crate::world::{self, WorldMesh};
 use crate::{Error, Options};
@@ -162,8 +164,13 @@ pub(crate) struct Online {
     /// The hub session when playing through the hub (HUB.md); logged out on exit.
     hub: Option<HubSession>,
     /// A travel ticket to act on: reconnect to another zone, reloading its map.
-    pending_travel: Option<(String, std::net::SocketAddr, Vec<u8>, Vec<u8>)>,
+    pending_travel: Option<(String, ZoneAddr, Vec<u8>)>,
     zone_name: String,
+    /// Events taken from the connection and not handled yet: while the zone's map is
+    /// still on its way (a browser fetches it), everything after `Welcome` waits here.
+    backlog: VecDeque<NetEvent>,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    awaiting_map: bool,
 }
 
 /// How long a message stays on the HUD, and how many are kept.
@@ -252,7 +259,11 @@ impl Input {
         if self.mouse.contains(&MouseButton::Right) {
             b |= buttons::SECONDARY;
         }
-        if self.down(KeyCode::ControlLeft) || self.down(KeyCode::ControlRight) {
+        // Guard is on C as well: a browser keeps Ctrl+W for itself (WEB.md 3.4).
+        if self.down(KeyCode::ControlLeft)
+            || self.down(KeyCode::ControlRight)
+            || self.down(KeyCode::KeyC)
+        {
             b |= buttons::GUARD;
         }
         if self.down(KeyCode::ShiftLeft) || self.down(KeyCode::ShiftRight) {
@@ -286,6 +297,9 @@ struct Active {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    /// The format frames are drawn in: the surface's, or its sRGB twin as a view format
+    /// where the surface itself is not sRGB (a WebGPU canvas).
+    view_format: wgpu::TextureFormat,
     gpu: Gpu,
     renderer: Renderer,
     avatars: Avatars,
@@ -295,6 +309,8 @@ struct Active {
 
 struct App {
     opts: Options,
+    /// The window, from its creation: the renderer on it (`active`) may come later.
+    window: Option<Arc<Window>>,
     bsp: Bsp,
     mesh: Option<WorldMesh>,
     active: Option<Active>,
@@ -321,7 +337,21 @@ struct App {
     /// The aim resolved by the last third-person tick, for the HUD.
     aim: (f32, f32),
     /// A map to switch to before the next frame (a zone change).
-    pending_map: Option<PathBuf>,
+    pending_map: Option<Bsp>,
+    palette: world::Palette,
+    /// The script's aim (`--script fight`): the nearest living enemy as of the last frame,
+    /// its id, position and velocity, and when it was seen.
+    script_target: Option<(u32, Vec3, Vec3, Instant)>,
+    last_report: Instant,
+    report_frame: usize,
+    /// The browser: the GPU device and a fetched map arrive here from their tasks.
+    #[cfg(target_arch = "wasm32")]
+    pending_gpu: PendingSlot<(wgpu::Surface<'static>, Gpu)>,
+    #[cfg(target_arch = "wasm32")]
+    pending_fetch: PendingSlot<(Bsp, u64)>,
+    /// Milliseconds from navigation to the first frame presented (WEB.md 9).
+    #[cfg(target_arch = "wasm32")]
+    first_frame_ms: f64,
     /// The tactical viewport (COMPANIONS.md 6): over either of the other two.
     tactical: Tactical,
     /// Leaves the world is drawn from in the tactical view (the squad's sight).
@@ -334,101 +364,62 @@ struct App {
     target_view: Option<(String, u16, u16)>,
 }
 
-pub fn run(opts: Options) -> Result<(), Error> {
-    let bsp = Bsp::load(&opts.map).map_err(|e| format!("loading {}: {e}", opts.map.display()))?;
-    log::info!(
-        "loaded {} ({} faces, {} leaves)",
-        opts.map.display(),
-        bsp.faces.len(),
-        bsp.leaves.len()
-    );
-    let palette = world::load_palette(&opts.palette);
+/// A value a browser task delivers to the frame that waits for it.
+#[cfg(target_arch = "wasm32")]
+type PendingSlot<T> = std::rc::Rc<std::cell::RefCell<Option<Result<T, String>>>>;
+
+/// How the client reaches its zone: directly, or with a ticket from the hub.
+struct Entry {
+    zone: ZoneAddr,
+    token: Vec<u8>,
+    hub: Option<HubSession>,
+    zone_name: String,
+}
+
+fn online(opts: &Options, sim: &Sim, map_hash: u64, entry: Entry) -> Result<Online, Error> {
+    log::info!("connecting to the zone as {}", opts.name);
+    Ok(Online {
+        net: NetClient::connect(
+            entry.zone,
+            opts.name.clone(),
+            opts.build.clone(),
+            opts.team,
+            entry.token,
+        )?,
+        welcome: None,
+        client: None,
+        pack: None,
+        team: 0,
+        build_name: String::new(),
+        accumulator: 0.0,
+        prev_origin: sim.curr.origin,
+        curr_origin: sim.curr.origin,
+        last_snapshot: Instant::now(),
+        rate: TickRate::COMBAT,
+        names: HashMap::new(),
+        kinds: HashMap::new(),
+        squad: Vec::new(),
+        messages: VecDeque::new(),
+        stalls: Vec::new(),
+        kills: 0,
+        deaths: 0,
+        map_hash,
+        respec_note: String::new(),
+        hub: entry.hub,
+        pending_travel: None,
+        zone_name: entry.zone_name,
+        backlog: VecDeque::new(),
+        awaiting_map: false,
+    })
+}
+
+fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, online: Option<Online>) -> App {
     let mesh = world::build(&bsp, &palette);
     let faces_total = mesh
         .face_ranges
         .iter()
         .filter(|r| r.index_count > 0)
         .count();
-    let sim = Sim::at(&bsp, opts.start);
-    // Through the hub: log in and get a ticket first; the ticket names the zone, its address
-    // and its certificate. The map comes from `Welcome` and is loaded then.
-    let (connect, cert, token, hub, zone_name) = match (opts.hub, opts.connect) {
-        (Some(hub_addr), _) => {
-            let cert_der = std::fs::read(&opts.hub_cert)
-                .map_err(|e| format!("reading hub certificate {}: {e}", opts.hub_cert.display()))?;
-            let (session, ticket) = HubSession::enter(HubLogin {
-                hub: hub_addr,
-                cert_der,
-                email: opts.user.clone(),
-                password: opts.password.clone(),
-                register: opts.register,
-                character: opts.character.clone(),
-                new_preset: opts.build.clone(),
-                zone: opts.zone.clone(),
-            })?;
-            log::info!(
-                "hub ticket for zone {} at {} (character {})",
-                ticket.zone,
-                ticket.addr,
-                session.character
-            );
-            (
-                Some(ticket.addr),
-                ticket.cert_der,
-                bitcode::encode(&ticket.token),
-                Some(session),
-                ticket.zone,
-            )
-        }
-        (None, Some(addr)) => {
-            let cert = std::fs::read(&opts.cert)
-                .map_err(|e| format!("reading zone certificate {}: {e}", opts.cert.display()))?;
-            (Some(addr), cert, Vec::new(), None, String::new())
-        }
-        (None, None) => (None, Vec::new(), Vec::new(), None, String::new()),
-    };
-    let online = match connect {
-        Some(addr) => {
-            let map_hash = fnv1a64(&std::fs::read(&opts.map)?);
-            log::info!("connecting to {addr} as {}", opts.name);
-            Some(Online {
-                net: NetClient::connect(
-                    addr,
-                    cert,
-                    opts.name.clone(),
-                    opts.build.clone(),
-                    opts.team,
-                    token,
-                )?,
-                welcome: None,
-                client: None,
-                pack: None,
-                team: 0,
-                build_name: String::new(),
-                accumulator: 0.0,
-                prev_origin: sim.curr.origin,
-                curr_origin: sim.curr.origin,
-                last_snapshot: Instant::now(),
-                rate: TickRate::COMBAT,
-                names: HashMap::new(),
-                kinds: HashMap::new(),
-                squad: Vec::new(),
-                messages: VecDeque::new(),
-                stalls: Vec::new(),
-                kills: 0,
-                deaths: 0,
-                map_hash,
-                respec_note: String::new(),
-                hub,
-                pending_travel: None,
-                zone_name,
-            })
-        }
-        None => None,
-    };
-
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
     let viewport = if opts.third_person {
         Viewport::Third
     } else {
@@ -436,6 +427,7 @@ pub fn run(opts: Options) -> Result<(), Error> {
     };
     let mut app = App {
         opts,
+        window: None,
         bsp,
         mesh: Some(mesh),
         active: None,
@@ -459,6 +451,16 @@ pub fn run(opts: Options) -> Result<(), Error> {
         bench_yaw0: 0.0,
         aim: (0.0, 0.0),
         pending_map: None,
+        palette,
+        script_target: None,
+        last_report: Instant::now(),
+        report_frame: 0,
+        #[cfg(target_arch = "wasm32")]
+        pending_gpu: Default::default(),
+        #[cfg(target_arch = "wasm32")]
+        pending_fetch: Default::default(),
+        #[cfg(target_arch = "wasm32")]
+        first_frame_ms: 0.0,
         tactical: Tactical::new(),
         tactical_leaves: Vec::new(),
         bars: Vec::new(),
@@ -469,6 +471,78 @@ pub fn run(opts: Options) -> Result<(), Error> {
         app.tactical.enter(app.sim.yaw);
     }
     app.bench_yaw0 = app.sim.yaw;
+    app
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run(opts: Options) -> Result<(), Error> {
+    let map_bytes =
+        std::fs::read(&opts.map).map_err(|e| format!("loading {}: {e}", opts.map.display()))?;
+    let bsp = Bsp::load(&opts.map).map_err(|e| format!("loading {}: {e}", opts.map.display()))?;
+    log::info!(
+        "loaded {} ({} faces, {} leaves)",
+        opts.map.display(),
+        bsp.faces.len(),
+        bsp.leaves.len()
+    );
+    let palette = world::load_palette(&opts.palette);
+    let sim = Sim::at(&bsp, opts.start);
+    // Through the hub: log in and get a ticket first; the ticket names the zone, its address
+    // and its certificate. The map comes from `Welcome` and is loaded then.
+    let entry = match (opts.hub, opts.connect) {
+        (Some(hub_addr), _) => {
+            let cert_der = std::fs::read(&opts.hub_cert)
+                .map_err(|e| format!("reading hub certificate {}: {e}", opts.hub_cert.display()))?;
+            let (session, ticket) = HubSession::enter(HubLogin {
+                hub: ZoneAddr {
+                    addr: Some(hub_addr),
+                    cert_der,
+                    web: None,
+                },
+                email: opts.user.clone(),
+                password: opts.password.clone(),
+                register: opts.register,
+                character: opts.character.clone(),
+                new_preset: opts.build.clone(),
+                zone: opts.zone.clone(),
+            })?;
+            log::info!(
+                "hub ticket for zone {} at {} (character {})",
+                ticket.zone,
+                ticket.addr,
+                session.character
+            );
+            Some(Entry {
+                zone: ticket_addr(&ticket),
+                token: bitcode::encode(&ticket.token),
+                hub: Some(session),
+                zone_name: ticket.zone,
+            })
+        }
+        (None, Some(addr)) => {
+            let cert = std::fs::read(&opts.cert)
+                .map_err(|e| format!("reading zone certificate {}: {e}", opts.cert.display()))?;
+            Some(Entry {
+                zone: ZoneAddr {
+                    addr: Some(addr),
+                    cert_der: cert,
+                    web: None,
+                },
+                token: Vec::new(),
+                hub: None,
+                zone_name: String::new(),
+            })
+        }
+        (None, None) => None,
+    };
+    let online = match entry {
+        Some(entry) => Some(online(&opts, &sim, fnv1a64(&map_bytes), entry)?),
+        None => None,
+    };
+
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut app = app(opts, bsp, palette, sim, online);
     event_loop.run_app(&mut app)?;
     if let Some(o) = &mut app.online {
         o.net.close();
@@ -516,6 +590,142 @@ pub fn run(opts: Options) -> Result<(), Error> {
     if app.exit_requested {
         return Err("exited on error".into());
     }
+    Ok(())
+}
+
+/// A map and its coloured lightmaps from the page's assets, with the hash of the `.bsp`.
+#[cfg(target_arch = "wasm32")]
+async fn fetch_map(assets: &str, name: &str) -> Result<(Bsp, u64), String> {
+    /// A map that has not arrived in this long is not coming (the zone waits 60 s for a
+    /// client's first input).
+    const FETCH_MS: u32 = 45_000;
+    let url = format!("{assets}/maps/{name}.bsp");
+    let fetch = async {
+        let bytes = crate::web::fetch_bytes(&url)
+            .await?
+            .ok_or_else(|| format!("{url}: no such map on this site"))?;
+        let mut bsp = Bsp::parse(&bytes).map_err(|e| format!("{url}: {e}"))?;
+        if let Some(lit) = crate::web::fetch_bytes(&format!("{assets}/maps/{name}.lit")).await? {
+            bsp.attach_lit(&lit).map_err(|e| format!("{url}: {e}"))?;
+        }
+        Ok((bsp, fnv1a64(&bytes)))
+    };
+    crate::web::timeout_ms(FETCH_MS, fetch)
+        .await
+        .unwrap_or_else(|| Err(format!("{url}: the download took too long")))
+}
+
+/// The browser client (WEB.md 3, 5): options from the page, assets by `fetch`, the login
+/// awaited, then the event loop on the page's own.
+#[cfg(target_arch = "wasm32")]
+pub async fn run_web() -> Result<(), String> {
+    use crate::web::{PageOptions, parse_hash, tell_page};
+    use gm_net::control::WebAddr;
+    use winit::platform::web::EventLoopExtWebSys;
+
+    let page = PageOptions::read();
+    let web_addr = |url: &str, hash: &str| -> Result<Option<WebAddr>, String> {
+        let Some(url) = page.string(url) else {
+            return Ok(None);
+        };
+        let cert_sha256 = match page.string(hash) {
+            Some(h) => Some(parse_hash(&h).ok_or("a certificate hash must be 64 hex digits")?),
+            None => None,
+        };
+        Ok(Some(WebAddr { url, cert_sha256 }))
+    };
+    let mut opts = Options {
+        name: page.string("name").unwrap_or_else(|| "web".into()),
+        build: page.string("build"),
+        team: page.number("team").unwrap_or(0.0) as u8,
+        third_person: page.flag("third-person"),
+        tactical: page.flag("tactical"),
+        user: page.string("user").unwrap_or_default(),
+        password: page.take("password").unwrap_or_default(),
+        register: page.flag("register"),
+        character: page.string("character").unwrap_or_default(),
+        seconds: page.number("seconds").unwrap_or(0.0) as f32,
+        script: page.string("script"),
+        report: page.flag("report"),
+        travel_to: page.string("travel-to"),
+        travel_after: page.number("travel-after").unwrap_or(0.0) as f32,
+        cache_mb: page.number("cache-mb").unwrap_or(128.0) as u64,
+        hub_web: web_addr("hub", "hub-cert")?,
+        connect_web: web_addr("connect", "cert")?,
+        assets: page.string("assets").unwrap_or_else(|| "assets".into()),
+        ..Options::default()
+    };
+    if let Some(zone) = page.string("zone") {
+        opts.zone = zone;
+    }
+    if let Some(mb) = page.number("vram-mb") {
+        opts.vram_mb = mb as u64;
+    }
+    let map = page.string("map").unwrap_or_else(|| "test_room".into());
+    if !valid_map_name(&map) {
+        return Err(format!("not a map name: {map:?}"));
+    }
+
+    tell_page("status", "loading the map");
+    let (bsp, map_hash) = fetch_map(&opts.assets, &map).await?;
+    let palette = world::palette_from_bytes(
+        crate::web::fetch_bytes(&format!("{}/textures/palette.lmp", opts.assets))
+            .await?
+            .as_deref(),
+    );
+    let sim = Sim::at(&bsp, opts.start);
+    let logging_in = !opts.user.is_empty() && opts.hub_web.is_some();
+    let entry = if logging_in {
+        tell_page("status", "logging in");
+        let (session, ticket) = HubSession::enter(HubLogin {
+            hub: ZoneAddr {
+                addr: None,
+                cert_der: Vec::new(),
+                web: opts.hub_web.clone(),
+            },
+            email: opts.user.clone(),
+            password: opts.password.clone(),
+            register: opts.register,
+            character: opts.character.clone(),
+            new_preset: opts.build.clone(),
+            zone: opts.zone.clone(),
+        })
+        .await?;
+        // The password has done its work; nothing keeps it (WEB.md 5).
+        opts.password.clear();
+        log::info!("hub ticket for zone {}", ticket.zone);
+        if ticket.web.is_none() {
+            return Err(format!("zone {} has no web listener", ticket.zone));
+        }
+        Some(Entry {
+            zone: ticket_addr(&ticket),
+            token: bitcode::encode(&ticket.token),
+            hub: Some(session),
+            zone_name: ticket.zone,
+        })
+    } else {
+        opts.connect_web.clone().map(|web| Entry {
+            zone: ZoneAddr {
+                addr: None,
+                cert_der: Vec::new(),
+                web: Some(web),
+            },
+            token: Vec::new(),
+            hub: None,
+            zone_name: String::new(),
+        })
+    };
+    let online = match entry {
+        Some(entry) => {
+            tell_page("status", "connecting to the zone");
+            Some(online(&opts, &sim, map_hash, entry).map_err(|e| e.to_string())?)
+        }
+        None => None,
+    };
+    let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
+    // Frames come from `requestAnimationFrame`: each redraw asks for the next.
+    event_loop.set_control_flow(ControlFlow::Wait);
+    event_loop.spawn_app(app(opts, bsp, palette, sim, online));
     Ok(())
 }
 
@@ -576,6 +786,74 @@ fn visible_from(bsp: &Bsp, leaves: &[usize]) -> Vec<u32> {
         }
     }
     out
+}
+
+/// A map's name as a zone may send it: letters, digits, `_` and `-`, at most 64. It is joined
+/// to a directory natively and put into a URL in a browser.
+fn valid_map_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// What the script assumes of the weapons it holds (the v1 content's are close to it): a
+/// bolt's speed and the wind-up before it leaves, a melee weapon's reach from the eye, and
+/// how far the first active (an area around the caster for most builds) reaches.
+const SCRIPT_BOLT_SPEED: f32 = 1400.0;
+const SCRIPT_BOLT_WINDUP: f32 = 0.15;
+const SCRIPT_MELEE_REACH: f32 = 84.0;
+const SCRIPT_AREA_REACH: f32 = 150.0;
+
+/// `--script fight` (WEB.md 8): face the nearest enemy and walk at it; in reach strike and
+/// use the first active (an area for most builds, which a guard does not turn away as it
+/// does a swing); further off loose the ranged secondary where the enemy will be. With
+/// nobody in sight, walk and turn. `target` is the enemy's position and velocity.
+fn fight_input(eye: Vec3, target: Option<(Vec3, Vec3)>, sim: &mut Sim, tick: u32) -> SimInput {
+    let mut input = SimInput {
+        buttons: 0,
+        yaw: sim.yaw,
+        pitch: 0.0,
+        forward: 1.0,
+        side: 0.0,
+        ability: 0,
+    };
+    match target {
+        Some((at, velocity)) => {
+            let distance = (at - eye).length().max(1.0);
+            let melee = distance < SCRIPT_MELEE_REACH;
+            // A bolt is aimed where the enemy will be when it arrives.
+            let aim_at = if melee {
+                at
+            } else {
+                at + velocity * (SCRIPT_BOLT_WINDUP + distance / SCRIPT_BOLT_SPEED)
+            };
+            let to = aim_at - eye;
+            let reach = to.length().max(1.0);
+            sim.yaw = to.y.atan2(to.x).to_degrees().rem_euclid(360.0);
+            sim.pitch = (-to.z / reach).clamp(-1.0, 1.0).asin().to_degrees();
+            input.yaw = sim.yaw;
+            input.pitch = sim.pitch;
+            if melee {
+                input.buttons |= buttons::PRIMARY;
+                if distance < 48.0 {
+                    input.forward = 0.0;
+                }
+            } else if distance < 900.0 {
+                input.buttons |= buttons::SECONDARY;
+            }
+            // The first active as often as it comes back, the second now and then.
+            if distance < SCRIPT_AREA_REACH && tick.is_multiple_of(32) {
+                input.ability = if tick.is_multiple_of(256) { 2 } else { 1 };
+            }
+        }
+        None => {
+            sim.yaw = (sim.yaw + 0.6).rem_euclid(360.0);
+            sim.pitch = 0.0;
+            input.yaw = sim.yaw;
+        }
+    }
+    input
 }
 
 fn role_name(role: u8) -> &'static str {
@@ -742,6 +1020,120 @@ pub(crate) fn build_hud(
 }
 
 impl App {
+    /// Give up: say why (on the page too, in a browser) and leave the loop.
+    fn fail(&mut self, event_loop: &ActiveEventLoop, why: &str) {
+        log::error!("{why}");
+        #[cfg(target_arch = "wasm32")]
+        crate::web::tell_page("error", why);
+        self.exit_requested = true;
+        event_loop.exit();
+    }
+
+    /// The window has its device: configure the surface and build the renderer on it.
+    fn activate(
+        &mut self,
+        window: Arc<Window>,
+        surface: wgpu::Surface<'static>,
+        gpu: Gpu,
+    ) -> Result<(), Error> {
+        let size = window.inner_size();
+        let caps = surface.get_capabilities(&gpu.adapter);
+        let mut config = surface
+            .get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1))
+            .ok_or("surface not supported by the adapter")?;
+        // Frames are drawn in sRGB. Where the surface has no sRGB format of its own (a
+        // WebGPU canvas is `bgra8unorm`), its sRGB twin is asked for as a view format.
+        let view_format = match caps.formats.iter().copied().find(|f| f.is_srgb()) {
+            Some(format) => {
+                config.format = format;
+                format
+            }
+            None => {
+                config.format = caps.formats[0];
+                let srgb = config.format.add_srgb_suffix();
+                if srgb != config.format {
+                    config.view_formats.push(srgb);
+                }
+                srgb
+            }
+        };
+        // Mailbox is the default: no tearing, no blocking, and it works where Fifo stalls
+        // (X11 with a compositing window manager on RADV presented one frame per second).
+        // Benchmarks measure throughput, so they run without vsync unless told otherwise.
+        let bench = self.opts.bench_frames.is_some();
+        config.present_mode = match self.opts.present {
+            Some(mode) if caps.present_modes.contains(&mode) => mode,
+            Some(mode) => {
+                log::warn!(
+                    "present mode {mode:?} unsupported here (available: {:?}); using the default",
+                    caps.present_modes
+                );
+                wgpu::PresentMode::AutoVsync
+            }
+            // A browser presents with the display, whatever is asked.
+            None if cfg!(target_arch = "wasm32") => wgpu::PresentMode::AutoVsync,
+            None if bench || !self.opts.vsync => wgpu::PresentMode::AutoNoVsync,
+            None if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) => {
+                wgpu::PresentMode::Mailbox
+            }
+            None => wgpu::PresentMode::AutoVsync,
+        };
+        log::info!("present modes available: {:?}", caps.present_modes);
+        config.desired_maximum_frame_latency = 2;
+        surface.configure(&gpu.device, &config);
+        log::info!(
+            "surface {}x{} {:?} (drawn as {:?}) {:?}",
+            config.width,
+            config.height,
+            config.format,
+            view_format,
+            config.present_mode
+        );
+        let mesh = self.mesh.take().ok_or("world mesh already consumed")?;
+        let mut renderer = Renderer::new(&gpu, view_format, &mesh, (config.width, config.height));
+        // Online, models come from the hub the session is logged in to.
+        let source = self
+            .online
+            .as_ref()
+            .and_then(|o| o.hub.as_ref())
+            .map(|h| h.model_source());
+        let avatars = Avatars::new(
+            &gpu,
+            &mut renderer.characters,
+            &self.opts,
+            &self.bsp,
+            source,
+        )?;
+        self.adapter_info = Some(gpu.info.clone());
+        self.active = Some(Active {
+            window: window.clone(),
+            surface,
+            config,
+            view_format,
+            gpu,
+            renderer,
+            avatars,
+            drawn_from: vec![usize::MAX],
+        });
+        // A browser gives the pointer only to a click (WEB.md 3.4): there the first click grabs.
+        if cfg!(not(target_arch = "wasm32"))
+            && self.opts.bench_frames.is_none()
+            && !self.tactical.active
+            && self.opts.script.is_none()
+        {
+            self.set_grab(true);
+        }
+        self.last_frame = Instant::now();
+        self.started = Instant::now();
+        // Offline there is nothing left to wait for; online the status clears at `Welcome`.
+        #[cfg(target_arch = "wasm32")]
+        if self.online.is_none() {
+            crate::web::tell_page("status", "");
+        }
+        window.request_redraw();
+        Ok(())
+    }
+
     /// Tab: into the tactical viewport, or back out of it.
     fn toggle_tactical(&mut self) {
         if self.tactical.active {
@@ -793,11 +1185,19 @@ impl App {
             return;
         };
         let Some(pack) = &o.pack else { return };
-        if self.input.just_pressed.remove(&KeyCode::KeyT)
-            && let Ok(target) = std::env::var("GM_TRAVEL_TO")
+        // T asks to travel to the zone named on the command line; a scripted run asks by
+        // itself, once, after `travel_after` seconds.
+        let timed = self.opts.travel_after > 0.0
+            && self.started.elapsed().as_secs_f32() >= self.opts.travel_after;
+        if (self.input.just_pressed.remove(&KeyCode::KeyT) || timed)
+            && let Some(target) = self.opts.travel_to.clone()
         {
+            if timed {
+                self.opts.travel_after = 0.0;
+            }
             o.net.send_control(Control::Travel(target.clone()));
             o.respec_note = format!("travel to {target} requested");
+            log::info!("{}", o.respec_note);
         }
         // B opens a stall on the market tile underfoot, N closes the own stall.
         if self.input.just_pressed.remove(&KeyCode::KeyB) {
@@ -834,7 +1234,47 @@ impl App {
         let bsp = &self.bsp;
         let viewport = self.viewport;
         let o = self.online.as_mut()?;
-        for ev in o.net.poll() {
+        o.backlog.extend(o.net.poll());
+        // The zone's map is still being fetched (a browser): what the zone sent after its
+        // `Welcome` waits, except snapshots, which would be stale by then anyway.
+        #[cfg(target_arch = "wasm32")]
+        if o.awaiting_map {
+            // The zone hung up meanwhile: say so now, not after a map nobody needs.
+            if let Some(NetEvent::Disconnected(reason)) = o
+                .backlog
+                .iter()
+                .find(|e| matches!(e, NetEvent::Disconnected(_)))
+            {
+                let why = format!("disconnected: {reason}");
+                self.fail(event_loop, &why);
+                return None;
+            }
+            match self.pending_fetch.borrow_mut().take() {
+                None => {
+                    o.backlog.retain(|e| !matches!(e, NetEvent::Snapshot(_)));
+                    return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
+                }
+                Some(Ok((map, hash))) if hash == o.map_hash => {
+                    o.awaiting_map = false;
+                    crate::web::tell_page("status", "");
+                    self.pending_map = Some(map);
+                    // The world is replaced at the start of the next frame.
+                    return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
+                }
+                Some(result) => {
+                    let why = match result {
+                        Err(e) => e,
+                        Ok(_) => "this site's copy of the zone's map is another build".into(),
+                    };
+                    log::error!("{why}");
+                    crate::web::tell_page("error", &why);
+                    self.exit_requested = true;
+                    event_loop.exit();
+                    return None;
+                }
+            }
+        }
+        while let Some(ev) = o.backlog.pop_front() {
             match ev {
                 NetEvent::Welcome {
                     entity,
@@ -842,30 +1282,60 @@ impl App {
                     map,
                     map_hash,
                 } => {
-                    if map_hash != o.map_hash {
-                        // Another map: load it (a zone change through the hub lands here).
-                        let path = self.opts.maps_dir.join(format!("{map}.bsp"));
-                        match std::fs::read(&path) {
-                            Ok(bytes) if fnv1a64(&bytes) == map_hash => {
-                                log::info!("zone runs map {map}; loading {}", path.display());
-                                self.pending_map = Some(path);
-                                o.map_hash = map_hash;
-                            }
-                            _ => {
-                                log::error!(
-                                    "zone runs map {map} with hash {map_hash:016x}; ours is {:016x} and {} does not match (wrong map build)",
-                                    o.map_hash,
-                                    path.display()
-                                );
-                                self.exit_requested = true;
-                                event_loop.exit();
-                                return None;
-                            }
-                        }
-                    }
                     o.rate = TickRate::new(hz as u32);
                     o.welcome = Some((entity, hz));
                     log::info!("joined as entity {entity} on {map} at {hz} Hz");
+                    #[cfg(target_arch = "wasm32")]
+                    crate::web::tell_page("status", "");
+                    // The name becomes a file name or a URL: a zone does not choose paths.
+                    if !valid_map_name(&map) {
+                        let why =
+                            format!("the zone named a map this client will not load: {map:?}");
+                        self.fail(event_loop, &why);
+                        return None;
+                    }
+                    if map_hash != o.map_hash {
+                        // Another map: load it (a zone change through the hub lands here).
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let path = self.opts.maps_dir.join(format!("{map}.bsp"));
+                            let loaded = std::fs::read(&path)
+                                .ok()
+                                .filter(|bytes| fnv1a64(bytes) == map_hash)
+                                .and_then(|_| Bsp::load(&path).ok());
+                            match loaded {
+                                Some(bsp) => {
+                                    log::info!("zone runs map {map}; loading {}", path.display());
+                                    self.pending_map = Some(bsp);
+                                    o.map_hash = map_hash;
+                                }
+                                None => {
+                                    log::error!(
+                                        "zone runs map {map} with hash {map_hash:016x}; ours is {:016x} and {} does not match (wrong map build)",
+                                        o.map_hash,
+                                        path.display()
+                                    );
+                                    self.exit_requested = true;
+                                    event_loop.exit();
+                                    return None;
+                                }
+                            }
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            log::info!("zone runs map {map}; fetching it");
+                            crate::web::tell_page("status", "loading the zone's map");
+                            o.map_hash = map_hash;
+                            o.awaiting_map = true;
+                            let (slot, assets) =
+                                (self.pending_fetch.clone(), self.opts.assets.clone());
+                            wasm_bindgen_futures::spawn_local(async move {
+                                let fetched = fetch_map(&assets, &map).await;
+                                *slot.borrow_mut() = Some(fetched);
+                            });
+                            return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
+                        }
+                    }
                 }
                 NetEvent::Snapshot(bytes) => {
                     if let Some(c) = &mut o.client {
@@ -921,13 +1391,29 @@ impl App {
                         addr,
                         cert_der,
                         token,
-                    } => match addr.parse::<std::net::SocketAddr>() {
-                        Ok(addr) => {
-                            log::info!("travel ticket for {zone} at {addr}");
-                            o.pending_travel = Some((zone, addr, cert_der, token));
+                        web,
+                    } => {
+                        log::info!("travel ticket for {zone} at {addr}");
+                        let to = ZoneAddr {
+                            addr: addr.parse().ok(),
+                            cert_der,
+                            web,
+                        };
+                        // The connection here is given up only for one that can be opened: a browser
+                        // needs the zone's web listener, a native client its address.
+                        let reachable = if cfg!(target_arch = "wasm32") {
+                            to.web.is_some()
+                        } else {
+                            to.addr.is_some()
+                        };
+                        if reachable {
+                            o.pending_travel = Some((zone, to, token));
+                        } else if cfg!(target_arch = "wasm32") {
+                            o.say(format!("{zone} has no web listener"), hud::ORANGE);
+                        } else {
+                            o.say(format!("{zone}: bad address {addr:?}"), hud::ORANGE);
                         }
-                        Err(e) => log::error!("bad travel address {addr}: {e}"),
-                    },
+                    }
                     Control::TravelRefused(reason) => {
                         o.respec_note = format!("travel refused: {reason}");
                         log::info!("{}", o.respec_note);
@@ -1043,6 +1529,8 @@ impl App {
                 },
                 NetEvent::Disconnected(reason) => {
                     log::error!("disconnected: {reason}");
+                    #[cfg(target_arch = "wasm32")]
+                    crate::web::tell_page("error", &format!("disconnected: {reason}"));
                     self.exit_requested = true;
                     event_loop.exit();
                     return None;
@@ -1051,16 +1539,10 @@ impl App {
         }
         // A travel ticket: say goodbye here, connect there (the body stays as a ghost until
         // the other zone claims it, HUB.md 3.3).
-        if let Some((zone, addr, cert_der, token)) = o.pending_travel.take() {
+        if let Some((zone, to, token)) = o.pending_travel.take() {
             o.net.close();
-            match NetClient::connect(
-                addr,
-                cert_der,
-                self.opts.name.clone(),
-                None,
-                self.opts.team,
-                token,
-            ) {
+            o.backlog.clear();
+            match NetClient::connect(to, self.opts.name.clone(), None, self.opts.team, token) {
                 Ok(net) => {
                     o.net = net;
                     o.welcome = None;
@@ -1089,6 +1571,7 @@ impl App {
         // The tactical viewport's keys are read before the ticks consume them: 1–5 select a
         // companion, ` selects all, F and H order the selection to follow or hold.
         let in_tactical = self.tactical.active;
+        let scripted = self.opts.script.as_deref() == Some("fight");
         let mut orders: Vec<Order> = Vec::new();
         if in_tactical {
             let slots = [
@@ -1132,6 +1615,13 @@ impl App {
             self.aim = (yaw, pitch);
             let input = if in_tactical {
                 self.input.command_input(yaw, pitch)
+            } else if scripted {
+                let target = self
+                    .script_target
+                    .map(|(_, at, velocity, _)| (at, velocity));
+                let input = fight_input(c.mover.eye(), target, &mut self.sim, c.tick);
+                self.aim = (input.yaw, input.pitch);
+                input
             } else {
                 self.input.sim_input(yaw, pitch)
             };
@@ -1169,6 +1659,37 @@ impl App {
             Viewport::Third => third_person_camera(bsp, eye, self.sim.yaw, self.sim.pitch),
         };
         let others = c.others_at(t);
+        if scripted {
+            let nearest = others
+                .iter()
+                .filter(|e| e.kind == EntityKind::Player && e.alive())
+                .filter(|e| match e.spawn {
+                    SpawnInfo::Player { team, .. } => my_team == 0 || team != my_team,
+                    _ => false,
+                })
+                .min_by(|a, b| {
+                    (a.pos - centre)
+                        .length_squared()
+                        .total_cmp(&(b.pos - centre).length_squared())
+                })
+                .map(|e| (e.id, e.pos));
+            // Its velocity from where it stood a frame ago, if it is the same body.
+            let now = Instant::now();
+            self.script_target = nearest.map(|(id, at)| {
+                let velocity = match self.script_target {
+                    Some((was, before, _, then)) if was == id => {
+                        let dt = (now - then).as_secs_f32();
+                        if dt > 1.0e-3 {
+                            ((at - before) / dt).clamp_length_max(600.0)
+                        } else {
+                            Vec3::ZERO
+                        }
+                    }
+                    _ => Vec3::ZERO,
+                };
+                (id, at, velocity, now)
+            });
+        }
         // What the HUD shows of the squad and of the creature being fought: the one the
         // squad is ordered onto, or else the nearest one that is hurt.
         self.squad_view = o
@@ -1432,16 +1953,8 @@ impl App {
     }
 
     /// Replace the world (BSP, mesh, renderer) with another map.
-    fn switch_map(&mut self, path: &std::path::Path) {
-        let bsp = match Bsp::load(path) {
-            Ok(b) => b,
-            Err(e) => {
-                log::error!("loading {}: {e}", path.display());
-                return;
-            }
-        };
-        let palette = world::load_palette(&self.opts.palette);
-        let mesh = world::build(&bsp, &palette);
+    fn switch_map(&mut self, bsp: Bsp) {
+        let mesh = world::build(&bsp, &self.palette);
         self.faces_total = mesh
             .face_ranges
             .iter()
@@ -1455,13 +1968,106 @@ impl App {
         }
         self.sim = Sim::new(&bsp);
         self.bsp = bsp;
-        self.opts.map = path.to_path_buf();
-        log::info!("switched to {}", path.display());
+        log::info!(
+            "switched map ({} faces, {} leaves)",
+            self.bsp.faces.len(),
+            self.bsp.leaves.len()
+        );
+    }
+
+    /// One line of what the client measured since the last one (`--report`, WEB.md 8).
+    fn report_line(&mut self) -> String {
+        let r = self.stats.report_since(self.report_frame);
+        self.report_frame = self.stats.frames();
+        let mut line = format!(
+            "fps={:.1} frame_ms_avg={:.2} frame_ms_p99={:.2} frame_ms_max={:.2}",
+            r.fps_avg, r.ms_avg, r.ms_p99, r.ms_max
+        );
+        if let Some(a) = &self.active {
+            let m = a.avatars.stats();
+            line.push_str(&format!(
+                " backend={:?} draw_calls={} characters={} with_model={} models={} fetched={} fetched_bytes={} cache_hits={} failed={} refused={}",
+                a.gpu.info.backend,
+                a.renderer.draw_calls,
+                a.renderer.characters.drawn,
+                a.avatars.with_model,
+                m.ready,
+                m.fetched,
+                m.fetched_bytes,
+                m.disk_hits,
+                m.failed,
+                m.refused
+            ));
+            #[cfg(target_arch = "wasm32")]
+            if let Some(cache) = &a.avatars.cache {
+                line.push_str(&format!(
+                    " cache_bytes={} cache_cap_bytes={}",
+                    cache.loader.store.total(),
+                    cache.loader.store.cap()
+                ));
+            }
+        }
+        if let Some(o) = &self.online {
+            if let Some(c) = &o.client {
+                let s = c.stats;
+                line.push_str(&format!(
+                    " entity={} snapshots={} gaps={} max_gap={} corrections={} unexplained={} inputs={} health={}",
+                    c.my_id,
+                    s.snapshots,
+                    s.gaps,
+                    s.max_gap,
+                    s.corrections,
+                    s.corrections_unexplained,
+                    s.inputs_sent,
+                    c.own_health
+                ));
+            }
+            line.push_str(&format!(
+                " kills={} deaths={} players={} zone={}",
+                o.kills,
+                o.deaths,
+                o.names.len(),
+                if o.zone_name.is_empty() {
+                    "-"
+                } else {
+                    &o.zone_name
+                }
+            ));
+            #[cfg(target_arch = "wasm32")]
+            {
+                let (rx, tx) = o.net.bytes();
+                line.push_str(&format!(" rx_bytes={rx} tx_bytes={tx}"));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        line.push_str(&format!(
+            " wasm_memory_bytes={} first_frame_ms={:.0}",
+            crate::web::wasm_memory_bytes(),
+            self.first_frame_ms
+        ));
+        line
     }
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(path) = self.pending_map.take() {
-            self.switch_map(&path);
+        #[cfg(target_arch = "wasm32")]
+        if self.active.is_none() {
+            let made = self.pending_gpu.borrow_mut().take();
+            match (made, self.window.clone()) {
+                (Some(Ok((surface, gpu))), Some(window)) => {
+                    if let Err(e) = self.activate(window, surface, gpu) {
+                        self.fail(event_loop, &format!("renderer setup failed: {e}"));
+                        return;
+                    }
+                }
+                (Some(Err(e)), _) => {
+                    self.fail(event_loop, &format!("renderer setup failed: {e}"));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if let Some(bsp) = self.pending_map.take() {
+            self.switch_map(bsp);
         }
         let now = Instant::now();
         let frame_dt = (now - self.last_frame).as_secs_f32();
@@ -1622,9 +2228,10 @@ impl App {
                 return;
             }
         };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(a.view_format),
+            ..Default::default()
+        });
         let aspect = a.config.width as f32 / a.config.height.max(1) as f32;
         for id in self.revoked.drain(..) {
             a.avatars.revoke(&id, &mut a.renderer.characters);
@@ -1681,6 +2288,13 @@ impl App {
             return;
         }
         self.stats.frame();
+        #[cfg(target_arch = "wasm32")]
+        if self.first_frame_ms == 0.0 {
+            self.first_frame_ms = web_sys::window()
+                .and_then(|w| w.performance())
+                .map_or(0.0, |p| p.now());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if !bench && self.opts.max_fps > 0 {
             // Cheap CPU-side cap so an uncapped present mode does not spin the GPU at 100%.
             let budget = std::time::Duration::from_secs_f64(1.0 / self.opts.max_fps as f64);
@@ -1745,7 +2359,28 @@ impl App {
         {
             event_loop.exit();
         }
+        if self.opts.report && self.last_report.elapsed().as_secs_f32() >= 1.0 {
+            self.last_report = Instant::now();
+            let line = self.report_line();
+            #[cfg(not(target_arch = "wasm32"))]
+            println!("stats: {line}");
+            #[cfg(target_arch = "wasm32")]
+            crate::web::tell_page("stats", &line);
+        }
         if self.opts.seconds > 0.0 && self.started.elapsed().as_secs_f32() >= self.opts.seconds {
+            #[cfg(target_arch = "wasm32")]
+            {
+                // The whole run in one line, for whoever scripted it.
+                self.report_frame = 0;
+                let line = self.report_line();
+                if let Some(o) = &mut self.online {
+                    o.net.close();
+                    if let Some(hub) = &o.hub {
+                        hub.logout();
+                    }
+                }
+                crate::web::tell_page("done", &line);
+            }
             event_loop.exit();
         }
     }
@@ -1753,110 +2388,82 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.active.is_some() {
+        if self.active.is_some() || self.window.is_some() {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         let attrs = Window::default_attributes()
             .with_title("gamengine")
             .with_inner_size(winit::dpi::PhysicalSize::new(
                 self.opts.width,
                 self.opts.height,
             ));
+        // The page owns the canvas and its size (WEB.md 5).
+        #[cfg(target_arch = "wasm32")]
+        let attrs = {
+            use wasm_bindgen::JsCast;
+            use winit::platform::web::WindowAttributesExtWebSys;
+            let canvas = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id("gm-canvas"))
+                .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok());
+            Window::default_attributes()
+                .with_title("gamengine")
+                .with_canvas(canvas)
+                .with_prevent_default(true)
+                .with_focusable(true)
+        };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                log::error!("window creation failed: {e}");
-                event_loop.exit();
+                self.fail(event_loop, &format!("window creation failed: {e}"));
                 return;
             }
         };
-        let result = (|| -> Result<Active, Error> {
+        self.window = Some(window.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
             let instance = wgpu::Instance::new(
                 wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
             );
-            let surface = instance.create_surface(window.clone())?;
-            let gpu = Gpu::new(&instance, Some(&surface), self.opts.software)?;
-            let size = window.inner_size();
-            let caps = surface.get_capabilities(&gpu.adapter);
-            let mut config = surface
-                .get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1))
-                .ok_or("surface not supported by the adapter")?;
-            config.format = caps
-                .formats
-                .iter()
-                .copied()
-                .find(|f| f.is_srgb())
-                .unwrap_or(caps.formats[0]);
-            // Mailbox is the default: no tearing, no blocking, and it works where Fifo stalls
-            // (X11 with a compositing window manager on RADV presented one frame per second).
-            // Benchmarks measure throughput, so they run without vsync unless told otherwise.
-            let bench = self.opts.bench_frames.is_some();
-            config.present_mode = match self.opts.present {
-                Some(mode) if caps.present_modes.contains(&mode) => mode,
-                Some(mode) => {
-                    log::warn!(
-                        "present mode {mode:?} unsupported here (available: {:?}); using the default",
-                        caps.present_modes
-                    );
-                    wgpu::PresentMode::AutoVsync
+            let result = instance
+                .create_surface(window.clone())
+                .map_err(Error::from)
+                .and_then(|surface| {
+                    let gpu = Gpu::new(&instance, Some(&surface), self.opts.software)?;
+                    self.activate(window.clone(), surface, gpu)
+                });
+            if let Err(e) = result {
+                self.fail(event_loop, &format!("renderer setup failed: {e}"));
+            }
+        }
+        // A browser hands out its GPU device asynchronously: the frame picks it up.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let slot = self.pending_gpu.clone();
+            let software = self.opts.software;
+            wasm_bindgen_futures::spawn_local(async move {
+                let made = async {
+                    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+                    // Each build draws through one API (WEB.md 3.2).
+                    desc.backends = if cfg!(feature = "webgl") {
+                        wgpu::Backends::GL
+                    } else {
+                        wgpu::Backends::BROWSER_WEBGPU
+                    };
+                    let instance = wgpu::Instance::new(desc);
+                    let surface = instance
+                        .create_surface(window.clone())
+                        .map_err(|e| e.to_string())?;
+                    let gpu = Gpu::request(&instance, Some(&surface), software)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok((surface, gpu))
                 }
-                None if bench || !self.opts.vsync => wgpu::PresentMode::AutoNoVsync,
-                None if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) => {
-                    wgpu::PresentMode::Mailbox
-                }
-                None => wgpu::PresentMode::AutoVsync,
-            };
-            log::info!("present modes available: {:?}", caps.present_modes);
-            config.desired_maximum_frame_latency = 2;
-            surface.configure(&gpu.device, &config);
-            log::info!(
-                "surface {}x{} {:?} {:?}",
-                config.width,
-                config.height,
-                config.format,
-                config.present_mode
-            );
-            let mesh = self.mesh.take().ok_or("world mesh already consumed")?;
-            let mut renderer =
-                Renderer::new(&gpu, config.format, &mesh, (config.width, config.height));
-            // Online, models come from the hub the session is logged in to.
-            let source = self
-                .online
-                .as_ref()
-                .and_then(|o| o.hub.as_ref())
-                .map(|h| h.model_source());
-            let avatars = Avatars::new(
-                &gpu,
-                &mut renderer.characters,
-                &self.opts,
-                &self.bsp,
-                source,
-            )?;
-            self.adapter_info = Some(gpu.info.clone());
-            Ok(Active {
-                window: window.clone(),
-                surface,
-                config,
-                gpu,
-                renderer,
-                avatars,
-                drawn_from: vec![usize::MAX],
-            })
-        })();
-        match result {
-            Ok(a) => {
-                self.active = Some(a);
-                if self.opts.bench_frames.is_none() && !self.tactical.active {
-                    self.set_grab(true);
-                }
-                self.last_frame = Instant::now();
+                .await;
+                *slot.borrow_mut() = Some(made);
                 window.request_redraw();
-            }
-            Err(e) => {
-                log::error!("renderer setup failed: {e}");
-                self.exit_requested = true;
-                event_loop.exit();
-            }
+            });
         }
     }
 
@@ -1870,7 +2477,11 @@ impl ApplicationHandler for App {
                 self.set_grab(false);
             }
             WindowEvent::Focused(true) => {
-                if self.opts.bench_frames.is_none() && !self.tactical.active {
+                if cfg!(not(target_arch = "wasm32"))
+                    && self.opts.bench_frames.is_none()
+                    && !self.tactical.active
+                    && self.opts.script.is_none()
+                {
                     self.set_grab(true);
                 }
             }
@@ -1908,6 +2519,7 @@ impl ApplicationHandler for App {
                             match code {
                                 KeyCode::Escape => self.set_grab(false),
                                 // Q turns the tactical camera; elsewhere it quits.
+                                #[cfg(not(target_arch = "wasm32"))]
                                 KeyCode::KeyQ if !self.tactical.active => event_loop.exit(),
                                 KeyCode::Tab if !event.repeat => self.toggle_tactical(),
                                 KeyCode::KeyV if !event.repeat => {
@@ -1941,8 +2553,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(a) = &self.active {
-            a.window.request_redraw();
+        if let Some(w) = &self.window
+            && !self.exit_requested
+        {
+            w.request_redraw();
         }
     }
 }

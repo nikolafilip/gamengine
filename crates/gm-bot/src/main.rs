@@ -19,6 +19,10 @@ mod rustls_pki {
 struct Args {
     connect: SocketAddr,
     cert: PathBuf,
+    /// Connect through the zone's WebTransport listener instead (WEB.md 7): its URL and the
+    /// SHA-256 of its certificate in hex (none: a publicly trusted certificate).
+    web: Option<String>,
+    web_cert: Option<String>,
     map: PathBuf,
     bots: usize,
     secs: u64,
@@ -46,7 +50,7 @@ struct Args {
     hire: usize,
 }
 
-const USAGE: &str = "gm-bot --connect ADDR --cert PATH [--map PATH] [--bots N] [--secs N] \
+const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:PORT [--web-cert SHA256HEX]) [--map PATH] [--bots N] [--secs N] \
 [--behaviour wander|hunter|hold|duelist|stroll|raid] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]\n\
        gm-bot --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME --zone ID \
 [--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...] \
@@ -58,6 +62,8 @@ fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         connect: "127.0.0.1:4433".parse().unwrap(),
         cert: PathBuf::from("zone-cert.der"),
+        web: None,
+        web_cert: None,
         map: PathBuf::from("assets/maps/built/test_room.bsp"),
         bots: 16,
         secs: 30,
@@ -90,6 +96,8 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--connect: {e}"))?
             }
             "--cert" => a.cert = PathBuf::from(value("--cert")?),
+            "--web" => a.web = Some(value("--web")?),
+            "--web-cert" => a.web_cert = Some(value("--web-cert")?),
             "--map" => a.map = PathBuf::from(value("--map")?),
             "--bots" => {
                 a.bots = value("--bots")?
@@ -349,7 +357,27 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let cert = CertificateDer::from(std::fs::read(&args.cert)?);
+    let web = match &args.web {
+        Some(url) => {
+            let cert_sha256 = match &args.web_cert {
+                Some(hex) => Some(
+                    gm_model_hex(hex)
+                        .ok_or_else(|| anyhow::anyhow!("--web-cert: 64 hex digits"))?,
+                ),
+                None => None,
+            };
+            Some(gm_net::control::WebAddr {
+                url: url.clone(),
+                cert_sha256,
+            })
+        }
+        None => None,
+    };
+    // Bots on the web listener need no QUIC certificate.
+    let cert = match &web {
+        Some(_) => None,
+        None => Some(CertificateDer::from(std::fs::read(&args.cert)?)),
+    };
     let world = Arc::new(Bsp::load(&args.map)?);
     let bind: SocketAddr = if args.connect.is_ipv4() {
         "0.0.0.0:0".parse().unwrap()
@@ -357,7 +385,9 @@ async fn main() -> anyhow::Result<()> {
         "[::]:0".parse().unwrap()
     };
     let mut endpoint = quinn::Endpoint::client(bind)?;
-    endpoint.set_default_client_config(client_config(&[cert])?);
+    if let Some(cert) = cert {
+        endpoint.set_default_client_config(client_config(&[cert])?);
+    }
 
     let mut set = tokio::task::JoinSet::new();
     for i in 0..args.bots {
@@ -381,15 +411,17 @@ async fn main() -> anyhow::Result<()> {
             stall_tile: None,
         };
         let secs = args.secs;
+        let web = web.clone();
         set.spawn(async move {
-            run_bot(
-                &endpoint,
-                args.connect,
-                cfg,
-                world,
-                tokio::time::sleep(Duration::from_secs(secs)),
-            )
-            .await
+            let stop = tokio::time::sleep(Duration::from_secs(secs));
+            match web {
+                Some(web) => {
+                    gm_bot::run_bot_web(&web, cfg, Vec::new(), move |_| Ok(world.clone()), stop)
+                        .await
+                        .map(|(report, _, _)| report)
+                }
+                None => run_bot(&endpoint, args.connect, cfg, world, stop).await,
+            }
         });
     }
     let mut reports = Vec::new();
@@ -449,4 +481,18 @@ async fn main() -> anyhow::Result<()> {
         println!("respecs {respecs}; final builds {finals:?}");
     }
     Ok(())
+}
+
+/// 64 hex digits as 32 bytes.
+fn gm_model_hex(hex: &str) -> Option<[u8; 32]> {
+    let hex = hex.as_bytes();
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, pair) in hex.chunks_exact(2).enumerate() {
+        let s = std::str::from_utf8(pair).ok()?;
+        out[i] = u8::from_str_radix(s, 16).ok()?;
+    }
+    Some(out)
 }
