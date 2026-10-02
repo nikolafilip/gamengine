@@ -26,6 +26,23 @@ pub const VEL_TOLERANCE: f32 = 16.0;
 /// Interpolation delay (PROTOCOL.md 7.3).
 pub const BASE_DELAY_TICKS: u32 = 6;
 pub const MAX_DELAY_TICKS: u32 = 13;
+
+/// The interpolation delay floor at `rate`. The constants above are ticks of the combat
+/// rate; another rate keeps the same time, not the same count (six ticks are 94 ms at 64 Hz
+/// and would be 300 ms in a 20 Hz town), and never less than two ticks, since interpolation
+/// needs a snapshot on each side.
+pub fn base_delay(rate: TickRate) -> u32 {
+    (BASE_DELAY_TICKS * rate.hz())
+        .div_ceil(TickRate::COMBAT.hz())
+        .max(2)
+}
+
+/// The most the delay grows to under loss, at `rate`.
+pub fn max_delay(rate: TickRate) -> u32 {
+    (MAX_DELAY_TICKS * rate.hz())
+        .div_ceil(TickRate::COMBAT.hz())
+        .max(base_delay(rate) + 2)
+}
 const TRACK_SAMPLES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -135,7 +152,7 @@ impl ClientState {
             last_acked_input: 0,
             tracks: BTreeMap::new(),
             gap_ticks: VecDeque::new(),
-            delay_ticks: BASE_DELAY_TICKS,
+            delay_ticks: base_delay(rate),
             last_shrink: 0,
             own_health: 0,
             own_alive: false,
@@ -304,7 +321,8 @@ impl ClientState {
         {
             self.gap_ticks.pop_front();
         }
-        let target = (BASE_DELAY_TICKS + self.gap_ticks.len() as u32).min(MAX_DELAY_TICKS);
+        let target =
+            (base_delay(self.rate) + self.gap_ticks.len() as u32).min(max_delay(self.rate));
         if target > self.delay_ticks {
             self.delay_ticks = target;
             self.last_shrink = self.newest_tick;
@@ -583,7 +601,7 @@ impl ClientState {
             let Some(&(t_last, last)) = track.samples.back() else {
                 continue;
             };
-            if (t_last as f32) < t - 4.0 * MAX_DELAY_TICKS as f32 {
+            if (t_last as f32) < t - 4.0 * max_delay(self.rate) as f32 {
                 continue; // long stale, nothing to show
             }
             // Bracket t: a = newest sample at or before t, b = oldest sample after t.
@@ -877,6 +895,20 @@ mod tests {
         assert_eq!(c.others_at(103.0).len(), 0);
         c.prune(103.0);
         assert!(c.tracks().is_empty());
+    }
+
+    #[test]
+    fn the_delay_is_a_time_not_a_tick_count() {
+        // The combat rate keeps its numbers exactly.
+        assert_eq!(base_delay(TickRate::COMBAT), BASE_DELAY_TICKS);
+        assert_eq!(max_delay(TickRate::COMBAT), MAX_DELAY_TICKS);
+        // A 20 Hz town shows others 100 ms behind (not 300), at most 250 ms under loss.
+        assert_eq!(base_delay(TickRate::TOWN), 2);
+        assert_eq!(max_delay(TickRate::TOWN), 5);
+        for hz in [1, 10, 20, 30, 64, 128] {
+            let rate = TickRate::new(hz);
+            assert!(base_delay(rate) >= 2 && max_delay(rate) >= base_delay(rate) + 2);
+        }
     }
 
     #[test]

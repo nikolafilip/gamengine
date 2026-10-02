@@ -13,6 +13,7 @@ pub mod entity;
 pub mod format;
 mod lightmap;
 mod pvs;
+mod stalls;
 mod trace;
 
 use std::path::Path;
@@ -26,6 +27,7 @@ pub use format::{
     LUMP_TEXINFO, LUMP_TEXTURES, LUMP_VERTICES, LUMP_VISIBILITY, Lump, NUM_LUMPS, Version,
 };
 pub use lightmap::{FaceLightmap, LightmapStats};
+pub use stalls::StallGrid;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plane {

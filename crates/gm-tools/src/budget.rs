@@ -228,6 +228,54 @@ pub fn check_model(path: &Path, b: &CharacterBudget) -> Result<Report> {
     })
 }
 
+/// An ingested avatar (MODELS.md 5). The container's own reader is the check the hub and the
+/// client run; the budget numbers are compared again here so that a change to `budgets.toml`
+/// alone is enough to fail an asset.
+pub fn check_gmm(path: &Path, b: &CharacterBudget) -> Result<Report> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut v = Vec::new();
+    let summary = match gm_model::Model::decode(&bytes) {
+        Ok(m) => {
+            let triangles = m.triangles() as u64;
+            if triangles > b.max_triangles {
+                v.push(format!("{triangles} triangles > {}", b.max_triangles));
+            }
+            if u32::from(m.tex_w.max(m.tex_h)) > b.max_texture_size {
+                v.push(format!(
+                    "texture {}x{} exceeds {2}x{2}",
+                    m.tex_w, m.tex_h, b.max_texture_size
+                ));
+            }
+            format!(
+                "tris={triangles} frame={} texture={}x{} gpu_bytes={} bytes={}",
+                gm_model::rig::frame_from_index(m.frame)
+                    .map(gm_model::rig::frame_name)
+                    .unwrap_or("?"),
+                m.tex_w,
+                m.tex_h,
+                m.gpu_bytes(),
+                bytes.len()
+            )
+        }
+        Err(e) => {
+            v.push(format!("not a valid .gmm: {e}"));
+            format!("bytes={}", bytes.len())
+        }
+    };
+    if bytes.len() as u64 > b.max_payload_bytes {
+        v.push(format!(
+            "{} payload bytes > {}",
+            bytes.len(),
+            b.max_payload_bytes
+        ));
+    }
+    Ok(Report {
+        path: path.to_owned(),
+        summary,
+        violations: v,
+    })
+}
+
 pub fn check_bsp(path: &Path, b: &MapBudget) -> Result<Report> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let header =
@@ -277,6 +325,7 @@ pub fn check_paths(paths: &[PathBuf], budgets: &Budgets) -> Result<Vec<Report>> 
                 .map(|e| e.to_ascii_lowercase());
             match ext.as_deref() {
                 Some("glb") | Some("gltf") => reports.push(check_model(p, &budgets.character)?),
+                Some("gmm") => reports.push(check_gmm(p, &budgets.character)?),
                 Some("bsp") => reports.push(check_bsp(p, &budgets.map)?),
                 _ => {}
             }

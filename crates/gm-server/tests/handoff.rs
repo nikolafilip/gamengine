@@ -115,6 +115,9 @@ async fn login_zone_handoff_logout_round_trip() {
         auth_per_minute: 100.0,
         templates: Vec::new(),
         max_coin_grant: 10_000,
+        models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
+        ingest: gm_hub::IngestMode::InProcess,
+        ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
     };
     let hub_task = tokio::spawn(gm_hub::run(
         hub_cfg,
@@ -153,6 +156,7 @@ async fn login_zone_handoff_logout_round_trip() {
             counter_pick: false,
             travel_to: None,
             travel_after_ticks: 0,
+            stall_tile: None,
         },
         play: Duration::from_secs(7),
     }));
@@ -228,6 +232,14 @@ async fn login_zone_handoff_logout_round_trip() {
             r.client.snapshots
         );
         assert_eq!(r.client.decode_errors, 0);
+        // A wandering bot covers ground: it was spawned somewhere it can stand, not at the
+        // origin of a map its saved position does not belong to.
+        assert!(
+            r.travelled > 200.0,
+            "{} moved {:.0} u in its zone",
+            r.name,
+            r.travelled
+        );
     }
     // The position persisted in B is where the bot was, not the spawn's origin.
     let rows = db.characters_of(1).await.unwrap();

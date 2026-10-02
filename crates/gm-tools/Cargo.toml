@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "GPL-3.0-or-later"
-description = "gamengine CLI: map build (ericw-tools wrapper), WAD generation, asset budget lint."
+description = "gamengine CLI: map build (ericw-tools wrapper), WAD generation, asset budget lint, model ingestion, hub tools."
 
 [dependencies]
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 anyhow = { workspace = true }
 gltf = { workspace = true }
 image = { workspace = true, features = ["jpeg"] }
@@ -17,3 +17,8 @@ toml = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 gm-bsp = { workspace = true }
+gm-core = { workspace = true }
+gm-hub-proto = { workspace = true }
+gm-ingest = { workspace = true }
+gm-model = { workspace = true }
+tokio = { workspace = true }

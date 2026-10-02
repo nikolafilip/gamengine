@@ -18,10 +18,10 @@ use gm_core::movement::{MoveInput, MoveVars, PlayerState, player_move, yaw_vecto
 use gm_core::sim::{Input as SimInput, buttons, view_dir};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Hull};
-use gm_core::vocab::Status;
+use gm_model::ModelId;
 use gm_net::client::ClientState;
-use gm_net::control::{BuildChoice, Control};
-use gm_net::snapshot::{EntityKind, flags};
+use gm_net::control::{BuildChoice, Control, StallEntry};
+use gm_net::snapshot::{EntityKind, SpawnInfo};
 use gm_net::transport::fnv1a64;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -29,10 +29,11 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use crate::avatars::{Avatars, Body, OWN, stall_boxes, stall_keeper};
 use crate::hub::{HubLogin, HubSession};
 use crate::net::{NetClient, NetEvent};
 use crate::render::{EntityDraw, Gpu, Renderer, view_proj};
-use crate::stats::{FrameStats, print_bench};
+use crate::stats::{FrameStats, print_bench, print_bench_avatars};
 use crate::world::{self, WorldMesh};
 use crate::{Error, Options};
 
@@ -40,6 +41,8 @@ use crate::{Error, Options};
 const SENSITIVITY: f32 = 0.066;
 const MAX_STEPS_PER_FRAME: u32 = 8;
 const BENCH_YAW_DEG_PER_S: f32 = 20.0;
+/// With a crowd the bench camera swings across it instead of turning away from it.
+const BENCH_CROWD_SWING_DEG: f32 = 22.0;
 /// Third-person camera: behind, slightly right and above the eyes (VOCABULARY.md 9).
 const CAMERA_BACK: f32 = 110.0;
 const CAMERA_RIGHT: f32 = 24.0;
@@ -66,9 +69,17 @@ pub struct Sim {
 
 impl Sim {
     pub fn new(bsp: &Bsp) -> Sim {
-        let (origin, yaw) = bsp
-            .player_start()
-            .unwrap_or((Vec3::new(0.0, 0.0, 64.0), 0.0));
+        Sim::at(bsp, None)
+    }
+
+    /// Start at `start` (`x, y, z, yaw`), or at the map's start.
+    pub fn at(bsp: &Bsp, start: Option<[f32; 4]>) -> Sim {
+        let (origin, yaw) = match start {
+            Some([x, y, z, yaw]) => (Vec3::new(x, y, z), yaw),
+            None => bsp
+                .player_start()
+                .unwrap_or((Vec3::new(0.0, 0.0, 64.0), 0.0)),
+        };
         let st = PlayerState::new(origin);
         Sim {
             rate: TickRate::COMBAT,
@@ -128,7 +139,10 @@ struct Online {
     curr_origin: Vec3,
     last_snapshot: Instant,
     rate: TickRate,
-    names: HashMap<u32, (String, u8)>,
+    /// Everyone in the zone: name, team, avatar model.
+    names: HashMap<u32, (String, u8, Option<ModelId>)>,
+    /// The market: open stalls and their keepers (ECONOMY.md 7).
+    stalls: Vec<StallEntry>,
     kills: u32,
     deaths: u32,
     map_hash: u64,
@@ -141,19 +155,6 @@ struct Online {
 }
 
 impl Online {
-    fn origin(&self) -> Vec3 {
-        let alpha = (self.accumulator / self.rate.dt()).clamp(0.0, 1.0);
-        self.prev_origin.lerp(self.curr_origin, alpha)
-    }
-
-    fn eye(&self) -> Vec3 {
-        let hull = self
-            .client
-            .as_ref()
-            .map_or(Hull::Player, |c| c.mover.mv.hull);
-        self.origin() + Vec3::new(0.0, 0.0, hull.eye_height())
-    }
-
     fn build_name_of(&self, pack: &ContentPack, build: &gm_core::build::Build) -> String {
         pack.builds
             .iter()
@@ -246,6 +247,7 @@ struct Active {
     config: wgpu::SurfaceConfiguration,
     gpu: Gpu,
     renderer: Renderer,
+    avatars: Avatars,
     current_leaf: Option<usize>,
 }
 
@@ -269,6 +271,11 @@ struct App {
     exit_requested: bool,
     acquire_timeouts: u32,
     entities: Vec<EntityDraw>,
+    /// Bodies to draw this frame (players, the own body in third person).
+    bodies: Vec<Body>,
+    /// Models the zone revoked since the last frame.
+    revoked: Vec<ModelId>,
+    bench_yaw0: f32,
     /// The aim resolved by the last third-person tick, for the HUD.
     aim: (f32, f32),
     /// A map to switch to before the next frame (a zone change).
@@ -290,7 +297,7 @@ pub fn run(opts: Options) -> Result<(), Error> {
         .iter()
         .filter(|r| r.index_count > 0)
         .count();
-    let sim = Sim::new(&bsp);
+    let sim = Sim::at(&bsp, opts.start);
     // Through the hub: log in and get a ticket first; the ticket names the zone, its address
     // and its certificate. The map comes from `Welcome` and is loaded then.
     let (connect, cert, token, hub, zone_name) = match (opts.hub, opts.connect) {
@@ -352,6 +359,7 @@ pub fn run(opts: Options) -> Result<(), Error> {
                 last_snapshot: Instant::now(),
                 rate: TickRate::COMBAT,
                 names: HashMap::new(),
+                stalls: Vec::new(),
                 kills: 0,
                 deaths: 0,
                 map_hash,
@@ -391,9 +399,13 @@ pub fn run(opts: Options) -> Result<(), Error> {
         exit_requested: false,
         acquire_timeouts: 0,
         entities: Vec::new(),
+        bodies: Vec::new(),
+        revoked: Vec::new(),
+        bench_yaw0: 0.0,
         aim: (0.0, 0.0),
         pending_map: None,
     };
+    app.bench_yaw0 = app.sim.yaw;
     event_loop.run_app(&mut app)?;
     if let Some(o) = &mut app.online {
         o.net.close();
@@ -404,9 +416,11 @@ pub fn run(opts: Options) -> Result<(), Error> {
     }
 
     let report = app.stats.report();
-    if let (Some(_), Some(info)) = (app.opts.bench_frames, &app.adapter_info) {
+    let scripted = app.opts.bench_frames.is_some() || app.opts.seconds > 0.0;
+    if let (true, Some(info)) = (scripted, &app.adapter_info) {
         let faces = app.active.as_ref().map_or(0, |a| a.renderer.faces_drawn);
-        print_bench(&report, info, "windowed", faces, app.faces_total);
+        let draws = app.active.as_ref().map_or(1, |a| a.renderer.draw_calls);
+        print_bench(&report, info, "windowed", faces, app.faces_total, draws);
     } else if report.frames > 0 {
         let (_, peak) = crate::stats::rss_bytes();
         log::info!(
@@ -416,6 +430,9 @@ pub fn run(opts: Options) -> Result<(), Error> {
             peak,
             peak as f64 / 1048576.0
         );
+    }
+    if let Some(a) = &app.active {
+        print_bench_avatars(&report, &a.avatars, &a.renderer);
     }
     if let Some(o) = &app.online
         && let Some(c) = &o.client
@@ -437,43 +454,6 @@ pub fn run(opts: Options) -> Result<(), Error> {
         return Err("exited on error".into());
     }
     Ok(())
-}
-
-/// Stable, saturated colour per entity id.
-fn id_color(id: u32) -> [f32; 4] {
-    let h = (id.wrapping_mul(2654435761) >> 8) as f32 / (1u32 << 24) as f32 * 6.0;
-    let c = 0.9;
-    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
-    let (r, g, b) = match h as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    [r + 0.1, g + 0.1, b + 0.1, 1.0]
-}
-
-/// Team colours: own side cool, the other side warm; no team keeps the id colour.
-fn player_color(id: u32, team: u8, my_team: u8, alive: bool, status: u16) -> [f32; 4] {
-    if !alive {
-        return [0.25, 0.25, 0.25, 1.0];
-    }
-    let mut c = if team == 0 || my_team == 0 {
-        id_color(id)
-    } else if team == my_team {
-        [0.25, 0.45, 1.0, 1.0]
-    } else {
-        [1.0, 0.3, 0.2, 1.0]
-    };
-    // Auras: a staggered or frozen body reads darker, a hasted one brighter.
-    if status & (1 << Status::Stagger.index()) != 0 || status & (1 << Status::Root.index()) != 0 {
-        c = [c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, 1.0];
-    } else if status & (1 << Status::Haste.index()) != 0 {
-        c = [c[0].min(1.0) + 0.3, c[1] + 0.3, c[2] + 0.3, 1.0];
-    }
-    c
 }
 
 /// Third-person camera position: pulled in by a point trace so it never enters a wall.
@@ -562,6 +542,15 @@ impl App {
         {
             o.net.send_control(Control::Travel(target.clone()));
             o.respec_note = format!("travel to {target} requested");
+        }
+        // B opens a stall on the market tile underfoot, N closes the own stall.
+        if self.input.just_pressed.remove(&KeyCode::KeyB) {
+            o.net.send_control(Control::StallOpen);
+            o.respec_note = "stall requested".into();
+        }
+        if self.input.just_pressed.remove(&KeyCode::KeyN) {
+            o.net.send_control(Control::StallClose);
+            o.respec_note = "closing the stall".into();
         }
         let keys = [KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4];
         for (i, k) in keys.iter().enumerate() {
@@ -684,8 +673,46 @@ impl App {
                         o.respec_note = format!("travel refused: {reason}");
                         log::info!("{}", o.respec_note);
                     }
-                    Control::PlayerInfo { id, name, team } => {
-                        o.names.insert(id, (name, team));
+                    Control::Roster(players) => {
+                        o.names.clear();
+                        for p in players {
+                            o.names.insert(p.id, (p.name, p.team, p.model));
+                        }
+                    }
+                    Control::PlayerInfo {
+                        id,
+                        name,
+                        team,
+                        model,
+                    } => {
+                        o.names.insert(id, (name, team, model));
+                    }
+                    Control::ModelRevoked(id) => {
+                        for entry in o.names.values_mut() {
+                            if entry.2 == Some(id) {
+                                entry.2 = None;
+                            }
+                        }
+                        for stall in &mut o.stalls {
+                            if stall.model == Some(id) {
+                                stall.model = None;
+                            }
+                        }
+                        self.revoked.push(id);
+                    }
+                    Control::Stalls(stalls) => o.stalls = stalls,
+                    Control::StallOpened(stall) => {
+                        log::info!("{} opened a stall", stall.owner);
+                        o.stalls.retain(|s| s.id != stall.id);
+                        o.stalls.push(stall);
+                    }
+                    Control::StallClosed(id) => o.stalls.retain(|s| s.id != id),
+                    Control::StallResult(result) => {
+                        o.respec_note = match result {
+                            Ok(()) => "stall: done".into(),
+                            Err(e) => format!("stall refused: {e}"),
+                        };
+                        log::info!("{}", o.respec_note);
                     }
                     Control::PlayerLeft(id) => {
                         o.names.remove(&id);
@@ -701,7 +728,7 @@ impl App {
                         let name = |id: u32| {
                             o.names
                                 .get(&id)
-                                .map(|(n, _)| n.clone())
+                                .map(|(n, _, _)| n.clone())
                                 .unwrap_or_else(|| format!("#{id}"))
                         };
                         log::info!("{} killed {}", name(killer), name(victim));
@@ -735,9 +762,11 @@ impl App {
                     o.client = None;
                     o.pack = None;
                     o.names.clear();
+                    o.stalls.clear();
                     o.zone_name = zone;
                     o.respec_note = format!("travelling to {}", o.zone_name);
                     self.entities.clear();
+                    self.bodies.clear();
                 }
                 Err(e) => log::error!("travel failed: {e}"),
             }
@@ -781,31 +810,43 @@ impl App {
         let extra = o.last_snapshot.elapsed().as_secs_f32() / dt;
         let t = c.render_tick(extra);
         self.entities.clear();
+        self.bodies.clear();
         let my_team = o.team;
+        let eye = {
+            let alpha = (o.accumulator / o.rate.dt()).clamp(0.0, 1.0);
+            o.prev_origin.lerp(o.curr_origin, alpha) + Vec3::Z * c.mover.mv.hull.eye_height()
+        };
+        let camera = match viewport {
+            Viewport::First => eye,
+            Viewport::Third => third_person_camera(bsp, eye, self.sim.yaw, self.sim.pitch),
+        };
         for e in c.others_at(t) {
             match e.kind {
                 EntityKind::Player => {
-                    let alive = e.alive();
-                    let mins = e.pos + Hull::Player.mins();
-                    let mut maxs = e.pos + Hull::Player.maxs();
-                    if !alive {
-                        maxs.z = mins.z + 12.0;
-                    }
-                    let mut color = player_color(e.id, e.team(), my_team, alive, e.status);
-                    if alive && e.flags & flags::GUARDING != 0 {
-                        color = [color[0], color[1], color[2].max(0.6), 1.0];
-                    }
-                    self.entities.push(EntityDraw { mins, maxs, color });
-                    // A small box shows where the body is facing.
-                    if alive {
-                        let (fwd, _) = yaw_vectors(e.yaw);
-                        let nose = e.pos + fwd * 18.0 + Vec3::Z * 20.0;
-                        self.entities.push(EntityDraw {
-                            mins: nose - Vec3::splat(3.0),
-                            maxs: nose + Vec3::splat(3.0),
-                            color: [1.0, 1.0, 1.0, 1.0],
-                        });
-                    }
+                    let SpawnInfo::Player {
+                        frame,
+                        team,
+                        aspects,
+                        armour,
+                    } = e.spawn
+                    else {
+                        continue;
+                    };
+                    self.bodies.push(Body {
+                        key: e.id,
+                        origin: e.pos,
+                        yaw: e.yaw,
+                        pitch: e.pitch,
+                        anim: e.anim,
+                        frame,
+                        armour,
+                        aspects,
+                        team,
+                        friendly: my_team != 0 && team == my_team,
+                        status: e.status,
+                        model: o.names.get(&e.id).and_then(|n| n.2),
+                        distance: (e.pos - camera).length(),
+                    });
                 }
                 EntityKind::Projectile => {
                     self.entities.push(EntityDraw {
@@ -816,7 +857,7 @@ impl App {
                 }
                 EntityKind::Area => {
                     let r = match e.spawn {
-                        gm_net::snapshot::SpawnInfo::Area { radius, .. } => radius as f32,
+                        SpawnInfo::Area { radius, .. } => radius as f32,
                         _ => 32.0,
                     };
                     self.entities.push(EntityDraw {
@@ -828,24 +869,45 @@ impl App {
             }
         }
         c.prune(t);
-        let alive = c.own_alive || !c.synced();
-        let eye = o.eye();
+        // The market: every stall with its keeper, who never moves and costs no snapshot.
+        for stall in &o.stalls {
+            stall_boxes(stall, &mut self.entities);
+            // While somebody stands behind the counter (the owner, usually), that body is
+            // the keeper; the stand-in is drawn when the tile is empty.
+            let at = Vec3::from(stall.pos);
+            let attended = self
+                .bodies
+                .iter()
+                .any(|b| (b.origin - at).truncate().length() < 40.0)
+                || (o.curr_origin - at).truncate().length() < 40.0;
+            if !attended {
+                self.bodies.push(stall_keeper(stall, camera));
+            }
+        }
         match viewport {
             Viewport::First => Some((eye, self.sim.yaw, self.sim.pitch)),
             Viewport::Third => {
-                // Draw the own body too.
-                let origin = o.origin();
-                let mins = origin + Hull::Player.mins();
-                let mut maxs = origin + Hull::Player.maxs();
-                if !alive {
-                    maxs.z = mins.z + 12.0;
-                }
-                self.entities.push(EntityDraw {
-                    mins,
-                    maxs,
-                    color: [0.85, 0.85, 0.9, 1.0],
+                // The own body, posed by the server's animation state.
+                let build = &c.sheet.build;
+                self.bodies.push(Body {
+                    key: OWN,
+                    origin: eye - Vec3::Z * c.mover.mv.hull.eye_height(),
+                    yaw: self.sim.yaw,
+                    pitch: self.sim.pitch,
+                    anim: if c.synced() {
+                        c.own_anim
+                    } else {
+                        gm_core::sim::anim::IDLE
+                    },
+                    frame: gm_model::rig::frame_index(build.frame),
+                    armour: build.armour as u8,
+                    aspects: build.aspects.0,
+                    team: my_team,
+                    friendly: true,
+                    status: c.mover.statuses.mask(),
+                    model: o.names.get(&c.my_id).and_then(|n| n.2),
+                    distance: 0.0,
                 });
-                let camera = third_person_camera(bsp, eye, self.sim.yaw, self.sim.pitch);
                 Some((camera, self.sim.yaw, self.sim.pitch))
             }
         }
@@ -868,12 +930,7 @@ impl App {
             .filter(|r| r.index_count > 0)
             .count();
         if let Some(a) = &mut self.active {
-            a.renderer = Renderer::new(
-                &a.gpu,
-                a.config.format,
-                &mesh,
-                (a.config.width, a.config.height),
-            );
+            a.renderer.set_world(&a.gpu, &mesh);
             a.current_leaf = None;
         } else {
             self.mesh = Some(mesh);
@@ -894,7 +951,10 @@ impl App {
 
         // Mouse look is applied per frame for responsiveness; movement uses it at tick time.
         let bench = self.opts.bench_frames.is_some();
-        if bench {
+        if bench && self.opts.crowd > 0 {
+            let t = self.started.elapsed().as_secs_f32();
+            self.sim.yaw = self.bench_yaw0 + BENCH_CROWD_SWING_DEG * (t * 0.7).sin();
+        } else if bench {
             self.sim.yaw += BENCH_YAW_DEG_PER_S * frame_dt;
         } else if self.grabbed {
             self.sim.yaw -= self.input.mouse_dx * SENSITIVITY;
@@ -922,14 +982,31 @@ impl App {
             self.input.just_pressed.clear();
             self.sim.advance(&self.bsp, &input, frame_dt);
             self.entities.clear();
+            self.bodies.clear();
             match self.viewport {
                 Viewport::First => (self.sim.eye(), self.sim.yaw, self.sim.pitch),
                 Viewport::Third => {
-                    let origin = self.sim.origin();
-                    self.entities.push(EntityDraw {
-                        mins: origin + Hull::Player.mins(),
-                        maxs: origin + Hull::Player.maxs(),
-                        color: [0.85, 0.85, 0.9, 1.0],
+                    let v = self.sim.curr.velocity;
+                    self.bodies.push(Body {
+                        key: OWN,
+                        origin: self.sim.origin(),
+                        yaw: self.sim.yaw,
+                        pitch: self.sim.pitch,
+                        anim: if !self.sim.curr.on_ground {
+                            gm_core::sim::anim::AIR
+                        } else if v.truncate().length() > 20.0 {
+                            gm_core::sim::anim::RUN
+                        } else {
+                            gm_core::sim::anim::IDLE
+                        },
+                        frame: 1,
+                        armour: 0,
+                        aspects: 0,
+                        team: 0,
+                        friendly: true,
+                        status: 0,
+                        model: None,
+                        distance: 0.0,
                     });
                     (
                         third_person_camera(
@@ -993,16 +1070,53 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let aspect = a.config.width as f32 / a.config.height.max(1) as f32;
+        for id in self.revoked.drain(..) {
+            a.avatars.revoke(&id, &mut a.renderer.characters);
+        }
+        // The own avatar is the last thing the disk cache lets go of (MODELS.md 8).
+        if let Some(o) = &self.online
+            && let Some(c) = &o.client
+            && let Some(id) = o.names.get(&c.my_id).and_then(|n| n.2)
+        {
+            a.avatars.pin(&id);
+        }
+        a.avatars.begin_frame();
+        for body in &self.bodies {
+            a.avatars.push(
+                body,
+                frame_dt,
+                &self.bsp,
+                &a.renderer.characters,
+                &mut self.entities,
+            );
+        }
+        a.avatars.push_crowd(
+            self.started.elapsed().as_secs_f32(),
+            frame_dt,
+            camera,
+            &self.bsp,
+            &a.renderer.characters,
+            &mut self.entities,
+        );
         a.renderer.render(
             &a.gpu,
             &view,
             view_proj(camera, cam_yaw, cam_pitch, aspect),
             &self.entities,
+            &a.avatars.draws,
         );
+        a.avatars.end_frame(&a.gpu, &mut a.renderer.characters);
         a.window.pre_present_notify();
         a.gpu.queue.present(frame);
-        self.stats.frame();
         self.acquire_timeouts = 0;
+        // A bench counts frames once every model its crowd wears is on the GPU.
+        if bench
+            && a.avatars.cache.as_ref().is_some_and(|c| c.pending() > 0)
+            && self.started.elapsed().as_secs_f32() < 60.0
+        {
+            return;
+        }
+        self.stats.frame();
         if !bench && self.opts.max_fps > 0 {
             // Cheap CPU-side cap so an uncapped present mode does not spin the GPU at 100%.
             let budget = std::time::Duration::from_secs_f64(1.0 / self.opts.max_fps as f64);
@@ -1034,8 +1148,9 @@ impl App {
                                 c.delay_ticks,
                             )
                         });
+                    let models = a.avatars.stats();
                     format!(
-                        "gamengine [{}{} team {} {vp}]  hp {hp}/{max_hp}  st {st:.0}  fo {fo:.0}  k {} d {}  {} players  delay {delay}  corr {corr}  {:.0} fps  {}",
+                        "gamengine [{}{} team {} {vp}]  hp {hp}/{max_hp}  st {st:.0}  fo {fo:.0}  k {} d {}  {} players  {} stalls  {} models  delay {delay}  corr {corr}  {:.0} fps  {}",
                         if o.zone_name.is_empty() {
                             String::new()
                         } else {
@@ -1046,6 +1161,8 @@ impl App {
                         o.kills,
                         o.deaths,
                         o.names.len(),
+                        o.stalls.len(),
+                        models.ready,
                         r.fps_avg,
                         o.respec_note
                     )
@@ -1136,7 +1253,21 @@ impl ApplicationHandler for App {
                 config.present_mode
             );
             let mesh = self.mesh.take().ok_or("world mesh already consumed")?;
-            let renderer = Renderer::new(&gpu, config.format, &mesh, (config.width, config.height));
+            let mut renderer =
+                Renderer::new(&gpu, config.format, &mesh, (config.width, config.height));
+            // Online, models come from the hub the session is logged in to.
+            let source = self
+                .online
+                .as_ref()
+                .and_then(|o| o.hub.as_ref())
+                .map(|h| h.model_source());
+            let avatars = Avatars::new(
+                &gpu,
+                &mut renderer.characters,
+                &self.opts,
+                &self.bsp,
+                source,
+            )?;
             self.adapter_info = Some(gpu.info.clone());
             Ok(Active {
                 window: window.clone(),
@@ -1144,6 +1275,7 @@ impl ApplicationHandler for App {
                 config,
                 gpu,
                 renderer,
+                avatars,
                 current_leaf: None,
             })
         })();

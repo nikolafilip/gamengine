@@ -143,7 +143,7 @@ bolt are the same projectile with different parameters. Genre = camera + control
 | Character mesh | 2,500–3,500 tris |
 | Character texture | one 1024×1024 atlas, hand-painted diffuse, 1 draw call per character |
 | Skeleton | ≤ 32 bones |
-| Per-character payload | ~1–1.5 MB (KTX2/Basis on disk is smaller; this is the ceiling) |
+| Per-character payload | ~1–1.5 MB ceiling. Measured in Phase 6 for an avatar at the triangle and atlas ceiling: 382 KB on disk and on the wire (`.gmm`, BC1 + zlib), 780 KB on the GPU |
 | Scene | 200 characters ≈ 400k tris, ≈ 200 MB texture VRAM worst case desktop; mobile cache 500 MB |
 | Stalls | instanced, dormant, billboard LOD, grid-snapped |
 
@@ -155,11 +155,23 @@ real iGPU on a self-hosted runner), bytes/player/second under a 200-bot swarm, p
 Windows/Linux/macOS via wgpu+winit. Browser via WASM + WebGPU + WebTransport is a priority on-ramp.
 Android later (third-person and tactical viewports suit touch; FPS does not). Consoles skipped.
 
-### 2.9 Custom model streaming [DECIDED]
-Ingestion: strip unused bones/morphs/metadata, resample to the 1024 atlas, encode KTX2/Basis, emit `.glb`,
-reject over-budget. Addressing by SHA-256. Client fixed-cap LRU (2 GB desktop / 500 MB mobile), own +
-guild avatars pinned. Tick-0 silhouette mannequin colored by armor weight, custom mesh swaps in async.
-Server hitbox from archetype frame, never from mesh.
+### 2.9 Custom model streaming [DECIDED; container CORRECTED in Phase 6]
+Ingestion: strip unused bones/morphs/metadata, resample to the 1024 atlas, re-encode, reject over-budget.
+Addressing by SHA-256. Client fixed-cap LRU (2 GB desktop / 500 MB mobile), own + guild avatars pinned.
+Tick-0 silhouette mannequin colored by armor weight, custom mesh swaps in async. Server hitbox from
+archetype frame, never from mesh.
+
+**[CORRECTED]** The first version said "encode KTX2/Basis, emit `.glb`". glTF stays the *upload* format;
+what the hub stores and clients fetch is `.gmm`, our own container (quantised vertices, BC1 mip chain,
+zlib; `docs/MODELS.md` 5). Measured with the workspace's release profile before deciding: parsing glTF in
+the client costs +370 KB of binary and the Basis transcoder +990 KB (plus a C++ toolchain for every
+target), against +30 KB for the container with inflate and SHA-256; the client had 1.94 MiB left under
+its 10 MiB cap. BC1 is what 2.6 already assumes for VRAM, every desktop GPU samples it natively, and the
+client decodes it to RGBA where it is not supported. Mobile (ETC2/ASTC) is a second ingestion output in
+Phase 8: the hub keeps every source upload, so nothing is uploaded twice. The same section's "colored by
+armor weight" has a consequence the first version missed: a custom model hides the mannequin's tint, so
+armor class is also carried by the gait of the shared animation set and aspects by a ring the client
+draws at the feet (MODELS.md 9).
 
 ---
 
@@ -322,17 +334,22 @@ gamengine/
                  Transport abstraction over quinn (native) and wtransport (wasm).
     gm-client    winit, wgpu renderer, input, prediction/reconciliation, interpolation, audio (kira),
                  dev UI (egui), game HUD, asset cache (LRU), viewport modules (fps, tps, tactical).
+    gm-model     avatar models as the client needs them: the standard rig, the `.gmm` container and its
+                 strict reader, the shared animation set, the mannequin. Small on purpose (the client
+                 links it); nothing here parses an upload.
+    gm-ingest    upload ingestion: glTF validated against the budgets and the frame envelope, re-encoded
+                 to `.gmm`. Linked by the hub (run in a sandboxed worker process) and by gm-tools.
     gm-server    tokio zone process: tick loop, interest management (PVS + distance rates), lag comp for
                  melee, projectile sim, AI companions, loot/contract state machines, zone handoff.
     gm-hub       account/auth service, character DB, shard registry, escrow ledger, asset ingestion API.
     gm-hub-proto hub messages, entry tokens and the hub connection (what zones, bots and the client link).
     gm-ai        companion behavior trees (tank/heal/dps/scout) driving gm-core inputs like a player.
-    gm-tools     CLI: model ingestion (gltf → glb + KTX2, budget lint), map build wrapper (ericw-tools),
-                 budget checker used by CI.
+    gm-tools     CLI: model tools (ingest locally, template, synthetic avatars, upload, wear), moderation
+                 tools, map build wrapper (ericw-tools) and map generators, budget checker used by CI.
     gm-bot       headless client for load tests and soak tests.
   assets/        maps (.map source + built .bsp/.lit + gamengine.fgd), textures (generated palette + WAD),
                  content (abilities + builds, TOML), later models/audio
-  docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, BUILDING.md
+  docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, BUILDING.md
   PLAN.md        this file stays at the repository root (it is the entry point; README links it)
   budgets.toml   every number CI enforces; read by gm-tools and scripts/
   scripts/       CI gates and the pinned ericw-tools fetch
@@ -342,14 +359,14 @@ gamengine/
 ### 11.2 Key crates
 | Concern | Crate | Note |
 |---|---|---|
-| Rendering | `wgpu`, `winit`, `glam`, `bytemuck` | forward renderer, lightmap + diffuse, skinned meshes in a storage buffer |
+| Rendering | `wgpu`, `winit`, `glam`, `bytemuck` | forward renderer, lightmap + diffuse; skinned characters, one draw call each, their 24 matrices in a block of a shared uniform buffer selected by dynamic offset (**[CORRECTED]** from "a storage buffer": uniform buffers with dynamic offsets exist on every backend including WebGL2-class ones, and a block is 1.6 KB) |
 | ECS | `hecs` | fallback `bevy_ecs`. **Not used yet:** the Phase 2 zone holds players in a `BTreeMap` and projectiles in a `Vec` (deterministic iteration, a handful of entity kinds); `hecs` enters when Phase 3 adds statuses, areas and many entity kinds |
 | Async/server | `tokio` | one runtime per zone process |
 | Transport | `quinn` (native), `wtransport` (browser) | QUIC datagrams + streams; the hub API is the same QUIC with one request per stream (HUB.md 3), no HTTP stack in the client |
 | Serialization | hand-rolled bit packing for snapshots; `bitcode` for reliable messages | snapshots must be byte-tight |
 | DB | `sqlx` 0.9 + Postgres, embedded sqlx migrations | typed location columns with a check constraint (HUB.md 4); items normalized, components as rows, escrow as transactions (Phase 5) |
 | Auth | `argon2`, signed entry tokens (`ed25519-dalek`) | hub issues, zones verify offline; 60 s, single use, zone-bound (HUB.md 3.1). **[CORRECTED]** not JWT: `bitcode` payload + raw signature, no header, no algorithm negotiation |
-| Models | `gltf`, `ktx2`, `basis-universal` | ingestion tool |
+| Models | `gltf`, `image`, `texpresso` (BC1), `miniz_oxide`, `sha2` | **[CORRECTED]** (2.9): `gltf`, `image` and `texpresso` only in `gm-ingest` (hub worker and tools); the client links `miniz_oxide` and `sha2`. No `ktx2`, no `basis-universal`; `lru` dropped (the caches order by file time and by last frame drawn) |
 | Audio | `kira` | |
 | Dev UI | `egui` + `egui-wgpu` | not shipped in HUD |
 | Testing | `turmoil` (simulated network for tokio), `proptest`, `criterion` | |
@@ -398,7 +415,12 @@ gamengine/
 - `stalls` (owner, tile_id, expiry, listings with escrowed buy-orders)
 - `hires` (avatar, window expiry, hire count)
 - `contracts` (buyer, party, instance, price, state: open | active | paid | refunded)
-- `models` (sha256, owner, status: active | takedown, generic_fallback_frame)
+- `models` (sha256 of the ingested bytes, frame, status: pending | active | rejected | takedown, sha256 of the
+  upload, uploader, decision and reason), `model_holders` (who may wear it, with the terms version they
+  certified), `model_events` (the audit trail), `characters.model` (MODELS.md 6.1). **[CORRECTED]** from
+  "(sha256, owner, status: active | takedown, generic_fallback_frame)": a model has holders, not one owner
+  (two players may upload the same file), a moderation queue needs `pending` and `rejected`, and the
+  fallback frame is the model's own frame
 - `ledger` (every coin movement, for money-supply monitoring)
 All item and coin movements are DB transactions; escrow states are enforced by constraints, not by code paths.
 
@@ -407,8 +429,10 @@ All item and coin movements are DB transactions; escrow states are enforced by c
    `.bsp` committed to `assets/maps/built`. Lightmap resolution and light entities are the whole lighting model.
 2. Base characters: modular skeleton frames (colossus, striker, caster, infiltrator) with a shared 32-bone rig
    and a shared animation set; armor weight classes as texture/mesh overlays on the same rig.
-3. Player uploads: `gm-hub` accepts glTF/glb; `gm-tools ingest` validates tris/bones/atlas, re-encodes, stores
-   by hash in object storage; CDN in front.
+3. Player uploads: `gm-hub` accepts a `.glb`; `gm-ingest` (in a worker process of the hub; the same code as
+   `gm-tools model ingest`) validates budgets, rig, pose and the frame envelope and re-encodes to `.gmm`; the
+   hub verifies the worker's output from its bytes and stores it by hash (a directory today, object storage
+   and a CDN at deployment).
 4. Budget lint runs in CI on every asset in the repo.
 
 ### 11.6 Development process
@@ -434,8 +458,8 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 2 | `gm-net` + `gm-server`: 16 players, prediction, reconciliation, interpolation, melee lag comp, projectiles, collision, FF | playable at 150 ms / 3% loss in `turmoil`; bytes/player < 30 KB/s. **Done 2026-09-30** (11.10) |
 | 3 | Point-buy characters, type matrix, FPS + third-person viewports, PVS culling | one arena map, 8v8 playtest, a build can be countered by re-speccing. **Done 2026-10-01** (11.10) |
 | 4 | Hub: accounts, persistence, zones, handoff, 200-bot swarm | 200 bots on one zone under CPU budget; login → zone → handoff → logout round trip. **Done 2026-10-01** (11.10) |
-| 5 | Economy: stalls, escrow contracts, component drops with corrected split, crafting, decomposition, account storage caps, guild halls, tavern hires, ledger | every coin/item movement is a DB transaction; scam test suite passes (mutation lock, escrow, floors) |
-| 6 | Custom models: ingestion, hash cache, LRU, silhouette fallback, takedown flag, moderation queue | 100 unique uploaded avatars in a town at 60 fps on iGPU, no disk growth past cap |
+| 5 | Economy: stalls, escrow contracts, component drops with corrected split, crafting, decomposition, account storage caps, guild halls, tavern hires, ledger | every coin/item movement is a DB transaction; scam test suite passes (mutation lock, escrow, floors). **Done 2026-10-01** (11.10) |
+| 6 | Custom models: ingestion, hash cache, LRU, silhouette fallback, takedown flag, moderation queue | 100 unique uploaded avatars in a town at 60 fps on iGPU, no disk growth past cap. **Done 2026-10-01** (11.10) |
 | 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars |
 | 8 | WASM/WebGPU/WebTransport build | browser client joins the same zone as native clients |
 | 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account |
@@ -636,9 +660,102 @@ class):
   hire window is recorded but no avatar is spawned; item edges are validated but not read by the
   simulation.
 
+**2026-10-01, Phase 6 done** (same machine, 1280 × 720, RADV; all numbers measured with the final
+build, none estimated; ranges are the spread over repeated runs):
+- `docs/MODELS.md` v1 is the contract, reviewed before coding (8 findings accepted, 1 in part, 1 as
+  a cut, 3 rejected). A creator uploads a glTF `.glb` **for one frame**, on the standard rig of 24
+  named bones in T-pose, with no animations: the animation set is the game's, shared by every
+  model and every mannequin, so a custom avatar cannot hide a windup. Ingestion checks budgets,
+  rig, pose and the **envelope** (head height within 8% of the frame's, a bounding box, and a
+  rasterised coverage of 50–150% of the frame's mannequin inside the hitbox rectangle: no
+  invisible avatars, no infiltrator dressed as a colossus) and re-encodes to `.gmm` (2.9
+  [CORRECTED]). An avatar at the ceiling (3,486 triangles, 1024² atlas) is **1.17 MB as uploaded,
+  382 KB stored and on the wire, 780 KB on the GPU**.
+- New crates: `gm-model` (rig, container, strict reader, procedural animation set, mannequin;
+  what the client links) and `gm-ingest` (glTF reading with its own bounds-checked accessor
+  reader, texture resampling, BC1, the rasteriser, the envelope; hub worker and tools only).
+- Hub: content-addressed store, `models` / `model_holders` / `model_events`, upload → pending →
+  active | rejected, takedown and reinstatement, strikes, slots and quotas, the audit trail;
+  ingestion in a child process under rlimits (2 GiB, 20 s CPU, 30 s wall clock), whose output the
+  hub **verifies from the bytes** and whose preview the hub draws itself; uploads and downloads as
+  raw bytes on the request's stream; Cubic on the hub endpoint. Tools: `gm-tools model`,
+  `gm-tools mod`, `gm-hub --grant-moderator`.
+- Zone: model ids ride the reliable stream (`Roster`, `PlayerInfo.model`, `ModelRevoked`), never
+  snapshots; a takedown reaches every client through its zone within the tick. Client: a skinned
+  character renderer (one draw call each), mannequins from the tick an entity appears, a model
+  cache with a hard disk cap (LRU, pins) and a hard GPU cap, four loader threads, hash checked
+  before parsing.
+- **The town** (`assets/maps/src/town.map`, generated by `gm-tools map gen-town`; 255 KB `.bsp` +
+  173 KB `.lit`, 1,236 faces, 128 spawns, sunlight through sky brushes) with a market of 30 stall
+  tiles: the first place the economy shows in the world. Stalls are opened **through the zone**
+  (it knows where a body stands; ECONOMY.md 7), persist for their 48 h, and are drawn with their
+  keeper (the owner's frame, armour and avatar) whether the owner is online or not.
+- **Acceptance** (`scripts/check-avatars.sh`, `budgets.toml [avatars]`), 100 distinct avatars at
+  the ceiling in the town:
+  - Offline, uncapped: **564–678 fps** average over eight runs (99th percentile frame 2.0–2.6 ms),
+    348,600 triangles in 102 draw calls, client
+    peak RSS **141 MB**, 78.0 MB of models on the GPU. With a 32 MiB cache cap against 38.2 MB of
+    models the directory, sampled every 50 ms, never exceeded **33,218,927 of 33,554,432 bytes**;
+    87 models stayed on disk and all 100 on screen. Most windowed runs have one stalled frame
+    of 16–47 ms about two seconds after the window opens (the bench now prints which frame was
+    the slowest); it also happens with mannequins only, never offscreen and not in the 25 s
+    online runs (worst frame 12 ms), so it is taken to be the window system and is not chased.
+  - Online, the real path (100 accounts each uploading its `.glb` through the hub's worker, a
+    moderator approving, a town zone at 20 Hz, 100 bots wearing them and strolling, 12 stalls
+    opened, the windowed client): **242 fps** (the client's 250 fps cap), 99th percentile
+    6.1–6.2 ms, worst frame 12 ms, peak RSS **146–148 MB**; all 100 models fetched from the hub
+    (38,159,385 bytes, 381,594 each); cache directory at most 33,295,020 bytes; a takedown while
+    the client watched left 99 models drawn and no copy on its disk. Zone → client **5.1–5.8 KB/s
+    per player** while the crowd leaves the spawns (4.0 KB/s once it has spread), 1.8–2.1 KB/s up;
+    zone tick 2.0–2.5 ms mean with 101 players. At 64 Hz the same crowd costs 13.4 KB/s down and
+    5.6 KB/s up. The worst of the 100 bots had 0 or 1 unexplained correction in its minute over
+    three runs (the netcode budget is one per 10 s); the viewer had none.
+  - More bodies: 200 (each model worn twice, 697,200 triangles) **395 fps**; 100 mannequins
+    650 fps; the empty town 4,818 fps; the arena with the same 100 avatars 1,020 fps; headless
+    offscreen 478 fps with 170 MB peak RSS. CI runs 48 avatars against a 16 MiB cap under
+    software Vulkan (29 fps on llvmpipe, not gated).
+  - Throughput: generating and ingesting 100 avatars takes 37–44 s (0.4 s each, generation
+    included); uploading them through the hub, worker, verification and approval 37–50 s.
+- Tests: 210 in the workspace, all green; among them the hub against real Postgres with the real
+  worker process (upload to takedown; workers that crash, hang, are missing or lie), ingestion
+  against hostile files (truncations, byte flips, bombs, an instanced index bomb, 200 random
+  valid containers through `verify`), the cache (cap under concurrent writers, two processes on
+  one directory, back-off, a takedown racing a download) and `crates/gm-server/tests/town.rs`
+  (six bots with models in the town, two racing for one tile, a takedown, a late joiner).
+- Reviews (MODELS.md 13): two rounds of independent code review, 14 findings accepted and fixed
+  (an instancing bomb in the upload parser, slow senders holding the ingestion workers, statuses
+  of one upload splitting under races, the fetch back-off that never doubled, takedowns undone
+  by a download in flight, hub request floods through the zone), 2 rejected; the author's own
+  pass found the cache overshooting its cap by 405,512 bytes with four loaders and the hub
+  trusting its worker.
+- Fixed on the way, from earlier phases: a character's saved position was applied on whatever
+  map it entered next, so first entries and arrivals from another zone started at foreign
+  coordinates, usually inside a wall, and could not move (Phase 4; HUB.md 3.2, migration 0004;
+  the handoff test now requires the bots to cover ground); `check-perf.sh --gate-fps` could
+  never pass (it parsed a line that does not exist; Phase 1); a reliable message to a client
+  with a full queue was dropped silently (now the client is disconnected); the interpolation
+  delay was six ticks at any rate, 300 ms in a 20 Hz town (now a time: 2 ticks, PROTOCOL.md 7.3);
+  `Travel` could flood the hub; a claimed ghost was announced as gone twice.
+- Binaries (release, LTO): `gm-client` **8,810,448 bytes (8.40 MiB)**, +354,856 for `gm-model`,
+  the character renderer, the cache, SHA-256 and inflate; baseline updated. `gm-hub` 7.03 MB
+  (+1.34 MB: glTF, image decoding and BC1 for the worker), `gm-server` 4.90 MB, `gm-bot` 3.82 MB,
+  `gm-tools` 4.55 MB. Other gates unchanged: swarm 6.5–7.0 ms mean, 8.5–9.4 ms p99, 252–272 MB,
+  10–19 KB/s per player over three runs; netcode and matrix green; test room 2,300–3,200 fps,
+  128 MB.
+- Known limits: no screen for any of it yet (uploading, wearing and moderating are `gm-tools`
+  commands; a stall shows its keeper and counter but its listings have no UI; the HUD is Phase
+  7); the animations are procedural placeholders; characters are not culled or given LODs (not
+  needed at these numbers); the store is a directory and one hub process (object storage and a
+  CDN at deployment); no ETC2/ASTC variant for mobile GPUs (Phase 8); the upload terms are a
+  draft; who receives upload privileges is a moderator's decision per account.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
 the numbers, the structure is what the code depends on). The economy numbers are **proposed** in `docs/ECONOMY.md` 12 (slot counts, the purchasing-power scale,
 the floors, the salvage rule, the contract timeout, no self-hire, no stacking of materials in v1).
+The model numbers are **proposed** in `docs/MODELS.md` 13 (the envelope: head pivot ±8%, top 0.90–1.15 h,
+box, coverage 50–150%, T-pose within 15°; 4 slots, 3 pending, 10 uploads an hour, 3 strikes, trust tier 2
+skips the queue, 8 MiB uploads, 256 MiB of models on the GPU) and so is **who may upload**: today a moderator
+grants `upload_privileges` per account. The upload terms in MODELS.md 10 are a draft for counsel.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

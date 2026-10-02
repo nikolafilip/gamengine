@@ -58,31 +58,35 @@ fn load_map(dir: &Path, map: &str) -> anyhow::Result<Arc<Bsp>> {
     })?))
 }
 
+/// Register or log in. The hub hashes eight passwords at a time and answers `Busy` to the
+/// ninth (HUB.md 3): a swarm waits its turn.
 async fn login(hub: &HubClient, cfg: &HubFlowConfig) -> anyhow::Result<SessionId> {
-    if cfg.register {
-        match hub
-            .request(&HubRequest::Register {
+    let mut register = cfg.register;
+    for attempt in 0..200u32 {
+        let req = if register {
+            HubRequest::Register {
                 email: cfg.email.clone(),
                 password: cfg.password.clone(),
-            })
-            .await
-        {
+            }
+        } else {
+            HubRequest::Login {
+                email: cfg.email.clone(),
+                password: cfg.password.clone(),
+            }
+        };
+        match hub.request(&req).await {
             Ok(HubResponse::Session { session, .. }) => return Ok(session),
-            Ok(other) => anyhow::bail!("unexpected register answer {other:?}"),
-            Err(HubClientError::Refused(gm_hub_proto::protocol::HubError::Taken)) => {}
+            Ok(other) => anyhow::bail!("unexpected login answer {other:?}"),
+            Err(HubClientError::Refused(gm_hub_proto::protocol::HubError::Taken)) if register => {
+                register = false;
+            }
+            Err(HubClientError::Refused(gm_hub_proto::protocol::HubError::Busy)) => {
+                tokio::time::sleep(Duration::from_millis(100 + (attempt % 7) as u64 * 40)).await;
+            }
             Err(e) => return Err(e.into()),
         }
     }
-    match hub
-        .request(&HubRequest::Login {
-            email: cfg.email.clone(),
-            password: cfg.password.clone(),
-        })
-        .await?
-    {
-        HubResponse::Session { session, .. } => Ok(session),
-        other => anyhow::bail!("unexpected login answer {other:?}"),
-    }
+    anyhow::bail!("the hub stayed busy")
 }
 
 /// Connect to the zone a ticket names and play until the bot exits.

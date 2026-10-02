@@ -357,3 +357,36 @@ fn player_movement_in_the_room() {
         "not on the floor: {st:?}"
     );
 }
+
+#[test]
+fn light_point_reads_the_floor_under_a_model() {
+    let bsp = load();
+    let (start, _) = bsp.player_start().expect("the map has a start");
+    // Straight down from the start: the lit floor of the room.
+    let down = |p: Vec3| bsp.light_point(p, p - Vec3::Z * 512.0);
+    let floor = down(start).expect("a floor under the start");
+    assert!(floor.iter().all(|c| (0.0..=1.0).contains(c)), "{floor:?}");
+    assert!(
+        floor.iter().sum::<f32>() > 0.05,
+        "the floor is lit: {floor:?}"
+    );
+    // The room has coloured lights: the light is not the same everywhere, and it changes
+    // smoothly (bilinear) over one luxel.
+    let mut distinct = 0;
+    let mut previous = floor;
+    for step in 1..40 {
+        let p = start + Vec3::new(step as f32 * 4.0, step as f32 * 2.0, 0.0);
+        let Some(l) = down(p) else { continue };
+        let jump = (0..3)
+            .map(|k| (l[k] - previous[k]).abs())
+            .fold(0.0, f32::max);
+        assert!(jump < 0.2, "light jumps by {jump} over 4.5 u at {p:?}");
+        if jump > 0.001 {
+            distinct += 1;
+        }
+        previous = l;
+    }
+    assert!(distinct > 5, "the light varies across the floor");
+    // Upward into the void above the ceiling, or a segment that crosses nothing: no light.
+    assert_eq!(bsp.light_point(start, start + Vec3::Z * 0.5), None);
+}

@@ -28,5 +28,7 @@ gm-hub = { path = "../gm-hub" }
 tracing-subscriber = { workspace = true }
 gm-bot = { path = "../gm-bot" }
 gm-content = { workspace = true }
+gm-ingest = { workspace = true }
+gm-model = { workspace = true }
 gm-net = { workspace = true, features = ["turmoil"] }
 turmoil = { workspace = true }

@@ -1589,10 +1589,17 @@ impl Economy {
 
     /// Close the stall (or let it expire): everything goes back to the owner, items to the
     /// inventory, then to storage, which may overflow. It never fails for lack of room, so
-    /// the tile is always freed.
-    pub async fn stall_close(&self, character: i64) -> Result<(), EconError> {
+    /// the tile is always freed. Returns the stall's id and its zone, for whoever must be told.
+    pub async fn stall_close(&self, character: i64) -> Result<(i64, String), EconError> {
         let mut tx = self.begin().await?;
         let (stall, holder) = Self::stall_of_owner(&mut tx, character).await?;
+        let zone: String = sqlx::query("select zone from stalls where id = $1")
+            .bind(stall)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(internal)?
+            .try_get("zone")
+            .map_err(internal)?;
         let inv = character_holder(&mut tx, character).await?;
         let sto = storage_holder(&mut tx, character).await?;
         lock_holders(&mut tx, &[holder, inv, sto]).await?;
@@ -1637,7 +1644,56 @@ impl Economy {
             .await
             .map_err(internal)?;
         // The emptied holder stays: the ledger rows that name it are the stall's history.
-        tx.commit().await.map_err(internal)
+        tx.commit().await.map_err(internal)?;
+        Ok((stall, zone))
+    }
+
+    /// The open stalls of `zone` (or the one stall `only`), with what a zone shows of their
+    /// keepers: `(id, tile_x, tile_y, owner, owner name, build, model hash and frame while
+    /// the model is active)`.
+    #[allow(clippy::type_complexity)]
+    pub async fn stalls_in(
+        &self,
+        zone: &str,
+        only: Option<i64>,
+    ) -> Result<
+        Vec<(
+            i64,
+            i32,
+            i32,
+            i64,
+            String,
+            serde_json::Value,
+            Option<(Vec<u8>, i16)>,
+        )>,
+        EconError,
+    > {
+        let rows = sqlx::query(
+            "select s.id, s.tile_x, s.tile_y, s.owner_character, c.name, c.build, m.hash, m.frame \
+             from stalls s join characters c on c.id = s.owner_character \
+             left join models m on m.hash = c.model and m.status = 'active' \
+             where s.zone = $1 and ($2::bigint is null or s.id = $2) order by s.id",
+        )
+        .bind(zone)
+        .bind(only)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        rows.iter()
+            .map(|r| {
+                let hash: Option<Vec<u8>> = r.try_get("hash").map_err(internal)?;
+                let frame: Option<i16> = r.try_get("frame").map_err(internal)?;
+                Ok((
+                    r.try_get("id").map_err(internal)?,
+                    r.try_get("tile_x").map_err(internal)?,
+                    r.try_get("tile_y").map_err(internal)?,
+                    r.try_get("owner_character").map_err(internal)?,
+                    r.try_get("name").map_err(internal)?,
+                    r.try_get("build").map_err(internal)?,
+                    hash.zip(frame),
+                ))
+            })
+            .collect()
     }
 
     /// Owners of stalls past their 48 h (the hub closes them on a timer).

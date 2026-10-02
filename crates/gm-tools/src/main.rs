@@ -4,7 +4,11 @@
 mod arena;
 mod budget;
 mod glb;
+mod hubcli;
 mod mapbuild;
+mod mapgen;
+mod model;
+mod town;
 mod wad;
 
 use std::path::PathBuf;
@@ -40,6 +44,62 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BudgetCmd,
     },
+    /// Avatar models (docs/MODELS.md): check, template, generate, upload, wear.
+    Model {
+        #[command(subcommand)]
+        cmd: ModelCmd,
+    },
+    /// Moderation (docs/MODELS.md 10): the queue, decisions, takedowns, privileges.
+    Mod {
+        #[command(subcommand)]
+        cmd: hubcli::ModCmd,
+    },
+    /// Hub accounts and test setup.
+    Hub {
+        #[command(subcommand)]
+        cmd: hubcli::HubCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelCmd {
+    /// Run the hub's ingestion on a local .glb: every violation, or the .gmm and its preview.
+    Ingest {
+        file: PathBuf,
+        /// The archetype frame the model is for: colossus, striker, caster, infiltrator.
+        #[arg(long)]
+        frame: String,
+        /// Where to write <name>.gmm and <name>.preview.png (default: next to the file).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Write the frame's mannequin on the standard rig as a .glb to start from.
+    Template {
+        #[arg(long)]
+        frame: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Generate distinct avatars at the budget ceiling (tests, benchmarks, the acceptance run).
+    Synth {
+        #[arg(long, default_value_t = 100)]
+        count: u32,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Side of the painted atlas.
+        #[arg(long, default_value_t = 1024)]
+        side: u32,
+        /// Frames to cycle through (default: all four).
+        #[arg(long, value_delimiter = ',')]
+        frames: Vec<String>,
+        /// Also write each avatar's ingested .gmm.
+        #[arg(long)]
+        ingest: bool,
+    },
+    #[command(flatten)]
+    Hub(hubcli::HubModelCmd),
 }
 
 #[derive(Subcommand)]
@@ -81,6 +141,11 @@ enum MapCmd {
     /// Write the generated 8v8 arena source map.
     GenArena {
         #[arg(long, default_value = "assets/maps/src/arena.map")]
+        out: PathBuf,
+    },
+    /// Write the generated town source map: the market square of Phase 6.
+    GenTown {
+        #[arg(long, default_value = "assets/maps/src/town.map")]
         out: PathBuf,
     },
     /// Print statistics about a compiled .bsp.
@@ -149,11 +214,44 @@ fn main() -> Result<()> {
             println!("gen-arena: {} bytes -> {}", text.len(), out.display());
             Ok(())
         }
+        Cmd::Map {
+            cmd: MapCmd::GenTown { out },
+        } => {
+            if let Some(dir) = out.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let text = town::generate();
+            std::fs::write(&out, &text)?;
+            println!("gen-town: {} bytes -> {}", text.len(), out.display());
+            Ok(())
+        }
         Cmd::Budget {
             cmd: BudgetCmd::Check { paths, budgets },
         } => budget::check_cli(&paths, &budgets),
         Cmd::Budget {
             cmd: BudgetCmd::SelfTest { budgets },
         } => budget::self_test(&budgets),
+        Cmd::Model {
+            cmd: ModelCmd::Ingest { file, frame, out },
+        } => model::ingest(&file, &frame, out.as_deref()),
+        Cmd::Model {
+            cmd: ModelCmd::Template { frame, out },
+        } => model::template(&frame, out.as_deref()),
+        Cmd::Model {
+            cmd:
+                ModelCmd::Synth {
+                    count,
+                    out,
+                    seed,
+                    side,
+                    frames,
+                    ingest,
+                },
+        } => model::synth_avatars(count, &out, seed, side, &frames, ingest),
+        Cmd::Model {
+            cmd: ModelCmd::Hub(cmd),
+        } => hubcli::model(cmd),
+        Cmd::Mod { cmd } => hubcli::moderate(cmd),
+        Cmd::Hub { cmd } => hubcli::hub(cmd),
     }
 }

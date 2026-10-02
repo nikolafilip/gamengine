@@ -2,6 +2,9 @@
 
 use std::time::Instant;
 
+use crate::avatars::Avatars;
+use crate::render::Renderer;
+
 #[derive(Default)]
 pub struct FrameStats {
     frame_ms: Vec<f32>,
@@ -18,6 +21,9 @@ pub struct Report {
     pub ms_p50: f32,
     pub ms_p99: f32,
     pub ms_max: f32,
+    /// Which frame was the slowest (0 = the first counted): a hitch at the start is a
+    /// warm-up, one in the middle is a stall.
+    pub max_at: usize,
 }
 
 impl FrameStats {
@@ -45,6 +51,11 @@ impl FrameStats {
         if slice.is_empty() {
             return Report::default();
         }
+        let max_at = slice
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map_or(0, |(i, _)| i);
         let mut sorted = slice.to_vec();
         sorted.sort_by(|a, b| a.total_cmp(b));
         let n = sorted.len();
@@ -57,6 +68,7 @@ impl FrameStats {
             ms_p50: sorted[n / 2],
             ms_p99: sorted[((n as f64 * 0.99) as usize).min(n - 1)],
             ms_max: sorted[n - 1],
+            max_at,
         }
     }
 
@@ -99,6 +111,7 @@ pub fn print_bench(
     mode: &str,
     faces_visible: usize,
     faces_total: usize,
+    draw_calls: usize,
 ) {
     let (rss, peak) = rss_bytes();
     println!(
@@ -106,18 +119,57 @@ pub fn print_bench(
         info.name, info.backend, info.device_type, info.driver, info.driver_info
     );
     println!(
-        "bench: frames={} seconds={:.3} fps_avg={:.1} frame_ms_avg={:.3} frame_ms_p50={:.3} frame_ms_p99={:.3} frame_ms_max={:.3}",
+        "bench: frames={} seconds={:.3} fps_avg={:.1} frame_ms_avg={:.3} frame_ms_p50={:.3} frame_ms_p99={:.3} frame_ms_max={:.3} slowest_frame={}",
         report.frames,
         report.seconds,
         report.fps_avg,
         report.ms_avg,
         report.ms_p50,
         report.ms_p99,
-        report.ms_max
+        report.ms_max,
+        report.max_at
     );
     println!(
         "bench: peak_rss_bytes={peak} rss_bytes={rss} binary_bytes={}",
         binary_bytes()
     );
-    println!("bench: faces_visible={faces_visible} faces_total={faces_total} draw_calls=1");
+    println!(
+        "bench: faces_visible={faces_visible} faces_total={faces_total} draw_calls={draw_calls}"
+    );
+}
+
+/// The avatar line of a run (MODELS.md 11), parsed by scripts/check-avatars.sh. Printed when
+/// any character was drawn.
+pub fn print_bench_avatars(report: &Report, avatars: &Avatars, renderer: &Renderer) {
+    let c = &renderer.characters;
+    if c.drawn == 0 {
+        return;
+    }
+    let s = avatars.stats();
+    let (cache_bytes, cache_cap) = avatars
+        .cache
+        .as_ref()
+        .map_or((0, 0), |c| (c.disk.total(), c.disk.cap()));
+    let (_, peak) = rss_bytes();
+    println!(
+        "avatars: characters={} with_model={} triangles={} models_ready={} models_pending={} gpu_bytes={} model_gpu_bytes={} \
+         cache_bytes={cache_bytes} cache_cap_bytes={cache_cap} fetched={} fetched_bytes={} disk_hits={} failed={} refused={} \
+         gpu_evictions={} gpu_deferred={} fps_avg={:.1} frame_ms_p99={:.3} peak_rss_bytes={peak}",
+        c.drawn,
+        avatars.with_model,
+        c.triangles,
+        s.ready,
+        avatars.cache.as_ref().map_or(0, |c| c.pending()),
+        c.gpu_bytes(),
+        s.gpu_bytes,
+        s.fetched,
+        s.fetched_bytes,
+        s.disk_hits,
+        s.failed,
+        s.refused,
+        s.gpu_evictions,
+        s.gpu_deferred,
+        report.fps_avg,
+        report.ms_p99,
+    );
 }

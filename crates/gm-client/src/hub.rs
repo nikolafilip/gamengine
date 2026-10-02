@@ -4,10 +4,16 @@
 
 use std::net::SocketAddr;
 
-use gm_hub_proto::protocol::{BuildChoice, HubRequest, HubResponse, SessionId, ZoneTicket};
+use std::sync::Arc;
+
+use gm_hub_proto::protocol::{
+    BuildChoice, HubError, HubRequest, HubResponse, MAX_MODEL_BYTES, SessionId, ZoneTicket,
+};
 use gm_hub_proto::{HubClient, HubClientError};
+use gm_model::ModelId;
 
 use crate::Error;
+use crate::cache::{FetchError, ModelSource};
 
 pub struct HubLogin {
     pub hub: SocketAddr,
@@ -114,11 +120,58 @@ impl HubSession {
         ))
     }
 
+    /// Models are fetched from the hub on this session (MODELS.md 6.2).
+    pub fn model_source(&self) -> Arc<dyn ModelSource> {
+        Arc::new(HubSource {
+            handle: self.rt.handle().clone(),
+            client: self.client.clone(),
+            session: self.session,
+        })
+    }
+
     pub fn logout(&self) {
         let session = self.session;
         let _ = self
             .rt
             .block_on(self.client.ok(&HubRequest::Logout { session }));
         self.client.close();
+    }
+}
+
+/// The longest one model may take to arrive (1.5 MiB at 13 KB/s); then the fetch backs off.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The hub as a model source: one request per model on its own stream.
+struct HubSource {
+    handle: tokio::runtime::Handle,
+    client: HubClient,
+    session: SessionId,
+}
+
+impl ModelSource for HubSource {
+    fn fetch(&self, id: &ModelId) -> Result<Vec<u8>, FetchError> {
+        let req = HubRequest::ModelGet {
+            session: self.session,
+            model: *id,
+        };
+        // A loader thread must come back: a stalled stream on a live connection would
+        // otherwise hold one of the four for good.
+        let download = self.handle.block_on(async {
+            tokio::time::timeout(
+                FETCH_TIMEOUT,
+                self.client.download(&req, MAX_MODEL_BYTES as usize),
+            )
+            .await
+        });
+        let Ok(result) = download else {
+            return Err(FetchError::Failed("timed out".into()));
+        };
+        match result {
+            Ok(bytes) => Ok(bytes),
+            // Over the rate limit, or the hub is busy: later.
+            Err(HubClientError::Refused(HubError::Busy)) => Err(FetchError::Failed("busy".into())),
+            Err(HubClientError::Refused(e)) => Err(FetchError::Refused(e.to_string())),
+            Err(e) => Err(FetchError::Failed(e.to_string())),
+        }
     }
 }

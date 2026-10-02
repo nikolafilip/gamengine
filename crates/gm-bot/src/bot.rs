@@ -40,6 +40,9 @@ pub struct BotConfig {
     /// Ask to travel to this zone after `travel_after_ticks` (hub flows only).
     pub travel_to: Option<String>,
     pub travel_after_ticks: u32,
+    /// Walk to this tile of the map's market (counted across its grids) and open a stall
+    /// there, or on the next free one (ECONOMY.md 7).
+    pub stall_tile: Option<u32>,
 }
 
 /// Why the bot loop ended.
@@ -71,6 +74,20 @@ pub struct BotReport {
     /// Re-specs requested and the build the bot ended with.
     pub respecs: u32,
     pub final_build: String,
+    /// Avatar models the zone announced (MODELS.md 7): the most distinct ids worn at once,
+    /// the own one at the end, the revocations heard, and whether anybody was still
+    /// announced wearing a revoked model afterwards.
+    pub models_seen: usize,
+    pub own_model: Option<[u8; 32]>,
+    pub revocations: u32,
+    pub revoked_still_worn: bool,
+    /// The most players the zone listed at once (roster and joins minus leaves).
+    pub roster: usize,
+    /// The bot opened a stall; and the stalls the zone showed when it left.
+    pub stall_opened: bool,
+    pub stalls_seen: usize,
+    /// Ground covered, in world units (a bot that never moves is stuck).
+    pub travelled: f32,
 }
 
 impl BotReport {
@@ -157,6 +174,30 @@ pub async fn run_bot_with_token(
     let mut current_build = build_name(&own);
     let mut client = ClientState::new(entity, rate, Sheet::new(own, &pack, team));
     let mut brain = Brain::new(cfg.seed, cfg.behaviour);
+    brain.hz = rate.hz();
+    // A vendor walks to its tile; a taken tile sends it to the next.
+    let tiles: Vec<glam::Vec3> = world
+        .stall_grids()
+        .iter()
+        .flat_map(|g| {
+            (0..g.rows).flat_map(move |row| {
+                (0..g.cols).filter_map(move |col| g.centre(g.base_x + col, g.base_y + row))
+            })
+        })
+        .collect();
+    let mut stall_tile = cfg.stall_tile.filter(|_| !tiles.is_empty());
+    // The tick of the last stall request, and whether the zone has answered it.
+    let mut stall_asked: Option<u32> = None;
+    let mut stall_answered = true;
+    let mut stalls_seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    if let Some(t) = stall_tile {
+        brain.goal = Some(tiles[t as usize % tiles.len()]);
+    }
+    // Who is here and what they wear, as the zone announces it.
+    let mut wearing: std::collections::HashMap<u32, Option<[u8; 32]>> =
+        std::collections::HashMap::new();
+    let mut revoked: Vec<[u8; 32]> = Vec::new();
+    let mut own_model = None;
     let mut next_pick = COUNTER_PICK_PERIOD_S * rate.hz();
     let mut report = BotReport {
         name: cfg.name.clone(),
@@ -207,7 +248,42 @@ pub async fn run_bot_with_token(
                         report.respecs += 1;
                     }
                 }
+                // On the tile (its centre may be taken by whoever got there first): ask for
+                // the stall. The zone drops a request that comes within a second of the last
+                // one: after a refusal the next one waits that second out, and a request that
+                // got no answer is repeated after three.
+                let wait = if stall_answered {
+                    rate.hz() + rate.hz() / 8
+                } else {
+                    3 * rate.hz()
+                };
+                if let Some(goal) = brain.goal
+                    && !report.stall_opened
+                    && stall_asked.is_none_or(|t| ticks - t > wait)
+                    && client.own_alive
+                    && (client.mover.mv.origin - goal).truncate().abs().max_element() < 56.0
+                {
+                    stall_asked = Some(ticks);
+                    stall_answered = false;
+                    let _ = control::send(&mut send, &Control::StallOpen).await;
+                }
+                // What the zone has announced so far.
+                report.roster = report.roster.max(wearing.len());
+                if ticks.is_multiple_of(16) {
+                    let distinct: std::collections::HashSet<&[u8; 32]> =
+                        wearing.values().flatten().collect();
+                    report.models_seen = report.models_seen.max(distinct.len());
+                    report.revoked_still_worn |=
+                        wearing.values().flatten().any(|m| revoked.contains(m));
+                    own_model = wearing.get(&entity).copied().flatten();
+                }
+                let before = client.mover.mv.origin;
                 let datagram = client.local_tick(world.as_ref(), input);
+                let step = (client.mover.mv.origin - before).truncate().length();
+                // A correction or a respawn is not walking.
+                if step < 32.0 {
+                    report.travelled += step;
+                }
                 if conn.send_datagram(Bytes::from(datagram.encode())).is_err() {
                     report.send_failures += 1;
                 }
@@ -280,6 +356,50 @@ pub async fn run_bot_with_token(
                         info!(name = %cfg.name, "kicked: {reason}");
                         break;
                     }
+                    Ok(Some(Control::StallResult(result))) => {
+                        stall_answered = true;
+                        match result {
+                        Ok(()) => {
+                            report.stall_opened = true;
+                            info!(name = %cfg.name, "stall opened");
+                        }
+                        Err(why) => {
+                            // Somebody was faster: the next tile.
+                            debug!(name = %cfg.name, "stall refused: {why}");
+                            if let Some(t) = stall_tile.as_mut() {
+                                *t += 1;
+                                brain.goal = Some(tiles[*t as usize % tiles.len()]);
+                            }
+                        }
+                        }
+                    }
+                    Ok(Some(Control::Stalls(list))) => {
+                        stalls_seen = list.iter().map(|s| s.id).collect();
+                    }
+                    Ok(Some(Control::StallOpened(stall))) => {
+                        stalls_seen.insert(stall.id);
+                    }
+                    Ok(Some(Control::StallClosed(id))) => {
+                        stalls_seen.remove(&id);
+                    }
+                    Ok(Some(Control::Roster(players))) => {
+                        wearing = players.into_iter().map(|p| (p.id, p.model)).collect();
+                    }
+                    Ok(Some(Control::PlayerInfo { id, model, .. })) => {
+                        wearing.insert(id, model);
+                    }
+                    Ok(Some(Control::PlayerLeft(id))) => {
+                        wearing.remove(&id);
+                    }
+                    Ok(Some(Control::ModelRevoked(model))) => {
+                        report.revocations += 1;
+                        revoked.push(model);
+                        for m in wearing.values_mut() {
+                            if *m == Some(model) {
+                                *m = None;
+                            }
+                        }
+                    }
                     Ok(Some(_)) => {}
                     Ok(None) | Err(_) => break,
                 }
@@ -296,6 +416,8 @@ pub async fn run_bot_with_token(
     report.rtt_ms = conn.rtt().as_secs_f64() * 1000.0;
     report.final_health = client.own_health;
     report.final_build = current_build;
+    report.stalls_seen = stalls_seen.len();
+    report.own_model = own_model;
     let _ = control::send(&mut send, &Control::Bye).await;
     conn.close(0u32.into(), b"done");
     // Give the Bye a moment to leave before the endpoint is dropped.

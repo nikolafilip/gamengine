@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use gm_hub::{Db, HubConfig, HubKey};
+use gm_hub::{Db, HubConfig, HubKey, IngestMode};
 use gm_net::transport::{Identity, hub_server_config};
 use tracing::info;
 
@@ -17,10 +17,15 @@ struct Args {
     zone_secret: String,
     migrate_only: bool,
     wipe: bool,
+    models_dir: PathBuf,
+    grant_moderator: Option<String>,
+    auth_per_minute: f64,
 }
 
 const USAGE: &str = "gm-hub --database-url URL [--listen ADDR] [--cert-out PATH] [--key PATH] [--content DIR] \
-[--zone-secret S] [--migrate-only] [--wipe]   (env: DATABASE_URL, GM_ZONE_SECRET)";
+[--zone-secret S] [--models-dir DIR] [--auth-per-minute N] [--migrate-only] [--wipe]   (env: DATABASE_URL, GM_ZONE_SECRET)\n\
+       gm-hub --database-url URL --grant-moderator EMAIL     make an existing account a moderator, then exit\n\
+       gm-hub ingest-worker --frame NAME --in FILE --out DIR   (run by the hub itself, MODELS.md 6.2)";
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
@@ -32,6 +37,9 @@ fn parse_args() -> Result<Args, String> {
         zone_secret: std::env::var("GM_ZONE_SECRET").unwrap_or_default(),
         migrate_only: false,
         wipe: false,
+        models_dir: PathBuf::from("models"),
+        grant_moderator: None,
+        auth_per_minute: 10.0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -47,6 +55,13 @@ fn parse_args() -> Result<Args, String> {
             "--key" => a.key = PathBuf::from(value("--key")?),
             "--content" => a.content = PathBuf::from(value("--content")?),
             "--zone-secret" => a.zone_secret = value("--zone-secret")?,
+            "--models-dir" => a.models_dir = PathBuf::from(value("--models-dir")?),
+            "--grant-moderator" => a.grant_moderator = Some(value("--grant-moderator")?),
+            "--auth-per-minute" => {
+                a.auth_per_minute = value("--auth-per-minute")?
+                    .parse()
+                    .map_err(|e| format!("--auth-per-minute: {e}"))?
+            }
             "--migrate-only" => a.migrate_only = true,
             "--wipe" => a.wipe = true,
             "-h" | "--help" => {
@@ -59,14 +74,60 @@ fn parse_args() -> Result<Args, String> {
     if a.database_url.is_empty() {
         return Err("--database-url (or DATABASE_URL) is required".into());
     }
-    if a.zone_secret.is_empty() && !a.migrate_only {
+    if a.zone_secret.is_empty() && !a.migrate_only && a.grant_moderator.is_none() {
         return Err("--zone-secret (or GM_ZONE_SECRET) is required".into());
     }
     Ok(a)
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// The ingestion worker (MODELS.md 6.2): parse one upload under resource limits and leave a
+/// report. It runs in its own process so that a hostile file costs one upload and no more.
+fn ingest_worker(args: &[String]) -> ! {
+    let mut frame = None;
+    let mut input = None;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--frame" => frame = it.next().and_then(|f| gm_model::rig::frame_by_name(f)),
+            "--in" => input = it.next().map(PathBuf::from),
+            "--out" => out = it.next().map(PathBuf::from),
+            _ => {}
+        }
+    }
+    let (Some(frame), Some(input), Some(out)) = (frame, input, out) else {
+        eprintln!("gm-hub ingest-worker --frame NAME --in FILE --out DIR");
+        std::process::exit(2);
+    };
+    #[cfg(unix)]
+    {
+        // 2 GiB of address space and 20 s of CPU: a bomb dies here, not in the hub.
+        let _ = rlimit::setrlimit(rlimit::Resource::AS, 2 << 30, 2 << 30);
+        let _ = rlimit::setrlimit(rlimit::Resource::CPU, 20, 20);
+        let _ = rlimit::setrlimit(rlimit::Resource::CORE, 0, 0);
+    }
+    match gm_ingest::worker(&input, frame, &out) {
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("gm-hub ingest-worker: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    // The worker is a plain synchronous process: no runtime, no logging, no database.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("ingest-worker") {
+        ingest_worker(&args[1..]);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -87,6 +148,13 @@ async fn main() -> anyhow::Result<()> {
         db.wipe().await?;
         info!("database wiped");
     }
+    if let Some(email) = &args.grant_moderator {
+        if gm_hub::models::grant_moderator(db.pool(), email).await? {
+            info!(%email, "is a moderator now");
+            return Ok(());
+        }
+        anyhow::bail!("no account with the email {email:?}");
+    }
     if args.migrate_only {
         return Ok(());
     }
@@ -101,9 +169,13 @@ async fn main() -> anyhow::Result<()> {
         content,
         key,
         session_secs: gm_hub::protocol::SESSION_SECS,
-        auth_per_minute: 10.0,
+        auth_per_minute: args.auth_per_minute,
         templates: gm_content::items::load_items(&args.content)?.template_ids(),
         max_coin_grant: 10_000,
+        models_dir: args.models_dir,
+        // Uploads are parsed by this same binary in a child process.
+        ingest: IngestMode::Worker(std::env::current_exe()?),
+        ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

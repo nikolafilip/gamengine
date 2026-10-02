@@ -146,6 +146,9 @@ async fn the_economy_over_the_wire() {
             auth_per_minute: 100.0,
             templates: items.template_ids(),
             max_coin_grant: 10_000,
+            models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
+            ingest: gm_hub::IngestMode::InProcess,
+            ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
         },
         db.clone(),
         endpoint,
@@ -402,31 +405,56 @@ async fn the_economy_over_the_wire() {
     };
     assert_eq!(coin, 700);
 
-    // A stall on the zone's grid, bought from over the wire.
-    econ(
-        &buyer_conn,
-        buyer_s,
-        buyer,
-        EconOp::StallOpen {
+    // A stall on the zone's grid: only the zone a character stands in may open it, the tile
+    // is taken by constraint, and the zone sees who keeps it.
+    let EconReply::Stall(stall) = zone_econ(
+        &town,
+        ZoneEconOp::StallOpen {
+            character: buyer,
             tile_x: 3,
             tile_y: 3,
         },
     )
     .await
-    .unwrap();
-    assert!(matches!(
-        econ(
-            &smith_conn,
-            smith_s,
-            smith,
-            EconOp::StallOpen {
+    .unwrap() else {
+        panic!("stall")
+    };
+    assert_eq!((stall.tile_x, stall.tile_y, stall.owner), (3, 3, buyer));
+    assert_eq!(stall.owner_name, "Buyer");
+    assert_eq!(stall.frame, 0, "an ironclad is a colossus");
+    assert_eq!(
+        zone_econ(
+            &town,
+            ZoneEconOp::StallOpen {
+                character: smith,
                 tile_x: 3,
                 tile_y: 3
             }
         )
         .await,
-        Err(HubError::Invalid(_))
-    ));
+        Err(HubError::Taken)
+    );
+    assert_eq!(
+        zone_econ(
+            &other_zone,
+            ZoneEconOp::StallOpen {
+                character: smith,
+                tile_x: 4,
+                tile_y: 3
+            }
+        )
+        .await,
+        Err(HubError::Unauthorized),
+        "a zone speaks only for the characters playing in it"
+    );
+    assert_eq!(
+        zone_econ(&town, ZoneEconOp::Stalls).await,
+        Ok(EconReply::Stalls(vec![stall.clone()]))
+    );
+    assert_eq!(
+        zone_econ(&other_zone, ZoneEconOp::Stalls).await,
+        Ok(EconReply::Stalls(Vec::new()))
+    );
     let EconReply::Id(listing) = econ(
         &buyer_conn,
         buyer_s,
@@ -465,6 +493,32 @@ async fn the_economy_over_the_wire() {
         )
         .await,
         Err(HubError::NotFound)
+    );
+
+    // The owner closes the stall from its own session; the tile is free again.
+    assert_eq!(
+        econ(&buyer_conn, buyer_s, buyer, EconOp::StallClose).await,
+        Ok(EconReply::Done)
+    );
+    assert_eq!(
+        zone_econ(&town, ZoneEconOp::Stalls).await,
+        Ok(EconReply::Stalls(Vec::new()))
+    );
+    assert!(matches!(
+        zone_econ(
+            &town,
+            ZoneEconOp::StallOpen {
+                character: smith,
+                tile_x: 3,
+                tile_y: 3
+            }
+        )
+        .await,
+        Ok(EconReply::Stall(_))
+    ));
+    assert_eq!(
+        zone_econ(&town, ZoneEconOp::StallClose { character: smith }).await,
+        Ok(EconReply::Done)
     );
 
     // Every copper is accounted for: 900 created, nothing burned, 900 in circulation.

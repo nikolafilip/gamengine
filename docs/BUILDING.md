@@ -22,7 +22,9 @@ cargo run --release -p gm-client -- --map assets/maps/built/test_room.bsp
 `map build` runs `qbsp -leaktest`, `vis` and `light -extra -lit`. The output is
 `assets/maps/built/<name>.bsp` plus `<name>.lit` (RGB lightmaps). Both are committed; the
 `.prt` portal file is not. `map gen-arena` regenerates `assets/maps/src/arena.map`, the 8v8
-arena of Phase 3 (symmetric, two team bases, pillars, low cover, side walkways).
+arena of Phase 3 (symmetric, two team bases, pillars, low cover, side walkways), and
+`map gen-town` regenerates `assets/maps/src/town.map`, the town of Phase 6 (a square under an
+open sky lit by the sun, houses, a market of 30 stall tiles, 128 spawns).
 
 ## Client flags
 
@@ -45,6 +47,15 @@ arena of Phase 3 (symmetric, two team bases, pillars, low cover, side walkways).
 | `--team N` | team 1 or 2 (default 0: the zone balances) |
 | `--third-person` | start in the third-person viewport (`V` toggles at any time) |
 | `--seconds N` | exit after N seconds and print the network statistics (scripted runs) |
+| `--avatar FILE.gmm` | offline: wear this ingested model (how a creator previews one before uploading) |
+| `--crowd N` | offline: N characters standing and walking around the start (benchmarks, `check-avatars.sh`) |
+| `--crowd-dir DIR` | the crowd wears the `.gmm` files of DIR, one each, fetched through the model cache as if DIR were the hub |
+| `--cache-dir DIR` | the model cache (default: the platform's cache directory + `gamengine/models`) |
+| `--cache-mb N` | byte cap of the model cache on disk (default 2048, at least 16) |
+| `--vram-mb N` | byte cap of models on the GPU (default 256) |
+| `--start X,Y,Z,YAW` | offline: start here instead of at a spawn |
+
+Keys in a zone with a market: `B` opens a stall on the tile you stand on, `N` closes your stall.
 
 Default present mode is **Mailbox** (no tearing, no blocking) with the frame cap, not Fifo.
 Reason, measured 2026-09-30 on Arch, X11, xfwm4 with compositing, RADV (Renoir): Fifo and
@@ -52,7 +63,10 @@ FifoRelaxed presented exactly one frame per second (every swapchain acquire hit 
 timeout) even with the window focused and the monitor awake, while Mailbox and Immediate ran at
 thousands of fps. If Fifo works on your setup, `--present fifo` gives true vsync.
 
-Bench output lines start with `bench:` and are parsed by `scripts/check-perf.sh`. Frame times
+Bench output lines start with `bench:` (and `avatars:` when characters were drawn) and are
+parsed by `scripts/check-perf.sh` and `scripts/check-avatars.sh`. `slowest_frame` is the index
+of the frame behind `frame_ms_max`: a hitch at the start is a warm-up, one in the middle a stall.
+With a crowd wearing models, frames count once every model is on the GPU. Frame times
 in windowed mode are CPU-side (submit to submit) and, with vsync off, they track GPU throughput.
 A monitor in DPMS standby lowers iGPU clocks; wake it (`xset dpms force on`) before measuring.
 
@@ -150,6 +164,58 @@ psql -h /tmp -p 54329 -U gm -d postgres -c 'create database gm_test'
 GM_TEST_DATABASE_URL='postgres://gm@localhost:54329/gm_test?host=/tmp' cargo test -p gm-server --test handoff
 ```
 
+## Avatar models and the town (Phase 6)
+
+`docs/MODELS.md` is the contract. A creator's loop needs no hub:
+
+```sh
+cargo run --release -p gm-tools -- model template --frame striker --out striker.glb   # the rig to start from
+cargo run --release -p gm-tools -- model ingest --frame striker my-avatar.glb         # every violation, or my-avatar.gmm + preview
+cargo run --release -p gm-client -- --map assets/maps/built/town.bsp --third-person --avatar my-avatar.gmm
+```
+
+With a hub (previous section; add `--models-dir DIR` to choose where the hub keeps models, the
+default is `models/`):
+
+```sh
+# once: the first moderator (an existing account), who then lets accounts upload
+cargo run --release -p gm-hub -- --database-url postgres://localhost/gamengine --grant-moderator mod@example.com
+cargo run --release -p gm-tools -- mod uploads you@example.com --user mod@example.com --password '...'
+
+# the creator: read the terms, certify, upload; then wear it on an offline character
+cargo run --release -p gm-tools -- model upload --frame striker my-avatar.glb --user you@example.com --password '...' --certify
+cargo run --release -p gm-tools -- model list --user you@example.com --password '...'
+cargo run --release -p gm-tools -- model wear --character Pezo --model <id> --user you@example.com --password '...'
+
+# the moderator: the queue, a look at a model, the decision, and later a takedown
+cargo run --release -p gm-tools -- mod queue --user mod@example.com --password '...'
+cargo run --release -p gm-tools -- mod fetch <id> --user mod@example.com --password '...'
+cargo run --release -p gm-tools -- mod approve <id> --user mod@example.com --password '...'
+cargo run --release -p gm-tools -- mod takedown <id> --code copyright --reason '...' --reference NOTICE-1 \
+    --user mod@example.com --password '...'
+```
+
+`gm-tools` reads the password from `GM_PASSWORD` when `--password` is absent, and the hub from
+`--hub`/`--hub-cert` (defaults `127.0.0.1:4400`, `hub-cert.der`).
+
+The town as a zone, at the 20 Hz of slow zones, with a crowd:
+
+```sh
+cargo run --release -p gm-server -- --map assets/maps/built/town.bsp --listen 127.0.0.1:4435 --cert-out town.der \
+    --hub 127.0.0.1:4400 --hub-cert hub-cert.der --zone-id town --zone-secret s3cret --hz 20 --max-players 160
+
+# 100 distinct avatars at the budget ceiling, uploaded, approved and worn by avatar-000..099@bots.test
+cargo run --release -p gm-tools -- model synth --count 100 --out /tmp/avatars
+cargo run --release -p gm-tools -- hub seed-avatars --dir /tmp/avatars --count 100 --user mod@example.com --password '...'
+
+# the bots stroll around the square; the first twelve open stalls
+cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --user 'avatar-{i}@bots.test' \
+    --password avatar-password --character 'Avatar{i}' --zone town --bots 100 --stalls 12 --behaviour stroll --secs 120
+```
+
+`scripts/check-avatars.sh --online` does all of the above against `GM_TEST_DATABASE_URL` (which
+it wipes) and checks the result.
+
 ## CI gates locally
 
 ```sh
@@ -162,6 +228,9 @@ scripts/check-perf.sh --software      # what CI runs
 scripts/check-netcode.sh              # 16 bots at 150 ms / 3% loss in turmoil, bytes/player/s gate, counter-pick
 scripts/check-matrix.sh               # 8v8 arena: a dominant build is countered by re-speccing
 scripts/check-swarm.sh                # 200 bots on one zone over real UDP: tick time, RSS, bytes (BOTS=32 for a smoke)
+scripts/check-avatars.sh --gate-fps   # 100 distinct avatars in the town: fps, RSS, the cache cap (MODELS.md 11)
+scripts/check-avatars.sh --software   # what CI runs: 48 avatars, 16 MiB cap, software Vulkan
+scripts/check-avatars.sh --online     # hub + town zone + 100 bots wearing uploads + the client (needs a database and a display)
 ```
 
 `check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and
@@ -185,7 +254,11 @@ commit with `scripts/check-binary-size.sh --update-baseline` and say why in the 
 Entities: `worldspawn` keys `wad`, `light` (minlight), `_sunlight*`, `_dirt`, `_bounce`;
 `light` (point or spot with `mangle`); `info_player_start` (a spawn for any team);
 `gm_spawn` with `team` 1 or 2 (0 = any) and `angle`; `func_detail`, `func_wall`,
-`func_illusionary`; `gm_zone` is a placeholder for later phases.
+`func_illusionary`; `gm_zone` is a placeholder for later phases. `gm_stall_grid` is a market:
+`origin` is the centre of the first tile on the ground, `cols` × `rows` tiles of side `tile`
+(128) spaced `pitch` (160) apart along +X and +Y, `angle` the way the keepers face, `base_x`
+and `base_y` the tile numbers of the first tile (distinct per grid of a map; at most 512 tiles
+per map). A brush textured `sky_day` is sky: it lets `_sunlight` in and is not drawn as a wall.
 
 ## Development helper: independent reviews
 

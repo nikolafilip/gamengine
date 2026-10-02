@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gm_hub_proto::protocol::{
-    CharacterId, CharacterState, HubNotice, HubRequest, HubResponse, SessionToken, TokenPayload,
-    ZoneId, ZoneTicket, now_secs,
+    CharacterId, CharacterState, EconReply, HubNotice, HubRequest, HubResponse, ModelRef,
+    SessionToken, StallSummary, TokenPayload, ZoneEconOp, ZoneId, ZoneTicket, now_secs,
 };
 use gm_hub_proto::{HubClient, HubClientError, TokenError, TokenVerifier};
 use tokio::sync::mpsc;
@@ -41,6 +41,8 @@ pub struct Claimed {
     pub name: String,
     pub state: CharacterState,
     pub team: u8,
+    /// The avatar model, while it is active (MODELS.md 6.3).
+    pub model: Option<ModelRef>,
 }
 
 impl HubLink {
@@ -89,11 +91,13 @@ impl HubLink {
                 name,
                 state,
                 team,
+                model,
             }) => Ok(Claimed {
                 character,
                 name,
                 state,
                 team,
+                model,
             }),
             Ok(other) => Err(format!("unexpected hub answer {other:?}")),
             Err(HubClientError::Refused(e)) => Err(e.to_string()),
@@ -137,6 +141,50 @@ impl HubLink {
         }
     }
 
+    /// One economy request of this zone (ECONOMY.md); the error is what the player is told.
+    async fn econ(&self, op: ZoneEconOp) -> Result<EconReply, String> {
+        match self.client.request(&HubRequest::ZoneEcon(op)).await {
+            Ok(HubResponse::Econ(r)) => Ok(r),
+            Ok(other) => Err(format!("unexpected hub answer {other:?}")),
+            Err(HubClientError::Refused(e)) => Err(e.to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Open a stall for a character standing on tile `(tile_x, tile_y)`.
+    pub async fn stall_open(
+        &self,
+        character: CharacterId,
+        tile_x: i32,
+        tile_y: i32,
+    ) -> Result<StallSummary, String> {
+        match self
+            .econ(ZoneEconOp::StallOpen {
+                character,
+                tile_x,
+                tile_y,
+            })
+            .await?
+        {
+            EconReply::Stall(s) => Ok(s),
+            other => Err(format!("unexpected hub answer {other:?}")),
+        }
+    }
+
+    pub async fn stall_close(&self, character: CharacterId) -> Result<(), String> {
+        self.econ(ZoneEconOp::StallClose { character })
+            .await
+            .map(|_| ())
+    }
+
+    /// Every open stall of this zone.
+    pub async fn stalls(&self) -> Result<Vec<StallSummary>, String> {
+        match self.econ(ZoneEconOp::Stalls).await? {
+            EconReply::Stalls(s) => Ok(s),
+            other => Err(format!("unexpected hub answer {other:?}")),
+        }
+    }
+
     /// Heartbeat every 5 s with the latest player count and tick time.
     pub fn spawn_heartbeat(self: &Arc<Self>, stats: Arc<Mutex<(u32, f32)>>) {
         let link = self.clone();
@@ -170,6 +218,8 @@ impl HubLink {
                     HubNotice::Kick { character, reason } => {
                         ClientEvent::HubKick { character, reason }
                     }
+                    HubNotice::ModelRevoked { model } => ClientEvent::HubModelRevoked { model },
+                    HubNotice::StallClosed { stall } => ClientEvent::HubStallClosed { stall },
                 };
                 if tx.send(ev).await.is_err() {
                     break;

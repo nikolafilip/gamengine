@@ -139,12 +139,20 @@ pub fn transport_config() -> TransportConfig {
     t
 }
 
-/// The hub's transport (HUB.md 3): the zone transport plus room for a thousand concurrent
-/// request streams, so a zone saving many characters never blocks on a stream limit.
+/// The hub's transport (HUB.md 3): the zones' idle timeout and keep-alives, and room for a
+/// thousand concurrent request streams, so a zone saving many characters never blocks on a
+/// stream limit.
+///
+/// Unlike the zone transport it keeps QUIC's loss-based congestion control (Cubic): the hub
+/// moves model files (MODELS.md 6.2), and a fixed 64 KiB window would cap a download at
+/// 640 KB/s on a 100 ms path. No datagrams travel on a hub connection.
 pub fn hub_transport_config() -> TransportConfig {
-    let mut t = transport_config();
+    let mut t = TransportConfig::default();
+    t.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("idle timeout fits")));
+    t.keep_alive_interval(Some(KEEP_ALIVE));
     t.max_concurrent_bidi_streams(VarInt::from_u32(1024));
     t.max_concurrent_uni_streams(VarInt::from_u32(256));
+    t.initial_rtt(Duration::from_millis(100));
     t
 }
 

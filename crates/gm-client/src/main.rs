@@ -5,6 +5,9 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod avatars;
+mod cache;
+mod characters;
 mod headless;
 mod hub;
 mod net;
@@ -53,11 +56,24 @@ pub struct Options {
     pub screenshot: Option<PathBuf>,
     /// Exit after this many seconds (scripted runs); 0 = never.
     pub seconds: f32,
+    /// An ingested model (`.gmm`) to wear offline (MODELS.md 12).
+    pub avatar: Option<PathBuf>,
+    /// Offline: this many bodies standing in front of the start.
+    pub crowd: u32,
+    /// Ingested models for the crowd to wear, cycled.
+    pub crowd_dir: Option<PathBuf>,
+    /// The model cache (MODELS.md 8): directory, disk cap and GPU cap in MiB.
+    pub cache_dir: Option<PathBuf>,
+    pub cache_mb: u64,
+    pub vram_mb: u64,
+    /// Offline: stand here instead of at the map's start: `(x, y, z, yaw)`.
+    pub start: Option<[f32; 4]>,
 }
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
 [--third-person] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
-[--size WxH] [--screenshot out.ppm] [--seconds N]\n\
+[--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--crowd N [--crowd-dir DIR]] \
+[--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW]\n\
        gm-client --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME [--zone ID] [--build NAME] \
 [--maps-dir DIR] [--third-person]";
 
@@ -89,6 +105,13 @@ fn parse_args() -> Result<Options, String> {
         height: 720,
         screenshot: None,
         seconds: 0.0,
+        avatar: None,
+        crowd: 0,
+        crowd_dir: None,
+        cache_dir: None,
+        cache_mb: 2048,
+        vram_mb: 256,
+        start: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -149,6 +172,33 @@ fn parse_args() -> Result<Options, String> {
                 o.seconds = value("--seconds")?
                     .parse()
                     .map_err(|e| format!("--seconds: {e}"))?
+            }
+            "--avatar" => o.avatar = Some(PathBuf::from(value("--avatar")?)),
+            "--crowd" => {
+                o.crowd = value("--crowd")?
+                    .parse()
+                    .map_err(|e| format!("--crowd: {e}"))?
+            }
+            "--crowd-dir" => o.crowd_dir = Some(PathBuf::from(value("--crowd-dir")?)),
+            "--cache-dir" => o.cache_dir = Some(PathBuf::from(value("--cache-dir")?)),
+            "--cache-mb" => {
+                o.cache_mb = value("--cache-mb")?
+                    .parse()
+                    .map_err(|e| format!("--cache-mb: {e}"))?
+            }
+            "--vram-mb" => {
+                o.vram_mb = value("--vram-mb")?
+                    .parse()
+                    .map_err(|e| format!("--vram-mb: {e}"))?
+            }
+            "--start" => {
+                let v = value("--start")?;
+                let n: Vec<f32> = v
+                    .split(',')
+                    .map(|p| p.trim().parse::<f32>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| format!("--start: {e}"))?;
+                o.start = Some(<[f32; 4]>::try_from(n).map_err(|_| "--start expects X,Y,Z,YAW")?);
             }
             "--size" => {
                 let v = value("--size")?;

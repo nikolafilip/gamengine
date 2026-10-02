@@ -28,10 +28,14 @@ pub struct CharacterRow {
     pub location_zone: Option<String>,
     pub transit_to: Option<String>,
     pub transit_age_secs: Option<f64>,
+    /// The zone whose map `position` is on; `None` = no saved position.
+    pub pos_zone: Option<String>,
     pub position: [f32; 3],
     pub yaw: f32,
     pub viewport: i16,
     pub play_seconds: i32,
+    /// The model the character wears (MODELS.md 6.1), whatever its status.
+    pub model: Option<Vec<u8>>,
 }
 
 impl CharacterRow {
@@ -53,13 +57,14 @@ impl CharacterRow {
                 _ => LocationSummary::Offline,
             },
             play_seconds: self.play_seconds.max(0) as u32,
+            model: self.model.clone().and_then(|m| m.try_into().ok()),
         }
     }
 
     pub fn state(&self) -> CharacterState {
         CharacterState {
             build: self.build.clone(),
-            zone: self.location_zone.clone(),
+            zone: self.pos_zone.clone(),
             position: self.position,
             yaw: self.yaw,
             viewport: self.viewport.clamp(0, 255) as u8,
@@ -88,6 +93,7 @@ fn row_to_character(r: &sqlx::postgres::PgRow) -> Result<CharacterRow, HubError>
         location_zone: r.try_get("location_zone").map_err(internal)?,
         transit_to: r.try_get("transit_to").map_err(internal)?,
         transit_age_secs: r.try_get("transit_age_secs").map_err(internal)?,
+        pos_zone: r.try_get("pos_zone").map_err(internal)?,
         position: [
             r.try_get("pos_x").map_err(internal)?,
             r.try_get("pos_y").map_err(internal)?,
@@ -96,12 +102,13 @@ fn row_to_character(r: &sqlx::postgres::PgRow) -> Result<CharacterRow, HubError>
         yaw: r.try_get("yaw").map_err(internal)?,
         viewport: r.try_get("viewport").map_err(internal)?,
         play_seconds: r.try_get("play_seconds").map_err(internal)?,
+        model: r.try_get("model").map_err(internal)?,
     })
 }
 
 const CHARACTER_COLUMNS: &str = "id, account_id, name, build, location_kind, location_zone, transit_to, \
     extract(epoch from (now() - transit_since))::float8 as transit_age_secs, \
-    pos_x, pos_y, pos_z, yaw, viewport, play_seconds";
+    pos_zone, pos_x, pos_y, pos_z, yaw, viewport, play_seconds, model";
 
 impl Db {
     pub fn pool(&self) -> &PgPool {
@@ -125,7 +132,7 @@ impl Db {
 
     /// Drop every row (tests).
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        sqlx::query("truncate item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
+        sqlx::query("truncate model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
             .execute(&self.pool)
             .await?;
         // The cascade empties `holders` too; the two singletons come back at zero.
@@ -349,7 +356,7 @@ impl Db {
         // can be reverted (the ghost timeout is 10 s).
         let n = if leaving {
             sqlx::query(
-                "update characters set build = $3, pos_x = $4, pos_y = $5, pos_z = $6, yaw = $7, viewport = $8, \
+                "update characters set build = $3, pos_zone = $2, pos_x = $4, pos_y = $5, pos_z = $6, yaw = $7, viewport = $8, \
                  play_seconds = $9, location_kind = 'offline', location_zone = null, transit_to = null, \
                  transit_since = null, updated = now() where id = $1 and location_zone = $2 \
                  and (location_kind = 'zone' or (location_kind = 'transit' \
@@ -357,7 +364,7 @@ impl Db {
             )
         } else {
             sqlx::query(
-                "update characters set build = $3, pos_x = $4, pos_y = $5, pos_z = $6, yaw = $7, viewport = $8, \
+                "update characters set build = $3, pos_zone = $2, pos_x = $4, pos_y = $5, pos_z = $6, yaw = $7, viewport = $8, \
                  play_seconds = $9, location_kind = 'zone', transit_to = null, transit_since = null, \
                  updated = now() where id = $1 and location_zone = $2 and (location_kind = 'zone' or (location_kind = 'transit' \
                  and extract(epoch from (now() - transit_since)) > 5))",
@@ -393,7 +400,7 @@ impl Db {
     ) -> Result<(), HubError> {
         let build_json = serde_json::to_value(&state.build).map_err(|_| HubError::Internal)?;
         let n = sqlx::query(
-            "update characters set build = $4, pos_x = $5, pos_y = $6, pos_z = $7, yaw = $8, viewport = $9, \
+            "update characters set build = $4, pos_zone = $2, pos_x = $5, pos_y = $6, pos_z = $7, yaw = $8, viewport = $9, \
              play_seconds = $10, location_kind = 'transit', location_zone = $2, transit_to = $3, transit_since = now(), \
              updated = now() where id = $1 and location_kind = 'zone' and location_zone = $2",
         )

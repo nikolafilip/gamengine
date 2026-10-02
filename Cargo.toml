@@ -17,6 +17,8 @@ gm-net = { path = "crates/gm-net" }
 gm-ai = { path = "crates/gm-ai" }
 gm-content = { path = "crates/gm-content" }
 gm-hub-proto = { path = "crates/gm-hub-proto" }
+gm-model = { path = "crates/gm-model" }
+gm-ingest = { path = "crates/gm-ingest" }
 
 # math / data
 glam = "0.33.11"
@@ -26,8 +28,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.6"
 bitcode = "0.6.9"
-sha2 = "0.11.0"
-lru = "0.18.5"
+sha2 = { version = "0.11.0", default-features = false }
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
 
 # rendering / windowing
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
@@ -78,4 +80,12 @@ strip = true
 debug = false
 
 [profile.dev.package."*"]
+opt-level = 2
+
+# Workspace members are not covered by "*". These two do the numeric work of model ingestion
+# (texture resampling, rasterising); unoptimised, their tests take minutes.
+[profile.dev.package.gm-model]
+opt-level = 2
+
+[profile.dev.package.gm-ingest]
 opt-level = 2

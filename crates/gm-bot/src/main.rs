@@ -40,12 +40,15 @@ struct Args {
     travel_to: Option<String>,
     travel_after: u64,
     maps_dir: PathBuf,
+    /// The first N bots of a hub swarm walk to the market and open a stall.
+    stalls: usize,
 }
 
 const USAGE: &str = "gm-bot --connect ADDR --cert PATH [--map PATH] [--bots N] [--secs N] \
-[--behaviour wander|hunter|hold|duelist] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]\n\
+[--behaviour wander|hunter|hold|duelist|stroll] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]\n\
        gm-bot --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME --zone ID \
-[--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...]";
+[--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...] \
+[--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall]";
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
@@ -69,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
         travel_to: None,
         travel_after: 10,
         maps_dir: PathBuf::from("assets/maps/built"),
+        stalls: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -102,6 +106,7 @@ fn parse_args() -> Result<Args, String> {
                     "hunter" => Behaviour::Hunter,
                     "hold" => Behaviour::Hold,
                     "duelist" => Behaviour::Duelist,
+                    "stroll" => Behaviour::Stroll,
                     other => return Err(format!("--behaviour: unknown {other}")),
                 }
             }
@@ -127,6 +132,11 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--travel-after: {e}"))?
             }
             "--maps-dir" => a.maps_dir = PathBuf::from(value("--maps-dir")?),
+            "--stalls" => {
+                a.stalls = value("--stalls")?
+                    .parse()
+                    .map_err(|e| format!("--stalls: {e}"))?
+            }
             "--teams" => {
                 a.teams = value("--teams")?
                     .split(',')
@@ -162,45 +172,73 @@ async fn main() -> anyhow::Result<()> {
         if args.user.is_empty() || args.password.is_empty() || args.character.is_empty() {
             anyhow::bail!("--hub needs --user, --password and --character");
         }
-        let cfg = gm_bot::HubFlowConfig {
-            hub,
-            hub_cert_der: std::fs::read(&args.hub_cert)?,
-            email: args.user,
-            password: args.password,
-            register: args.register,
-            character: args.character,
-            preset: args
-                .builds
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "blade".into()),
-            zone: args.zone,
-            travel_after: args
-                .travel_to
-                .as_ref()
-                .map(|_| Duration::from_secs(args.travel_after)),
-            travel_to: args.travel_to,
-            maps_dir: args.maps_dir,
-            bot: BotConfig {
-                name: String::new(),
-                seed: args.seed,
-                behaviour: args.behaviour,
-                rate: TickRate::COMBAT,
-                run_ticks: 0,
-                build: None,
-                team: 0,
-                counter_pick: args.counter_pick,
-                travel_to: None,
-                travel_after_ticks: 0,
-            },
-            play: Duration::from_secs(args.secs),
-        };
-        let r = gm_bot::run_hub_flow(cfg).await?;
-        println!(
-            "hub flow: character {} zones {:?} login {:.0} ms enter {:.0} ms travel {:.0} ms logout {:.0} ms",
-            r.character, r.zones, r.login_ms, r.enter_ms, r.travel_ms, r.logout_ms
-        );
-        for rep in &r.reports {
+        // One bot, or a swarm with an account each: `{i}` in the user and the character.
+        let swarm = args.user.contains("{i}");
+        let count = if swarm { args.bots } else { 1 };
+        let hub_cert_der = std::fs::read(&args.hub_cert)?;
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..count {
+            let number = format!("{i:03}");
+            let cfg = gm_bot::HubFlowConfig {
+                hub,
+                hub_cert_der: hub_cert_der.clone(),
+                email: args.user.replace("{i}", &number),
+                password: args.password.clone(),
+                register: args.register,
+                character: args.character.replace("{i}", &number),
+                preset: if args.builds.is_empty() {
+                    "blade".into()
+                } else {
+                    args.builds[i % args.builds.len()].clone()
+                },
+                zone: args.zone.clone(),
+                travel_after: args
+                    .travel_to
+                    .as_ref()
+                    .map(|_| Duration::from_secs(args.travel_after)),
+                travel_to: args.travel_to.clone(),
+                maps_dir: args.maps_dir.clone(),
+                bot: BotConfig {
+                    name: String::new(),
+                    seed: args.seed * 1000 + i as u64,
+                    behaviour: args.behaviour,
+                    rate: TickRate::COMBAT,
+                    run_ticks: 0,
+                    build: None,
+                    team: 0,
+                    counter_pick: args.counter_pick,
+                    travel_to: None,
+                    travel_after_ticks: 0,
+                    // Every other tile, so the market fills evenly.
+                    stall_tile: (i < args.stalls).then_some(i as u32 * 2),
+                },
+                play: Duration::from_secs(args.secs),
+            };
+            set.spawn(async move {
+                // Arrive over a few seconds, like people do.
+                tokio::time::sleep(Duration::from_millis(i as u64 * 25)).await;
+                gm_bot::run_hub_flow(cfg).await
+            });
+        }
+        let mut flows = Vec::new();
+        while let Some(r) = set.join_next().await {
+            match r? {
+                Ok(flow) => flows.push(flow),
+                Err(e) => eprintln!("bot failed: {e:#}"),
+            }
+        }
+        if flows.is_empty() {
+            anyhow::bail!("no bot completed");
+        }
+        if !swarm {
+            let r = &flows[0];
+            println!(
+                "hub flow: character {} zones {:?} login {:.0} ms enter {:.0} ms travel {:.0} ms logout {:.0} ms",
+                r.character, r.zones, r.login_ms, r.enter_ms, r.travel_ms, r.logout_ms
+            );
+        }
+        let reports: Vec<&gm_bot::BotReport> = flows.iter().flat_map(|f| &f.reports).collect();
+        for rep in reports.iter().take(if swarm { 0 } else { usize::MAX }) {
             println!(
                 "  {}: {} snapshots, {} corrections, kills {} deaths {}",
                 rep.name,
@@ -210,6 +248,30 @@ async fn main() -> anyhow::Result<()> {
                 rep.own_deaths
             );
         }
+        let n = reports.len().max(1) as f64;
+        println!(
+            "hub bots={} completed={} stalls_opened={} stalls_seen_max={} wearing_a_model={} models_seen_max={} roster_max={} revocations_max={} rx_bytes_per_s_avg={:.0} tx_bytes_per_s_avg={:.0} corrections_avg={:.2} unexplained_max={}",
+            count,
+            flows.len(),
+            reports.iter().filter(|r| r.stall_opened).count(),
+            reports.iter().map(|r| r.stalls_seen).max().unwrap_or(0),
+            reports.iter().filter(|r| r.own_model.is_some()).count(),
+            reports.iter().map(|r| r.models_seen).max().unwrap_or(0),
+            reports.iter().map(|r| r.roster).max().unwrap_or(0),
+            reports.iter().map(|r| r.revocations).max().unwrap_or(0),
+            reports.iter().map(|r| r.rx_bytes_per_s()).sum::<f64>() / n,
+            reports.iter().map(|r| r.tx_bytes_per_s()).sum::<f64>() / n,
+            reports
+                .iter()
+                .map(|r| r.client.corrections as f64)
+                .sum::<f64>()
+                / n,
+            reports
+                .iter()
+                .map(|r| r.client.corrections_unexplained)
+                .max()
+                .unwrap_or(0),
+        );
         return Ok(());
     }
     let cert = CertificateDer::from(std::fs::read(&args.cert)?);
@@ -241,6 +303,7 @@ async fn main() -> anyhow::Result<()> {
             counter_pick: args.counter_pick,
             travel_to: None,
             travel_after_ticks: 0,
+            stall_tile: None,
         };
         let secs = args.secs;
         set.spawn(async move {

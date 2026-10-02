@@ -80,6 +80,55 @@ impl HubClient {
         }
     }
 
+    /// A request that carries bytes: the framed message, then `body` raw on the same stream
+    /// (MODELS.md 6.2).
+    pub async fn upload(
+        &self,
+        req: &HubRequest,
+        body: &[u8],
+    ) -> Result<HubResponse, HubClientError> {
+        let (mut send, mut recv) = self.conn.open_bi().await?;
+        control::send_any(&mut send, req).await?;
+        // The hub may refuse before reading the body and stop the stream: that is its
+        // answer, not our error.
+        let sent = send.write_all(body).await;
+        let _ = send.finish();
+        let resp: Option<HubResponse> = control::recv_any(&mut recv).await?;
+        match resp {
+            Some(HubResponse::Err(e)) => Err(HubClientError::Refused(e)),
+            Some(other) => Ok(other),
+            None => Err(match sent {
+                Err(e) => HubClientError::Other(format!("upload interrupted: {e}")),
+                Ok(()) => HubClientError::Unexpected,
+            }),
+        }
+    }
+
+    /// A request answered with bytes: `Blob { len }`, then `len` raw bytes, at most `max`.
+    pub async fn download(&self, req: &HubRequest, max: usize) -> Result<Vec<u8>, HubClientError> {
+        let (mut send, mut recv) = self.conn.open_bi().await?;
+        control::send_any(&mut send, req).await?;
+        send.finish().map_err(|_| HubClientError::Unexpected)?;
+        let resp: HubResponse = control::recv_any(&mut recv)
+            .await?
+            .ok_or(HubClientError::Unexpected)?;
+        let len = match resp {
+            HubResponse::Blob { len } => len as usize,
+            HubResponse::Err(e) => return Err(HubClientError::Refused(e)),
+            _ => return Err(HubClientError::Unexpected),
+        };
+        if len > max {
+            return Err(HubClientError::Other(format!(
+                "the hub announced {len} bytes; at most {max} were expected"
+            )));
+        }
+        let mut body = vec![0u8; len];
+        recv.read_exact(&mut body)
+            .await
+            .map_err(|e| HubClientError::Other(format!("download interrupted: {e}")))?;
+        Ok(body)
+    }
+
     /// Expect `Ok`.
     pub async fn ok(&self, req: &HubRequest) -> Result<(), HubClientError> {
         match self.request(req).await? {

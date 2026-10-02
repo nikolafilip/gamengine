@@ -8,7 +8,7 @@ use std::time::Duration;
 use glam::Vec3;
 use gm_core::build::{Build, ContentPack};
 use gm_core::vocab::EntityId;
-use gm_hub_proto::protocol::CharacterId;
+use gm_hub_proto::protocol::{CharacterId, ModelId, ModelRef, StallSummary};
 use gm_net::PROTOCOL_VERSION;
 use gm_net::control::{self, BuildChoice, Control};
 use gm_net::input::InputDatagram;
@@ -31,6 +31,8 @@ pub struct HubJoin {
     /// Where it was in this zone, if the saved position belongs here.
     pub origin: Option<(Vec3, f32)>,
     pub play_seconds: u32,
+    /// The avatar model the hub says the character wears (MODELS.md 6.3).
+    pub model: Option<ModelRef>,
 }
 
 pub enum ClientEvent {
@@ -61,6 +63,30 @@ pub enum ClientEvent {
     HubKick {
         character: CharacterId,
         reason: String,
+    },
+    /// The hub says a model was taken down: nobody wears it any more (MODELS.md 7).
+    HubModelRevoked {
+        model: ModelId,
+    },
+    /// The client wants a stall on the tile it stands on, or its stall closed (ECONOMY.md 7).
+    StallOpen {
+        id: EntityId,
+    },
+    StallClose {
+        id: EntityId,
+    },
+    /// The hub's answers, and its word that a stall of this zone closed.
+    StallOpened {
+        id: EntityId,
+        result: Result<StallSummary, String>,
+    },
+    StallCloseResult {
+        id: EntityId,
+        result: Result<(), String>,
+    },
+    StallsLoaded(Vec<StallSummary>),
+    HubStallClosed {
+        stall: i64,
     },
     Respec {
         id: EntityId,
@@ -172,6 +198,7 @@ async fn handle_connection(
                             character: claimed.character,
                             origin,
                             play_seconds: claimed.state.play_seconds,
+                            model: claimed.model,
                         }),
                     )
                 }
@@ -283,6 +310,16 @@ async fn handle_connection(
                     }
                     Ok(Some(Control::Travel(zone))) => {
                         if tx.send(ClientEvent::Travel { id, zone }).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(Control::StallOpen)) => {
+                        if tx.send(ClientEvent::StallOpen { id }).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(Control::StallClose)) => {
+                        if tx.send(ClientEvent::StallClose { id }).await.is_err() {
                             break;
                         }
                     }

@@ -1,9 +1,11 @@
-//! wgpu device setup and the world renderer: one pipeline, one draw call, PVS-culled indices.
+//! wgpu device setup and the renderer: the world in one draw call with PVS-culled indices,
+//! entity boxes in one more, and one per character (`characters`).
 
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::Error;
+use crate::characters::{CharacterDraw, Characters};
 use crate::world::{FaceRange, TEXTURE_SIZE, Vertex, WorldMesh};
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -16,6 +18,8 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub info: wgpu::AdapterInfo,
+    /// BC texture compression is available: model atlases upload as they are (MODELS.md 8).
+    pub bc: bool,
 }
 
 impl Gpu {
@@ -46,10 +50,22 @@ impl Gpu {
                 info.driver,
                 info.driver_info
             );
+            let bc = adapter
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+            if !bc {
+                log::warn!(
+                    "no BC texture compression on this GPU: model atlases are decoded on the CPU"
+                );
+            }
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("gm-client"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: if bc {
+                        wgpu::Features::TEXTURE_COMPRESSION_BC
+                    } else {
+                        wgpu::Features::empty()
+                    },
                     required_limits: wgpu::Limits::downlevel_defaults(),
                     experimental_features: wgpu::ExperimentalFeatures::disabled(),
                     memory_hints: wgpu::MemoryHints::Performance,
@@ -62,6 +78,7 @@ impl Gpu {
                 device,
                 queue,
                 info,
+                bc,
             })
         })
     }
@@ -86,7 +103,7 @@ pub fn view_proj(eye: Vec3, yaw_deg: f32, pitch_deg: f32, aspect: f32) -> Mat4 {
     proj * glam::camera::rh::view::look_to_mat4(eye, forward, Vec3::Z)
 }
 
-/// A solid box drawn for an entity (players, projectiles). Hand-painted meshes arrive in Phase 6.
+/// A solid box: projectiles, areas, markers. Players are `characters::CharacterDraw`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EntityDraw {
     pub mins: Vec3,
@@ -194,6 +211,18 @@ fn box_vertices(out: &mut Vec<EntityVertex>, d: &EntityDraw) {
     }
 }
 
+/// GPU resources of one map.
+struct WorldGpu {
+    textures_bg: wgpu::BindGroup,
+    vertex_buf: wgpu::Buffer,
+    index_buf: wgpu::Buffer,
+    index_count: u32,
+    face_ranges: Vec<FaceRange>,
+    all_indices: Vec<u32>,
+    scratch: Vec<u32>,
+    faces_drawn: usize,
+}
+
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     entity_pipeline: wgpu::RenderPipeline,
@@ -202,17 +231,18 @@ pub struct Renderer {
     entity_vertices: Vec<EntityVertex>,
     globals_buf: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
-    textures_bg: wgpu::BindGroup,
-    vertex_buf: wgpu::Buffer,
-    index_buf: wgpu::Buffer,
-    index_count: u32,
+    textures_layout: wgpu::BindGroupLayout,
+    diffuse_sampler: wgpu::Sampler,
+    lightmap_sampler: wgpu::Sampler,
+    world: WorldGpu,
     depth_view: wgpu::TextureView,
     depth_size: (u32, u32),
-    face_ranges: Vec<FaceRange>,
-    all_indices: Vec<u32>,
-    scratch: Vec<u32>,
+    /// Models, mannequins and this frame's skinning blocks.
+    pub characters: Characters,
     pub lightmap_scale: f32,
     pub faces_drawn: usize,
+    /// Draw calls of the last frame: the world, the boxes, one per character.
+    pub draw_calls: usize,
 }
 
 fn make_depth(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
@@ -235,7 +265,7 @@ fn make_depth(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
 }
 
 /// Box-filter mip chain for an RGBA image.
-fn mip_chain(rgba: &[u8], mut w: u32, mut h: u32) -> Vec<(u32, u32, Vec<u8>)> {
+pub fn mip_chain(rgba: &[u8], mut w: u32, mut h: u32) -> Vec<(u32, u32, Vec<u8>)> {
     let mut levels = vec![(w, h, rgba.to_vec())];
     while w > 1 || h > 1 {
         let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
@@ -294,6 +324,115 @@ fn upload_layer(
     }
 }
 
+/// Upload one map: its texture array, its lightmap atlas, its vertices and indices.
+fn world_gpu(
+    gpu: &Gpu,
+    textures_layout: &wgpu::BindGroupLayout,
+    diffuse_sampler: &wgpu::Sampler,
+    lightmap_sampler: &wgpu::Sampler,
+    world: &WorldMesh,
+) -> WorldGpu {
+    let device = &gpu.device;
+    // Diffuse texture array with a full mip chain.
+    let layers = world.texture_layers.len().max(1) as u32;
+    let mip_count = TEXTURE_SIZE.ilog2() + 1;
+    let diffuse = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("diffuse array"),
+        size: wgpu::Extent3d {
+            width: TEXTURE_SIZE,
+            height: TEXTURE_SIZE,
+            depth_or_array_layers: layers,
+        },
+        mip_level_count: mip_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (i, layer) in world.texture_layers.iter().enumerate() {
+        upload_layer(
+            &gpu.queue,
+            &diffuse,
+            i as u32,
+            &mip_chain(layer, TEXTURE_SIZE, TEXTURE_SIZE),
+        );
+    }
+    let diffuse_view = diffuse.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    // Lightmap atlas, linear (not sRGB): light values multiply the albedo.
+    let lm = &world.lightmap;
+    let lightmap = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("lightmap atlas"),
+        size: wgpu::Extent3d {
+            width: lm.width,
+            height: lm.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    upload_layer(
+        &gpu.queue,
+        &lightmap,
+        0,
+        &[(lm.width, lm.height, lm.rgba.clone())],
+    );
+    let lightmap_view = lightmap.create_view(&wgpu::TextureViewDescriptor::default());
+    let textures_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("textures"),
+        layout: textures_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&diffuse_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(diffuse_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&lightmap_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(lightmap_sampler),
+            },
+        ],
+    });
+    let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("world vertices"),
+        contents: bytemuck::cast_slice(&world.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("world indices"),
+        contents: bytemuck::cast_slice(&world.indices),
+        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+    });
+    WorldGpu {
+        textures_bg,
+        vertex_buf,
+        index_buf,
+        index_count: world.indices.len() as u32,
+        face_ranges: world.face_ranges.clone(),
+        all_indices: world.indices.clone(),
+        scratch: Vec::with_capacity(world.indices.len()),
+        faces_drawn: world
+            .face_ranges
+            .iter()
+            .filter(|r| r.index_count > 0)
+            .count(),
+    }
+}
+
 impl Renderer {
     pub fn new(
         gpu: &Gpu,
@@ -305,36 +444,6 @@ impl Renderer {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("world"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-
-        // Diffuse texture array with a full mip chain.
-        let layers = world.texture_layers.len().max(1) as u32;
-        let mip_count = TEXTURE_SIZE.ilog2() + 1;
-        let diffuse = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("diffuse array"),
-            size: wgpu::Extent3d {
-                width: TEXTURE_SIZE,
-                height: TEXTURE_SIZE,
-                depth_or_array_layers: layers,
-            },
-            mip_level_count: mip_count,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        for (i, layer) in world.texture_layers.iter().enumerate() {
-            upload_layer(
-                &gpu.queue,
-                &diffuse,
-                i as u32,
-                &mip_chain(layer, TEXTURE_SIZE, TEXTURE_SIZE),
-            );
-        }
-        let diffuse_view = diffuse.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
         });
         let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("diffuse"),
@@ -350,30 +459,6 @@ impl Renderer {
             anisotropy_clamp: 1,
             border_color: None,
         });
-
-        // Lightmap atlas, linear (not sRGB): light values multiply the albedo.
-        let lm = &world.lightmap;
-        let lightmap = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lightmap atlas"),
-            size: wgpu::Extent3d {
-                width: lm.width,
-                height: lm.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        upload_layer(
-            &gpu.queue,
-            &lightmap,
-            0,
-            &[(lm.width, lm.height, lm.rgba.clone())],
-        );
-        let lightmap_view = lightmap.create_view(&wgpu::TextureViewDescriptor::default());
         let lightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("lightmap"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -441,28 +526,6 @@ impl Renderer {
                 binding: 0,
                 resource: globals_buf.as_entire_binding(),
             }],
-        });
-        let textures_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("textures"),
-            layout: &textures_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&lightmap_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&lightmap_sampler),
-                },
-            ],
         });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -576,17 +639,14 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("world vertices"),
-            contents: bytemuck::cast_slice(&world.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("world indices"),
-            contents: bytemuck::cast_slice(&world.indices),
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-        });
-
+        let characters = Characters::new(gpu, color_format, &globals_layout);
+        let world = world_gpu(
+            gpu,
+            &textures_layout,
+            &diffuse_sampler,
+            &lightmap_sampler,
+            world,
+        );
         Renderer {
             pipeline,
             entity_pipeline,
@@ -595,22 +655,29 @@ impl Renderer {
             entity_vertices: Vec::new(),
             globals_buf,
             globals_bg,
-            textures_bg,
-            vertex_buf,
-            index_buf,
-            index_count: world.indices.len() as u32,
+            textures_layout,
+            diffuse_sampler,
+            lightmap_sampler,
+            faces_drawn: world.faces_drawn,
+            world,
             depth_view: make_depth(device, size),
             depth_size: size,
-            face_ranges: world.face_ranges.clone(),
-            all_indices: world.indices.clone(),
-            scratch: Vec::with_capacity(world.indices.len()),
+            characters,
             lightmap_scale: 2.0,
-            faces_drawn: world
-                .face_ranges
-                .iter()
-                .filter(|r| r.index_count > 0)
-                .count(),
+            draw_calls: 0,
         }
+    }
+
+    /// Replace the map; loaded models and mannequins stay (a zone change keeps its avatars).
+    pub fn set_world(&mut self, gpu: &Gpu, world: &WorldMesh) {
+        self.world = world_gpu(
+            gpu,
+            &self.textures_layout,
+            &self.diffuse_sampler,
+            &self.lightmap_sampler,
+            world,
+        );
+        self.faces_drawn = self.world.faces_drawn;
     }
 
     pub fn resize(&mut self, gpu: &Gpu, size: (u32, u32)) {
@@ -622,45 +689,44 @@ impl Renderer {
 
     /// Restrict drawing to `faces` (from the PVS), or to everything with `None`.
     pub fn set_visible_faces(&mut self, gpu: &Gpu, faces: Option<&[u32]>) {
-        self.scratch.clear();
+        let w = &mut self.world;
+        w.scratch.clear();
         let mut drawn = 0;
         match faces {
             None => {
-                self.scratch.extend_from_slice(&self.all_indices);
-                drawn = self
-                    .face_ranges
-                    .iter()
-                    .filter(|r| r.index_count > 0)
-                    .count();
+                w.scratch.extend_from_slice(&w.all_indices);
+                drawn = w.face_ranges.iter().filter(|r| r.index_count > 0).count();
             }
             Some(faces) => {
                 for &f in faces {
-                    let r = self.face_ranges[f as usize];
+                    let r = w.face_ranges[f as usize];
                     if r.index_count > 0 {
                         drawn += 1;
                         let start = r.first_index as usize;
-                        self.scratch.extend_from_slice(
-                            &self.all_indices[start..start + r.index_count as usize],
+                        w.scratch.extend_from_slice(
+                            &w.all_indices[start..start + r.index_count as usize],
                         );
                     }
                 }
             }
         }
-        self.index_count = self.scratch.len() as u32;
+        w.index_count = w.scratch.len() as u32;
+        w.faces_drawn = drawn;
         self.faces_drawn = drawn;
-        if !self.scratch.is_empty() {
+        if !w.scratch.is_empty() {
             gpu.queue
-                .write_buffer(&self.index_buf, 0, bytemuck::cast_slice(&self.scratch));
+                .write_buffer(&w.index_buf, 0, bytemuck::cast_slice(&w.scratch));
         }
     }
 
-    /// Record and submit one frame into `target`, drawing the world and `entities`.
+    /// Record and submit one frame into `target`: the world, `entities` and `characters`.
     pub fn render(
         &mut self,
         gpu: &Gpu,
         target: &wgpu::TextureView,
         view_proj: Mat4,
         entities: &[EntityDraw],
+        characters: &[CharacterDraw],
     ) {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
@@ -688,6 +754,10 @@ impl Renderer {
                 bytemuck::cast_slice(&self.entity_vertices),
             );
         }
+        self.characters.prepare(gpu, characters);
+        self.draw_calls = (self.world.index_count > 0) as usize
+            + !self.entity_vertices.is_empty() as usize
+            + self.characters.drawn;
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -722,14 +792,15 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if self.index_count > 0 {
+            if self.world.index_count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.globals_bg, &[]);
-                pass.set_bind_group(1, &self.textures_bg, &[]);
-                pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-                pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.index_count, 0, 0..1);
+                pass.set_bind_group(1, &self.world.textures_bg, &[]);
+                pass.set_vertex_buffer(0, self.world.vertex_buf.slice(..));
+                pass.set_index_buffer(self.world.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.world.index_count, 0, 0..1);
             }
+            self.characters.draw(&mut pass, &self.globals_bg);
             if !self.entity_vertices.is_empty() {
                 pass.set_pipeline(&self.entity_pipeline);
                 pass.set_bind_group(0, &self.globals_bg, &[]);

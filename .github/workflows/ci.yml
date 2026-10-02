@@ -43,6 +43,7 @@ jobs:
         run: |
           cargo run -q -p gm-tools --locked -- map build assets/maps/src/test_room.map --out target/ci-maps
           cargo run -q -p gm-tools --locked -- map build assets/maps/src/arena.map --out target/ci-maps
+          cargo run -q -p gm-tools --locked -- map build assets/maps/src/town.map --out target/ci-maps
       - name: Tests
         run: cargo test --workspace --locked
       - name: Asset budgets
@@ -75,6 +76,8 @@ jobs:
         run: SKIP_BUILD=1 scripts/check-binary-size.sh --self-test
       - name: Headless render + RAM gate (software Vulkan; fps is not gated here)
         run: SKIP_BUILD=1 FRAMES=120 scripts/check-perf.sh --software
+      - name: Avatar gate smoke (48 distinct avatars, 16 MiB cache cap, software Vulkan)
+        run: scripts/check-avatars.sh --software
 
   # Frame time on a real integrated GPU (PLAN.md 2.7). Enabled once a self-hosted runner exists.
   # perf-igpu:
@@ -82,3 +85,4 @@ jobs:
   #   steps:
   #     - uses: actions/checkout@v4
   #     - run: scripts/check-perf.sh --gate-fps
+  #     - run: scripts/check-avatars.sh --gate-fps

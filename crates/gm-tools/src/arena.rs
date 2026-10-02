@@ -3,157 +3,13 @@
 //! committed and hand-editable in TrenchBroom; the generator exists so the layout is
 //! reproducible and reviewable as code.
 
-use std::fmt::Write as _;
+use crate::mapgen::{Map, fix_worldspawn_closure};
 
 /// Quake map units.
 const HALF_X: f32 = 1344.0;
 const HALF_Y: f32 = 960.0;
 const WALL: f32 = 16.0;
 const CEILING: f32 = 320.0;
-
-struct Map {
-    out: String,
-}
-
-impl Map {
-    fn new() -> Map {
-        Map { out: String::new() }
-    }
-
-    /// An axis-aligned box brush `mins..maxs` with a side texture, a top texture and a
-    /// bottom texture.
-    fn boxb(&mut self, mins: [f32; 3], maxs: [f32; 3], side: &str, top: &str, bottom: &str) {
-        let [x0, y0, z0] = mins;
-        let [x1, y1, z1] = maxs;
-        let p = |a: [f32; 3], b: [f32; 3], c: [f32; 3], tex: &str| {
-            format!(
-                "( {} {} {} ) ( {} {} {} ) ( {} {} {} ) {tex} 0 0 0 1 1\n",
-                a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]
-            )
-        };
-        self.out.push_str("{\n");
-        // +x face (points counter-clockwise seen from outside, as qbsp expects).
-        self.out
-            .push_str(&p([x1, y1, z0], [x1, y0, z0], [x1, y0, z1], side));
-        // -x
-        self.out
-            .push_str(&p([x0, y0, z1], [x0, y0, z0], [x0, y1, z0], side));
-        // +y
-        self.out
-            .push_str(&p([x0, y1, z1], [x0, y1, z0], [x1, y1, z0], side));
-        // -y
-        self.out
-            .push_str(&p([x1, y0, z0], [x0, y0, z0], [x0, y0, z1], side));
-        // +z
-        self.out
-            .push_str(&p([x1, y0, z1], [x0, y0, z1], [x0, y1, z1], top));
-        // -z
-        self.out
-            .push_str(&p([x0, y1, z0], [x0, y0, z0], [x1, y0, z0], bottom));
-        self.out.push_str("}\n");
-    }
-
-    /// A ramp rising along +x (`rise_x > 0`) or -x from `z0` at the low end to `z1` at the
-    /// high end, spanning `y0..y1`. The low end is at `x_low`, the high end at `x_high`.
-    #[allow(clippy::too_many_arguments)]
-    fn ramp_x(&mut self, x_low: f32, x_high: f32, y0: f32, y1: f32, z0: f32, z1: f32, tex: &str) {
-        let (xa, xb) = if x_low < x_high {
-            (x_low, x_high)
-        } else {
-            (x_high, x_low)
-        };
-        let p = |a: [f32; 3], b: [f32; 3], c: [f32; 3], t: &str| {
-            format!(
-                "( {} {} {} ) ( {} {} {} ) ( {} {} {} ) {t} 0 0 0 1 1\n",
-                a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]
-            )
-        };
-        // Heights at xa and xb.
-        let (za, zb) = if x_low < x_high { (z0, z1) } else { (z1, z0) };
-        let ztop = za.max(zb);
-        self.out.push_str("{\n");
-        // bottom
-        self.out.push_str(&p(
-            [xa, y1, z0 - 16.0],
-            [xa, y0, z0 - 16.0],
-            [xb, y0, z0 - 16.0],
-            "trim_dark",
-        ));
-        // +y side
-        self.out.push_str(&p(
-            [xa, y1, ztop],
-            [xa, y1, z0 - 16.0],
-            [xb, y1, z0 - 16.0],
-            "trim_dark",
-        ));
-        // -y side
-        self.out.push_str(&p(
-            [xb, y0, z0 - 16.0],
-            [xa, y0, z0 - 16.0],
-            [xa, y0, ztop],
-            "trim_dark",
-        ));
-        // high end cap (vertical face at the high x end)
-        if x_low < x_high {
-            self.out.push_str(&p(
-                [xb, y1, z0 - 16.0],
-                [xb, y0, z0 - 16.0],
-                [xb, y0, ztop],
-                "trim_dark",
-            ));
-            // low end cap
-            self.out.push_str(&p(
-                [xa, y0, ztop],
-                [xa, y0, z0 - 16.0],
-                [xa, y1, z0 - 16.0],
-                "trim_dark",
-            ));
-        } else {
-            self.out.push_str(&p(
-                [xb, y1, z0 - 16.0],
-                [xb, y0, z0 - 16.0],
-                [xb, y0, ztop],
-                "trim_dark",
-            ));
-            self.out.push_str(&p(
-                [xa, y0, ztop],
-                [xa, y0, z0 - 16.0],
-                [xa, y1, z0 - 16.0],
-                "trim_dark",
-            ));
-        }
-        // sloped top: three points on the slope, counter-clockwise seen from above.
-        self.out
-            .push_str(&p([xb, y0, zb], [xa, y0, za], [xa, y1, za], tex));
-        self.out.push_str("}\n");
-    }
-
-    fn entity(&mut self, props: &[(&str, String)]) {
-        self.out.push_str("{\n");
-        for (k, v) in props {
-            let _ = writeln!(self.out, "\"{k}\" \"{v}\"");
-        }
-        self.out.push_str("}\n");
-    }
-
-    fn light(&mut self, x: f32, y: f32, z: f32, light: u32, color: [u8; 3]) {
-        self.entity(&[
-            ("classname", "light".into()),
-            ("origin", format!("{x} {y} {z}")),
-            ("light", light.to_string()),
-            ("_color", format!("{} {} {}", color[0], color[1], color[2])),
-        ]);
-    }
-
-    fn spawn(&mut self, x: f32, y: f32, z: f32, angle: i32, team: u8) {
-        self.entity(&[
-            ("classname", "gm_spawn".into()),
-            ("origin", format!("{x} {y} {z}")),
-            ("angle", angle.to_string()),
-            ("team", team.to_string()),
-        ]);
-    }
-}
 
 /// The arena as `.map` text.
 pub fn generate() -> String {
@@ -342,27 +198,6 @@ pub fn generate() -> String {
     m.out.push_str("}\n");
     // Entities must follow the worldspawn block: move the "}" of worldspawn before them.
     fix_worldspawn_closure(m.out)
-}
-
-/// The generator writes brushes into worldspawn and entities after it; this closes the
-/// worldspawn block right after its last brush.
-fn fix_worldspawn_closure(text: String) -> String {
-    // Entities start at the first "{\n\"classname\"" after the worldspawn header.
-    let header_end = text
-        .find("\"_bounce\" \"1\"\n")
-        .map(|i| i + "\"_bounce\" \"1\"\n".len())
-        .unwrap_or(0);
-    let body = &text[header_end..];
-    let first_entity = body.find("{\n\"classname\"").unwrap_or(body.len());
-    let mut out = String::with_capacity(text.len() + 4);
-    out.push_str(&text[..header_end]);
-    out.push_str(&body[..first_entity]);
-    out.push_str("}\n");
-    let rest = &body[first_entity..];
-    // Drop the final stray "}\n" the generator appended after the last entity.
-    let rest = rest.strip_suffix("}\n").unwrap_or(rest);
-    out.push_str(rest);
-    out
 }
 
 #[cfg(test)]

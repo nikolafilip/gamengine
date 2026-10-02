@@ -1,6 +1,7 @@
 # Hub: accounts, characters, zones, handoff
 
-Status: v1, Phase 4. This document is the contract between `gm-hub`, `gm-server` and the
+Status: v1.2 (Phase 4; the economy requests of Phase 5; models, stalls in the world and the
+saved position's zone of Phase 6). This document is the contract between `gm-hub`, `gm-server` and the
 clients for everything that outlives a zone process: accounts, characters, where a character is,
 and how it moves between zones. PLAN.md 2.1 (Postgres via sqlx, in-memory session state), 11.3
 (hub-directed handoff with a ghost until the ack), 11.4 (data model) and 11.7 (one zone process
@@ -39,15 +40,20 @@ Section 8 records the independent design review this version went through.
 
 ## 3. Hub protocol
 
-Transport: QUIC with the transport parameters of PROTOCOL.md 1 (idle timeout 10 s, keep-alive
-2 s, fixed window) except that a hub connection allows **1,024** concurrent bidirectional
-streams (a zone saving thirty characters at once must never block on a stream limit).
+Transport: QUIC with the idle timeout and keep-alive of PROTOCOL.md 1 (10 s, 2 s), **1,024**
+concurrent bidirectional streams per connection (a zone saving thirty characters at once must
+never block on a stream limit) and, since Phase 6, QUIC's loss-based congestion control (Cubic)
+instead of the zones' fixed 64 KiB window: that window is right for a few KB/s of datagrams and
+would cap a model download at 640 KB/s on a 100 ms path (MODELS.md 6.2).
 Certificates: the hub presents a self-signed certificate written at start (`--cert-out`);
 clients and zones trust exactly that file. Every request is one bidirectional stream: the
 requester writes one framed `HubRequest` and finishes; the hub writes one framed `HubResponse`
 and finishes. Framing is PROTOCOL.md 8 (big-endian u16 length + `bitcode`). Messages over
-65,535 bytes are protocol errors. A zone's connection also carries hub-initiated notices on
-unidirectional streams opened by the hub (`HubNotice`, section 3.4).
+65,535 bytes are protocol errors. Two requests carry bytes that are not messages (MODELS.md
+6.2): `ModelUpload` is followed on the same stream by `len` raw bytes, checked against the
+limit before one of them is read, and the answer to `ModelGet` and `Mod(Preview)` is
+`Blob { len }` followed by `len` raw bytes. A zone's connection also carries hub-initiated
+notices on unidirectional streams opened by the hub (`HubNotice`, section 3.4).
 
 ```
 enum HubRequest {
@@ -70,25 +76,42 @@ enum HubRequest {
     // the economy (ECONOMY.md): a session for one of its own characters; a zone for itself
     Econ { session: SessionId, character: CharacterId, op: EconOp },
     ZoneEcon(ZoneEconOp),
+    // avatar models (MODELS.md 6.2, 10)
+    ModelUpload { session: SessionId, frame: u8, tos_version: u16, len: u32 },   // + len bytes
+    ModelList { session: SessionId },
+    ModelDrop { session: SessionId, model: ModelId },
+    SetModel { session: SessionId, character: CharacterId, model: Option<ModelId> },
+    ModelGet { session: SessionId, model: ModelId },
+    Mod { session: SessionId, op: ModOp },      // moderators: Queue, Preview, Decide, Takedown,
+                                                // Reinstate, SetUpload, SetTrust, ClearStrikes
 }
 
 enum HubNotice {                   // hub → zone, unidirectional streams
     Claimed { character: CharacterId },
     Kick { character: CharacterId, reason: String },
+    ModelRevoked { model: ModelId },            // to every zone (MODELS.md 6.3)
+    StallClosed { stall: i64 },                 // to the stall's zone (ECONOMY.md 7)
 }
 
 enum HubResponse {
     Ok,
     Err(HubError),                 // typed: Credentials, Taken, NotFound, Busy, Unauthorized,
-                                   // Invalid(String), Internal, Insufficient, Full, Cooldown
+                                   // Invalid(String), Internal, Insufficient, Full, Cooldown,
+                                   // Gone (taken down, not served)
     Session { session: SessionId, account: AccountId },
     Characters(Vec<CharacterSummary>),
     Character(CharacterSummary),
     Zones(Vec<ZoneSummary>),       // id, map, players, address, cert hash, up for ms
     Ticket(ZoneTicket),            // addr, cert_der, token
-    Claimed { character: CharacterId, name: String, state: CharacterState, team: u8 },
+    Claimed { character: CharacterId, name: String, state: CharacterState, team: u8,
+              model: Option<ModelRef> },  // what the character wears, while it is active
     Registered { public_key: [u8; 32] },  // the hub's token verification key
-    Econ(EconReply),               // Done, Id, Ids, Holder, TradeView, Trade, Decided, Tavern
+    Econ(EconReply),               // Done, Id, Ids, Holder, TradeView, Trade, Decided, Tavern,
+                                   // Stall, Stalls
+    Models(Vec<ModelSummary>),
+    ModelAccepted { model: ModelId, status: ModelStatus },
+    Blob { len: u32 },             // + len bytes
+    ModQueue(Vec<ModEntry>),
 }
 ```
 
@@ -151,6 +174,16 @@ zone authenticated by `ZoneHello`); a late save from an origin zone after a hand
 zone writing someone else's character, is refused with `NotFound`. Streams are unordered, so this
 rule, not arrival order, is what keeps the location right.
 
+`zone` is the zone whose map the position is on (the column `pos_zone`, written with every
+save), not where the character is: a claim hands the position to a zone only when it is that
+zone's own, and the zone uses it only when it is still a place to stand on its map (otherwise
+the character spawns). **[CORRECTED in Phase 6]** Until then the hub compared against
+`location_zone`, which is null while offline and names the origin during a transit, and a zone
+trusted whatever it was given: a first entry and every arrival from another zone were placed at
+the saved coordinates of the previous map (the origin for a new character), usually inside a
+wall. The Phase 4 round trip did not notice because its assertions were about the database;
+it now also requires the bots to cover ground in both zones.
+
 ### 3.3 Handoff
 
 1. Client → zone: `Control::Travel { zone: ZoneId }` (new control message).
@@ -173,9 +206,11 @@ spawn. Nothing can wedge a character forever.
 ### 3.4 Hub notices
 
 The hub opens a unidirectional stream to a zone for each notice: `HubNotice::Claimed {
-character }` (drop the ghost) and `HubNotice::Kick { character, reason }` (the account logged
-out, or an operator removed it). Notices are advisory for the zone's bookkeeping; the database
-is already updated when they are sent.
+character }` (drop the ghost), `HubNotice::Kick { character, reason }` (the account logged
+out, or an operator removed it), `HubNotice::ModelRevoked { model }` (to every zone: a takedown,
+MODELS.md 6.3) and `HubNotice::StallClosed { stall }` (to the stall's zone: its owner closed it
+or its 48 h ran out, ECONOMY.md 7). Notices are advisory for the zone's bookkeeping; the
+database is already updated when they are sent.
 
 ## 4. Database (PLAN.md 11.4)
 
@@ -194,7 +229,9 @@ check constraint that the zone columns are null exactly when offline. Builds are
 for inspection; the hub validates them against the content pack it loads at start (the hub and
 every zone of a deployment load the same `assets/content`, and the hub refuses a zone whose
 `map_hash`/content differ from what it knows for that zone id). Items, stalls, escrow and the
-ledger arrive in Phase 5 as separate tables. Migrations are embedded in the binary and run at
+ledger arrive in Phase 5 as separate tables (ECONOMY.md); Phase 6 adds `models`,
+`model_holders`, `model_events`, `characters.model` and three account columns (MODELS.md 6.1),
+and `characters.pos_zone` (section 3.2). Migrations are embedded in the binary and run at
 start in order; the hub refuses to start on an unknown newer schema.
 
 Passwords: argon2id with the crate defaults (19 MiB, 2 iterations, parallelism 1), one hash per
@@ -220,14 +257,15 @@ email answers `Taken` without timing leaks worth defending in Phase 4.
 
 ## 6. Deliberately absent
 
-No HTTP API (the ops tool `gm-hub ctl` speaks the same protocol). No OAuth, no email
+No HTTP API: the tools speak the same protocol (`gm-tools model`, `gm-tools mod`,
+`gm-tools hub`; the first moderator is made with `gm-hub --grant-moderator EMAIL`). No OAuth, no email
 verification, no password reset (Phase ∞, with the website). No zone-to-zone direct links: every
 move goes through the hub. No sharding of the hub.
 
 ## 7. Open
 
-Whether zone secrets become per-zone certificates signed by the hub. Where the asset ingestion
-API of Phase 6 lives (same endpoint, large messages on their own streams).
+Whether zone secrets become per-zone certificates signed by the hub. (Resolved in Phase 6: the
+asset ingestion API lives on the same endpoint, bytes raw on the request's own stream.)
 
 ## 8. Implementation notes (Phase 4)
 
@@ -256,6 +294,12 @@ flow starts and in the second zone 160 ms after the travel request; argon2id cos
 hash. The 200-bot swarm gate (`scripts/check-swarm.sh`) measured **6.6 ms mean / 9.1 ms p99**
 per tick with 200 duelists in the arena hall, 272 MB server RSS, 20 KB/s down per player; the
 snapshot pass runs on a `rayon` pool, the simulation step is single-threaded (3 ms of the 6.6).
+
+**Phase 6** added `gm-hub::models` (the store, quotas, moderation; MODELS.md 6 and 10) and the
+`ingest-worker` subcommand of the hub binary, which is the same executable started as a child
+with resource limits. Measured 2026-10-01: 100 uploads of 1.17 MB each through the worker,
+verification, approval and `SetModel` take 37 to 50 s on loopback (0.4 to 0.5 s per avatar);
+the two model tests against Postgres with the real worker take 3 to 5 s.
 
 ## 9. Design review log
 

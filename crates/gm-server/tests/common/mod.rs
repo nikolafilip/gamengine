@@ -230,6 +230,7 @@ pub fn play(m: Match) -> Outcome {
                 counter_pick,
                 travel_to: None,
                 travel_after_ticks: 0,
+                stall_tile: None,
             };
             let report = run_bot(
                 &endpoint,

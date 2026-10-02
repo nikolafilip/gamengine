@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use gm_bsp::Bsp;
+use gm_bsp::{Bsp, StallGrid};
 use gm_core::sim::Spawn;
 use gm_net::transport::fnv1a64;
 
@@ -14,6 +14,8 @@ pub struct ZoneWorld {
     pub hash: u64,
     /// Every `info_player_start` (team 0) and `gm_spawn` (its `team` key, 0 = any).
     pub spawns: Vec<Spawn>,
+    /// The market: where stalls may stand (ECONOMY.md 7).
+    pub stall_grids: Vec<StallGrid>,
 }
 
 impl ZoneWorld {
@@ -43,6 +45,7 @@ impl ZoneWorld {
             })
             .collect();
         ZoneWorld {
+            stall_grids: bsp.stall_grids(),
             bsp,
             name: name.to_string(),
             hash,

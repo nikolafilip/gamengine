@@ -23,7 +23,12 @@ pub enum Behaviour {
     /// Use the whole kit: melee kits close in and guard, ranged kits kite, actives fire when
     /// their shape says so. The arena acceptance test runs this on both sides.
     Duelist,
+    /// A town: walk a while, stand a while, stay near where one arrived, never fight.
+    Stroll,
 }
+
+/// How far a strolling bot goes from where it arrived before it turns back.
+const STROLL_LEASH: f32 = 420.0;
 
 /// What the brain sees this tick.
 pub struct View<'a> {
@@ -97,6 +102,15 @@ pub struct Brain {
     jump_until: u32,
     strafe: f32,
     next_strafe: u32,
+    /// Ticks per second of the zone (stroll legs are timed in seconds).
+    pub hz: u32,
+    /// Where a strolling bot first stood.
+    home: Option<Vec3>,
+    /// A place to walk to and stay at, whatever the behaviour (a vendor's tile).
+    pub goal: Option<Vec3>,
+    /// Progress towards the goal: the distance a second ago, and a sidestep while stuck.
+    goal_check: (u32, f32),
+    sidestep_until: u32,
 }
 
 impl Brain {
@@ -113,6 +127,11 @@ impl Brain {
             jump_until: 0,
             strafe: 1.0,
             next_strafe: 0,
+            hz: 64,
+            home: None,
+            goal: None,
+            goal_check: (0, f32::MAX),
+            sidestep_until: 0,
         }
     }
 
@@ -145,6 +164,31 @@ impl Brain {
         let mut forward = 0.0f32;
         let mut side = 0.0f32;
         let mut ability = 0u8;
+        if let Some(goal) = self.goal {
+            if !v.alive {
+                return self.input(buttons, forward, side, ability);
+            }
+            let to = goal - me;
+            let d = to.truncate().length();
+            if d > 12.0 {
+                self.yaw = to.y.atan2(to.x).to_degrees().rem_euclid(360.0);
+                self.pitch = 0.0;
+                forward = if d > 60.0 { 1.0 } else { 0.5 };
+                // No closer than a second ago: something is in the way; step around it.
+                if tick >= self.goal_check.0 {
+                    if self.goal_check.1 - d < 8.0 {
+                        self.sidestep_until = tick + self.hz / 2;
+                        self.strafe = if self.rng.below(2) == 0 { 1.0 } else { -1.0 };
+                    }
+                    self.goal_check = (tick + self.hz, d);
+                }
+                if tick < self.sidestep_until {
+                    side = self.strafe;
+                    forward = 0.2;
+                }
+            }
+            return self.input(buttons, forward, side, ability);
+        }
         let nearest = self.nearest(me, v.team, v.others);
         let reach = primary_arc(v.kit).map_or(70.0, |m| m.reach);
         match self.behaviour {
@@ -155,6 +199,29 @@ impl Brain {
                         buttons |= buttons::PRIMARY;
                     }
                 }
+            }
+            Behaviour::Stroll => {
+                // Home is where the bot first stood alive (before the first snapshot the
+                // mover is still at the origin).
+                if !v.alive {
+                    return self.input(buttons, forward, side, ability);
+                }
+                let home = *self.home.get_or_insert(me);
+                if tick >= self.next_turn {
+                    self.pitch = 0.0;
+                    let away = me - home;
+                    self.yaw = if away.truncate().length() > STROLL_LEASH {
+                        // Too far: head back, roughly.
+                        (-away.y).atan2(-away.x).to_degrees() + self.rng.range_f32(-30.0, 30.0)
+                    } else {
+                        self.rng.range_f32(0.0, 360.0)
+                    }
+                    .rem_euclid(360.0);
+                    // One leg in three is a pause.
+                    self.strafe = if self.rng.below(3) == 0 { 0.0 } else { 1.0 };
+                    self.next_turn = tick + self.hz * 2 + self.rng.below(self.hz * 5);
+                }
+                forward = 0.6 * self.strafe;
             }
             Behaviour::Wander => {
                 if tick >= self.next_turn {

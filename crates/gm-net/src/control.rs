@@ -11,6 +11,31 @@ pub enum BuildChoice {
     Custom(Build),
 }
 
+/// One player as a zone announces it.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct PlayerEntry {
+    pub id: u32,
+    pub name: String,
+    pub team: u8,
+    pub model: Option<[u8; 32]>,
+}
+
+/// An open stall as a zone shows it (ECONOMY.md 7): where it stands and who keeps it. The
+/// keeper is drawn as a body that never moves; it costs no snapshot bytes.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct StallEntry {
+    pub id: i64,
+    /// Centre of the tile, on the ground.
+    pub pos: [f32; 3],
+    /// Yaw the keeper faces.
+    pub yaw: f32,
+    pub owner: String,
+    /// The keeper's frame, armour class and avatar model, as in `PlayerInfo`.
+    pub frame: u8,
+    pub armour: u8,
+    pub model: Option<[u8; 32]>,
+}
+
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub enum Control {
     // client → server
@@ -28,6 +53,10 @@ pub enum Control {
     Respec(BuildChoice),
     /// Ask the hub (through the zone) for a ticket to another zone (HUB.md 3.3).
     Travel(String),
+    /// Open a stall on the market tile the player stands on; answered by `StallResult`.
+    StallOpen,
+    /// Close the own stall; answered by `StallResult`.
+    StallClose,
     Bye,
     // server → client
     Welcome {
@@ -59,11 +88,24 @@ pub enum Control {
     /// The travel request failed.
     TravelRefused(String),
     Reject(String),
+    /// To a joiner: everyone already in the zone, itself included, in one message.
+    Roster(Vec<PlayerEntry>),
+    /// A player joined, or what it wears changed. `model` is the id of its avatar model
+    /// (MODELS.md 7), absent for the frame's mannequin.
     PlayerInfo {
         id: u32,
         name: String,
         team: u8,
+        model: Option<[u8; 32]>,
     },
+    /// A model was taken down: forget it, delete it (MODELS.md 8).
+    ModelRevoked([u8; 32]),
+    /// To a joiner: every open stall of the zone.
+    Stalls(Vec<StallEntry>),
+    StallOpened(StallEntry),
+    StallClosed(i64),
+    /// The answer to `StallOpen` or `StallClose`.
+    StallResult(Result<(), String>),
     PlayerLeft(u32),
     Killed {
         victim: u32,
@@ -227,6 +269,47 @@ mod tests {
             content.len()
         );
         println!("content pack on the wire: {} bytes", content.len());
+    }
+
+    #[test]
+    fn a_full_market_fits_one_message() {
+        // gm_bsp::stalls::MAX_STALL_TILES stalls, every keeper with the longest name and a
+        // model.
+        let market = Control::Stalls(
+            (0..512)
+                .map(|i| StallEntry {
+                    id: i64::MAX - i,
+                    pos: [1234.5, -2345.25, 96.0],
+                    yaw: 180.0,
+                    owner: "Ž".repeat(12),
+                    frame: 3,
+                    armour: 3,
+                    model: Some([i as u8; 32]),
+                })
+                .collect(),
+        );
+        let bytes = encode_framed(&market).unwrap();
+        println!("a market of 512 stalls is {} bytes", bytes.len());
+        assert!(bytes.len() < MAX_MESSAGE_BYTES, "{} bytes", bytes.len());
+    }
+
+    #[test]
+    fn a_roster_of_a_full_town_fits_one_message() {
+        let roster = Control::Roster(
+            (0..400)
+                .map(|i| PlayerEntry {
+                    id: 1000 + i,
+                    name: format!("Žanamarija Škrinjarić{i:03}"),
+                    team: (i % 3) as u8,
+                    model: Some([i as u8; 32]),
+                })
+                .collect(),
+        );
+        let bytes = encode_framed(&roster).unwrap();
+        assert!(bytes.len() < MAX_MESSAGE_BYTES, "{} bytes", bytes.len());
+        let (back, n) = decode_framed(&bytes).unwrap().unwrap();
+        assert_eq!(n, bytes.len());
+        assert_eq!(back, roster);
     }
 
     #[test]

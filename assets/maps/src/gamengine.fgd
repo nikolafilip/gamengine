@@ -75,3 +75,13 @@
         2 : "Danger"
     ]
 ]
+
+@PointClass size(-64 -64 0, 64 64 8) color(255 200 80) = gm_stall_grid : "Market: a grid of stall tiles (ECONOMY.md 7). The origin is the centre of tile (0, 0) on the ground; columns run along +X, rows along +Y." [
+    cols(integer) : "Columns" : 6
+    rows(integer) : "Rows" : 5
+    pitch(integer) : "Distance between tile centres" : 160
+    tile(integer) : "Side of a tile" : 128
+    angle(integer) : "Yaw the stall keepers face" : 180
+    base_x(integer) : "Tile number of the first column (when a map has several grids)" : 0
+    base_y(integer) : "Tile number of the first row" : 0
+]

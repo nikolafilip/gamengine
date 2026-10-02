@@ -6,9 +6,11 @@
 pub mod db;
 pub mod economy;
 pub mod hub;
+pub mod models;
 
 pub use db::Db;
 pub use gm_hub_proto::{
     HUB_SERVER_NAME, HubClient, HubClientError, HubKey, TokenError, TokenVerifier, protocol, token,
 };
 pub use hub::{HubConfig, run};
+pub use models::IngestMode;

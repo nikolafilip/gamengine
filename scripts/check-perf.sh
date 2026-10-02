@@ -31,7 +31,7 @@ out="$(target/release/gm-client "${args[@]}" 2>&1)" || { echo "$out"; echo "FAIL
 echo "$out"
 
 rss="$(echo "$out" | sed -n 's/^bench: peak_rss_bytes=\([0-9]*\).*/\1/p' | tail -1)"
-fps="$(echo "$out" | sed -n 's/^bench: fps_avg=\([0-9]*\)\..*/\1/p' | tail -1)"
+fps="$(echo "$out" | sed -n 's/^bench: frames=.* fps_avg=\([0-9]*\)\..*/\1/p' | tail -1)"
 [[ -n "$rss" ]] || { echo "FAIL: gm-client did not report peak RSS"; exit 1; }
 status=0
 if (( rss > MAX_RSS )); then echo "FAIL: peak RSS $rss bytes exceeds $MAX_RSS"; status=1; else echo "OK: peak RSS $rss bytes within $MAX_RSS"; fi

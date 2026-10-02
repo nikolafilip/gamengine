@@ -1,6 +1,6 @@
 # Wire Protocol
 
-Status: v2, Phase 3. `gm-net` implements exactly this document; the test vectors in section 2
+Status: v2.2 (v2 of Phase 3; reliable messages extended in Phases 4 and 6, sections 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
 document disagree, the document wins and the code is wrong; changes to either go in one commit.
 
@@ -292,7 +292,11 @@ once, the state after frame `t` is the same on both sides regardless of when it 
 
 ### 7.3 Interpolation (other entities)
 Render time for other entities is `newest_server_tick - delay`, with `delay` = 6 ticks (94 ms)
-plus one extra tick per snapshot gap observed in the last second, capped at 13. The delay shrinks
+plus one extra tick per snapshot gap observed in the last second, capped at 13. Those are ticks
+of the 64 Hz combat rate; at another rate the delay keeps the time, not the count:
+`ceil(6 × hz / 64)` and `ceil(13 × hz / 64)`, never under 2 ticks (a snapshot on each side) and
+a ceiling at least 2 above the floor. A 20 Hz town shows others 2 ticks (100 ms) behind, 5
+(250 ms) at worst. The delay shrinks
 by one tick per second without gaps. Positions and angles are interpolated between the two
 reconstructed snapshots bracketing the render time. When only the older sample exists (a gap),
 the entity holds its last position; no extrapolation. (Draining the buffer by time-scaling
@@ -326,6 +330,9 @@ enum Control {
     Hello { version: u16, name: String, token: Vec<u8>, build: Option<BuildChoice>, team: u8 },
     Chat(String),
     Respec(BuildChoice),                       // applied at the next respawn (MATRIX.md 9)
+    Travel(String),                            // to another zone (HUB.md 3.3)
+    StallOpen,                                 // on the market tile the player stands on
+    StallClose,                                // the own stall
     Bye,
     // server → client
     Welcome { entity: u32, server_tick: u32, hz: u16, map: String, map_hash: u64 },
@@ -335,12 +342,22 @@ enum Control {
     TravelTicket { zone: String, addr: String, cert_der: Vec<u8>, token: Vec<u8> },
     TravelRefused(String),
     Reject(String),
-    PlayerInfo { id: u32, name: String, team: u8 },
+    Roster(Vec<PlayerEntry>),                  // to a joiner: everyone here, itself included
+    PlayerInfo { id: u32, name: String, team: u8, model: Option<[u8; 32]> },
     PlayerLeft(u32),
+    ModelRevoked([u8; 32]),                    // forget it, delete it (MODELS.md 7, 8)
+    Stalls(Vec<StallEntry>),                   // to a joiner: every open stall of the zone
+    StallOpened(StallEntry),
+    StallClosed(i64),
+    StallResult(Result<(), String>),           // the answer to StallOpen / StallClose
     Killed { victim: u32, killer: u32 },       // killer 0 = world
     ChatFrom { from: u32, text: String },
     Kick(String),
 }
+
+struct PlayerEntry { id: u32, name: String, team: u8, model: Option<[u8; 32]> }
+struct StallEntry { id: i64, pos: [f32; 3], yaw: f32, owner: String, frame: u8, armour: u8,
+                    model: Option<[u8; 32]> }
 ```
 
 `Build` and `ContentPack` are `gm-core::build` types encoded with `bitcode` (the vocabulary
@@ -365,6 +382,23 @@ in `Hello`, and loads the map that zone's `Welcome` names. Its body stays here a
 (visible, hittable, no inputs run) until the other zone claims it or 10 s pass.
 
 `Hello.name`: 1..=24 bytes of printable UTF-8 after trimming; anything else is rejected.
+
+Who is here (Phase 6): a joiner receives one `Roster` with every player of the zone, itself
+included (400 players with 24-byte names and models fit one message), and everybody else one
+`PlayerInfo`. `model` is the id of the avatar model the player wears (MODELS.md 7), absent for
+the frame's mannequin; a `PlayerInfo` for a known id replaces what was known (a respawn on
+another frame changes what is worn). Model ids never ride in snapshots. `ModelRevoked` tells
+everyone to forget a model that was taken down.
+
+The market (ECONOMY.md 7): a joiner receives `Stalls`, then `StallOpened` and `StallClosed` as
+they happen. A stall's keeper is drawn from the `StallEntry` (frame, armour class, model) as a
+body that does not move; it costs no snapshot bytes. `StallOpen` and `StallClose` are answered
+by `StallResult`; the zone forwards at most one such request per player per second to the hub
+and drops the rest unanswered. A map has at most 512 stall tiles, so `Stalls` always fits one
+message.
+
+A reliable message is never dropped: a client whose queue of 256 undelivered messages is full
+is disconnected.
 
 ## 9. Budgets and the acceptance test
 
@@ -437,3 +471,17 @@ implementation; verdicts are ours):
 - Control: `Travel`, `TravelTicket`, `TravelRefused`; `Hello.token` mandatory under a hub,
   `Hello.name`/`Hello.build` ignored then. The datagram format is unchanged; the version byte
   stays 2 (sections 2–5 did not change).
+
+## 13. Changes in v2.2 (Phase 6)
+
+- Control: `Roster` (a joiner used to receive one `PlayerInfo` per player), `PlayerInfo.model`,
+  `ModelRevoked`; `StallOpen`, `StallClose`, `Stalls`, `StallOpened`, `StallClosed`,
+  `StallResult`. Every send of a reliable message disconnects a client that does not drain
+  its queue (before, only `Killed` did; the others were dropped silently).
+- Interpolation delay is a time, not a tick count (7.3): 2 to 5 ticks at 20 Hz instead of 6 to
+  13 (300 to 650 ms).
+- The datagram format is unchanged; the version byte stays 2.
+- Measured (loopback, the town, 100 strolling players all in view of each other plus one
+  viewer): at 20 Hz 4.0 to 5.8 KB/s down and 1.8 to 2.1 KB/s up per player; at 64 Hz 13.4 KB/s
+  down and 5.6 KB/s up. At 20 Hz the worst of the 100 bots had 0 or 1 unexplained correction
+  in its minute over three runs (the budget of section 9 is one per 10 s).

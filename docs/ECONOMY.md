@@ -111,6 +111,24 @@ A trade is between two characters in the same zone. State: `open → committed |
 with a **unique (zone, tile_x, tile_y)**: grid-snapped, non-overlapping by constraint. One open
 stall per character. No listing fee, no tax.
 
+**In the world (Phase 6).** A map says where stalls may stand with `gm_stall_grid` entities:
+rectangles of square tiles on the ground (the town's market is 6 × 5 tiles of 128 u, 160 u
+apart, facing the square; at most 512 tiles per map, tile numbers unique across a map's grids).
+A stall is opened **through the zone**, because only the zone knows where a body stands:
+the player sends `Control::StallOpen` (PROTOCOL.md 8), the zone checks that the player is
+alive on a tile and that the tile is free, and asks the hub (`ZoneEconOp::StallOpen {
+character, tile_x, tile_y }`), which checks that the character is playing in that zone and
+lets the unique constraint settle two players racing for one tile (`Taken`). The session-level
+`EconOp::StallOpen` of Phase 5, which let a client name any tile from anywhere, is gone.
+Closing is the owner's `Control::StallClose` (or `EconOp::StallClose` from anywhere, or the
+48 h). The zone loads its stalls from the hub when it starts (`ZoneEconOp::Stalls`), tells
+every joiner (`Control::Stalls`) and everyone present when one opens or closes; the hub tells
+the zone when a stall closes for any reason (`HubNotice::StallClosed`). A stall is drawn as a
+counter on its tile with its **keeper**: the owner's frame, armour class and avatar model as a
+body that stands there whether the owner is online or not, replaced by the owner in person
+while the owner stands behind the counter. Listings, buying and the town board have no screen
+yet (Phase 7 brings the HUD); the keeper and the tile are what the world shows today.
+
 - `listings (stall_id, item_id, price)`: the item sits in the stall's holder. `buy` names the
   price the buyer was shown and is refused when it differs; it moves the coin buyer → owner and
   the item stall → buyer in one transaction. An owner cannot buy from their own stall.

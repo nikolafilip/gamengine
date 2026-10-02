@@ -1,0 +1,16 @@
+[package]
+name = "gm-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine avatar models: the standard rig, the ingested .gmm container, poses, the shared animation set and the mannequin."
+
+[dependencies]
+bytemuck = { workspace = true }
+glam = { workspace = true }
+gm-core = { workspace = true }
+miniz_oxide = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

@@ -10,6 +10,8 @@ pub use gm_net::control::BuildChoice;
 pub type AccountId = i64;
 pub type CharacterId = i64;
 pub type ZoneId = String;
+/// SHA-256 of an ingested model file (MODELS.md 5).
+pub type ModelId = [u8; 32];
 
 /// Sixteen random bytes; lives in hub memory for 24 h or until `Logout`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Encode, Decode)]
@@ -34,6 +36,153 @@ pub struct CharacterSummary {
     pub build: Build,
     pub location: LocationSummary,
     pub play_seconds: u32,
+    /// The model the character wears (MODELS.md 6), whatever its status.
+    pub model: Option<ModelId>,
+}
+
+/// What a zone is told about a character's avatar: the id clients fetch by and the frame the
+/// model was ingested for (MODELS.md 6.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct ModelRef {
+    pub id: ModelId,
+    pub frame: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum ModelStatus {
+    Pending,
+    Active,
+    Rejected,
+    Takedown,
+}
+
+impl ModelStatus {
+    pub const fn name(self) -> &'static str {
+        match self {
+            ModelStatus::Pending => "pending",
+            ModelStatus::Active => "active",
+            ModelStatus::Rejected => "rejected",
+            ModelStatus::Takedown => "takedown",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ModelStatus> {
+        [
+            ModelStatus::Pending,
+            ModelStatus::Active,
+            ModelStatus::Rejected,
+            ModelStatus::Takedown,
+        ]
+        .into_iter()
+        .find(|m| m.name() == s)
+    }
+}
+
+/// Why a model was refused or removed (MODELS.md 10). Every code but `Other` is a strike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum ReasonCode {
+    None,
+    Copyright,
+    Likeness,
+    Sexual,
+    Hateful,
+    Other,
+}
+
+impl ReasonCode {
+    pub const fn name(self) -> &'static str {
+        match self {
+            ReasonCode::None => "",
+            ReasonCode::Copyright => "copyright",
+            ReasonCode::Likeness => "likeness",
+            ReasonCode::Sexual => "sexual",
+            ReasonCode::Hateful => "hateful",
+            ReasonCode::Other => "other",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ReasonCode> {
+        [
+            ReasonCode::None,
+            ReasonCode::Copyright,
+            ReasonCode::Likeness,
+            ReasonCode::Sexual,
+            ReasonCode::Hateful,
+            ReasonCode::Other,
+        ]
+        .into_iter()
+        .find(|c| c.name() == s)
+    }
+
+    pub const fn is_strike(self) -> bool {
+        !matches!(self, ReasonCode::None | ReasonCode::Other)
+    }
+}
+
+/// A model as its holder (or a moderator) sees it.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct ModelSummary {
+    pub id: ModelId,
+    pub frame: u8,
+    pub status: ModelStatus,
+    pub bytes: u32,
+    pub triangles: u32,
+    pub texture: [u16; 2],
+    /// The statement of reasons for a rejection or a takedown.
+    pub code: ReasonCode,
+    pub reason: String,
+}
+
+/// One entry of the moderation queue.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct ModEntry {
+    pub model: ModelSummary,
+    pub uploader: String,
+    pub holders: u32,
+    pub waiting_secs: u64,
+}
+
+/// What a moderator may ask (MODELS.md 10).
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum ModOp {
+    /// Pending models, oldest first.
+    Queue {
+        limit: u32,
+    },
+    /// The preview image of a model (answered with a blob).
+    Preview {
+        model: ModelId,
+    },
+    /// `pending → active | rejected`.
+    Decide {
+        model: ModelId,
+        approve: bool,
+        code: ReasonCode,
+        reason: String,
+    },
+    /// `active → takedown`; `reference` names the notice.
+    Takedown {
+        model: ModelId,
+        code: ReasonCode,
+        reason: String,
+        reference: String,
+    },
+    /// `takedown → active` (a counter-notice).
+    Reinstate {
+        model: ModelId,
+        reason: String,
+    },
+    SetUpload {
+        email: String,
+        allow: bool,
+    },
+    SetTrust {
+        email: String,
+        tier: u8,
+    },
+    ClearStrikes {
+        email: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -152,6 +301,38 @@ pub enum HubRequest {
     },
     // a registered zone connection (ECONOMY.md 8, 9)
     ZoneEcon(ZoneEconOp),
+    // models (MODELS.md 6.2). `ModelUpload` is followed on the same stream by `len` raw bytes.
+    ModelUpload {
+        session: SessionId,
+        /// Archetype frame index the model is for.
+        frame: u8,
+        /// The upload terms the account certifies (MODELS.md 10).
+        tos_version: u16,
+        len: u32,
+    },
+    ModelList {
+        session: SessionId,
+    },
+    /// Give up holding a model; the account's characters stop wearing it.
+    ModelDrop {
+        session: SessionId,
+        model: ModelId,
+    },
+    /// What an offline character wears.
+    SetModel {
+        session: SessionId,
+        character: CharacterId,
+        model: Option<ModelId>,
+    },
+    /// Answered with `Blob { len }` followed by `len` raw bytes.
+    ModelGet {
+        session: SessionId,
+        model: ModelId,
+    },
+    Mod {
+        session: SessionId,
+        op: ModOp,
+    },
 }
 
 pub type ItemId = i64;
@@ -200,10 +381,6 @@ pub enum EconOp {
     /// The offers as the hub holds them, with the version an accept must name.
     TradeView {
         trade: i64,
-    },
-    StallOpen {
-        tile_x: i32,
-        tile_y: i32,
     },
     StallList {
         item: ItemId,
@@ -284,6 +461,32 @@ pub enum ZoneEconOp {
         character: CharacterId,
         item: ItemId,
     },
+    /// A character opens a stall on a tile of this zone's market. The zone asks, because only
+    /// the zone knows that the character stands on that tile and that the tile exists
+    /// (ECONOMY.md 7).
+    StallOpen {
+        character: CharacterId,
+        tile_x: i32,
+        tile_y: i32,
+    },
+    /// The owner, standing in this zone, closes the stall.
+    StallClose { character: CharacterId },
+    /// Every open stall of this zone (asked once, when the zone starts).
+    Stalls,
+}
+
+/// An open stall as its zone shows it: where it is and who keeps it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct StallSummary {
+    pub id: i64,
+    pub tile_x: i32,
+    pub tile_y: i32,
+    pub owner: CharacterId,
+    pub owner_name: String,
+    /// The keeper's frame and armour class, and its avatar model while that is active.
+    pub frame: u8,
+    pub armour: u8,
+    pub model: Option<ModelRef>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
@@ -330,6 +533,8 @@ pub enum EconReply {
     Decided(bool),
     /// `(character, price, hires in the last 12 h)`.
     Tavern(Vec<(CharacterId, i64, i64)>),
+    Stall(StallSummary),
+    Stalls(Vec<StallSummary>),
 }
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -347,6 +552,8 @@ pub enum HubError {
     Full,
     /// Too soon after the last change of a trade.
     Cooldown,
+    /// The content was removed and is not served (MODELS.md 6.2).
+    Gone,
 }
 
 impl std::fmt::Display for HubError {
@@ -362,6 +569,7 @@ impl std::fmt::Display for HubError {
             HubError::Insufficient => write!(f, "not enough coin"),
             HubError::Full => write!(f, "no room"),
             HubError::Cooldown => write!(f, "too soon after the last change"),
+            HubError::Gone => write!(f, "removed"),
         }
     }
 }
@@ -385,11 +593,24 @@ pub enum HubResponse {
         name: String,
         state: CharacterState,
         team: u8,
+        /// The avatar model, present only while it is active (MODELS.md 6.3).
+        model: Option<ModelRef>,
     },
     Registered {
         public_key: [u8; 32],
     },
     Econ(EconReply),
+    Models(Vec<ModelSummary>),
+    /// The upload was ingested (or already known): its id and where it stands.
+    ModelAccepted {
+        model: ModelId,
+        status: ModelStatus,
+    },
+    /// `len` raw bytes follow on the stream.
+    Blob {
+        len: u32,
+    },
+    ModQueue(Vec<ModEntry>),
 }
 
 /// Hub → zone, on unidirectional streams (HUB.md 3.4).
@@ -402,6 +623,14 @@ pub enum HubNotice {
         character: CharacterId,
         reason: String,
     },
+    /// A model left `active`: nobody wears it any more (MODELS.md 6.3).
+    ModelRevoked {
+        model: ModelId,
+    },
+    /// A stall of this zone closed: its owner closed it, or its 48 h ran out (ECONOMY.md 7).
+    StallClosed {
+        stall: i64,
+    },
 }
 
 /// Limits (HUB.md 3).
@@ -413,6 +642,20 @@ pub const SESSION_SECS: u64 = 24 * 3600;
 pub const HUB_BIDI_STREAMS: u32 = 1024;
 /// Password hashes running at once; more answer `Busy`.
 pub const HASH_PERMITS: usize = 8;
+/// Models (MODELS.md 3, 5, 6.2).
+pub const MAX_MODEL_UPLOAD_BYTES: u32 = 8 * 1024 * 1024;
+pub const MAX_MODEL_BYTES: u32 = 1_572_864;
+/// The largest blob a hub answers with (a model or its preview).
+pub const MAX_BLOB_BYTES: u32 = MAX_MODEL_BYTES;
+/// The upload terms an account must certify (MODELS.md 10).
+pub const TOS_VERSION: u16 = 1;
+pub const DEFAULT_MODEL_SLOTS: i16 = 4;
+pub const MAX_PENDING_MODELS: i64 = 3;
+pub const UPLOAD_STRIKES: i16 = 3;
+/// Accounts at this trust tier or above skip the moderation queue.
+pub const TRUSTED_TIER: i16 = 2;
+/// Ingestion workers running at once; more answer `Busy`.
+pub const INGEST_PERMITS: usize = 2;
 
 /// Unix seconds now.
 pub fn now_secs() -> u64 {

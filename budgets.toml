@@ -8,6 +8,19 @@ max_texture_size = 1024     # per axis
 max_textures = 1            # one atlas, one draw call
 max_payload_bytes = 1572864 # 1.5 MiB ceiling for the whole .glb
 
+[avatars]
+# MODELS.md 11, PLAN.md 11.8 Phase 6: distinct avatars at the [character] ceiling in the town
+# (scripts/check-avatars.sh). The cache cap of the gate is smaller than the models on purpose:
+# the run has to evict, and the directory may never be larger than the cap.
+count = 100
+cache_cap_mb = 32               # 100 ceiling avatars are 38.2 MB
+min_fps = 60                    # on the reference iGPU (--gate-fps)
+max_frame_ms_p99 = 16           # no visible hitch: 99 frames in 100 inside one 60 Hz period
+max_gpu_bytes_per_model = 1048576   # vertices + indices + the BC1 mip chain; measured 779,628
+max_town_bytes_per_player_s = 8192  # zone -> client with 100 players in view at 20 Hz (--online)
+smoke_count = 48                # --software (CI): enough models to overflow the smallest cap
+smoke_cache_cap_mb = 16
+
 [map]
 max_bsp_bytes = 33554432    # 32 MiB per zone map (generous; tighten when real maps exist)
 max_lightmap_bytes = 16777216

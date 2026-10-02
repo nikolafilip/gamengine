@@ -19,6 +19,7 @@ gm-core = { workspace = true }
 gm-bsp = { workspace = true }
 gm-net = { workspace = true }
 gm-hub-proto = { workspace = true }
+gm-model = { workspace = true }
 tokio = { workspace = true }
 quinn = { workspace = true }
 bytes = { workspace = true }

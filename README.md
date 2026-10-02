@@ -16,18 +16,20 @@ crates/gm-core      shared simulation: entity vocabulary, matrix, builds, status
 crates/gm-content   content loader: abilities and builds in TOML, compiled and validated into gm-core packs.
 crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
 crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
-crates/gm-client    wgpu forward renderer, Quake movement, fixed-step loop, zone connection.
+crates/gm-client    wgpu forward renderer, skinned characters, model cache, Quake movement, zone connection.
 crates/gm-server    authoritative tokio zone server: tick loop, sessions, PVS snapshots, lag compensation.
-crates/gm-hub       accounts, characters, zone registry, handoff, the economy, Postgres persistence.
+crates/gm-hub       accounts, characters, zone registry, handoff, the economy, avatar models and their moderation.
 crates/gm-hub-proto hub messages, entry tokens and the hub connection used by zones, bots and the client.
+crates/gm-model     avatar models: the standard rig, the .gmm container, the shared animation set, the mannequin.
+crates/gm-ingest    model ingestion: a glTF upload validated against budgets and the frame envelope, re-encoded.
 crates/gm-ai        AI companions (Phase 7).
-crates/gm-tools     CLI: map build (ericw-tools wrapper), WAD generation, asset budget lint.
+crates/gm-tools     CLI: map build and generators, WAD generation, budget lint, model and moderation tools.
 crates/gm-bot       headless bots: the client's prediction code with scripted behaviour, for tests and load.
-assets/maps/src     TrenchBroom .map sources and gamengine.fgd (test_room, the 8v8 arena)
+assets/maps/src     TrenchBroom .map sources and gamengine.fgd (test_room, the 8v8 arena, the town)
 assets/maps/built   compiled .bsp (+ .lit colored lightmaps)
 assets/textures     generated palette and WAD (gm-tools wad make)
 assets/content      abilities and preset builds (TOML), the v1 kits
-docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, BUILDING.md
+docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
@@ -65,7 +67,19 @@ the type matrix and the damage pipeline are [`docs/MATRIX.md`](docs/MATRIX.md).
 
 Persistent play (Phase 4): a hub with accounts and characters hands out tickets to zones and
 moves characters between them ([`docs/HUB.md`](docs/HUB.md), setup in
-[`docs/BUILDING.md`](docs/BUILDING.md)).
+[`docs/BUILDING.md`](docs/BUILDING.md)). The economy (Phase 5) is
+[`docs/ECONOMY.md`](docs/ECONOMY.md): every coin and item movement is one database transaction.
+
+Custom avatars and the town (Phase 6): players upload a glTF model for their frame; the hub
+validates it in a sandboxed worker, re-encodes it, queues it for moderation and serves it by
+hash; clients cache it under a hard disk cap and draw the frame's mannequin until it arrives
+([`docs/MODELS.md`](docs/MODELS.md)). Try one without a hub:
+
+```sh
+cargo run --release -p gm-tools -- model template --frame striker --out striker.glb
+cargo run --release -p gm-tools -- model ingest --frame striker striker.glb
+cargo run --release -p gm-client -- --map assets/maps/built/town.bsp --third-person --avatar striker.gmm
+```
 
 ## CI gates
 
@@ -88,6 +102,10 @@ moves characters between them ([`docs/HUB.md`](docs/HUB.md), setup in
   time, RSS and bytes per player under `budgets.toml`.
 - `crates/gm-server/tests/handoff.rs` — login → zone → handoff → logout through the hub
   against Postgres, the character's location checked in the database at every step.
+- `scripts/check-avatars.sh` — 100 distinct avatars at the budget ceiling in the town: every
+  one drawn, 60 fps on the reference iGPU, RSS under the ceiling, and the model cache
+  directory never above its cap. CI runs a 48-avatar smoke under software Vulkan; `--online`
+  runs the whole path (uploads, ingestion, moderation, zone, bots, client).
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

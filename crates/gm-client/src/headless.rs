@@ -1,15 +1,20 @@
 //! Offscreen rendering for CI and benchmarks: no window, same renderer, optional PPM screenshot.
 
+use std::time::{Duration, Instant};
+
 use gm_bsp::Bsp;
 use gm_core::movement::MoveInput;
 
 use crate::app::Sim;
-use crate::render::{Gpu, Renderer, view_proj};
-use crate::stats::{FrameStats, print_bench};
+use crate::avatars::Avatars;
+use crate::render::{EntityDraw, Gpu, Renderer, view_proj};
+use crate::stats::{FrameStats, print_bench, print_bench_avatars};
 use crate::world;
 use crate::{Error, Options};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// How long the crowd's models may take to load before the frames are counted anyway.
+const WARM_UP: Duration = Duration::from_secs(60);
 
 pub fn run(opts: &Options) -> Result<(), Error> {
     let bsp = Bsp::load(&opts.map).map_err(|e| format!("loading {}: {e}", opts.map.display()))?;
@@ -26,6 +31,7 @@ pub fn run(opts: &Options) -> Result<(), Error> {
     let gpu = Gpu::new(&instance, None, opts.software)?;
     let (w, h) = (opts.width.max(1), opts.height.max(1));
     let mut renderer = Renderer::new(&gpu, FORMAT, &mesh, (w, h));
+    let mut avatars = Avatars::new(&gpu, &mut renderer.characters, opts, &bsp, None)?;
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
         size: wgpu::Extent3d {
@@ -43,18 +49,28 @@ pub fn run(opts: &Options) -> Result<(), Error> {
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
     // Let the player settle on the floor, then sweep the camera like the windowed bench does.
-    let mut sim = Sim::new(&bsp);
+    let mut sim = Sim::at(&bsp, opts.start);
     let idle = MoveInput {
         yaw: sim.yaw,
         ..Default::default()
     };
     sim.advance(&bsp, &idle, 2.0);
+    let yaw0 = sim.yaw;
     let frames = opts.bench_frames.unwrap_or(120);
     let dt = 1.0 / 60.0;
     let mut stats = FrameStats::new();
     let mut leaf = None;
-    for _ in 0..frames {
-        sim.yaw += 20.0 * dt;
+    let mut boxes: Vec<EntityDraw> = Vec::new();
+    let mut time = 0.0f32;
+    let warm_up = Instant::now();
+    let mut counted = 0;
+    while counted < frames {
+        time += dt;
+        if avatars.crowd_len() > 0 {
+            sim.yaw = yaw0 + 22.0 * (time * 0.7).sin();
+        } else {
+            sim.yaw += 20.0 * dt;
+        }
         let eye = sim.eye();
         let l = bsp.leaf_for_point(eye);
         if leaf != Some(l) {
@@ -65,29 +81,44 @@ pub fn run(opts: &Options) -> Result<(), Error> {
                 renderer.set_visible_faces(&gpu, Some(&bsp.visible_faces(l)));
             }
         }
+        boxes.clear();
+        avatars.begin_frame();
+        avatars.push_crowd(time, dt, eye, &bsp, &renderer.characters, &mut boxes);
         renderer.render(
             &gpu,
             &view,
             view_proj(eye, sim.yaw, sim.pitch, w as f32 / h as f32),
-            &[],
+            &boxes,
+            &avatars.draws,
         );
+        avatars.end_frame(&gpu, &mut renderer.characters);
         gpu.device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|e| format!("poll: {e}"))?;
+        // Frames count once every model the crowd wears is on the GPU.
+        let loading = avatars.cache.as_ref().is_some_and(|c| c.pending() > 0);
+        if loading && warm_up.elapsed() < WARM_UP {
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
+        }
         stats.frame();
+        counted += 1;
     }
 
     if let Some(path) = &opts.screenshot {
         write_ppm(&gpu, &target, w, h, path)?;
         log::info!("screenshot written to {}", path.display());
     }
+    let report = stats.report();
     print_bench(
-        &stats.report(),
+        &report,
         &gpu.info,
         "headless",
         renderer.faces_drawn,
         faces_total,
+        renderer.draw_calls,
     );
+    print_bench_avatars(&report, &avatars, &renderer);
     Ok(())
 }
 

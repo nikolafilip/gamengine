@@ -9,8 +9,9 @@ use bytes::Bytes;
 use gm_core::build::{Build, ContentPack};
 use gm_core::sim::{HitKind, Zone, ZoneEvent};
 use gm_core::tick::TickRate;
+use gm_core::trace::{CollisionWorld, Contents, Hull};
 use gm_core::vocab::EntityId;
-use gm_net::control::{BuildChoice, Control};
+use gm_net::control::{BuildChoice, Control, PlayerEntry, StallEntry};
 use rayon::prelude::*;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -19,12 +20,15 @@ use tracing::{info, warn};
 use crate::hub_link::HubLink;
 use crate::net::{ClientEvent, EVENT_CHANNEL, JoinInfo, NetConfig, accept_loop};
 use crate::session::{PvsCache, Session, TickTable};
-use gm_hub_proto::protocol::{CharacterId, CharacterState};
+use gm_hub_proto::protocol::{CharacterId, CharacterState, ModelId, StallSummary};
 
 /// Zones save every character this often (HUB.md 3.2).
 pub const SAVE_EVERY: Duration = Duration::from_secs(30);
 /// A ghost waits this long for the other zone's claim (HUB.md 3.3).
 pub const GHOST_TIMEOUT: Duration = Duration::from_secs(10);
+/// A revoked model is remembered this long, so a claim that raced the takedown cannot bring
+/// it back (MODELS.md 7).
+pub const REVOKED_MEMORY: Duration = Duration::from_secs(60);
 use crate::tick::{TickMetrics, TickScheduler};
 use crate::world::ZoneWorld;
 
@@ -73,6 +77,31 @@ struct HubSlot {
     ghost_since: Option<Instant>,
     /// Another zone claimed the character: no save on leave.
     claimed_elsewhere: bool,
+}
+
+/// A stall as clients see it: the tile's centre, the keeper's looks. `None` when the tile is
+/// not on this map (a stall left over from another build of it).
+fn stall_entry(
+    world: &ZoneWorld,
+    s: &StallSummary,
+    revoked: &[(ModelId, Instant)],
+) -> Option<StallEntry> {
+    let (grid, centre) = world
+        .stall_grids
+        .iter()
+        .find_map(|g| Some((g, g.centre(s.tile_x, s.tile_y)?)))?;
+    Some(StallEntry {
+        id: s.id,
+        pos: centre.into(),
+        yaw: grid.yaw,
+        owner: s.owner_name.clone(),
+        frame: s.frame,
+        armour: s.armour,
+        model: s
+            .model
+            .filter(|m| m.frame == s.frame && !revoked.iter().any(|(id, _)| *id == m.id))
+            .map(|m| m.id),
+    })
 }
 
 fn character_state(
@@ -167,6 +196,20 @@ pub async fn run(
     let event_tx = tx.clone();
     drop(tx);
     let mut hub_slots: BTreeMap<EntityId, HubSlot> = BTreeMap::new();
+    let mut revoked: Vec<(ModelId, Instant)> = Vec::new();
+    // The market: open stalls by id (the hub is their owner; this is its mirror).
+    let mut stalls: BTreeMap<i64, StallSummary> = BTreeMap::new();
+    if let Some(link) = cfg.hub.clone().filter(|_| !world.stall_grids.is_empty()) {
+        let tx = event_tx.clone();
+        tokio::spawn(async move {
+            match link.stalls().await {
+                Ok(list) => {
+                    let _ = tx.send(ClientEvent::StallsLoaded(list)).await;
+                }
+                Err(e) => warn!("loading the zone's stalls: {e}"),
+            }
+        });
+    }
 
     let mut zone = Zone::new(rate, cfg.seed, world.spawns.clone(), cfg.content.clone());
     let resolve = |zone: &Zone, choice: Option<&BuildChoice>| -> Result<Build, String> {
@@ -261,16 +304,21 @@ pub async fn run(
                     } else {
                         team
                     };
-                    let id = match &hub {
-                        Some(h) if h.origin.is_some() => {
+                    // A saved position is used when it is still a place to stand (the map
+                    // may have been rebuilt since); otherwise the player spawns.
+                    let resume = hub.as_ref().and_then(|h| h.origin).filter(|(origin, _)| {
+                        origin.is_finite()
+                            && world.bsp.point_contents(Hull::Player, *origin) == Contents::Empty
+                    });
+                    let id = match resume {
+                        Some((origin, yaw)) => {
                             if let Err(e) = build.validate(&zone.content) {
                                 let _ = reply.send(Err(format!("invalid build: {e}")));
                                 continue;
                             }
-                            let (origin, yaw) = h.origin.expect("checked");
                             zone.add_player_at(build.clone(), team, origin, yaw)
                         }
-                        _ => match zone.add_player(&world.bsp, build.clone(), team) {
+                        None => match zone.add_player(&world.bsp, build.clone(), team) {
                             Ok(id) => id,
                             Err(e) => {
                                 let _ = reply.send(Err(format!("invalid build: {e}")));
@@ -278,6 +326,11 @@ pub async fn run(
                             }
                         },
                     };
+                    revoked.retain(|(_, at)| at.elapsed() < REVOKED_MEMORY);
+                    let model = hub
+                        .as_ref()
+                        .and_then(|h| h.model)
+                        .filter(|m| !revoked.iter().any(|(id, _)| *id == m.id));
                     if let Some(h) = hub {
                         hub_slots.insert(
                             id,
@@ -301,24 +354,38 @@ pub async fn run(
                         build,
                         team,
                     }));
+                    let mut session = Session::new(id, name.clone(), conn, control);
+                    session.model = model;
+                    session.announced = zone.player(id).and_then(|p| session.wears(p.frame()));
                     for s in sessions.values() {
                         s.send_control(Control::PlayerInfo {
                             id,
                             name: name.clone(),
                             team,
+                            model: session.announced,
                         });
-                        let _ = control.try_send(Control::PlayerInfo {
+                    }
+                    sessions.insert(id, session);
+                    // The joiner learns everyone, itself included, in one message: a town
+                    // of hundreds must not overflow its control queue.
+                    let roster: Vec<PlayerEntry> = sessions
+                        .values()
+                        .map(|s| PlayerEntry {
                             id: s.id,
                             name: s.name.clone(),
                             team: zone.player(s.id).map_or(0, |p| p.team()),
-                        });
+                            model: s.announced,
+                        })
+                        .collect();
+                    sessions[&id].send_control(Control::Roster(roster));
+                    if !stalls.is_empty() {
+                        sessions[&id].send_control(Control::Stalls(
+                            stalls
+                                .values()
+                                .filter_map(|s| stall_entry(&world, s, &revoked))
+                                .collect(),
+                        ));
                     }
-                    let _ = control.try_send(Control::PlayerInfo {
-                        id,
-                        name: name.clone(),
-                        team,
-                    });
-                    sessions.insert(id, Session::new(id, name, conn, control));
                     report.joins += 1;
                 }
                 ClientEvent::Respec { id, build } => {
@@ -344,6 +411,14 @@ pub async fn run(
                     let Some(state) = character_state(&zone, &link, id, slot) else {
                         continue;
                     };
+                    // One handoff request per player at the hub, and no more than one a
+                    // second: the rest of a flood is dropped here.
+                    if !sessions
+                        .get_mut(&id)
+                        .is_some_and(|s| s.begin_travel_request())
+                    {
+                        continue;
+                    }
                     let character = slot.character;
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
@@ -352,7 +427,10 @@ pub async fn run(
                     });
                 }
                 ClientEvent::TravelResult { id, result } => {
-                    let Some(s) = sessions.get(&id) else { continue };
+                    let Some(s) = sessions.get_mut(&id) else {
+                        continue;
+                    };
+                    s.end_travel_request();
                     match result {
                         Ok(ticket) => {
                             s.send_control(Control::TravelTicket {
@@ -386,6 +464,8 @@ pub async fn run(
                             s.conn.close(0u32.into(), b"travelled");
                         }
                         hub_slots.remove(&id);
+                        // The body leaves here: said once, counted once (the `Leave` that
+                        // follows the closed connection finds nothing left to announce).
                         for s in sessions.values() {
                             s.send_control(Control::PlayerLeft(id));
                         }
@@ -401,6 +481,132 @@ pub async fn run(
                     {
                         s.send_control(Control::Kick(reason));
                         s.conn.close(3u32.into(), b"kicked by the hub");
+                    }
+                }
+                ClientEvent::HubModelRevoked { model } => {
+                    revoked.retain(|(_, at)| at.elapsed() < REVOKED_MEMORY);
+                    revoked.push((model, Instant::now()));
+                    for s in sessions.values_mut() {
+                        if s.model.is_some_and(|m| m.id == model) {
+                            s.model = None;
+                            s.announced = None;
+                        }
+                    }
+                    for stall in stalls.values_mut() {
+                        if stall.model.is_some_and(|m| m.id == model) {
+                            stall.model = None;
+                        }
+                    }
+                    // Everyone forgets it, whoever wore it.
+                    for s in sessions.values() {
+                        s.send_control(Control::ModelRevoked(model));
+                    }
+                }
+                ClientEvent::StallsLoaded(list) => {
+                    stalls = list.into_iter().map(|s| (s.id, s)).collect();
+                    let entries: Vec<StallEntry> = stalls
+                        .values()
+                        .filter_map(|s| stall_entry(&world, s, &revoked))
+                        .collect();
+                    info!(stalls = entries.len(), "market loaded");
+                    for s in sessions.values() {
+                        s.send_control(Control::Stalls(entries.clone()));
+                    }
+                }
+                ClientEvent::StallOpen { id } => {
+                    let Some(session) = sessions.get_mut(&id) else {
+                        continue;
+                    };
+                    if !session.begin_stall_request() {
+                        continue;
+                    }
+                    // Only the zone knows where the player stands: it must be alive, on a
+                    // tile of the market, and the tile must be free (ECONOMY.md 7).
+                    let request = (|| {
+                        let link = cfg.hub.clone().ok_or("this zone has no market")?;
+                        let slot = hub_slots.get(&id).ok_or("this zone has no market")?;
+                        let p = zone
+                            .player(id)
+                            .filter(|p| p.alive && !p.ghost)
+                            .ok_or("you cannot open a stall now")?;
+                        let (x, y) = world
+                            .stall_grids
+                            .iter()
+                            .find_map(|g| g.tile_at(p.mover.mv.origin))
+                            .ok_or("stand on a market tile to open a stall")?;
+                        if stalls.values().any(|s| (s.tile_x, s.tile_y) == (x, y)) {
+                            return Err("that tile is taken");
+                        }
+                        Ok((link, slot.character, x, y))
+                    })();
+                    match request {
+                        Ok((link, character, x, y)) => {
+                            let tx = event_tx.clone();
+                            tokio::spawn(async move {
+                                let result = link.stall_open(character, x, y).await;
+                                let _ = tx.send(ClientEvent::StallOpened { id, result }).await;
+                            });
+                        }
+                        Err(why) => {
+                            session.end_stall_request();
+                            session.send_control(Control::StallResult(Err(why.to_string())));
+                        }
+                    }
+                }
+                ClientEvent::StallOpened { id, result } => {
+                    let answer = match result {
+                        Ok(stall) => {
+                            if let Some(entry) = stall_entry(&world, &stall, &revoked) {
+                                for s in sessions.values() {
+                                    s.send_control(Control::StallOpened(entry.clone()));
+                                }
+                            }
+                            stalls.insert(stall.id, stall);
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
+                    };
+                    if let Some(s) = sessions.get_mut(&id) {
+                        s.end_stall_request();
+                        s.send_control(Control::StallResult(answer));
+                    }
+                }
+                ClientEvent::StallClose { id } => {
+                    let Some(session) = sessions.get_mut(&id) else {
+                        continue;
+                    };
+                    if !session.begin_stall_request() {
+                        continue;
+                    }
+                    match (cfg.hub.clone(), hub_slots.get(&id)) {
+                        (Some(link), Some(slot)) => {
+                            let character = slot.character;
+                            let tx = event_tx.clone();
+                            tokio::spawn(async move {
+                                let result = link.stall_close(character).await;
+                                let _ = tx.send(ClientEvent::StallCloseResult { id, result }).await;
+                            });
+                        }
+                        _ => {
+                            session.end_stall_request();
+                            session.send_control(Control::StallResult(Err(
+                                "this zone has no market".into(),
+                            )));
+                        }
+                    }
+                }
+                ClientEvent::StallCloseResult { id, result } => {
+                    // The stall itself goes when the hub's notice arrives.
+                    if let Some(s) = sessions.get_mut(&id) {
+                        s.end_stall_request();
+                        s.send_control(Control::StallResult(result));
+                    }
+                }
+                ClientEvent::HubStallClosed { stall } => {
+                    if stalls.remove(&stall).is_some() {
+                        for s in sessions.values() {
+                            s.send_control(Control::StallClosed(stall));
+                        }
                     }
                 }
                 ClientEvent::Input { id, datagram } => {
@@ -438,7 +644,7 @@ pub async fn run(
                             report.oversize_drops += s.oversize_drops;
                             report.send_failures += s.send_failures;
                         }
-                        report.leaves += 1;
+                        // The body is still here: it leaves at the claim or the timeout.
                         continue;
                     }
                     if let (Some(link), Some(slot)) = (&cfg.hub, hub_slots.remove(&id))
@@ -450,7 +656,8 @@ pub async fn run(
                             link.save(slot.character, state, true).await;
                         });
                     }
-                    if let Some(p) = zone.remove_player(id) {
+                    let body = zone.remove_player(id);
+                    if let Some(p) = &body {
                         info!(
                             entity = id,
                             executed = p.executed_frames,
@@ -465,9 +672,14 @@ pub async fn run(
                         report.starved_ticks += p.starved_ticks;
                         report.dropped_frames += p.dropped_frames;
                     }
-                    if let Some(s) = sessions.remove(&id) {
+                    let session = sessions.remove(&id);
+                    if let Some(s) = &session {
                         report.oversize_drops += s.oversize_drops;
                         report.send_failures += s.send_failures;
+                    }
+                    // Claimed by another zone a moment ago: that said and counted it.
+                    if body.is_none() && session.is_none() {
+                        continue;
                     }
                     for s in sessions.values() {
                         s.send_control(Control::PlayerLeft(id));
@@ -526,6 +738,7 @@ pub async fn run(
                 for s in sessions.values() {
                     s.send_control(Control::PlayerLeft(id));
                 }
+                report.leaves += 1;
             }
         }
 
@@ -556,17 +769,31 @@ pub async fn run(
                     report.kills += 1;
                     let team = zone.player(killer).map_or(0, |p| p.team()) as usize;
                     report.team_kills[team.min(2)] += 1;
-                    for s in sessions.values_mut() {
-                        if !s.send_control(Control::Killed { victim, killer }) {
-                            // Not draining its control stream: the connection is as good as dead.
-                            s.conn.close(3u32.into(), b"control stream not read");
-                        }
+                    for s in sessions.values() {
+                        s.send_control(Control::Killed { victim, killer });
                     }
                 }
                 ZoneEvent::Respawned(id) => {
                     // The client's prediction switches to whatever build the respawn applied.
-                    if let (Some(s), Some(p)) = (sessions.get(&id), zone.player(id)) {
+                    let mut wears = None;
+                    if let (Some(s), Some(p)) = (sessions.get_mut(&id), zone.player(id)) {
                         s.send_control(Control::BuildApplied(p.sheet.build.clone()));
+                        // A respec to another frame shows the mannequin; back, the model.
+                        let now = s.wears(p.frame());
+                        if now != s.announced {
+                            s.announced = now;
+                            wears = Some((s.name.clone(), p.team(), now));
+                        }
+                    }
+                    if let Some((name, team, model)) = wears {
+                        for s in sessions.values() {
+                            s.send_control(Control::PlayerInfo {
+                                id,
+                                name: name.clone(),
+                                team,
+                                model,
+                            });
+                        }
                     }
                 }
                 ZoneEvent::Parried { .. } => report.parries += 1,

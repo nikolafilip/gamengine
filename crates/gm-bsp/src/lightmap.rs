@@ -101,3 +101,75 @@ impl Bsp {
         s
     }
 }
+
+impl Bsp {
+    /// The light on the first lit surface the segment `start → end` crosses, as linear RGB in
+    /// `0.0..=1.0` (Quake's `R_LightPoint`): for a model, cast it from the feet straight down
+    /// and it is the light of the floor it stands on. Bilinear between luxels, so it does not
+    /// step as the model walks. `None` when the segment crosses no lit surface.
+    pub fn light_point(&self, start: Vec3, end: Vec3) -> Option<[f32; 3]> {
+        self.light_point_node(self.world().head_nodes[0], start, end, 0)
+    }
+
+    fn light_point_node(&self, num: i32, start: Vec3, end: Vec3, depth: u32) -> Option<[f32; 3]> {
+        if num < 0 || depth > 128 {
+            return None;
+        }
+        let node = &self.nodes[num as usize];
+        let plane = &self.planes[node.plane as usize];
+        let front = plane.normal.dot(start) - plane.dist;
+        let back = plane.normal.dot(end) - plane.dist;
+        let side = (front < 0.0) as usize;
+        if (back < 0.0) as usize == side {
+            return self.light_point_node(node.children[side], start, end, depth + 1);
+        }
+        let frac = front / (front - back);
+        let mid = start + (end - start) * frac;
+        // The near side first; then the surfaces on this node's plane; then the far side.
+        if let Some(l) = self.light_point_node(node.children[side], start, mid, depth + 1) {
+            return Some(l);
+        }
+        for f in node.first_face..node.first_face + node.num_faces {
+            let Some(lm) = self.face_lightmap(f as usize) else {
+                continue;
+            };
+            let ti = &self.texinfo[self.faces[f as usize].texinfo as usize];
+            let (s, t) = Self::texcoord(ti, mid);
+            let (ds, dt) = (
+                (s - lm.mins[0] as f32) / LUXEL_SIZE,
+                (t - lm.mins[1] as f32) / LUXEL_SIZE,
+            );
+            if ds < 0.0 || dt < 0.0 || ds > (lm.width - 1) as f32 || dt > (lm.height - 1) as f32 {
+                continue;
+            }
+            let (x0, y0) = (ds.floor() as u32, dt.floor() as u32);
+            let (x1, y1) = ((x0 + 1).min(lm.width - 1), (y0 + 1).min(lm.height - 1));
+            let (fx, fy) = (ds - x0 as f32, dt - y0 as f32);
+            let sample = |x: u32, y: u32| -> [f32; 3] {
+                let i = (y * lm.width + x) as usize;
+                match lm.rgb {
+                    Some(rgb) => [
+                        rgb[i * 3] as f32,
+                        rgb[i * 3 + 1] as f32,
+                        rgb[i * 3 + 2] as f32,
+                    ],
+                    None => [lm.gray[i] as f32; 3],
+                }
+            };
+            let (a, b, c, d) = (
+                sample(x0, y0),
+                sample(x1, y0),
+                sample(x0, y1),
+                sample(x1, y1),
+            );
+            let mut out = [0f32; 3];
+            for k in 0..3 {
+                let top = a[k] + (b[k] - a[k]) * fx;
+                let bottom = c[k] + (d[k] - c[k]) * fx;
+                out[k] = (top + (bottom - top) * fy) / 255.0;
+            }
+            return Some(out);
+        }
+        self.light_point_node(node.children[1 - side], mid, end, depth + 1)
+    }
+}

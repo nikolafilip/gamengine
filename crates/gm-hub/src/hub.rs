@@ -21,11 +21,19 @@ use tracing::{debug, info, warn};
 use crate::db::Db;
 use gm_hub_proto::protocol::{
     AccountId, BuildChoice, CharacterId, ContractOutcome, EconOp, EconReply, HASH_PERMITS,
-    HubError, HubNotice, HubRequest, HubResponse, ItemSummary, LocationSummary, SessionId,
-    TradeOffer, ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
+    HubError, HubNotice, HubRequest, HubResponse, ItemSummary, LocationSummary, ModOp, ModelRef,
+    SessionId, StallSummary, TradeOffer, ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
 };
 
 use crate::economy::{EconError, Economy, Outcome, TradeStatus};
+use crate::models::{IngestMode, Models};
+
+/// The body of an upload must arrive within ten seconds plus its length at 64 KiB/s
+/// (MODELS.md 6.2): 15 s for 300 KB, 138 s for the 8 MiB limit. A slow sender holds one of
+/// the upload slots for that long at most, never a worker.
+fn upload_body_timeout(len: u32) -> Duration {
+    Duration::from_secs(10) + Duration::from_secs_f64(len as f64 / 65_536.0)
+}
 
 /// A zone whose last heartbeat is older than this gets no new players (HUB.md 2).
 const ZONE_STALE: Duration = Duration::from_secs(15);
@@ -43,6 +51,12 @@ pub struct HubConfig {
     pub templates: Vec<String>,
     /// The largest coin drop a zone may report in one grant, in copper (ECONOMY.md 9).
     pub max_coin_grant: i64,
+    /// Where ingested models, their previews and the uploads live (MODELS.md 6.1).
+    pub models_dir: std::path::PathBuf,
+    /// How uploads are parsed: a worker process in production.
+    pub ingest: IngestMode,
+    /// Wall clock of one ingestion (`models::INGEST_TIMEOUT` outside tests).
+    pub ingest_timeout: Duration,
 }
 
 struct Session {
@@ -81,6 +95,7 @@ struct Hub {
     cfg: HubConfig,
     db: Db,
     econ: Economy,
+    models: Models,
     state: Mutex<State>,
     hashing: Semaphore,
     /// Verifies our own tokens on `Claim` (defence in depth; the zone verified too).
@@ -99,9 +114,16 @@ pub async fn run(
     endpoint: quinn::Endpoint,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
+    let models = Models::new(
+        db.pool().clone(),
+        &cfg.models_dir,
+        cfg.ingest.clone(),
+        cfg.ingest_timeout,
+    )?;
     let hub = Arc::new(Hub {
         hashing: Semaphore::new(HASH_PERMITS),
         verifier: Mutex::new(HashMap::new()),
+        models,
         cfg,
         econ: Economy::new(db.pool().clone()),
         db,
@@ -118,8 +140,11 @@ pub async fn run(
                 match hub.econ.stalls_expired().await {
                     Ok(owners) => {
                         for owner in owners {
-                            if let Err(e) = hub.econ.stall_close(owner).await {
-                                warn!(owner, "closing an expired stall: {e}");
+                            match hub.econ.stall_close(owner).await {
+                                Ok((stall, zone)) => {
+                                    hub.notify(&zone, HubNotice::StallClosed { stall }).await;
+                                }
+                                Err(e) => warn!(owner, "closing an expired stall: {e}"),
                             }
                         }
                     }
@@ -213,13 +238,96 @@ async fn handle_stream(
         Some(r) => r,
         None => return Ok(()),
     };
-    let resp = match handle(&hub, &auth, &conn, remote, req).await {
-        Ok(r) => r,
-        Err(e) => HubResponse::Err(e),
+    // Requests that carry or are answered with raw bytes on the stream (MODELS.md 6.2).
+    let resp = match req {
+        HubRequest::ModelUpload {
+            session,
+            frame,
+            tos_version,
+            len,
+        } => {
+            let r = upload(&hub, session, frame, tos_version, len, &mut recv).await;
+            if r.is_err() {
+                // Refused, perhaps before the body was read: tell the sender to stop.
+                let _ = recv.stop(0u32.into());
+            }
+            r.unwrap_or_else(HubResponse::Err)
+        }
+        HubRequest::ModelGet { session, model } => {
+            let blob = async {
+                let account = hub.session_account(session)?;
+                hub.models.get(session, account, &model).await
+            }
+            .await;
+            return send_blob(&mut send, blob).await;
+        }
+        HubRequest::Mod {
+            session,
+            op: ModOp::Preview { model },
+        } => {
+            let blob = async {
+                hub.moderator(session).await?;
+                hub.models.preview(&model)
+            }
+            .await;
+            return send_blob(&mut send, blob).await;
+        }
+        req => match handle(&hub, &auth, &conn, remote, req).await {
+            Ok(r) => r,
+            Err(e) => HubResponse::Err(e),
+        },
     };
     control::send_any(&mut send, &resp).await?;
     let _ = send.finish();
     Ok(())
+}
+
+/// Answer with `Blob { len }` and the bytes, or with the error.
+async fn send_blob(
+    send: &mut quinn::SendStream,
+    blob: Result<Vec<u8>, HubError>,
+) -> anyhow::Result<()> {
+    match blob {
+        Ok(bytes) => {
+            control::send_any(
+                send,
+                &HubResponse::Blob {
+                    len: bytes.len() as u32,
+                },
+            )
+            .await?;
+            send.write_all(&bytes).await?;
+        }
+        Err(e) => control::send_any(send, &HubResponse::Err(e)).await?,
+    }
+    let _ = send.finish();
+    Ok(())
+}
+
+/// `ModelUpload`: everything that can be refused is refused before the body is read. One
+/// upload per account at a time and at most `UPLOAD_SLOTS` bodies in memory; a worker is taken
+/// only once the body is complete, so a slow sender never keeps one idle.
+async fn upload(
+    hub: &Hub,
+    session: SessionId,
+    frame: u8,
+    tos_version: u16,
+    len: u32,
+    recv: &mut quinn::RecvStream,
+) -> Result<HubResponse, HubError> {
+    let account = hub.session_account(session)?;
+    let _turn = hub.models.begin_upload(account)?;
+    hub.models
+        .precheck(account, frame, tos_version, len)
+        .await?;
+    let mut body = vec![0u8; len as usize];
+    match tokio::time::timeout(upload_body_timeout(len), recv.read_exact(&mut body)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(HubError::Invalid(format!("the upload was cut short: {e}"))),
+        Err(_) => return Err(HubError::Invalid("the upload took too long".into())),
+    }
+    let (model, status) = hub.models.upload(account, frame, body).await?;
+    Ok(HubResponse::ModelAccepted { model, status })
 }
 
 impl Hub {
@@ -323,6 +431,24 @@ impl Hub {
             cert_der: entry.cert_der.clone(),
             token: self.cfg.key.issue(account, character, zone),
         })
+    }
+
+    /// The account of a session that is a moderator's.
+    async fn moderator(&self, session: SessionId) -> Result<AccountId, HubError> {
+        let account = self.session_account(session)?;
+        if self.models.is_moderator(account).await? {
+            Ok(account)
+        } else {
+            Err(HubError::Unauthorized)
+        }
+    }
+
+    /// Send a notice to every connected zone.
+    async fn notify_all(&self, notice: HubNotice) {
+        let zones: Vec<ZoneId> = self.state.lock().unwrap().zones.keys().cloned().collect();
+        for zone in zones {
+            self.notify(&zone, notice.clone()).await;
+        }
     }
 
     /// Send a notice to a zone, if it is connected.
@@ -589,8 +715,8 @@ async fn handle(
                     .await;
             }
             let mut state = row.state();
-            if row.location_zone.as_deref() != Some(zone.as_str()) {
-                // The saved position belongs to another zone: spawn here.
+            if state.zone.as_deref() != Some(zone.as_str()) {
+                // The saved position is on another zone's map, or there is none: spawn here.
                 state.zone = None;
             }
             Ok(HubResponse::Claimed {
@@ -598,6 +724,7 @@ async fn handle(
                 name: row.name.clone(),
                 state,
                 team: 0,
+                model: hub.models.worn(row.id).await?,
             })
         }
         HubRequest::Save {
@@ -664,6 +791,85 @@ async fn handle(
         HubRequest::ZoneEcon(op) => {
             let zone = hub.zone_of_conn(auth)?;
             Ok(HubResponse::Econ(zone_econ_op(hub, &zone, op).await?))
+        }
+        // Answered on the stream itself (`handle_stream`): they carry or return raw bytes.
+        HubRequest::ModelUpload { .. } | HubRequest::ModelGet { .. } => Err(HubError::Internal),
+        HubRequest::ModelList { session } => {
+            let account = hub.session_account(session)?;
+            Ok(HubResponse::Models(hub.models.list(account).await?))
+        }
+        HubRequest::ModelDrop { session, model } => {
+            let account = hub.session_account(session)?;
+            hub.models.drop_model(account, &model).await?;
+            Ok(HubResponse::Ok)
+        }
+        HubRequest::SetModel {
+            session,
+            character,
+            model,
+        } => {
+            let account = hub.session_account(session)?;
+            let row = hub
+                .db
+                .character(character)
+                .await?
+                .filter(|r| r.account_id == account)
+                .ok_or(HubError::NotFound)?;
+            let frame = gm_model::rig::frame_index(row.build.frame);
+            hub.models
+                .set_model(account, character, frame, model.as_ref())
+                .await?;
+            Ok(HubResponse::Ok)
+        }
+        HubRequest::Mod { session, op } => {
+            let moderator = hub.moderator(session).await?;
+            match op {
+                ModOp::Queue { limit } => Ok(HubResponse::ModQueue(hub.models.queue(limit).await?)),
+                ModOp::Preview { .. } => Err(HubError::Internal),
+                ModOp::Decide {
+                    model,
+                    approve,
+                    code,
+                    reason,
+                } => {
+                    hub.models
+                        .decide(moderator, &model, approve, code, &reason)
+                        .await?;
+                    Ok(HubResponse::Ok)
+                }
+                ModOp::Takedown {
+                    model,
+                    code,
+                    reason,
+                    reference,
+                } => {
+                    let revoked = hub
+                        .models
+                        .takedown(moderator, &model, code, &reason, &reference)
+                        .await?;
+                    // The database already says so; now the zones and their clients.
+                    for model in revoked {
+                        hub.notify_all(HubNotice::ModelRevoked { model }).await;
+                    }
+                    Ok(HubResponse::Ok)
+                }
+                ModOp::Reinstate { model, reason } => {
+                    hub.models.reinstate(moderator, &model, &reason).await?;
+                    Ok(HubResponse::Ok)
+                }
+                ModOp::SetUpload { email, allow } => {
+                    hub.models.set_upload(moderator, &email, allow).await?;
+                    Ok(HubResponse::Ok)
+                }
+                ModOp::SetTrust { email, tier } => {
+                    hub.models.set_trust(moderator, &email, tier).await?;
+                    Ok(HubResponse::Ok)
+                }
+                ModOp::ClearStrikes { email } => {
+                    hub.models.clear_strikes(moderator, &email).await?;
+                    Ok(HubResponse::Ok)
+                }
+            }
         }
     }
 }
@@ -772,12 +978,15 @@ async fn econ_op(
                 theirs: trade_offer(theirs),
             })
             .map_err(econ_err),
-        EconOp::StallOpen { tile_x, tile_y } => {
-            id(e.stall_open(me, &here()?, tile_x, tile_y).await)
-        }
         EconOp::StallList { item, price } => id(e.stall_list(me, item, price).await),
         EconOp::StallBuy { listing, price } => done(e.stall_buy(me, listing, price).await),
-        EconOp::StallClose => done(e.stall_close(me).await),
+        EconOp::StallClose => {
+            // The owner may close from anywhere; the zone the stall stands in is told.
+            let (stall, stall_zone) = e.stall_close(me).await.map_err(econ_err)?;
+            hub.notify(&stall_zone, HubNotice::StallClosed { stall })
+                .await;
+            Ok(EconReply::Done)
+        }
         EconOp::BuyOrderPost {
             material,
             price,
@@ -841,6 +1050,33 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
                 .map(|()| EconReply::Done)
                 .map_err(econ_err)
         }
+        ZoneEconOp::StallOpen {
+            character,
+            tile_x,
+            tile_y,
+        } => {
+            if hub.db.zone_of(character).await?.as_ref() != Some(zone) {
+                return Err(HubError::Unauthorized);
+            }
+            let id = match e.stall_open(character, zone, tile_x, tile_y).await {
+                Ok(id) => id,
+                // The unique constraints: the tile is taken, or the character has a stall.
+                Err(EconError::State(_)) => return Err(HubError::Taken),
+                Err(other) => return Err(econ_err(other)),
+            };
+            let mut stalls = stall_summaries(hub, zone, Some(id)).await?;
+            stalls.pop().map(EconReply::Stall).ok_or(HubError::Internal)
+        }
+        ZoneEconOp::StallClose { character } => {
+            if hub.db.zone_of(character).await?.as_ref() != Some(zone) {
+                return Err(HubError::Unauthorized);
+            }
+            let (stall, stall_zone) = e.stall_close(character).await.map_err(econ_err)?;
+            hub.notify(&stall_zone, HubNotice::StallClosed { stall })
+                .await;
+            Ok(EconReply::Done)
+        }
+        ZoneEconOp::Stalls => Ok(EconReply::Stalls(stall_summaries(hub, zone, None).await?)),
         ZoneEconOp::Drop { character, item } | ZoneEconOp::Pickup { character, item }
             if hub.db.zone_of(character).await?.as_ref() != Some(zone) =>
         {
@@ -872,6 +1108,35 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
                 .map_err(econ_err)
         }
     }
+}
+
+/// The stalls of a zone as its zone shows them.
+async fn stall_summaries(
+    hub: &Hub,
+    zone: &ZoneId,
+    only: Option<i64>,
+) -> Result<Vec<StallSummary>, HubError> {
+    let rows = hub.econ.stalls_in(zone, only).await.map_err(econ_err)?;
+    rows.into_iter()
+        .map(|(id, tile_x, tile_y, owner, owner_name, build, model)| {
+            let build: Build = serde_json::from_value(build).map_err(|_| HubError::Internal)?;
+            Ok(StallSummary {
+                id,
+                tile_x,
+                tile_y,
+                owner,
+                owner_name,
+                frame: gm_model::rig::frame_index(build.frame),
+                armour: build.armour as u8,
+                model: model.and_then(|(hash, frame)| {
+                    Some(ModelRef {
+                        id: hash.try_into().ok()?,
+                        frame: frame as u8,
+                    })
+                }),
+            })
+        })
+        .collect()
 }
 
 /// The tick rate the hub validates content against (builds do not depend on it, but the pack

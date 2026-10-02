@@ -145,25 +145,35 @@ fn texture_layer(tex: &gm_bsp::MipTex, pal: &Palette) -> Vec<u8> {
 }
 
 pub fn build(bsp: &Bsp, pal: &Palette) -> WorldMesh {
-    // Lightmap atlas: one rectangle per lit face, plus a 2x2 white block for unlit faces at (0,0).
+    // Lightmap atlas: one rectangle per lit face, plus two 2x2 blocks: white for faces the
+    // compiler left unlit, and half grey for sky, which is drawn at its texture's own
+    // brightness (the shader doubles the lightmap).
     let world = bsp.world();
     let face_ids: Vec<usize> = (world.first_face..world.first_face + world.num_faces)
         .map(|f| f as usize)
         .collect();
     let lightmaps: Vec<Option<gm_bsp::FaceLightmap<'_>>> =
         face_ids.iter().map(|&f| bsp.face_lightmap(f)).collect();
-    let mut rects = vec![(2u32, 2u32)];
+    let mut rects = vec![(2u32, 2u32), (2u32, 2u32)];
     rects.extend(lightmaps.iter().flatten().map(|lm| (lm.width, lm.height)));
     let (aw, ah, pos) = pack(&rects);
     let mut rgba = vec![0u8; (aw * ah * 4) as usize];
-    for y in 0..2 {
-        for x in 0..2 {
-            let o = ((y * aw + x) * 4) as usize;
-            rgba[o..o + 4].copy_from_slice(&[255, 255, 255, 255]);
+    for (block, level) in [(0usize, 255u8), (1, 128)] {
+        let (bx, by) = pos[block];
+        for y in 0..2 {
+            for x in 0..2 {
+                let o = (((by + y) * aw + bx + x) * 4) as usize;
+                rgba[o..o + 4].copy_from_slice(&[level, level, level, 255]);
+            }
         }
     }
+    // The middle of each block, in atlas coordinates.
+    let block_uv = |block: usize| {
+        let (bx, by) = pos[block];
+        [(bx as f32 + 1.0) / aw as f32, (by as f32 + 1.0) / ah as f32]
+    };
     let mut rect_of_face = vec![None; lightmaps.len()];
-    let mut next_rect = 1;
+    let mut next_rect = 2;
     for (i, lm) in lightmaps.iter().enumerate() {
         let Some(lm) = lm else { continue };
         let (ax, ay) = pos[next_rect];
@@ -217,7 +227,8 @@ pub fn build(bsp: &Bsp, pal: &Palette) -> WorldMesh {
                     (ax as f32 + (s - lm.mins[0] as f32) / LUXEL + 0.5) / aw as f32,
                     (ay as f32 + (t - lm.mins[1] as f32) / LUXEL + 0.5) / ah as f32,
                 ],
-                _ => [1.0 / aw as f32, 1.0 / ah as f32],
+                _ if tex.name.starts_with("sky") => block_uv(1),
+                _ => block_uv(0),
             };
             vertices.push(Vertex {
                 pos: p.to_array(),

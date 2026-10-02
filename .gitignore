@@ -19,3 +19,9 @@
 # session kickoff notes, not part of the project
 /NEXT_SESSION_PROMPT.md
 /zone-cert.der
+
+# what a locally run hub and its zones write (docs/BUILDING.md): certificates, the hub's
+# signing key (never commit it) and the model store
+/*.der
+/hub.key
+/models/

@@ -78,7 +78,7 @@ pub struct Texture {
 
 /// The textures every map can rely on. Names are at most 15 characters (WAD limit).
 /// `skip`, `clip` and `trigger` are tool textures qbsp looks up by name.
-pub const BASE_TEXTURES: [&str; 10] = [
+pub const BASE_TEXTURES: [&str; 16] = [
     "floor_stone",
     "wall_brick",
     "ceil_plaster",
@@ -89,6 +89,13 @@ pub const BASE_TEXTURES: [&str; 10] = [
     "skip",
     "clip",
     "trigger",
+    // The town (Phase 6). A name starting with `sky` is a sky surface to qbsp and light.
+    "cobble",
+    "plaster_wall",
+    "timber_wall",
+    "roof_tile",
+    "market_tile",
+    "sky_day",
 ];
 
 fn hash(x: i32, y: i32, seed: u32) -> f32 {
@@ -235,6 +242,111 @@ fn generate_rgb(name: &str, x: i32, y: i32) -> [f32; 3] {
                 scale([0.95, 0.90, 0.75], 0.95 + 0.05 * noise(x, y, p, p, 71))
             }
         }
+        "cobble" => {
+            // Stones: the nearest of the jittered points of a 16-texel lattice; the seam
+            // between the two nearest is grout.
+            let cell = 16;
+            let cells = p / cell;
+            let (cx, cy) = (x.div_euclid(cell), y.div_euclid(cell));
+            let (mut d1, mut d2, mut owner) = (f32::MAX, f32::MAX, (0, 0));
+            for j in -1..=1 {
+                for i in -1..=1 {
+                    let (gx, gy) = (cx + i, cy + j);
+                    // Offsets inside the cell, in integers first: the same texel one period
+                    // on must give the same floats, bit for bit.
+                    let dx =
+                        (x - gx * cell) as f32 - (3.0 + 10.0 * noise(gx, gy, cells, cells, 81));
+                    let dy =
+                        (y - gy * cell) as f32 - (3.0 + 10.0 * noise(gx, gy, cells, cells, 82));
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d < d1 {
+                        d2 = d1;
+                        d1 = d;
+                        owner = (gx, gy);
+                    } else if d < d2 {
+                        d2 = d;
+                    }
+                }
+            }
+            if d2 - d1 < 1.6 {
+                scale([0.20, 0.19, 0.17], 0.9 + 0.2 * noise(x, y, p, p, 83))
+            } else {
+                let stone = mix(
+                    [0.44, 0.42, 0.38],
+                    [0.56, 0.52, 0.45],
+                    noise(owner.0, owner.1, cells, cells, 84),
+                );
+                // Rounded: darker towards the seam.
+                let round = 0.82 + 0.18 * ((d2 - d1) / 6.0).min(1.0);
+                scale(stone, round * (0.95 + 0.1 * noise(x, y, p, p, 85)))
+            }
+        }
+        "plaster_wall" => {
+            let base = [0.80, 0.73, 0.60];
+            let stain = smooth_noise(x, y, p, 32, 91);
+            scale(
+                base,
+                0.86 + 0.14 * smooth_noise(x, y, p, 8, 92) - 0.10 * (stain - 0.5).max(0.0)
+                    + 0.04 * (noise(x, y, p, p, 93) - 0.5),
+            )
+        }
+        "timber_wall" => {
+            // Half-timbering: a dark frame every tile, plaster between.
+            let (xx, yy) = (x.rem_euclid(p), y.rem_euclid(p));
+            let brace = (xx - yy).abs() < 3 && xx > 6 && yy > 6;
+            if xx < 6 || yy < 6 || brace {
+                let grain = if yy < 6 { xx } else { yy };
+                scale(
+                    [0.26, 0.17, 0.10],
+                    0.85 + 0.25 * noise(grain / 2, (xx + yy) / 9, p, p, 101),
+                )
+            } else {
+                scale(
+                    [0.82, 0.76, 0.64],
+                    0.88 + 0.12 * smooth_noise(x, y, p, 8, 102)
+                        + 0.04 * (noise(x, y, p, p, 103) - 0.5),
+                )
+            }
+        }
+        "roof_tile" => {
+            // Courses of rounded clay tiles, every other course offset by half a tile.
+            let (tw, th) = (16, 16);
+            let row = y.div_euclid(th);
+            let xo = if row % 2 == 0 { 0 } else { tw / 2 };
+            let col = (x + xo).div_euclid(tw);
+            let (u, v) = (
+                (x + xo).rem_euclid(tw) as f32 / tw as f32,
+                y.rem_euclid(th) as f32 / th as f32,
+            );
+            let clay = mix(
+                [0.55, 0.24, 0.16],
+                [0.68, 0.33, 0.20],
+                noise(col, row, p / tw, p / th, 111),
+            );
+            // Lit at the bulge, dark where a tile slides under the next course.
+            let bulge = 0.75 + 0.3 * (u * core::f32::consts::PI).sin();
+            let lap = if v < 0.15 { 0.6 } else { 1.0 - 0.15 * v };
+            scale(clay, bulge * lap)
+        }
+        "market_tile" => {
+            // One flagstone with a dark border: drawn at half scale it marks a stall tile.
+            let (xx, yy) = (x.rem_euclid(p), y.rem_euclid(p));
+            let edge = xx.min(yy).min(p - 1 - xx).min(p - 1 - yy);
+            let base = [0.62, 0.58, 0.48];
+            if edge < 2 {
+                [0.16, 0.14, 0.12]
+            } else if edge < 4 {
+                scale(base, 0.7)
+            } else {
+                scale(
+                    base,
+                    0.9 + 0.14 * smooth_noise(x, y, p, 16, 121)
+                        + 0.05 * (noise(x, y, p, p, 122) - 0.5),
+                )
+            }
+        }
+        // Flat on purpose: any pattern in a tiled sky shows as a grid overhead.
+        "sky_day" => [0.47, 0.64, 0.90],
         // Tool textures: flat, distinct colours so they are obvious in the editor.
         "skip" => [0.55, 0.55, 0.20],
         "clip" => [0.55, 0.20, 0.55],

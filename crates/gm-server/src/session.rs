@@ -6,16 +6,19 @@
 //! then does one PVS bit test and one record copy per entity.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
 use glam::Vec3;
 use gm_bsp::Bsp;
 use gm_core::sim::{Area, GuardState, Player, Projectile, Zone};
 use gm_core::vocab::{ArchetypeFrame, EntityId, Status};
+use gm_hub_proto::protocol::{ModelId, ModelRef};
 use gm_net::MAX_DATAGRAM_PAYLOAD;
 use gm_net::control::Control;
 use gm_net::quant;
 use gm_net::snapshot::{EntityState, OwnState, Snapshot, SpawnInfo, StatusWire, flags};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::world::ZoneWorld;
 
@@ -122,6 +125,10 @@ impl TickTable {
 pub struct Session {
     pub id: EntityId,
     pub name: String,
+    /// The avatar model the hub named at the claim, and the id last announced to clients
+    /// (present only while the player's frame is the model's, MODELS.md 7).
+    pub model: Option<ModelRef>,
+    pub announced: Option<ModelId>,
     pub conn: quinn::Connection,
     /// Bounded: a client that stops reading its control stream is kicked, not buffered forever.
     pub control: mpsc::Sender<Control>,
@@ -134,6 +141,38 @@ pub struct Session {
     pub malformed: u32,
     pub last_udp_tx: u64,
     pub last_udp_rx: u64,
+    stall_gate: RequestGate,
+    travel_gate: RequestGate,
+}
+
+/// A player's stall and travel requests go to the hub: one of a kind at a time, and at most
+/// one in this long.
+pub const STALL_REQUEST_GAP: Duration = Duration::from_secs(1);
+pub const TRAVEL_REQUEST_GAP: Duration = Duration::from_secs(1);
+
+/// What a client may ask of the hub through the zone: one request at a time and at most one
+/// per gap, so that a flood of messages costs the hub one request per gap and not one each.
+#[derive(Default)]
+pub struct RequestGate {
+    busy: bool,
+    last: Option<Instant>,
+}
+
+impl RequestGate {
+    /// `true` reserves the gate until `end`.
+    pub fn begin(&mut self, now: Instant, gap: Duration) -> bool {
+        if self.busy || self.last.is_some_and(|t| now.duration_since(t) < gap) {
+            return false;
+        }
+        self.busy = true;
+        self.last = Some(now);
+        true
+    }
+
+    /// The answer is in (or the request was never sent).
+    pub fn end(&mut self) {
+        self.busy = false;
+    }
 }
 
 impl Session {
@@ -146,6 +185,8 @@ impl Session {
         Session {
             id,
             name,
+            model: None,
+            announced: None,
             conn,
             control,
             history: VecDeque::with_capacity(HISTORY),
@@ -157,12 +198,50 @@ impl Session {
             malformed: 0,
             last_udp_tx: 0,
             last_udp_rx: 0,
+            stall_gate: RequestGate::default(),
+            travel_gate: RequestGate::default(),
         }
     }
 
-    /// Queue a reliable message; `false` when the client is not draining its stream.
+    /// May this player make a stall request now? `true` reserves it: `end_stall_request`
+    /// releases it when the answer is in.
+    pub fn begin_stall_request(&mut self) -> bool {
+        self.stall_gate.begin(Instant::now(), STALL_REQUEST_GAP)
+    }
+
+    pub fn end_stall_request(&mut self) {
+        self.stall_gate.end();
+    }
+
+    /// The same for `Travel`: a handoff is a hub transaction.
+    pub fn begin_travel_request(&mut self) -> bool {
+        self.travel_gate.begin(Instant::now(), TRAVEL_REQUEST_GAP)
+    }
+
+    pub fn end_travel_request(&mut self) {
+        self.travel_gate.end();
+    }
+
+    /// The model id to announce for a player whose current frame is `frame`: a model is shown
+    /// only on the frame it was ingested for.
+    pub fn wears(&self, frame: ArchetypeFrame) -> Option<ModelId> {
+        self.model
+            .filter(|m| m.frame == frame_index(frame))
+            .map(|m| m.id)
+    }
+
+    /// Queue a reliable message. A client whose queue is full is not draining its stream:
+    /// it is disconnected, because a reliable message is never silently lost (a missed
+    /// `PlayerInfo` or `ModelRevoked` would leave it drawing the wrong thing for good).
     pub fn send_control(&self, msg: Control) -> bool {
-        self.control.try_send(msg).is_ok()
+        match self.control.try_send(msg) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.conn.close(3u32.into(), b"control stream not read");
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
     }
 
     /// Record an ack; anything we did not send (or no longer hold) counts as no ack.
@@ -458,6 +537,29 @@ pub fn projectile_state(pr: &Projectile) -> EntityState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flood_of_requests_reaches_the_hub_once_per_gap() {
+        let gap = Duration::from_secs(1);
+        let t0 = Instant::now();
+        let mut gate = RequestGate::default();
+        assert!(gate.begin(t0, gap));
+        // In flight: nothing else passes, however long it takes.
+        assert!(!gate.begin(t0, gap));
+        assert!(!gate.begin(t0 + Duration::from_secs(5), gap));
+        gate.end();
+        // Answered at once: the next one still waits out the gap.
+        assert!(!gate.begin(t0 + Duration::from_millis(999), gap));
+        assert!(gate.begin(t0 + gap, gap));
+        // A thousand messages in the following second: none passes.
+        let passed = (0..1000)
+            .filter(|i| {
+                gate.end();
+                gate.begin(t0 + gap + Duration::from_micros(999 * i), gap)
+            })
+            .count();
+        assert_eq!(passed, 0);
+    }
 
     #[test]
     fn bands_schedule_by_distance() {

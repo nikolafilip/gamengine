@@ -1,0 +1,23 @@
+[package]
+name = "gm-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "GPL-3.0-or-later"
+description = "gamengine model ingestion: glTF uploads validated against the budgets and the frame envelope, re-encoded to .gmm."
+
+[dependencies]
+anyhow = { workspace = true }
+glam = { workspace = true }
+gltf = { workspace = true }
+gm-core = { workspace = true }
+gm-model = { workspace = true }
+image = { workspace = true, features = ["jpeg"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+texpresso = { version = "2.0.2", features = ["rayon"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+miniz_oxide = { workspace = true }
