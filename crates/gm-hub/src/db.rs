@@ -132,7 +132,7 @@ impl Db {
 
     /// Drop every row (tests).
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        sqlx::query("truncate model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
+        sqlx::query("truncate kills, trials, model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
             .execute(&self.pool)
             .await?;
         // The cascade empties `holders` too; the two singletons come back at zero.
@@ -468,6 +468,46 @@ impl Db {
         .await
         .map_err(internal)?
         .rows_affected())
+    }
+
+    /// A character passed a trial (COMPANIONS.md 11): recorded once, the fastest time kept.
+    pub async fn trial_pass(
+        &self,
+        character: CharacterId,
+        trial: &str,
+        zone: &ZoneId,
+        secs: u32,
+    ) -> Result<(), HubError> {
+        sqlx::query(
+            "insert into trials (character_id, trial, zone, secs) values ($1, $2, $3, $4) \
+             on conflict (character_id, trial) do update set secs = least(trials.secs, excluded.secs)",
+        )
+        .bind(character)
+        .bind(trial)
+        .bind(zone)
+        .bind(secs.min(i32::MAX as u32) as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?;
+        Ok(())
+    }
+
+    /// The trials a character has passed, with its best time in seconds.
+    pub async fn trials_of(&self, character: CharacterId) -> Result<Vec<(String, u32)>, HubError> {
+        let rows =
+            sqlx::query("select trial, secs from trials where character_id = $1 order by trial")
+                .bind(character)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(internal)?;
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    r.try_get("trial").map_err(internal)?,
+                    r.try_get::<i32, _>("secs").map_err(internal)?.max(0) as u32,
+                ))
+            })
+            .collect()
     }
 
     pub async fn log(&self, zone: &str, event: &str, detail: &str) {

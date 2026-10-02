@@ -1,0 +1,41 @@
+# Creatures (COMPANIONS.md 8.1). A creature is a build without a budget: the same frames,
+# armour classes, aspects and verbs as a player, read by the same rules, with its health set
+# here. Abilities marked `creature = true` in abilities.toml are theirs alone.
+
+[[creature]]
+key = "sentinel"
+name = "Sentinel"
+frame = "striker"
+armour = "mail"
+aspects = ["flame"]
+attributes = { str = 16, agi = 14, con = 16, int = 8, spr = 10 }
+health = 420
+primary = "sword"
+secondary = "crossbow"
+guard = "parry"
+actives = ["overhead", "dash"]
+sight = 700
+leash = 900
+respawn_s = 600
+
+[[creature]]
+key = "warden"
+name = "The Warden"
+frame = "colossus"
+armour = "plate"
+aspects = ["stone"]
+attributes = { str = 20, agi = 8, con = 20, int = 14, spr = 14 }
+health = 7500
+stagger_threshold = 400
+primary = "maul"
+secondary = "stone_throw"
+actives = ["quake", "stomp"]
+sight = 900
+leash = 1100
+boss = true
+respawn_s = 120
+[creature.loot]
+components = 3
+standard = ["core/iron", "frame/ash", "catalyst/basalt"]
+top = ["core/dragonbone", "shard/boss_scale", "catalyst/basalt"]
+coin = 30

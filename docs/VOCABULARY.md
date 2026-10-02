@@ -1,13 +1,17 @@
 # Entity Vocabulary
 
-Status: v0.3, Phase 3 (sections 5.2–5.6 tightened, 14 added). This document is the contract for
+Status: v0.4, Phase 7 (v0.3 of Phase 3 with sections 5.2–5.6 tightened and 14 added; section
+15 adds the driver of a body, `Origin::Aim`, zero packets and the command stance). This document is the contract for
 phases 2–7. `gm-core::vocab` mirrors it as plain data types; when the two disagree, this document
 wins and the code is wrong. Changes to either require changing both in the same commit.
 
 ## 1. Principles
 
 1. One simulation, one vocabulary. Genres (FPS, third-person, tactical) are camera, control
-   scheme and HUD. They never add server rules.
+   scheme and HUD. They never add server rules, with one stated exception: the tactical
+   viewport's sight through the squad is a grant, so its price, the command stance (section
+   15), is a rule of the simulation. A body is driven by a client or by a mind; either way it
+   is the same body and the frames it runs are the same inputs.
 2. Six server verbs. Every ability, spell, weapon and monster attack is a timed script of verbs
    with parameters. There is no ability-specific server code path.
 3. The server resolves every verb. The client predicts its own movement and `MoveSelf`, shows
@@ -57,7 +61,8 @@ wins and the code is wrong. Changes to either require changing both in the same 
 - **Shape**: `Sphere{radius}`, `Cylinder{radius, height}`, `Cone{length, half_angle}`,
   `Box{half_extents}`.
 - **Origin**: `SelfFeet`, `SelfEyes`, `Weapon{offset}` (forward, right, up in the actor's view
-  frame), `Point`, `Target(entity)`, `Impact` (where the triggering projectile hit).
+  frame), `Point`, `Aim{range}` (the spot on the floor the actor looks at, section 15; areas
+  only), `Impact` (where the triggering projectile hit).
 - **Falloff**: `None`, `Linear`, `InverseSquare`.
 
 Friendly fire is not a parameter. It is always on for every verb that deals damage.
@@ -209,7 +214,9 @@ Examples (values illustrative, tuning happens in playtests):
 
 Damage never checks team, party, guild or alliance (PLAN.md 4.4). Collision: player-player
 capsule sweeps always; projectiles collide with every capsule except the shooter's own for the
-first 2 ticks. Team-kill statistics feed the reputation ledger.
+first 2 ticks. Team-kill statistics feed the reputation ledger. A body that begins a step
+inside another body is not held by it for that step (PROTOCOL.md 7.5): overlap is an accident
+of spawning or blinking, never a prison.
 
 ## 9. Genre compilation
 
@@ -217,7 +224,7 @@ first 2 ticks. Team-kill statistics feed the reputation ledger.
 |---|---|---|---|
 | FPS | eye ray from view yaw/pitch | full | all; precision `Projectile` kits shine |
 | Third-person | camera ray resolved to a world point, re-aimed from the eyes ("camera-to-muzzle re-aim") | full, 360° awareness | all; `MeleeArc`, `Guard`, `MoveSelf` kits shine |
-| Tactical | none (body stays at the war table or leadership stance) | officer body exposed | issues intents (`MoveTo`, `Attack`, `Hold`) to **hired AI only**; the AI turns intents into ordinary inputs |
+| Tactical | none (the body is in the command stance, section 15) | none: the officer's body is exposed | issues intents (`Follow`, `Hold`, `MoveTo`, `Attack`) to **its own companions only**; their minds turn intents into ordinary inputs (COMPANIONS.md 5) |
 
 The tactical view never commands humans (PLAN.md 4.3).
 
@@ -244,8 +251,7 @@ that scales with level (there are no levels). No ability-specific server code.
 ## 12. Open questions
 
 Which kits may parry projectiles. Whether `Stealth` distance stays a status magnitude.
-`Origin::Target` is accepted but resolves to the caster until a targeting rule exists (Phase 7
-companions).
+(`Origin::Target` is gone: section 15.)
 
 ## 13. Phase 2 implementation notes
 
@@ -289,3 +295,27 @@ dash, dead, guard, parry, cast, stagger. Derived on the server, never simulated 
 The vocabulary became non-recursive in v0.3: `Trigger` (projectile hits), `[ApplyStatus]`
 (area effects) and `Riposte` (parries) replaced `[Verb]`. Nothing content could express before
 is lost; projectile chains were never allowed by the validator.
+
+## 15. Phase 7: drivers, aimed areas, zero packets, the command stance
+
+- **Drivers.** A body's frames come from a client (through the frame ledger, PROTOCOL.md 4)
+  or from a mind (`gm-ai`), which hands the zone one `Input` per server tick. A mind's body
+  runs exactly one frame a tick in its own frame clock; its swings are not rewound. Nothing
+  else in the simulation knows the difference (COMPANIONS.md 2.1).
+- **`Origin::Aim { range }`** (1..=1,024 u) replaces `Origin::Target`: the first body or world
+  surface along the actor's view ray within `range`, dropped to the ground (under a body:
+  its feet; with nothing in the way: the point at `range`). Current positions, no rewind,
+  nothing homes: what is placed is a spot on the floor. Only an `AreaEffect` may use it.
+- **A packet of amount 0 is not an attack**: no damage, knockback or stagger, not blocked,
+  parried or evaded, interrupts nothing; only its triggers land (MATRIX.md 7). The healer's
+  dart is such a packet with Regen on whoever it hits, friend or foe.
+- **The command stance.** Button bit 11 held, while no script runs and the body is not
+  staggered, puts the body in the stance; it lasts while the bit is held and 400 ms after.
+  In it the frame is read as view angles only: no movement, no jump, no action, no guard.
+  It is stepped in `step_mover` on both sides of the wire, like the guard; the snapshot's
+  own-entity flag `commanding` settles a disagreement. Animation state 12, `command`.
+- **Creatures** are builds without a budget (`CreatureDef`): attributes may leave 5..=20,
+  health is set by content (up to 60,000), and they may slot abilities marked `creature`,
+  which no player build can. Everything else is the build rules.
+- Animation states: idle, run, air, windup, swing, recover, dash, dead, guard, parry, cast,
+  stagger, command.

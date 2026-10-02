@@ -12,6 +12,12 @@ pub const BUDGET: u32 = 100;
 /// Second aspect cost (MATRIX.md 5).
 pub const SECOND_ASPECT_COST: u32 = 10;
 pub const MAX_ACTIVES: usize = 4;
+/// Companions a character commands without a leadership ability, and with every bonus
+/// (COMPANIONS.md 3.2).
+pub const SQUAD_BASE: usize = 3;
+pub const SQUAD_MAX: usize = 5;
+/// The largest health a creature definition may override to (it rides the wire as a u16).
+pub const MAX_CREATURE_HEALTH: u16 = 60_000;
 
 /// What slot an ability may be put in (MATRIX.md 10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -36,6 +42,43 @@ pub struct AbilityDef {
     pub cost: u8,
     /// Required aspect; also the element of every elemental packet in the script.
     pub aspect: Option<Element>,
+    /// Squad slots the ability adds while slotted (COMPANIONS.md 3.2).
+    pub squad: u8,
+    /// Only a creature may slot it (COMPANIONS.md 8.1).
+    pub creature: bool,
+}
+
+/// What a boss drops (COMPANIONS.md 10): `components` items per kill, drawn in order from
+/// `standard` for a party that brought companions and from `top` for a party of humans only.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub struct Loot {
+    pub components: u8,
+    pub standard: Vec<String>,
+    pub top: Vec<String>,
+    /// Copper, split among the recipients.
+    pub coin: u32,
+}
+
+/// A creature (COMPANIONS.md 8.1): a build without a budget, with its health set by content.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub struct CreatureDef {
+    pub key: String,
+    pub name: String,
+    /// Frame, attributes, armour class, aspects and kit: the body is read by the same rules
+    /// as a player's.
+    pub build: Build,
+    pub health: u16,
+    /// 0 = the derived threshold (MATRIX.md 6).
+    pub stagger_threshold: u16,
+    /// How far it perceives, and how far from its post it goes.
+    pub sight: f32,
+    pub leash: f32,
+    pub boss: bool,
+    /// Seconds after its encounter was cleared until it stands on its post again; 0 = never.
+    pub respawn_s: u16,
+    pub loot: Option<Loot>,
 }
 
 /// A character build (MATRIX.md 9). Ability references are indices into the content pack.
@@ -68,6 +111,8 @@ pub struct NamedBuild {
 pub struct ContentPack {
     pub abilities: Vec<AbilityDef>,
     pub builds: Vec<NamedBuild>,
+    pub creatures: Vec<CreatureDef>,
+    pub trials: Vec<crate::trial::TrialDef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +127,7 @@ pub enum BuildError {
     SharedCooldownGroup(u8),
     TooManyActives,
     Budget { spent: u32 },
+    CreatureOnly(u16),
 }
 
 impl core::fmt::Display for BuildError {
@@ -108,6 +154,7 @@ impl core::fmt::Display for BuildError {
             }
             BuildError::TooManyActives => write!(f, "at most {MAX_ACTIVES} actives"),
             BuildError::Budget { spent } => write!(f, "build spends {spent} of {BUDGET} points"),
+            BuildError::CreatureOnly(i) => write!(f, "ability {i} is a creature's"),
         }
     }
 }
@@ -163,6 +210,34 @@ impl Build {
         if !self.attributes.in_range() {
             return Err(BuildError::AttributeOutOfRange);
         }
+        self.check_kit(pack, false)?;
+        let spent = self.cost(pack);
+        if spent != BUDGET {
+            return Err(BuildError::Budget { spent });
+        }
+        Ok(())
+    }
+
+    /// A creature's build (COMPANIONS.md 8.1): the kit rules without the budget and without
+    /// the attribute range, and creature abilities allowed.
+    pub fn validate_creature(&self, pack: &ContentPack) -> Result<(), BuildError> {
+        self.check_kit(pack, true)
+    }
+
+    /// Companions this build commands (COMPANIONS.md 3.2): three, plus the slots its
+    /// abilities add, at most five.
+    pub fn squad_capacity(&self, pack: &ContentPack) -> usize {
+        let bonus: usize = self
+            .slots()
+            .iter()
+            .filter_map(|(i, _)| pack.abilities.get(*i as usize))
+            .map(|a| a.squad as usize)
+            .sum();
+        (SQUAD_BASE + bonus).min(SQUAD_MAX)
+    }
+
+    /// Aspects, slot types, duplicates, aspect gating, cooldown groups.
+    fn check_kit(&self, pack: &ContentPack, creature: bool) -> Result<(), BuildError> {
         if self.aspects.0 & !0x1f != 0 {
             return Err(BuildError::TooManyAspects);
         }
@@ -184,6 +259,9 @@ impl Build {
             if def.slot != expected {
                 return Err(BuildError::WrongSlot { index, expected });
             }
+            if def.creature && !creature {
+                return Err(BuildError::CreatureOnly(index));
+            }
             if seen.contains(&index) {
                 return Err(BuildError::DuplicateAbility(index));
             }
@@ -199,10 +277,6 @@ impl Build {
                 }
                 groups.push(g);
             }
-        }
-        let spent = self.cost(pack);
-        if spent != BUDGET {
-            return Err(BuildError::Budget { spent });
         }
         Ok(())
     }
@@ -276,7 +350,59 @@ impl ContentPack {
                 reason: e.to_string(),
             })?;
         }
+        for (i, c) in self.creatures.iter().enumerate() {
+            let err = |reason: String| ContentError {
+                key: c.key.clone(),
+                reason,
+            };
+            if c.key.is_empty() || self.creatures[..i].iter().any(|o| o.key == c.key) {
+                return Err(err("duplicate or empty creature key".into()));
+            }
+            c.build
+                .validate_creature(self)
+                .map_err(|e| err(e.to_string()))?;
+            if c.health == 0 || c.health > MAX_CREATURE_HEALTH {
+                return Err(err(format!("health must be 1..={MAX_CREATURE_HEALTH}")));
+            }
+            if !(c.sight > 0.0 && c.leash > 0.0) {
+                return Err(err("sight and leash must be positive".into()));
+            }
+            match &c.loot {
+                Some(_) if !c.boss => return Err(err("only a boss drops (no junk loot)".into())),
+                Some(l) if l.components > 0 && (l.standard.is_empty() || l.top.is_empty()) => {
+                    return Err(err("loot needs a standard and a top list".into()));
+                }
+                _ => {}
+            }
+        }
+        for (i, t) in self.trials.iter().enumerate() {
+            let err = |reason: &str| ContentError {
+                key: t.key.clone(),
+                reason: reason.into(),
+            };
+            if t.key.is_empty() || self.trials[..i].iter().any(|o| o.key == t.key) {
+                return Err(err("duplicate or empty trial key"));
+            }
+            if t.map.is_empty() || t.encounter.is_empty() {
+                return Err(err("a trial names its map and its encounter"));
+            }
+            let l = &t.lens;
+            if [l.damage, l.tank, l.healing, l.command]
+                .iter()
+                .any(|&v| v > 1000)
+            {
+                return Err(err("lens shares are per mille (0..=1000)"));
+            }
+        }
         Ok(())
+    }
+
+    /// A creature definition and its index (what `Roster` entries name).
+    pub fn creature(&self, key: &str) -> Option<(u16, &CreatureDef)> {
+        self.creatures
+            .iter()
+            .position(|c| c.key == key)
+            .map(|i| (i as u16, &self.creatures[i]))
     }
 }
 
@@ -414,6 +540,17 @@ impl Sheet {
             build,
             team,
         }
+    }
+
+    /// A creature's sheet (COMPANIONS.md 8.1): its build's kit and derived stats, with the
+    /// health and the stagger threshold the definition sets.
+    pub fn creature(def: &CreatureDef, pack: &ContentPack, team: u8) -> Sheet {
+        let mut sheet = Sheet::new(def.build.clone(), pack, team);
+        sheet.derived.health = def.health as i32;
+        if def.stagger_threshold > 0 {
+            sheet.derived.stagger_threshold = def.stagger_threshold as f32;
+        }
+        sheet
     }
 }
 

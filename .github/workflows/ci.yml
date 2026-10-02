@@ -44,6 +44,7 @@ jobs:
           cargo run -q -p gm-tools --locked -- map build assets/maps/src/test_room.map --out target/ci-maps
           cargo run -q -p gm-tools --locked -- map build assets/maps/src/arena.map --out target/ci-maps
           cargo run -q -p gm-tools --locked -- map build assets/maps/src/town.map --out target/ci-maps
+          cargo run -q -p gm-tools --locked -- map build assets/maps/src/dungeon.map --out target/ci-maps
       - name: Tests
         run: cargo test --workspace --locked
       - name: Asset budgets
@@ -56,6 +57,8 @@ jobs:
         run: scripts/check-matrix.sh
       - name: Swarm smoke (32 bots over real UDP; the 200-bot gate runs on the reference machine)
         run: BOTS=32 SECS=10 scripts/check-swarm.sh
+      - name: Dungeon gate (a leader and three companions clear it on a real zone; 4 leaders at once)
+        run: SKIP_TESTS=1 LEADERS=4 scripts/check-dungeon.sh
 
   gates:
     name: binary size, RAM, software render

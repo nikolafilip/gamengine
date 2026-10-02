@@ -24,7 +24,9 @@ cargo run --release -p gm-client -- --map assets/maps/built/test_room.bsp
 `.prt` portal file is not. `map gen-arena` regenerates `assets/maps/src/arena.map`, the 8v8
 arena of Phase 3 (symmetric, two team bases, pillars, low cover, side walkways), and
 `map gen-town` regenerates `assets/maps/src/town.map`, the town of Phase 6 (a square under an
-open sky lit by the sun, houses, a market of 30 stall tiles, 128 spawns).
+open sky lit by the sun, houses, a market of 30 stall tiles, 128 spawns), and `map gen-dungeon`
+`assets/maps/src/dungeon.map`, the tutorial dungeon of Phase 7 (an entry hall, a passage with
+two turns, the gate room with two sentinels, a stair, the Warden's hall).
 
 ## Client flags
 
@@ -46,6 +48,7 @@ open sky lit by the sun, houses, a market of 30 stall tiles, 128 spawns).
 | `--build NAME` | preset build to ask the zone for: `ironclad`, `blade`, `frostweaver`, `shade` (default: the zone's default) |
 | `--team N` | team 1 or 2 (default 0: the zone balances) |
 | `--third-person` | start in the third-person viewport (`V` toggles at any time) |
+| `--tactical` | start in the tactical viewport (`Tab` toggles at any time); with `--headless --bench` it measures the view from above |
 | `--seconds N` | exit after N seconds and print the network statistics (scripted runs) |
 | `--avatar FILE.gmm` | offline: wear this ingested model (how a creator previews one before uploading) |
 | `--crowd N` | offline: N characters standing and walking around the start (benchmarks, `check-avatars.sh`) |
@@ -56,6 +59,14 @@ open sky lit by the sun, houses, a market of 30 stall tiles, 128 spawns).
 | `--start X,Y,Z,YAW` | offline: start here instead of at a spawn |
 
 Keys in a zone with a market: `B` opens a stall on the tile you stand on, `N` closes your stall.
+
+The tactical viewport (COMPANIONS.md 6): `Tab` kneels the body into the command stance and
+lifts the camera above it; `Tab` again stands up (400 ms). In it the cursor is free: `1`–`5`
+select a companion and `` ` `` all of them, left click selects the companion under the cursor,
+right click sends the selection to the ground under the cursor or onto the body under it,
+`F` orders follow and `H` hold; the movement keys pan, `Q`/`E` turn, the wheel zooms. (`Q`
+quits everywhere else.) The HUD shows your health, stamina and focus, the squad with its
+orders, the creature being fought, and what the zone says of encounters, loot and trials.
 
 Default present mode is **Mailbox** (no tearing, no blocking) with the frame cap, not Fifo.
 Reason, measured 2026-09-30 on Arch, X11, xfwm4 with compositing, RADV (Renoir): Fifo and
@@ -164,6 +175,43 @@ psql -h /tmp -p 54329 -U gm -d postgres -c 'create database gm_test'
 GM_TEST_DATABASE_URL='postgres://gm@localhost:54329/gm_test?host=/tmp' cargo test -p gm-server --test handoff
 ```
 
+## Companions and the tutorial dungeon (Phase 7)
+
+`docs/COMPANIONS.md` is the contract. A dungeon without a hub, with three recruits lent by
+the zone:
+
+```sh
+cargo run --release -p gm-server -- --map assets/maps/built/dungeon.bsp --cert-out zone-cert.der \
+    --squads --recruits ironclad,mender,frostweaver
+cargo run --release -p gm-client -- --connect 127.0.0.1:4433 --build blade --third-person \
+    --map assets/maps/built/dungeon.bsp
+# or a headless leader that clears it by itself and prints what it got:
+cargo run --release -p gm-bot -- --connect 127.0.0.1:4433 --cert zone-cert.der \
+    --map assets/maps/built/dungeon.bsp --behaviour raid --builds blade --secs 420
+```
+
+Zone flags: `--squads` lets companions in with their commanders (a town does not);
+`--recruits a,b,c` lends those preset builds to fill squad slots that hires left empty (the
+tutorial only); a map that posts creatures (`gm_creature`) is a wild zone, and `--wild` makes
+any map one; `--arrive-at-entry` starts every arrival at the map's spawns instead of where
+the character logged out (dungeons); `--requires trial,trial` (with `--hub`) lets in only
+characters that have passed one of those trials.
+
+Hired avatars need a hub. An owner lists a character and goes offline; a leader hires from
+the tavern and enters:
+
+```sh
+cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --user owner@example.com \
+    --password '...' --register --character Bulwark --builds ironclad --zone dungeon --list-for-hire 100 --secs 0
+cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --user you@example.com \
+    --password '...' --character Marko --zone dungeon --behaviour raid --hire 3 --secs 420
+```
+
+`scripts/check-dungeon.sh` is the gate (offline, over a simulated network, a real zone, and
+the load of sixteen leaders); `scripts/check-dungeon.sh --online` plays the whole story
+through the hub against `GM_TEST_DATABASE_URL`: recruits first, then three avatars hired with
+the coin of the first kill, then the gated zone.
+
 ## Avatar models and the town (Phase 6)
 
 `docs/MODELS.md` is the contract. A creator's loop needs no hub:
@@ -231,6 +279,8 @@ scripts/check-swarm.sh                # 200 bots on one zone over real UDP: tick
 scripts/check-avatars.sh --gate-fps   # 100 distinct avatars in the town: fps, RSS, the cache cap (MODELS.md 11)
 scripts/check-avatars.sh --software   # what CI runs: 48 avatars, 16 MiB cap, software Vulkan
 scripts/check-avatars.sh --online     # hub + town zone + 100 bots wearing uploads + the client (needs a database and a display)
+scripts/check-dungeon.sh              # a leader and three companions clear the tutorial dungeon; 16 leaders at once (COMPANIONS.md 14)
+scripts/check-dungeon.sh --online     # the same through the hub with hired avatars, loot, the trial and a gated zone (needs a database)
 ```
 
 `check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and
@@ -254,7 +304,9 @@ commit with `scripts/check-binary-size.sh --update-baseline` and say why in the 
 Entities: `worldspawn` keys `wad`, `light` (minlight), `_sunlight*`, `_dirt`, `_bounce`;
 `light` (point or spot with `mangle`); `info_player_start` (a spawn for any team);
 `gm_spawn` with `team` 1 or 2 (0 = any) and `angle`; `func_detail`, `func_wall`,
-`func_illusionary`; `gm_zone` is a placeholder for later phases. `gm_stall_grid` is a market:
+`func_illusionary`; `gm_zone` is a placeholder for later phases. `gm_creature` posts a
+creature of `assets/content/creatures.toml` (`creature`, `encounter`, `angle`); creatures that
+share an encounter name fight, reset and are cleared together. `gm_stall_grid` is a market:
 `origin` is the centre of the first tile on the ground, `cols` × `rows` tiles of side `tile`
 (128) spaced `pitch` (160) apart along +X and +Y, `angle` the way the keepers face, `base_x`
 and `base_y` the tile numbers of the first tile (distinct per grid of a map; at most 512 tiles

@@ -56,6 +56,10 @@ pub fn run(opts: &Options) -> Result<(), Error> {
     };
     sim.advance(&bsp, &idle, 2.0);
     let yaw0 = sim.yaw;
+    let mut tactical = crate::tactical::Tactical::new();
+    if opts.tactical {
+        tactical.enter(sim.yaw);
+    }
     let frames = opts.bench_frames.unwrap_or(120);
     let dt = 1.0 / 60.0;
     let mut stats = FrameStats::new();
@@ -72,6 +76,18 @@ pub fn run(opts: &Options) -> Result<(), Error> {
             sim.yaw += 20.0 * dt;
         }
         let eye = sim.eye();
+        // The tactical viewport: the camera above the body, the world drawn from the
+        // body's leaf (the camera itself hangs in the rock over the ceiling).
+        let (camera, cam_yaw, cam_pitch) = if opts.tactical {
+            tactical.steer(0.0, 0.0, 0.2, 0.0, dt);
+            (
+                tactical.camera(sim.origin()),
+                tactical.yaw,
+                crate::tactical::PITCH,
+            )
+        } else {
+            (eye, sim.yaw, sim.pitch)
+        };
         let l = bsp.leaf_for_point(eye);
         if leaf != Some(l) {
             leaf = Some(l);
@@ -83,14 +99,13 @@ pub fn run(opts: &Options) -> Result<(), Error> {
         }
         boxes.clear();
         avatars.begin_frame();
-        avatars.push_crowd(time, dt, eye, &bsp, &renderer.characters, &mut boxes);
-        renderer.render(
-            &gpu,
-            &view,
-            view_proj(eye, sim.yaw, sim.pitch, w as f32 / h as f32),
-            &boxes,
-            &avatars.draws,
-        );
+        avatars.push_crowd(time, dt, camera, &bsp, &renderer.characters, &mut boxes);
+        let vp = view_proj(camera, cam_yaw, cam_pitch, w as f32 / h as f32);
+        renderer.hud.begin((w, h));
+        if opts.tactical {
+            crate::app::build_hud(&mut renderer.hud, None, &tactical, vp, &[], &[], None);
+        }
+        renderer.render(&gpu, &view, vp, &boxes, &avatars.draws);
         avatars.end_frame(&gpu, &mut renderer.characters);
         gpu.device
             .poll(wgpu::PollType::wait_indefinitely())

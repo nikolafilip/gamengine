@@ -7,6 +7,7 @@
 pub mod bot;
 pub mod brain;
 pub mod hub_flow;
+pub mod raid;
 
 pub use bot::{BotConfig, BotExit, BotReport, run_bot, run_bot_with_token};
 pub use brain::{Behaviour, Brain, View};

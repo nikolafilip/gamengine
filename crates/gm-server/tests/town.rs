@@ -73,6 +73,8 @@ fn flow(
             stall_tile: stall,
         },
         play: Duration::from_secs(secs),
+        list_for_hire: None,
+        hire: 0,
     }
 }
 
@@ -141,6 +143,7 @@ async fn avatars_and_stalls_in_the_town() {
         map_hash: world.hash,
         public_addr: zone_endpoint.local_addr().unwrap(),
         zone_cert_der: zone_identity.cert_der().to_vec(),
+        requires: Vec::new(),
     })
     .await
     .expect("the zone registers");

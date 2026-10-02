@@ -1,11 +1,12 @@
 # Wire Protocol
 
-Status: v2.2 (v2 of Phase 3; reliable messages extended in Phases 4 and 6, sections 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
+Status: v3 (Phase 7: companions and command, section 14; v2 of Phase 3 with the reliable
+messages of Phases 4 and 6, sections 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
 document disagree, the document wins and the code is wrong; changes to either go in one commit.
 
-Protocol version byte: **2**. Any change to sections 2–5 bumps it. Section 11 lists what v2
-changed over v1.
+Protocol version byte: **3**. Any change to sections 2–5 bumps it. Section 11 lists what v2
+changed over v1, section 14 what v3 changed over v2.
 
 Section 10 records the independent design review this version went through and what changed.
 
@@ -108,7 +109,7 @@ Frame:
 
 | Field | Bits | Notes |
 |---|---|---|
-| buttons | 16 | bit 0 jump, 1 crouch, 2 primary, 3 secondary, 4 guard, 5–8 ability 1–4, 9 interact, 10 viewport switch, 11–15 reserved (must be 0) |
+| buttons | 16 | bit 0 jump, 1 crouch, 2 primary, 3 secondary, 4 guard, 5–8 ability 1–4, 9 interact, 10 viewport switch, 11 command (the command stance, COMPANIONS.md 5.1), 12–15 reserved (must be 0) |
 | yaw | 12 | 0.1° |
 | pitch | 11 | 0.1° |
 | forward | 8 | i8, −127..=127 → −1..=1 |
@@ -193,7 +194,7 @@ Entity record:
 | vel | 3 × svar | VEL. Absolute when SPAWN (or the baseline record has no velocity), delta otherwise |
 | anim | 8 | ANIM |
 | health | uvar | HEALTH |
-| flags | 8 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 reserved |
+| flags | 8 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only) |
 | status | 16 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras) |
 
 Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infiltrator), `team`
@@ -201,8 +202,10 @@ Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infilt
 leather, mail, plate): everything that makes a build readable at a glance. Projectile → `owner`
 uvar, `def` uvar (ability index in the owner's kit), `input_tick` uvar (the owner's client tick
 that fired it, for matching the owner's predicted copy). Area → `owner` uvar, `def` uvar (0 when
-triggered by a projectile or a parry), `radius` uvar (largest extent in whole units); its `pos`
-is the origin and it is removed when it expires.
+triggered by a projectile or a parry), `radius` uvar (largest extent in whole units), `harmful`
+1 bit (it deals damage, or puts a status on whoever stands in it that is not Regen, Haste,
+Fortify or Stealth: what its look says, so a client can draw a telegraph and a sanctuary
+differently); its `pos` is the origin and it is removed when it expires.
 
 Entity ids are **monotonic** within a zone process and never reused, so a delta can never be
 applied to a different entity's baseline record.
@@ -218,15 +221,21 @@ Rules:
 - An entity that is unchanged since the baseline is not listed at all (carry-forward costs zero
   bytes). An entity that is not scheduled this tick by its distance band is likewise not listed
   and is **not** in `removed`.
-- `vel`, `health`, the `jump held` and `script running` flags and the own block are sent for
-  the **own entity only**. Party members will get `health` in Phase 5. Nothing else about other
-  players' resources is sent; their `status` mask is the aura, not the numbers.
+- `vel`, the `jump held`, `script running` and `commanding` flags and the own block are sent
+  for the **own entity only**. `health` is sent for the own entity, for the bodies of the
+  viewer's party (its companions) and for creatures (COMPANIONS.md 13); a record that is not
+  scheduled this tick keeps the health of its baseline. Nothing else about other players'
+  resources is sent; their `status` mask is the aura, not the numbers.
 - Only entities in the PVS of the client's eye leaf are sent (PLAN.md 1.2, 8). An entity counts
   as in the PVS when the leaf of its origin or of its eye point is in the row. The client's own
   entity is always sent, and so is any player within **128 u** of the client's eye whatever the
   PVS says: a body that close can block the client's movement, and prediction cannot handle a
   wall it was never told about (a pillar corner is exactly where this happens). At 4 m the
   anti-ESP value of hiding it is nil. Entities leaving the PVS appear in `removed`.
+- **The squad** (COMPANIONS.md 5.2): a client's own companions are always sent, wherever they
+  are. While its body is in the command stance **with the button held**, it is also sent
+  every entity in the PVS of each living companion's eyes, with the distance band taken from
+  the nearest squad member. Nothing is sent that no squad member could see.
 - Distance bands (PLAN.md 1.2), measured from the client's eye to the entity's origin:
   full rate to 512 u; every second tick to 1,536 u; every sixth tick beyond (≈ 10.7 Hz).
   Projectiles, the own entity and any entity absent from the baseline (first sight) are always
@@ -316,7 +325,10 @@ clamp bounds the catch-up to 200 ms whatever the client claims.
 ### 7.5 Collision
 World: BSP hull traces (gm-bsp). Players against players: axis-aligned box sweeps with the same
 32 × 32 × 56 hull, resolved inside the movement trace so sliding and stepping work against
-players exactly as against walls. Hitboxes for damage are the archetype capsules
+players exactly as against walls. One exception, the same on both sides: a body whose own box,
+as its step begins, is inside another's by more than a unit on every axis is not held by that
+body for that step (two bodies that ended up in each other, at a crowded spawn or after a
+blink, walk apart instead of being stuck for good). Hitboxes for damage are the archetype capsules
 (VOCABULARY.md 3). Projectiles are swept as spheres against the world (point hull) and against
 capsules.
 
@@ -333,6 +345,7 @@ enum Control {
     Travel(String),                            // to another zone (HUB.md 3.3)
     StallOpen,                                 // on the market tile the player stands on
     StallClose,                                // the own stall
+    Order { slots: u8, order: Order },         // to the own squad, from the stance (COMPANIONS.md 5.3)
     Bye,
     // server → client
     Welcome { entity: u32, server_tick: u32, hz: u16, map: String, map_hash: u64 },
@@ -343,7 +356,7 @@ enum Control {
     TravelRefused(String),
     Reject(String),
     Roster(Vec<PlayerEntry>),                  // to a joiner: everyone here, itself included
-    PlayerInfo { id: u32, name: String, team: u8, model: Option<[u8; 32]> },
+    PlayerInfo { id: u32, name: String, team: u8, model: Option<[u8; 32]>, kind: BodyKind },
     PlayerLeft(u32),
     ModelRevoked([u8; 32]),                    // forget it, delete it (MODELS.md 7, 8)
     Stalls(Vec<StallEntry>),                   // to a joiner: every open stall of the zone
@@ -353,9 +366,18 @@ enum Control {
     Killed { victim: u32, killer: u32 },       // killer 0 = world
     ChatFrom { from: u32, text: String },
     Kick(String),
+    Squad(Vec<SquadEntry>),                    // to a commander: its squad, in slot order
+    OrderRefused(String),
+    Encounter { name: String, state: EncounterState },
+    Loot { encounter: String, items: Vec<String>, coin: u32 },
+    Trial { key: String, name: String, passed: bool, detail: String, secs: u32 },
 }
 
-struct PlayerEntry { id: u32, name: String, team: u8, model: Option<[u8; 32]> }
+enum BodyKind { Human, Companion { owner: u32 }, Creature { def: u16 } }
+enum Order { Follow, Hold, MoveTo([f32; 3]), Attack(u32) }
+enum EncounterState { Engaged, Reset, Cleared { secs: u32 } }
+struct SquadEntry { id: u32, name: String, role: u8, order: Order, max_health: u16, recruit: bool }
+struct PlayerEntry { id: u32, name: String, team: u8, model: Option<[u8; 32]>, kind: BodyKind }
 struct StallEntry { id: i64, pos: [f32; 3], yaw: f32, owner: String, frame: u8, armour: u8,
                     model: Option<[u8; 32]> }
 ```
@@ -396,6 +418,17 @@ body that does not move; it costs no snapshot bytes. `StallOpen` and `StallClose
 by `StallResult`; the zone forwards at most one such request per player per second to the hub
 and drops the rest unanswered. A map has at most 512 stall tiles, so `Stalls` always fits one
 message.
+
+Minds (COMPANIONS.md): `Roster` and `PlayerInfo` list companions and creatures like players,
+with their `kind` (a creature's `def` indexes the content pack's creatures, which is where a
+client gets its name and its maximum health). A commander is sent `Squad` whenever a member or
+an order of its squad changes, also when an order ends by itself; `role` is 0 heal, 1 tank,
+2 scout, 3 dps. `Order` is accepted only from the command stance with the button held, at most
+eight a second, for the squad slots named by the bits of `slots`; `Attack` must name a living
+body the client is being sent, `MoveTo` a point with a way to it. Anything else is answered
+`OrderRefused`. `Encounter` goes to the participants and to whoever stands in sight of the
+encounter's creatures; `Loot` and `Trial` to the human they concern (`detail` says why a trial
+was not passed, or, for a pass, what the ledger said).
 
 A reliable message is never dropped: a client whose queue of 256 undelivered messages is full
 is disconnected.
@@ -485,3 +518,19 @@ implementation; verdicts are ours):
   viewer): at 20 Hz 4.0 to 5.8 KB/s down and 1.8 to 2.1 KB/s up per player; at 64 Hz 13.4 KB/s
   down and 5.6 KB/s up. At 20 Hz the worst of the 100 bots had 0 or 1 unexplained correction
   in its minute over three runs (the budget of section 9 is one per 10 s).
+
+## 14. Changes in v3 (Phase 7)
+
+- Input: button bit 11, `command`.
+- Snapshot: `health` for the viewer's party and for creatures; flag bit 7 `commanding` on the
+  own entity; animation state 12 `command`; one more bit, `harmful`, in an area's spawn info;
+  own companions always sent; squad sight while commanding.
+- Collision (7.5): a body that begins a step inside another is not held by it.
+- Control: `Order`, `OrderRefused`, `Squad`, `Encounter`, `Loot`, `Trial`; `PlayerEntry` and
+  `PlayerInfo` carry `kind`. The content pack carries `creatures` and `trials`, and abilities
+  carry `squad` and `creature`.
+- The version byte is 3: the datagram format changed (the area record).
+- Measured: one leader with three companions in the Warden fight (simulated network, 150 ms,
+  3% loss) 4.7–5.3 KB/s down, 5.5 KB/s up, 0 unexplained corrections in 24 runs of two to four
+  minutes; 16 leaders with their squads in the dungeon (loopback, 67 bodies) 17.9 KB/s down on
+  average, 19.3 KB/s for the worst. The arena test of section 9 is unchanged (10.3 KB/s down).

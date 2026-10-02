@@ -8,9 +8,10 @@ pub mod items;
 
 use std::path::Path;
 
-use gm_core::build::{AbilityDef, Build, ContentPack, NamedBuild, Slot};
+use gm_core::build::{AbilityDef, Build, ContentPack, CreatureDef, Loot, NamedBuild, Slot};
 use gm_core::matrix::{ArmourClass, Aspects, Attributes, Element};
 use gm_core::tick::{Tick, TickRate};
+use gm_core::trial::{Lens, TrialDef};
 use gm_core::vocab::{
     Ability, AbilityId, ApplyStatus, ArchetypeFrame, AreaEffect, Block, Bounce, Bypass, Cooldown,
     Cost, DamagePacket, DamageType, Falloff, Guard, Interrupt, MeleeArc, MoveKind, MoveSelf,
@@ -55,6 +56,20 @@ struct BuildsFile {
     build: Vec<BuildToml>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreaturesFile {
+    #[serde(default)]
+    creature: Vec<CreatureToml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrialsFile {
+    #[serde(default)]
+    trial: Vec<TrialToml>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AbilityToml {
@@ -63,6 +78,12 @@ struct AbilityToml {
     slot: String,
     cost: u8,
     aspect: Option<String>,
+    /// Squad slots the ability adds while slotted (COMPANIONS.md 3.2).
+    #[serde(default)]
+    squad: u8,
+    /// Only creatures may slot it (COMPANIONS.md 8.1).
+    #[serde(default)]
+    creature: bool,
     #[serde(default)]
     cooldown_ms: u32,
     cooldown_group: Option<u8>,
@@ -191,8 +212,16 @@ struct TriggerToml {
 #[serde(untagged, deny_unknown_fields)]
 enum OriginToml {
     Named(String),
-    Weapon { weapon: [f32; 3] },
-    Point { point: [f32; 3] },
+    Weapon {
+        weapon: [f32; 3],
+    },
+    Point {
+        point: [f32; 3],
+    },
+    /// Where the actor aims, within this range (VOCABULARY.md 4).
+    Aim {
+        aim: f32,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +413,71 @@ struct AttributesToml {
     spr: u8,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatureToml {
+    key: String,
+    name: String,
+    frame: String,
+    armour: String,
+    aspects: Vec<String>,
+    attributes: AttributesToml,
+    health: u16,
+    #[serde(default)]
+    stagger_threshold: u16,
+    primary: String,
+    secondary: String,
+    guard: Option<String>,
+    #[serde(default)]
+    actives: Vec<String>,
+    sight: f32,
+    leash: f32,
+    #[serde(default)]
+    boss: bool,
+    #[serde(default)]
+    respawn_s: u16,
+    loot: Option<LootToml>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LootToml {
+    components: u8,
+    standard: Vec<String>,
+    top: Vec<String>,
+    #[serde(default)]
+    coin: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrialToml {
+    key: String,
+    name: String,
+    map: String,
+    encounter: String,
+    #[serde(default)]
+    time_limit_s: u32,
+    max_party_deaths: Option<u8>,
+    #[serde(default)]
+    max_humans: u8,
+    #[serde(default)]
+    role: RoleToml,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleToml {
+    #[serde(default)]
+    damage: u16,
+    #[serde(default)]
+    tank: u16,
+    #[serde(default)]
+    healing: u16,
+    #[serde(default)]
+    command: u16,
+}
+
 // ---------- compilation ----------
 
 struct Ctx {
@@ -472,6 +566,7 @@ impl Ctx {
             },
             OriginToml::Weapon { weapon } => Origin::Weapon { offset: *weapon },
             OriginToml::Point { point } => Origin::Point(*point),
+            OriginToml::Aim { aim } => Origin::Aim { range: *aim },
         })
     }
 
@@ -730,16 +825,33 @@ fn compile_ability(
         slot,
         cost: a.cost,
         aspect,
+        squad: a.squad,
+        creature: a.creature,
     })
 }
 
-fn compile_build(b: &BuildToml, pack: &ContentPack) -> Result<NamedBuild, ContentError> {
-    let err = |msg: String| ContentError::Invalid(format!("build {}: {msg}", b.name));
+/// What a build and a creature share: the frame, the attributes, the armour class, the
+/// aspects and the slotted abilities by key.
+struct BodyToml<'a> {
+    what: &'a str,
+    name: &'a str,
+    frame: &'a str,
+    armour: &'a str,
+    aspects: &'a [String],
+    attributes: &'a AttributesToml,
+    primary: &'a str,
+    secondary: &'a str,
+    guard: Option<&'a str>,
+    actives: &'a [String],
+}
+
+fn compile_body(b: &BodyToml<'_>, pack: &ContentPack) -> Result<Build, ContentError> {
+    let err = |msg: String| ContentError::Invalid(format!("{} {}: {msg}", b.what, b.name));
     let find = |key: &str| {
         pack.find(key)
             .ok_or_else(|| err(format!("unknown ability {key:?}")))
     };
-    let frame = match b.frame.as_str() {
+    let frame = match b.frame {
         "colossus" => ArchetypeFrame::Colossus,
         "striker" => ArchetypeFrame::Striker,
         "caster" => ArchetypeFrame::Caster,
@@ -751,52 +863,135 @@ fn compile_build(b: &BuildToml, pack: &ContentPack) -> Result<NamedBuild, Conten
         .find(|c| c.name() == b.armour)
         .ok_or_else(|| err(format!("unknown armour class {:?}", b.armour)))?;
     let mut aspects = Aspects::NONE;
-    for a in &b.aspects {
+    for a in b.aspects {
         let e = Element::ALL
             .into_iter()
             .find(|e| e.name() == a.as_str())
             .ok_or_else(|| err(format!("unknown aspect {a:?}")))?;
         aspects.0 |= Aspects::one(e).0;
     }
-    Ok(NamedBuild {
-        name: b.name.clone(),
-        build: Build {
-            frame,
-            attributes: Attributes::new(
-                b.attributes.str,
-                b.attributes.agi,
-                b.attributes.con,
-                b.attributes.int,
-                b.attributes.spr,
-            ),
-            armour,
-            aspects,
-            primary: find(&b.primary)?,
-            secondary: find(&b.secondary)?,
-            guard: b.guard.as_deref().map(find).transpose()?,
-            actives: b
-                .actives
-                .iter()
-                .map(|k| find(k))
-                .collect::<Result<_, _>>()?,
-        },
+    Ok(Build {
+        frame,
+        attributes: Attributes::new(
+            b.attributes.str,
+            b.attributes.agi,
+            b.attributes.con,
+            b.attributes.int,
+            b.attributes.spr,
+        ),
+        armour,
+        aspects,
+        primary: find(b.primary)?,
+        secondary: find(b.secondary)?,
+        guard: b.guard.map(find).transpose()?,
+        actives: b
+            .actives
+            .iter()
+            .map(|k| find(k))
+            .collect::<Result<_, _>>()?,
     })
 }
 
-/// Compile the two TOML documents into a validated pack.
+fn compile_build(b: &BuildToml, pack: &ContentPack) -> Result<NamedBuild, ContentError> {
+    Ok(NamedBuild {
+        name: b.name.clone(),
+        build: compile_body(
+            &BodyToml {
+                what: "build",
+                name: &b.name,
+                frame: &b.frame,
+                armour: &b.armour,
+                aspects: &b.aspects,
+                attributes: &b.attributes,
+                primary: &b.primary,
+                secondary: &b.secondary,
+                guard: b.guard.as_deref(),
+                actives: &b.actives,
+            },
+            pack,
+        )?,
+    })
+}
+
+fn compile_creature(c: &CreatureToml, pack: &ContentPack) -> Result<CreatureDef, ContentError> {
+    Ok(CreatureDef {
+        key: c.key.clone(),
+        name: c.name.clone(),
+        build: compile_body(
+            &BodyToml {
+                what: "creature",
+                name: &c.key,
+                frame: &c.frame,
+                armour: &c.armour,
+                aspects: &c.aspects,
+                attributes: &c.attributes,
+                primary: &c.primary,
+                secondary: &c.secondary,
+                guard: c.guard.as_deref(),
+                actives: &c.actives,
+            },
+            pack,
+        )?,
+        health: c.health,
+        stagger_threshold: c.stagger_threshold,
+        sight: c.sight,
+        leash: c.leash,
+        boss: c.boss,
+        respawn_s: c.respawn_s,
+        loot: c.loot.as_ref().map(|l| Loot {
+            components: l.components,
+            standard: l.standard.clone(),
+            top: l.top.clone(),
+            coin: l.coin,
+        }),
+    })
+}
+
+fn compile_trial(t: &TrialToml) -> TrialDef {
+    TrialDef {
+        key: t.key.clone(),
+        name: t.name.clone(),
+        map: t.map.clone(),
+        encounter: t.encounter.clone(),
+        time_limit_s: t.time_limit_s,
+        max_party_deaths: t.max_party_deaths,
+        max_humans: t.max_humans,
+        lens: Lens {
+            damage: t.role.damage,
+            tank: t.role.tank,
+            healing: t.role.healing,
+            command: t.role.command,
+        },
+    }
+}
+
+/// Compile abilities and builds into a validated pack (no creatures, no trials).
 pub fn load_str(
     abilities: &str,
     builds: &str,
     rate: TickRate,
 ) -> Result<ContentPack, ContentError> {
-    let af: AbilitiesFile = toml::from_str(abilities).map_err(|e| ContentError::Toml {
-        path: "abilities.toml".into(),
-        source: e,
-    })?;
-    let bf: BuildsFile = toml::from_str(builds).map_err(|e| ContentError::Toml {
-        path: "builds.toml".into(),
-        source: e,
-    })?;
+    load_all(abilities, builds, "", "", rate)
+}
+
+/// Compile the four TOML documents into a validated pack.
+pub fn load_all(
+    abilities: &str,
+    builds: &str,
+    creatures: &str,
+    trials: &str,
+    rate: TickRate,
+) -> Result<ContentPack, ContentError> {
+    fn parse<T: serde::de::DeserializeOwned>(text: &str, path: &str) -> Result<T, ContentError> {
+        toml::from_str(text).map_err(|e| ContentError::Toml {
+            path: path.into(),
+            source: e,
+        })
+    }
+    let af: AbilitiesFile = parse(abilities, "abilities.toml")?;
+    let bf: BuildsFile = parse(builds, "builds.toml")?;
+    let cf: CreaturesFile = parse(creatures, "creatures.toml")?;
+    let tf: TrialsFile = parse(trials, "trials.toml")?;
     let mut pack = ContentPack::default();
     for (i, a) in af.ability.iter().enumerate() {
         pack.abilities.push(compile_ability(a, i, rate)?);
@@ -805,20 +1000,51 @@ pub fn load_str(
         let nb = compile_build(b, &pack)?;
         pack.builds.push(nb);
     }
+    for c in &cf.creature {
+        let def = compile_creature(c, &pack)?;
+        pack.creatures.push(def);
+    }
+    pack.trials = tf.trial.iter().map(compile_trial).collect();
     pack.validate(rate)?;
     Ok(pack)
 }
 
-/// Load `<dir>/abilities.toml` and `<dir>/builds.toml`.
+/// Load `<dir>/abilities.toml`, `builds.toml` and, when they exist, `creatures.toml` and
+/// `trials.toml`. With an `items.toml` beside them, every material a creature drops must be
+/// one it defines (ECONOMY.md 4).
 pub fn load_dir(dir: &Path, rate: TickRate) -> Result<ContentPack, ContentError> {
-    let read = |name: &str| {
+    let read = |name: &str, optional: bool| {
         let path = dir.join(name);
-        std::fs::read_to_string(&path).map_err(|e| ContentError::Io {
-            path: path.display().to_string(),
-            source: e,
-        })
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(text),
+            Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(ContentError::Io {
+                path: path.display().to_string(),
+                source: e,
+            }),
+        }
     };
-    load_str(&read("abilities.toml")?, &read("builds.toml")?, rate)
+    let pack = load_all(
+        &read("abilities.toml", false)?,
+        &read("builds.toml", false)?,
+        &read("creatures.toml", true)?,
+        &read("trials.toml", true)?,
+        rate,
+    )?;
+    if dir.join("items.toml").exists() {
+        let items = items::load_items(dir)?;
+        for c in &pack.creatures {
+            for m in c.loot.iter().flat_map(|l| l.standard.iter().chain(&l.top)) {
+                if !items.materials.iter().any(|known| &known.id == m) {
+                    return Err(ContentError::Invalid(format!(
+                        "creature {}: drops {m:?}, which items.toml does not define",
+                        c.key
+                    )));
+                }
+            }
+        }
+    }
+    Ok(pack)
 }
 
 #[cfg(test)]
@@ -838,6 +1064,8 @@ mod tests {
             assert_eq!(a.slot, b.slot, "{}", a.key);
             assert_eq!(a.cost, b.cost, "{}", a.key);
             assert_eq!(a.aspect, b.aspect, "{}", a.key);
+            assert_eq!(a.squad, b.squad, "{}", a.key);
+            assert_eq!(a.creature, b.creature, "{}", a.key);
             assert_eq!(a.ability.steps, b.ability.steps, "{}", a.key);
             assert_eq!(a.ability.cost, b.ability.cost, "{}", a.key);
             assert_eq!(a.ability.cooldown, b.ability.cooldown, "{}", a.key);
@@ -845,6 +1073,41 @@ mod tests {
             assert_eq!(a.ability.interrupt, b.ability.interrupt, "{}", a.key);
         }
         assert_eq!(pack.builds, fixture.builds);
+        assert_eq!(pack.creatures, fixture.creatures);
+        assert_eq!(pack.trials, fixture.trials);
+    }
+
+    #[test]
+    fn creatures_follow_the_kit_rules_and_players_cannot_slot_their_abilities() {
+        let pack = load_dir(Path::new(DIR), TickRate::COMBAT).expect("content loads");
+        let (_, warden) = pack.creature("warden").expect("the Warden ships");
+        assert!(warden.boss && warden.loot.as_ref().is_some_and(|l| l.components == 3));
+        let sheet = gm_core::build::Sheet::creature(warden, &pack, 3);
+        assert_eq!(sheet.derived.health, warden.health as i32);
+        assert_eq!(sheet.derived.stagger_threshold, 400.0);
+        // A player build with the Warden's maul is refused, whatever it costs.
+        let mut stolen = pack.build("ironclad").unwrap().clone();
+        stolen.primary = pack.find("maul").unwrap();
+        assert!(matches!(
+            stolen.validate(&pack),
+            Err(gm_core::build::BuildError::CreatureOnly(_))
+        ));
+        // The leadership ability is what takes a squad from three to five.
+        assert_eq!(pack.build("blade").unwrap().squad_capacity(&pack), 3);
+        assert_eq!(pack.build("captain").unwrap().squad_capacity(&pack), 5);
+        // A creature that drops what no item file defines is refused.
+        let bad = std::fs::read_to_string(Path::new(DIR).join("creatures.toml"))
+            .unwrap()
+            .replace("core/iron", "core/unobtainium");
+        let dir = std::env::temp_dir().join(format!("gm-content-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["abilities.toml", "builds.toml", "trials.toml", "items.toml"] {
+            std::fs::copy(Path::new(DIR).join(f), dir.join(f)).unwrap();
+        }
+        std::fs::write(dir.join("creatures.toml"), bad).unwrap();
+        let err = load_dir(&dir, TickRate::COMBAT).unwrap_err().to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.contains("unobtainium"), "{err}");
     }
 
     #[test]

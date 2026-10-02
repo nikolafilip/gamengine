@@ -817,7 +817,7 @@ async fn tavern_hires_burn_thirty_per_cent() {
     econ.hire_list(avatar, 1_000).await.unwrap();
 
     let before = econ.supply().await.unwrap();
-    let burned = econ.hire(hirer, avatar).await.unwrap();
+    let (hire, burned) = econ.hire(hirer, avatar, 3).await.unwrap();
     assert_eq!(burned, 1_000 * HIRE_BURN_PER_CENT / 100);
     assert_eq!(coin(&econ, hirer).await, 9_000);
     assert_eq!(coin(&econ, avatar).await, 700, "flat coin only");
@@ -832,7 +832,7 @@ async fn tavern_hires_burn_thirty_per_cent() {
 
     // Hiring your own character and hiring an avatar its owner is playing are refused.
     assert!(matches!(
-        econ.hire(own_alt, avatar).await,
+        econ.hire(own_alt, avatar, 3).await,
         Err(EconError::Invalid(_))
     ));
     sqlx::query("update characters set location_kind = 'zone', location_zone = 'z' where id = $1")
@@ -840,11 +840,19 @@ async fn tavern_hires_burn_thirty_per_cent() {
         .execute(econ.pool())
         .await
         .unwrap();
+    let second = player(&econ, 10_000).await;
     assert!(matches!(
-        econ.hire(hirer, avatar).await,
+        econ.hire(second, avatar, 3).await,
         Err(EconError::State(_))
     ));
-    assert!(!econ.tavern().await.unwrap().iter().any(|t| t.0 == avatar));
+    assert!(
+        !econ
+            .tavern()
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.character == avatar)
+    );
     sqlx::query(
         "update characters set location_kind = 'offline', location_zone = null where id = $1",
     )
@@ -857,16 +865,65 @@ async fn tavern_hires_burn_thirty_per_cent() {
     // dearer one that was not hired.
     let (_, fresh) = account_with_character(&econ).await;
     econ.hire_list(fresh, 5_000).await.unwrap();
-    econ.hire(hirer, avatar).await.unwrap();
-    econ.hire(hirer, avatar).await.unwrap();
+    let third = player(&econ, 10_000).await;
+    econ.hire(second, avatar, 3).await.unwrap();
+    econ.hire(third, avatar, 3).await.unwrap();
     let list = econ.tavern().await.unwrap();
-    let pos = |c: i64| list.iter().position(|t| t.0 == c).unwrap();
+    let pos = |c: i64| list.iter().position(|t| t.character == c).unwrap();
     assert!(pos(fresh) < pos(avatar));
-    assert_eq!(list[pos(avatar)].2, 3);
+    assert_eq!(list[pos(avatar)].hires, 3);
+    assert!(list[pos(avatar)].name.starts_with("Char"));
     // A hirer without the coin hires nobody.
     let poor = player(&econ, 10).await;
-    assert_eq!(econ.hire(poor, fresh).await, Err(EconError::Insufficient));
+    assert_eq!(
+        econ.hire(poor, fresh, 3).await,
+        Err(EconError::Insufficient)
+    );
     assert_eq!(coin(&econ, poor).await, 10);
+    assert!(econ.squad(poor).await.unwrap().is_empty());
+
+    // The squad (COMPANIONS.md 3.3): the hire is active, the avatar may serve several
+    // hirers, and one hirer cannot hold two copies of it.
+    let squad = econ.squad(hirer).await.unwrap();
+    assert_eq!(squad.len(), 1);
+    assert_eq!((squad[0].id, squad[0].avatar), (hire, avatar));
+    assert_eq!(econ.squad(second).await.unwrap().len(), 1);
+    assert!(matches!(
+        econ.hire(hirer, avatar, 3).await,
+        Err(EconError::State(_))
+    ));
+    // A full squad refuses before any coin moves.
+    assert!(matches!(
+        econ.hire(hirer, fresh, 1).await,
+        Err(EconError::State(_))
+    ));
+    assert_eq!(coin(&econ, hirer).await, 9_000);
+    // Dismissing frees the slot and refunds nothing; only the hirer can.
+    assert_eq!(econ.dismiss(second, hire).await, Err(EconError::NotFound));
+    econ.dismiss(hirer, hire).await.unwrap();
+    assert_eq!(econ.dismiss(hirer, hire).await, Err(EconError::NotFound));
+    assert!(econ.squad(hirer).await.unwrap().is_empty());
+    assert_eq!(coin(&econ, hirer).await, 9_000);
+    econ.hire(hirer, fresh, 1).await.unwrap();
+    assert_eq!(coin(&econ, hirer).await, 4_000);
+    // The owner takes the avatar back: every active hire of it ends, nobody is refunded.
+    let mut ended = econ.end_hires_of(avatar).await.unwrap();
+    ended.sort_by_key(|(_, hirer)| *hirer);
+    assert_eq!(
+        ended.iter().map(|(_, h)| *h).collect::<Vec<_>>(),
+        vec![second, third]
+    );
+    assert!(econ.squad(second).await.unwrap().is_empty());
+    assert!(econ.end_hires_of(avatar).await.unwrap().is_empty());
+    assert_eq!(coin(&econ, second).await, 9_000);
+    // A hire runs out after its window: it leaves the squad and frees the slot.
+    sqlx::query("update hires set at = now() - interval '13 hours' where hirer_character = $1")
+        .bind(hirer)
+        .execute(econ.pool())
+        .await
+        .unwrap();
+    assert!(econ.squad(hirer).await.unwrap().is_empty());
+    econ.hire(third, fresh, 1).await.unwrap();
     sound(&econ).await;
 }
 

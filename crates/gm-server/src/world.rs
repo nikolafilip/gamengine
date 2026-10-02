@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use gm_bsp::{Bsp, StallGrid};
+use gm_bsp::{Bsp, CreaturePost, StallGrid};
 use gm_core::sim::Spawn;
 use gm_net::transport::fnv1a64;
 
@@ -16,6 +16,8 @@ pub struct ZoneWorld {
     pub spawns: Vec<Spawn>,
     /// The market: where stalls may stand (ECONOMY.md 7).
     pub stall_grids: Vec<StallGrid>,
+    /// Where the map stands its creatures (COMPANIONS.md 8.1).
+    pub creature_posts: Vec<CreaturePost>,
 }
 
 impl ZoneWorld {
@@ -46,6 +48,7 @@ impl ZoneWorld {
             .collect();
         ZoneWorld {
             stall_grids: bsp.stall_grids(),
+            creature_posts: bsp.creature_posts(),
             bsp,
             name: name.to_string(),
             hash,

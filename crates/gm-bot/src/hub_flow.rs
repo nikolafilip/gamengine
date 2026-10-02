@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use gm_bsp::Bsp;
 use gm_core::tick::TickRate;
-use gm_hub_proto::protocol::{BuildChoice, HubRequest, HubResponse, SessionId, ZoneTicket};
+use gm_hub_proto::protocol::{
+    BuildChoice, EconOp, EconReply, HubRequest, HubResponse, SessionId, ZoneTicket,
+};
 use gm_hub_proto::{HubClient, HubClientError};
 use gm_net::transport::client_config;
 use quinn::rustls::pki_types::CertificateDer;
@@ -35,8 +37,13 @@ pub struct HubFlowConfig {
     /// Where `<map>.bsp` files live (the bot predicts against the zone's map).
     pub maps_dir: PathBuf,
     pub bot: BotConfig,
-    /// Total play time before logging out.
+    /// Total play time before logging out; zero = do not enter a zone at all.
     pub play: Duration,
+    /// List the character for hire at this price first (ECONOMY.md 11).
+    pub list_for_hire: Option<i64>,
+    /// Hire this many avatars from the tavern, in its order, before entering (the character
+    /// pays; slots it has already filled are not hired again).
+    pub hire: usize,
 }
 
 /// Timings of the round trip (HUB.md 5).
@@ -49,6 +56,12 @@ pub struct HubFlowReport {
     pub zones: Vec<String>,
     pub reports: Vec<BotReport>,
     pub character: i64,
+    /// The names of the avatars in the character's squad when it entered (COMPANIONS.md
+    /// 3.3), and what it held and had passed when it logged out.
+    pub squad: Vec<String>,
+    pub coin: i64,
+    pub items: Vec<String>,
+    pub trials: Vec<String>,
 }
 
 fn load_map(dir: &Path, map: &str) -> anyhow::Result<Arc<Bsp>> {
@@ -153,6 +166,58 @@ pub async fn run_hub_flow(cfg: HubFlowConfig) -> anyhow::Result<HubFlowReport> {
         }
     };
     out.character = character;
+    let econ = |op: EconOp| HubRequest::Econ {
+        session,
+        character,
+        op,
+    };
+    if let Some(price) = cfg.list_for_hire {
+        hub.request(&econ(EconOp::HireList { price })).await?;
+        info!(character = %cfg.character, price, "listed for hire");
+    }
+    if cfg.hire > 0 {
+        let have = match hub.request(&econ(EconOp::Squad)).await? {
+            HubResponse::Econ(EconReply::Squad(s)) => s,
+            other => anyhow::bail!("unexpected squad answer {other:?}"),
+        };
+        let tavern = match hub.request(&econ(EconOp::Tavern)).await? {
+            HubResponse::Econ(EconReply::Tavern(t)) => t,
+            other => anyhow::bail!("unexpected tavern answer {other:?}"),
+        };
+        let mut hired = have.len();
+        for entry in tavern {
+            if hired >= cfg.hire {
+                break;
+            }
+            if have.iter().any(|h| h.character == entry.character) {
+                continue;
+            }
+            // Its own account's avatars and a full squad are refused; the next one then.
+            match hub
+                .request(&econ(EconOp::Hire {
+                    avatar: entry.character,
+                }))
+                .await
+            {
+                Ok(_) => {
+                    info!(avatar = %entry.name, price = entry.price, "hired");
+                    hired += 1;
+                }
+                Err(HubClientError::Refused(why)) => {
+                    info!(avatar = %entry.name, "not hired: {why}");
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    if let HubResponse::Econ(EconReply::Squad(s)) = hub.request(&econ(EconOp::Squad)).await? {
+        out.squad = s.into_iter().map(|h| h.name).collect();
+    }
+    if cfg.play.is_zero() {
+        hub.ok(&HubRequest::Logout { session }).await?;
+        hub.close();
+        return Ok(out);
+    }
 
     let t1 = Instant::now();
     let ticket = match hub
@@ -193,6 +258,23 @@ pub async fn run_hub_flow(cfg: HubFlowConfig) -> anyhow::Result<HubFlowReport> {
         out.travel_ms = out.travel_ms.max(0.0);
         out.zones.push(format!("{}:{}", next.zone, map));
         out.reports.push(report);
+    }
+    // What the trip left the character with.
+    if let HubResponse::Econ(EconReply::Holder { coin, items }) =
+        hub.request(&econ(EconOp::Inventory)).await?
+    {
+        out.coin = coin;
+        out.items = items
+            .into_iter()
+            // A material is named `layer/name` already.
+            .flat_map(|i| i.components.into_iter().map(|(_, material)| material))
+            .collect();
+    }
+    if let HubResponse::Trials(t) = hub
+        .request(&HubRequest::Trials { session, character })
+        .await?
+    {
+        out.trials = t.into_iter().map(|(key, _)| key).collect();
     }
     let t3 = Instant::now();
     hub.ok(&HubRequest::Logout { session }).await?;

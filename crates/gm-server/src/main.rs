@@ -27,11 +27,27 @@ struct Args {
     ticks: Option<u64>,
     max_players: usize,
     seed: u64,
+    wild: bool,
+    arrive_at_entry: bool,
+    squads: bool,
+    recruits: Vec<String>,
+    requires: Vec<String>,
 }
 
 const USAGE: &str = "gm-server [--map PATH] [--content DIR] [--default-build NAME] [--listen ADDR] \
 [--cert-out PATH] [--hz 64|20] [--report-secs N] [--ticks N] [--max-players N] [--seed N] \
-[--hub ADDR --hub-cert PATH --zone-id NAME --zone-secret S [--public-addr ADDR]]   (env: GM_ZONE_SECRET)";
+[--wild] [--arrive-at-entry] [--squads] [--recruits BUILD,BUILD,...] \
+[--hub ADDR --hub-cert PATH --zone-id NAME --zone-secret S [--public-addr ADDR] \
+[--requires TRIAL,TRIAL,...]]   (env: GM_ZONE_SECRET)";
+
+/// A comma-separated list of names.
+fn names(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
+}
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
@@ -50,6 +66,11 @@ fn parse_args() -> Result<Args, String> {
         ticks: None,
         max_players: 64,
         seed: 1,
+        wild: false,
+        arrive_at_entry: false,
+        squads: false,
+        recruits: Vec::new(),
+        requires: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -98,6 +119,11 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--seed: {e}"))?
             }
+            "--wild" => args.wild = true,
+            "--arrive-at-entry" => args.arrive_at_entry = true,
+            "--squads" => args.squads = true,
+            "--recruits" => args.recruits = names(&value("--recruits")?),
+            "--requires" => args.requires = names(&value("--requires")?),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -139,9 +165,42 @@ async fn main() -> anyhow::Result<()> {
     info!(
         abilities = content.abilities.len(),
         builds = content.builds.len(),
+        creatures = content.creatures.len(),
+        trials = content.trials.len(),
         dir = %args.content.display(),
         "content loaded"
     );
+    // What the squads and the gate are made of has to exist before anybody joins.
+    for name in &args.recruits {
+        if content.build(name).is_none() {
+            anyhow::bail!(
+                "recruit build {name:?} is not in {}",
+                args.content.display()
+            );
+        }
+    }
+    for key in &args.requires {
+        if !content.trials.iter().any(|t| &t.key == key) {
+            anyhow::bail!("trial {key:?} is not in {}", args.content.display());
+        }
+    }
+    for post in &world.creature_posts {
+        if content.creature(&post.creature).is_none() {
+            anyhow::bail!(
+                "the map posts a creature {:?} that is not in {}",
+                post.creature,
+                args.content.display()
+            );
+        }
+    }
+    if !args.recruits.is_empty() && !args.squads {
+        anyhow::bail!("--recruits needs --squads");
+    }
+    if !args.requires.is_empty() && args.hub.is_none() {
+        anyhow::bail!("--requires needs --hub: the hub is what remembers trials");
+    }
+    // A map that posts creatures is a wild zone (COMPANIONS.md 3.1).
+    let wild = args.wild || !world.creature_posts.is_empty();
     let identity = Identity::generate(&["localhost"])?;
     std::fs::write(&args.cert_out, identity.cert_der())?;
     info!(cert = %args.cert_out.display(), "zone certificate written; clients pass it with --cert");
@@ -164,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
                     map_hash: world.hash,
                     public_addr: args.public_addr.unwrap_or(endpoint.local_addr()?),
                     zone_cert_der: identity.cert_der().to_vec(),
+                    requires: args.requires.clone(),
                 })
                 .await?,
             )
@@ -182,6 +242,10 @@ async fn main() -> anyhow::Result<()> {
         content,
         default_build: args.default_build,
         hub,
+        wild,
+        arrive_at_entry: args.arrive_at_entry,
+        squads: args.squads,
+        recruits: args.recruits,
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -197,6 +261,9 @@ async fn main() -> anyhow::Result<()> {
         team_kills = ?report.team_kills,
         max_tx_bps = format_args!("{:.0}", report.max_tx_bytes_per_player_s),
         max_rx_bps = format_args!("{:.0}", report.max_rx_bytes_per_player_s),
+        encounters_cleared = report.encounters_cleared,
+        encounters_reset = report.encounters_reset,
+        trials_passed = report.trials_passed,
         "final report"
     );
     Ok(())

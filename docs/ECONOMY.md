@@ -186,6 +186,15 @@ with `gm_core::loot::split` and asks the hub to create the items (source → cha
    population (PLAN.md 5.4); the hub refuses a single grant above 1 gold.
 6. A zone grants only to characters playing in it. A component for a full inventory lands on
    the zone's ground, never nowhere.
+7. **A kill pays once** (Phase 7, COMPANIONS.md 10). The zone reports a kill as one
+   `GrantKill { reference, components, coin }`: the hub claims `(zone, reference)` in the
+   `kills` table and creates every component and every purse in that same transaction; a
+   reference that is already claimed answers `Done` and changes nothing, so the zone repeats
+   its report until it is answered. A recipient who has stopped playing in the zone by then
+   forfeits: no coin is made for it and its components lie on the zone's ground. A party
+   that brought companions draws from the boss's `standard` list, a party of humans only
+   from its `top` list (the loot ceiling of PLAN.md 5.6); the companions themselves, hired
+   or lent, receive nothing.
 
 ## 10. Crafting and decomposition (PLAN.md 5.3, 5.4)
 
@@ -207,6 +216,16 @@ with `gm_core::loot::split` and asks the hub to create the items (source → cha
   hires inside a window the avatar sorts last in the tavern list (diminishing priority). An
   account cannot hire its own characters. An owner who logs in takes their character back and
   ends the hire without a refund; the tavern says so before the hirer pays.
+- What a hire buys (Phase 7, COMPANIONS.md 3.3): a **copy** of the listed character (its
+  name, its stored build, its model) that fights in the hirer's squad, driven by a mind,
+  wherever the hirer enters a zone that lets squads in. The character itself stays offline
+  and may serve several hirers at once, each paying. A hire is **active** until its 12 h are
+  over, its owner enters a zone with the character, or the hirer dismisses it (`Dismiss`,
+  no refund). A character holds at most its squad capacity in active hires (3; 5 with a
+  leadership ability in its build) and at most one copy of any one avatar; a hire beyond
+  that is refused before any coin moves, under the hirer's holder lock so two hires at once
+  cannot both see room. The tavern list carries each avatar's name and build: a hirer reads
+  the role from it. `Squad` lists a character's active hires.
 - A guild has members with ranks and a hall with chests (`guild_chest` holders). Depositing is
   open to members; withdrawing needs `rank >= min_rank` of the chest.
 
@@ -220,7 +239,9 @@ crafted top item 1–3 gold; a 12 h tavern hire 20–60 silver; a carry 50 silve
 Death-drop in contested zones and housing remain open and are not in this version.
 
 Also proposed: stacking of materials is **not** in v1 (every component is a row and a slot);
-the 120 min contract timeout; the 1 gold cap on a single coin grant; no self-hire.
+the 120 min contract timeout; the 1 gold cap on a single coin grant; no self-hire; one copy
+of an avatar per squad; a recipient who left the zone before its kill is reported forfeits
+(Phase 7).
 
 **2026-10-01, design reviewed by Gemini 3.1 Pro** (before the module was finished):
 - Accepted: the ledger invariant was worded as a sum of the ledger, which is volume, not supply

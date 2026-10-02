@@ -45,3 +45,27 @@ primary = "dagger"                                                   # 0
 secondary = "shadow_dart"                                            # 3
 guard = "parry"                                                      # 4
 actives = ["blink", "vanish", "poison_cloud"]                        # 10 + 8 + 8
+
+# Phase 7 (COMPANIONS.md 12): the healer the tutorial needs and a leadership build.
+
+[[build]]
+name = "mender"
+frame = "caster"
+attributes = { str = 11, agi = 20, con = 20, int = 20, spr = 20 }  # 66
+armour = "cloth"                                                     # 0
+aspects = ["storm"]
+primary = "staff"                                                    # 0
+secondary = "mend"                                                   # 4
+guard = "brace"                                                      # 2
+actives = ["sanctuary", "haste", "thunderclap"]                      # 10 + 8 + 10
+
+[[build]]
+name = "captain"
+frame = "striker"
+attributes = { str = 20, agi = 20, con = 20, int = 11, spr = 20 }  # 66
+armour = "mail"                                                      # 8
+aspects = ["flame"]
+primary = "sword"                                                    # 2
+secondary = "crossbow"                                               # 4
+guard = "parry"                                                      # 4
+actives = ["war_standard", "dash"]                                   # 10 (five companions) + 6

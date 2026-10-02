@@ -8,7 +8,7 @@ use crate::collide::Aabb;
 use crate::geom::Capsule;
 use crate::matrix::EVADING_GRACE_TICKS;
 use crate::movement::{MoveInput, MoveVars, PlayerState, player_move, yaw_vectors};
-use crate::sim::{MAX_ABILITIES, REGEN_PAUSE_MS, tick_delta};
+use crate::sim::{COMMAND_EXIT_MS, MAX_ABILITIES, REGEN_PAUSE_MS, tick_delta};
 use crate::status::Statuses;
 use crate::tick::{Tick, TickRate};
 use crate::trace::{CollisionWorld, Hull};
@@ -27,8 +27,10 @@ pub mod buttons {
     pub const ABILITY4: u16 = 1 << 8;
     pub const INTERACT: u16 = 1 << 9;
     pub const VIEWPORT: u16 = 1 << 10;
-    /// Bits 11–15 must be zero on the wire.
-    pub const RESERVED: u16 = 0xF800;
+    /// Held: the command stance (COMPANIONS.md 5.1).
+    pub const COMMAND: u16 = 1 << 11;
+    /// Bits 12–15 must be zero on the wire.
+    pub const RESERVED: u16 = 0xF000;
 }
 
 /// Animation states carried in snapshots (`anim`). Cosmetic; the client never simulates them.
@@ -45,6 +47,8 @@ pub mod anim {
     pub const PARRY: u8 = 9;
     pub const CAST: u8 = 10;
     pub const STAGGER: u8 = 11;
+    /// In the command stance: everyone sees a commander is at it (COMPANIONS.md 5.1).
+    pub const COMMAND: u8 = 12;
 }
 
 /// Marker for "no cast animation" lookups.
@@ -116,6 +120,9 @@ pub struct Mover {
     pub iframes_until: Tick,
     /// Stamina regeneration resumes at this frame tick.
     pub regen_pause_until: Tick,
+    /// In the command stance until this frame tick: it is pushed ahead on every frame that
+    /// holds the `command` button, so it also covers standing up after the release.
+    pub command_until: Tick,
 }
 
 impl Mover {
@@ -135,6 +142,7 @@ impl Mover {
             evade_until: 0,
             iframes_until: 0,
             regen_pause_until: 0,
+            command_until: 0,
         }
     }
 
@@ -181,6 +189,12 @@ impl Mover {
         tick_delta(now, self.iframes_until) < 0
     }
 
+    /// In the command stance at frame tick `now` (COMPANIONS.md 5.1): no movement of its own,
+    /// no activation, no guard.
+    pub fn commanding(&self, now: Tick) -> bool {
+        tick_delta(now, self.command_until) < 0
+    }
+
     /// Forget every running thing (death, respawn); cooldowns survive.
     pub fn reset_actions(&mut self) {
         self.script = None;
@@ -189,6 +203,7 @@ impl Mover {
         self.statuses.clear();
         self.evade_until = 0;
         self.iframes_until = 0;
+        self.command_until = 0;
     }
 }
 
@@ -260,6 +275,32 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
         m.script = None;
         m.guard = GuardState::None;
     }
+
+    // The command stance (COMPANIONS.md 5.1): it begins on a frame that holds the button
+    // while nothing runs, lasts while the button is held and for the exit time after.
+    if input.buttons & buttons::COMMAND != 0
+        && !staggered
+        && (m.script.is_none() || m.commanding(now))
+    {
+        m.command_until = now.wrapping_add(command_exit_ticks(dt)).wrapping_add(1);
+    }
+    let commanding = m.commanding(now);
+    // In the stance the body does nothing of its own: the frame is read as if only the view
+    // angles had been sent.
+    let stance_input;
+    let (input, pressed) = if commanding {
+        m.guard = GuardState::None;
+        stance_input = Input {
+            buttons: 0,
+            forward: 0.0,
+            side: 0.0,
+            ability: 0,
+            ..*input
+        };
+        (&stance_input, 0)
+    } else {
+        (input, pressed)
+    };
 
     guard_step(sheet, m, input, pressed, now, staggered, actions);
 
@@ -436,6 +477,11 @@ fn guard_step(
 
 fn regen_pause_ticks() -> Tick {
     TickRate::COMBAT.ms_to_ticks(REGEN_PAUSE_MS)
+}
+
+/// Frames a body needs to stand up from the command stance, at the tick length `dt`.
+pub fn command_exit_ticks(dt: f32) -> Tick {
+    (COMMAND_EXIT_MS as f32 / 1000.0 / dt).ceil() as Tick
 }
 
 fn try_activate(sheet: &Sheet, m: &mut Mover, slot: usize, now: Tick) -> bool {

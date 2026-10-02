@@ -38,6 +38,8 @@ pub enum SpawnInfo {
         def: u32,
         /// Largest extent in whole units.
         radius: u32,
+        /// It hurts who stands in it (`AreaEffect::harmful`): what its look says.
+        harmful: bool,
     },
 }
 
@@ -64,6 +66,9 @@ pub mod flags {
     /// A parry window is open or its whiff recovery runs (own entity: a successful parry on
     /// the server ends the window at once, and the client must follow).
     pub const PARRY: u8 = 1 << 6;
+    /// In the command stance (own entity: a client whose prediction disagrees adopts the
+    /// server's state, COMPANIONS.md 5.1).
+    pub const COMMANDING: u8 = 1 << 7;
 }
 
 mod mask {
@@ -425,10 +430,16 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
                 w.write_uvar(def as u64);
                 w.write_uvar(input_tick as u64);
             }
-            SpawnInfo::Area { owner, def, radius } => {
+            SpawnInfo::Area {
+                owner,
+                def,
+                radius,
+                harmful,
+            } => {
                 w.write_uvar(owner as u64);
                 w.write_uvar(def as u64);
                 w.write_uvar(radius as u64);
+                w.write_bits(harmful as u64, 1);
             }
         }
     }
@@ -481,6 +492,7 @@ fn read_entity(
                 owner: r.read_uvar32()?,
                 def: r.read_uvar32()?,
                 radius: r.read_uvar32()?,
+                harmful: r.read_bits(1)? != 0,
             },
             _ => return Err(NetError::Malformed("unknown entity kind")),
         }
@@ -673,6 +685,7 @@ mod tests {
                 owner: 1,
                 def: 3,
                 radius: 128,
+                harmful: true,
             },
             pos: [10, 20, 30],
             yaw: 0,

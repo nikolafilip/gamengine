@@ -25,6 +25,9 @@ pub enum Behaviour {
     Duelist,
     /// A town: walk a while, stand a while, stay near where one arrived, never fight.
     Stroll,
+    /// A dungeon: lead a squad through the creature posts of the map (`raid::Raid` thinks
+    /// instead of this brain).
+    Raid,
 }
 
 /// How far a strolling bot goes from where it arrived before it turns back.
@@ -192,6 +195,8 @@ impl Brain {
         let nearest = self.nearest(me, v.team, v.others);
         let reach = primary_arc(v.kit).map_or(70.0, |m| m.reach);
         match self.behaviour {
+            // A raid leader that lost its `raid::Raid` (it never does) stands still.
+            Behaviour::Raid => {}
             Behaviour::Hold => {
                 if let Some((e, d)) = nearest {
                     self.face(eye, e.pos);
@@ -424,11 +429,12 @@ pub fn counter_pick(pack: &ContentPack, current: &str, enemy: Aspects) -> Option
         offence / defence.max(1e-3)
     };
     let current_score = pack.build(current).map_or(0.0, |b| score(b.aspects));
+    // Among presets that score the same (they bring the same aspects), the first listed.
     let best = pack
         .builds
         .iter()
         .map(|nb| (nb, score(nb.build.aspects)))
-        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        .reduce(|best, next| if next.1 > best.1 { next } else { best })?;
     (best.0.name != current && best.1 > current_score * 1.5).then(|| best.0.name.clone())
 }
 

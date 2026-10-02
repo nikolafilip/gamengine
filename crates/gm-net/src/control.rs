@@ -11,13 +11,55 @@ pub enum BuildChoice {
     Custom(Build),
 }
 
-/// One player as a zone announces it.
+/// Who drives a body (COMPANIONS.md 2.1), as a zone announces it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub enum BodyKind {
+    #[default]
+    Human,
+    /// A companion of the player with this entity id.
+    Companion { owner: u32 },
+    /// An instance of creature definition `def` of the content pack.
+    Creature { def: u16 },
+}
+
+/// One body as a zone announces it: a player, a companion or a creature.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub struct PlayerEntry {
     pub id: u32,
     pub name: String,
     pub team: u8,
     pub model: Option<[u8; 32]>,
+    pub kind: BodyKind,
+}
+
+/// A standing order (COMPANIONS.md 5.3).
+#[derive(Clone, Copy, Debug, PartialEq, Encode, Decode)]
+pub enum Order {
+    Follow,
+    Hold,
+    MoveTo([f32; 3]),
+    Attack(u32),
+}
+
+/// One companion as its commander is told about it (COMPANIONS.md 13).
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub struct SquadEntry {
+    pub id: u32,
+    pub name: String,
+    /// `gm_ai::Role` index: 0 heal, 1 tank, 2 scout, 3 dps.
+    pub role: u8,
+    pub order: Order,
+    pub max_health: u16,
+    /// Lent by the zone rather than hired.
+    pub recruit: bool,
+}
+
+/// What an encounter did (COMPANIONS.md 9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum EncounterState {
+    Engaged,
+    Reset,
+    Cleared { secs: u32 },
 }
 
 /// An open stall as a zone shows it (ECONOMY.md 7): where it stands and who keeps it. The
@@ -57,6 +99,13 @@ pub enum Control {
     StallOpen,
     /// Close the own stall; answered by `StallResult`.
     StallClose,
+    /// An order for the squad slots in `slots` (bit i = slot i), from the command stance
+    /// (COMPANIONS.md 5.3). A refusal is answered by `OrderRefused`; an accepted order shows
+    /// in the next `Squad`.
+    Order {
+        slots: u8,
+        order: Order,
+    },
     Bye,
     // server → client
     Welcome {
@@ -97,6 +146,7 @@ pub enum Control {
         name: String,
         team: u8,
         model: Option<[u8; 32]>,
+        kind: BodyKind,
     },
     /// A model was taken down: forget it, delete it (MODELS.md 8).
     ModelRevoked([u8; 32]),
@@ -117,6 +167,28 @@ pub enum Control {
         text: String,
     },
     Kick(String),
+    /// To a commander: its squad, in slot order, whenever a member or an order changes.
+    Squad(Vec<SquadEntry>),
+    OrderRefused(String),
+    /// An encounter the client takes part in, or stands near, changed state.
+    Encounter {
+        name: String,
+        state: EncounterState,
+    },
+    /// What a boss kill gave this client (COMPANIONS.md 10).
+    Loot {
+        encounter: String,
+        items: Vec<String>,
+        coin: u32,
+    },
+    /// A trial's verdict on this client (COMPANIONS.md 11): passed, or why not.
+    Trial {
+        key: String,
+        name: String,
+        passed: bool,
+        detail: String,
+        secs: u32,
+    },
 }
 
 pub const MAX_MESSAGE_BYTES: usize = u16::MAX as usize;
@@ -302,6 +374,7 @@ mod tests {
                     name: format!("Žanamarija Škrinjarić{i:03}"),
                     team: (i % 3) as u8,
                     model: Some([i as u8; 32]),
+                    kind: BodyKind::Companion { owner: i },
                 })
                 .collect(),
         );

@@ -162,6 +162,11 @@ damage = max(1, round(base × type × layer × guard × gear))
 `Expose` on the defender grants every attacker `bypass ARMOR`. A parry inside its window
 negates the packet entirely (the only zero) and runs the parry's `on_success` on the attacker.
 
+**A packet whose `amount` is 0 is not an attack** (Phase 7): it never enters this pipeline.
+It deals nothing (not the minimum of 1), knocks nobody back, builds no stagger, is not
+blocked, parried or evaded and interrupts nothing; only its triggers land. It is how a
+projectile carries a boon: the healer's dart is a zero packet with Regen on whoever it hits.
+
 The three true bypasses of PLAN.md 3.2 are structural, not special-cased:
 - **magic through armour**: elemental packets never consult `D.armour` or the kind table;
 - **blunt through magic shields**: hammers are content with `bypass MAGIC_SHIELD`, so they
@@ -247,7 +252,12 @@ Each ability carries: `slot` (primary | secondary | guard | active), `cost` (bui
 that element), and the verb script of VOCABULARY.md 6. Price bands, so that the budget binds
 against the attribute line: primaries 0–2, secondaries 3–5, guards 4–6, actives 6–12. The v1
 content ships the abilities and the four preset builds (`ironclad`, `blade`, `frostweaver`,
-`shade`) that the bots use; `assets/content/README.md` has the table.
+`shade`) that the bots use; `assets/content/README.md` has the table. Phase 7 adds `mend`
+(secondary, 4), `sanctuary` (active, 10) and `war_standard` (active, 10; two more squad
+slots), the presets `mender` and `captain`, and two more files: `creatures.toml` (creatures
+are builds without a budget, with abilities marked `creature = true` that no player build may
+slot) and `trials.toml` (COMPANIONS.md 8, 11). An ability may carry `squad = N`: companions
+it adds to the squad of whoever has it in the build.
 
 ## 11. Acceptance: a dominant build can be countered by re-speccing
 

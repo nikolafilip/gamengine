@@ -13,7 +13,10 @@ use gm_bot::Behaviour;
 
 #[test]
 fn blades_counter_pick_into_frostweavers_and_turn_the_match() {
-    let secs = 60;
+    // Ninety seconds: at sixty the kill share after the counter-pick rested on some forty
+    // kills and came within 0.05 of the bar in one run of a dozen (0.65–0.89, the same on
+    // the Phase 6 build), and under it about once in forty.
+    let secs = 90;
     let o = play(Match {
         map: ARENA,
         bots: 16,
@@ -26,6 +29,8 @@ fn blades_counter_pick_into_frostweavers_and_turn_the_match() {
         teams: vec![1, 2],
         counter_pick_teams: vec![2],
         report_every: Duration::from_secs(5),
+        squads: false,
+        recruits: Vec::new(),
     });
     let text = summarize(&o);
     println!("{text}");
@@ -37,7 +42,7 @@ fn blades_counter_pick_into_frostweavers_and_turn_the_match() {
     }
     assert_eq!(o.bots.len(), 16);
     // Every blade asked for a re-spec; a build applies at the next respawn (MATRIX.md 9), so a
-    // blade that never died again in the last fifty seconds legitimately stays a blade. Most
+    // blade that never died again in the last eighty seconds legitimately stays a blade. Most
     // must have turned.
     let blades: Vec<_> = o.bots.iter().filter(|b| b.team == 2).collect();
     assert_eq!(blades.len(), 8);
@@ -83,9 +88,13 @@ fn blades_counter_pick_into_frostweavers_and_turn_the_match() {
     );
     assert!(early[1] + early[2] >= 6, "too few early kills: {early:?}");
     assert!(late[1] + late[2] >= 10, "too few late kills: {late:?}");
+    // Before the counter-pick the first twenty seconds hold about ten kills: too few to
+    // put a bar on by themselves (their share ran from 0.00 to 0.62 over forty runs; that
+    // ironclads beat blades is the offline matrix gate's to prove, on three seeds and 115
+    // kills). What this test proves is the turn: the share rises, and ends well over half.
     assert!(
-        share(early) < 0.5,
-        "ironclads should dominate before the counter-pick: {early:?}"
+        share(late) > share(early),
+        "the counter-pick should turn the match: {early:?} then {late:?}"
     );
     assert!(
         share(late) > 0.6,

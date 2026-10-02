@@ -89,6 +89,10 @@ pub struct RenderEntity {
     pub flags: u8,
     /// Active statuses, a bit per `Status` index.
     pub status: u16,
+    /// Health, for the bodies whose health the zone sends: the own party and creatures.
+    pub health: Option<u16>,
+    /// Velocity as the two snapshots around the render time show it.
+    pub vel: Vec3,
 }
 
 impl RenderEntity {
@@ -208,6 +212,7 @@ impl ClientState {
         let composite = Composite {
             world,
             solids: &solids,
+            own: Some(self.mover.aabb()),
         };
         self.actions.clear();
         if self.own_alive || !self.synced {
@@ -370,6 +375,7 @@ impl ClientState {
             self.explained_until = server_tick.wrapping_add(8);
         }
         let explained = tick_delta(self.explained_until, server_tick) >= 0;
+        let dt = self.rate.dt();
         let server_pos = Vec3::from(quant::dequantize_pos3(own.pos));
         let server_vel = own.vel.map(|v| Vec3::from(quant::dequantize_vel3(v)));
         // Statuses arrive relative to the acknowledged frame; rebuild them in our frame clock.
@@ -418,6 +424,18 @@ impl ClientState {
             {
                 m.guard = GuardState::None;
             }
+            // The command stance: the server's word when the prediction disagrees (a stagger
+            // the client had not seen kept a script alive a frame longer, or the reverse).
+            let commanding = own.flags & flags::COMMANDING != 0;
+            if commanding != m.commanding(last_input_tick) {
+                m.command_until = if commanding {
+                    last_input_tick
+                        .wrapping_add(gm_core::sim::command_exit_ticks(dt))
+                        .wrapping_add(1)
+                } else {
+                    last_input_tick
+                };
+            }
         };
         // A respawn resets the ability state exactly as the server does (cooldowns survive).
         let derived = self.sheet.derived;
@@ -461,7 +479,9 @@ impl ClientState {
                         != matches!(
                             predicted.guard,
                             GuardState::Parry { .. } | GuardState::Whiff { .. }
-                        );
+                        )
+                    || (own.flags & flags::COMMANDING != 0)
+                        != predicted.commanding(last_input_tick);
                 if self.synced && !respawned {
                     if !mismatch && !soft {
                         self.drop_acked(last_input_tick);
@@ -560,14 +580,15 @@ impl ClientState {
     /// Re-run the ring from index `from` starting at state `m`; the result is the new mover.
     fn replay_from(&mut self, world: &dyn CollisionWorld, from: usize, mut m: Mover) {
         let solids = self.latest_boxes();
-        let composite = Composite {
-            world,
-            solids: &solids,
-        };
         let dt = self.rate.dt();
         let mut sink = Vec::new();
         for j in from..self.ring.len() {
             let (tick, input, _) = self.ring[j];
+            let composite = Composite {
+                world,
+                solids: &solids,
+                own: Some(m.aabb()),
+            };
             step_mover(&composite, &self.sheet, &mut m, &input, tick, dt, &mut sink);
             self.ring[j].2 = m;
             self.stats.replayed_ticks += 1;
@@ -615,12 +636,14 @@ impl ClientState {
                     break;
                 }
             }
+            let mut vel = Vec3::ZERO;
             let (pos, yaw, pitch, state) = match (a, b) {
                 (Some(&(ta, sa)), Some(&(tb, sb))) => {
                     let alpha =
                         ((t - ta as f32) / (tb as f32 - ta as f32).max(1.0)).clamp(0.0, 1.0);
                     let pa = Vec3::from(quant::dequantize_pos3(sa.pos));
                     let pb = Vec3::from(quant::dequantize_pos3(sb.pos));
+                    vel = (pb - pa) / ((tb as f32 - ta as f32).max(1.0) * self.rate.dt());
                     (
                         pa.lerp(pb, alpha),
                         lerp_angle(
@@ -661,6 +684,8 @@ impl ClientState {
                 anim: state.anim,
                 flags: state.flags,
                 status: state.status,
+                health: state.health,
+                vel,
             });
         }
         out

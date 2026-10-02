@@ -21,8 +21,9 @@ use tracing::{debug, info, warn};
 use crate::db::Db;
 use gm_hub_proto::protocol::{
     AccountId, BuildChoice, CharacterId, ContractOutcome, EconOp, EconReply, HASH_PERMITS,
-    HubError, HubNotice, HubRequest, HubResponse, ItemSummary, LocationSummary, ModOp, ModelRef,
-    SessionId, StallSummary, TradeOffer, ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
+    HiredAvatar, HubError, HubNotice, HubRequest, HubResponse, ItemSummary, LocationSummary, ModOp,
+    ModelRef, SessionId, StallSummary, TavernEntry, TradeOffer, ZoneEconOp, ZoneId, ZoneSummary,
+    ZoneTicket, now_secs,
 };
 
 use crate::economy::{EconError, Economy, Outcome, TradeStatus};
@@ -76,7 +77,12 @@ struct ZoneEntry {
     since: Instant,
     last_heartbeat: Instant,
     conn: quinn::Connection,
+    /// Trials that open the zone; empty = open to all (COMPANIONS.md 11).
+    requires: Vec<String>,
 }
+
+/// The most trials a zone may name as its key.
+const MAX_ZONE_REQUIRES: usize = 16;
 
 struct Bucket {
     tokens: f64,
@@ -409,6 +415,63 @@ impl Hub {
             .is_some_and(|z| z.last_heartbeat.elapsed() < ZONE_STALE)
     }
 
+    /// The gate of a zone (COMPANIONS.md 11): a character that passed none of the trials the
+    /// zone names is not let in, by `Enter` or by a handoff.
+    async fn gate(&self, zone: &ZoneId, character: CharacterId) -> Result<(), HubError> {
+        let requires = self
+            .state
+            .lock()
+            .unwrap()
+            .zones
+            .get(zone)
+            .map(|z| z.requires.clone())
+            .unwrap_or_default();
+        if requires.is_empty() {
+            return Ok(());
+        }
+        let passed = self.db.trials_of(character).await?;
+        if passed.iter().any(|(t, _)| requires.contains(t)) {
+            Ok(())
+        } else {
+            Err(HubError::Locked(requires.join(", ")))
+        }
+    }
+
+    /// The active hires of `hirer` as its zone and its client are told (COMPANIONS.md 3.3):
+    /// oldest first, at most `capacity`. A stored build that no longer validates against
+    /// the content is left out rather than sent into a zone.
+    async fn hired(
+        &self,
+        hirer: CharacterId,
+        capacity: usize,
+    ) -> Result<Vec<HiredAvatar>, HubError> {
+        let mut out = Vec::new();
+        for h in self.econ.squad(hirer).await.map_err(econ_err)? {
+            if out.len() >= capacity {
+                break;
+            }
+            let Ok(build) = serde_json::from_value::<Build>(h.build) else {
+                continue;
+            };
+            if build.validate(&self.cfg.content).is_err() {
+                continue;
+            }
+            out.push(HiredAvatar {
+                hire: h.id,
+                character: h.avatar,
+                name: h.name,
+                model: self
+                    .models
+                    .worn(h.avatar)
+                    .await?
+                    .filter(|m| m.frame == gm_model::rig::frame_index(build.frame)),
+                build,
+                expires_at: h.expires_unix.max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
     fn zone_of_conn(&self, auth: &ConnAuth) -> Result<ZoneId, HubError> {
         auth.zone
             .lock()
@@ -595,6 +658,15 @@ async fn handle(
             if !hub.zone_live(&zone) {
                 return Err(HubError::NotFound);
             }
+            if hub
+                .db
+                .character(character)
+                .await?
+                .is_none_or(|r| r.account_id != account)
+            {
+                return Err(HubError::NotFound);
+            }
+            hub.gate(&zone, character).await?;
             hub.db.begin_enter(account, character, &zone).await?;
             Ok(HubResponse::Ticket(
                 hub.ticket_for(&zone, account, character)?,
@@ -625,6 +697,51 @@ async fn handle(
             }
             Ok(HubResponse::Ok)
         }
+        HubRequest::Trials { session, character } => {
+            let account = hub.session_account(session)?;
+            hub.db
+                .character(character)
+                .await?
+                .filter(|r| r.account_id == account)
+                .ok_or(HubError::NotFound)?;
+            Ok(HubResponse::Trials(hub.db.trials_of(character).await?))
+        }
+        HubRequest::Trial {
+            character,
+            trial,
+            secs,
+        } => {
+            // A zone speaks only for characters playing in it, and only about the trials
+            // of its own map.
+            let zone = hub.zone_of_conn(auth)?;
+            if hub.db.zone_of(character).await?.as_ref() != Some(&zone) {
+                return Err(HubError::Unauthorized);
+            }
+            let map = hub
+                .state
+                .lock()
+                .unwrap()
+                .zones
+                .get(&zone)
+                .map(|z| z.map.clone())
+                .ok_or(HubError::Unauthorized)?;
+            if !hub
+                .cfg
+                .content
+                .trials
+                .iter()
+                .any(|t| t.key == trial && t.map == map)
+            {
+                return Err(HubError::Invalid(format!(
+                    "{trial:?} is not a trial of the map {map:?}"
+                )));
+            }
+            hub.db.trial_pass(character, &trial, &zone, secs).await?;
+            hub.db
+                .log(&zone, "trial", &format!("{character} {trial} {secs}s"))
+                .await;
+            Ok(HubResponse::Ok)
+        }
         HubRequest::ZoneHello {
             secret,
             zone,
@@ -632,6 +749,7 @@ async fn handle(
             map_hash,
             addr,
             cert_der,
+            requires,
         } => {
             if secret != hub.cfg.zone_secret || hub.cfg.zone_secret.is_empty() {
                 warn!(%remote, %zone, "zone hello with a wrong secret");
@@ -639,6 +757,15 @@ async fn handle(
             }
             if valid_name(&zone).is_none() {
                 return Err(HubError::Invalid("zone id".into()));
+            }
+            if requires.len() > MAX_ZONE_REQUIRES
+                || requires
+                    .iter()
+                    .any(|r| !hub.cfg.content.trials.iter().any(|t| &t.key == r))
+            {
+                return Err(HubError::Invalid(
+                    "the zone requires an unknown trial".into(),
+                ));
             }
             // A restarted zone has lost its players: they go offline and re-enter.
             let orphaned = hub.db.offline_zone(&zone).await?;
@@ -657,6 +784,7 @@ async fn handle(
                         since: Instant::now(),
                         last_heartbeat: Instant::now(),
                         conn: conn.clone(),
+                        requires,
                     },
                 );
                 previous
@@ -719,12 +847,23 @@ async fn handle(
                 // The saved position is on another zone's map, or there is none: spawn here.
                 state.zone = None;
             }
+            // The owner is playing this character now: every hire of it as an avatar ends
+            // (ECONOMY.md 11), and the zones its hirers play in are told.
+            for (hire, hirer) in hub.econ.end_hires_of(row.id).await.map_err(econ_err)? {
+                if let Some(z) = hub.db.zone_of(hirer).await? {
+                    hub.notify(&z, HubNotice::HireEnded { hirer, hire }).await;
+                }
+            }
+            let squad = hub
+                .hired(row.id, row.build.squad_capacity(&hub.cfg.content))
+                .await?;
             Ok(HubResponse::Claimed {
                 character: row.id,
                 name: row.name.clone(),
                 state,
                 team: 0,
                 model: hub.models.worn(row.id).await?,
+                squad,
             })
         }
         HubRequest::Save {
@@ -756,6 +895,7 @@ async fn handle(
                 .build
                 .validate(&hub.cfg.content)
                 .map_err(|e| HubError::Invalid(e.to_string()))?;
+            hub.gate(&to_zone, character).await?;
             hub.db
                 .begin_handoff(character, &zone, &to_zone, &state)
                 .await?;
@@ -1007,12 +1147,50 @@ async fn econ_op(
         EconOp::ChestWithdraw { chest, item } => done(e.chest_withdraw(me, chest, item).await),
         EconOp::HireList { price } => done(e.hire_list(me, price).await),
         EconOp::Hire { avatar } => e
-            .hire(me, avatar)
+            .hire(me, avatar, capacity(hub, me).await?)
             .await
-            .map(EconReply::Id)
+            .map(|(hire, _burned)| EconReply::Id(hire))
             .map_err(econ_err),
-        EconOp::Tavern => e.tavern().await.map(EconReply::Tavern).map_err(econ_err),
+        EconOp::Tavern => Ok(EconReply::Tavern(
+            e.tavern()
+                .await
+                .map_err(econ_err)?
+                .into_iter()
+                // A listed character whose stored build no longer parses is not for hire.
+                .filter_map(|t| {
+                    Some(TavernEntry {
+                        character: t.character,
+                        name: t.name,
+                        price: t.price,
+                        hires: t.hires,
+                        build: serde_json::from_value(t.build).ok()?,
+                    })
+                })
+                .collect(),
+        )),
+        EconOp::Squad => Ok(EconReply::Squad(
+            hub.hired(me, capacity(hub, me).await?).await?,
+        )),
+        EconOp::Dismiss { hire } => {
+            e.dismiss(me, hire).await.map_err(econ_err)?;
+            if let Some(z) = &zone {
+                hub.notify(z, HubNotice::HireEnded { hirer: me, hire })
+                    .await;
+            }
+            Ok(EconReply::Done)
+        }
     }
+}
+
+/// The squad capacity of a character's stored build (COMPANIONS.md 3.2).
+async fn capacity(hub: &Hub, character: CharacterId) -> Result<usize, HubError> {
+    Ok(hub
+        .db
+        .character(character)
+        .await?
+        .ok_or(HubError::NotFound)?
+        .build
+        .squad_capacity(&hub.cfg.content))
 }
 
 /// What a zone reports. A zone speaks only for itself: it grants to characters playing in
@@ -1049,6 +1227,49 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
                 .await
                 .map(|()| EconReply::Done)
                 .map_err(econ_err)
+        }
+        ZoneEconOp::GrantKill {
+            reference,
+            components,
+            coin,
+        } => {
+            if components.len() > 256 || coin.len() > 64 {
+                return Err(HubError::Invalid("too many grants".into()));
+            }
+            if coin
+                .iter()
+                .any(|(_, amount)| *amount > hub.cfg.max_coin_grant)
+            {
+                return Err(HubError::Invalid("coin drops are tiny".into()));
+            }
+            // A zone speaks only for characters playing in it. One who left between the
+            // kill and this report forfeits: its coin is not made, its components lie on
+            // the ground where the boss died.
+            let mut here: Vec<(CharacterId, bool)> = Vec::new();
+            for character in components
+                .iter()
+                .map(|(c, _)| *c)
+                .chain(coin.iter().map(|(c, _)| *c))
+            {
+                if !here.iter().any(|(c, _)| *c == character) {
+                    let playing = hub.db.zone_of(character).await?.as_ref() == Some(zone);
+                    here.push((character, playing));
+                }
+            }
+            let is_here = |c: CharacterId| here.iter().any(|(h, playing)| *h == c && *playing);
+            let components: Vec<(Option<i64>, String)> = components
+                .into_iter()
+                .map(|(c, material)| (is_here(c).then_some(c), material))
+                .collect();
+            let coin: Vec<(i64, i64)> = coin.into_iter().filter(|(c, _)| is_here(*c)).collect();
+            match e
+                .grant_kill(zone, reference, &components, &coin)
+                .await
+                .map_err(econ_err)?
+            {
+                Some(ids) => Ok(EconReply::Ids(ids)),
+                None => Ok(EconReply::Done),
+            }
         }
         ZoneEconOp::StallOpen {
             character,

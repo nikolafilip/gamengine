@@ -124,6 +124,34 @@ pub fn sweep_boxes<'a>(
     best
 }
 
+/// Whether two bodies are in each other, by more than a unit on every axis (bodies in
+/// contact are not).
+pub fn entangled(a: &Aabb, b: &Aabb) -> bool {
+    (0..3).all(|k| a.mins[k] + 1.0 < b.maxs[k] && a.maxs[k] - 1.0 > b.mins[k])
+}
+
+/// Nearest hit among the boxes of other bodies, for a mover whose own box is `own` as its
+/// step begins. A body the mover is already inside does not hold it: two bodies that ended
+/// up in each other (a spawn point that overflowed, a blink into a crowd) can walk apart
+/// instead of being stuck for good. The test costs nothing until a sweep starts in a box.
+pub fn sweep_bodies<'a>(
+    hull: Hull,
+    start: Vec3,
+    end: Vec3,
+    boxes: impl IntoIterator<Item = &'a Aabb>,
+    own: Option<Aabb>,
+) -> Trace {
+    let mut best = Trace::clear(start, end);
+    for b in boxes {
+        let t = sweep_box(hull, start, end, b);
+        if t.start_solid && own.is_some_and(|own| entangled(&own, b)) {
+            continue;
+        }
+        best = nearer(best, t);
+    }
+    best
+}
+
 /// Merge two traces of the same sweep: solid starts win, then the shorter fraction.
 pub fn nearer(a: Trace, b: Trace) -> Trace {
     if b.start_solid {
@@ -144,6 +172,8 @@ pub fn nearer(a: Trace, b: Trace) -> Trace {
 pub struct Composite<'a, W: CollisionWorld + ?Sized> {
     pub world: &'a W,
     pub solids: &'a [Aabb],
+    /// The mover's own box as the step begins ([`sweep_bodies`]).
+    pub own: Option<Aabb>,
 }
 
 impl<W: CollisionWorld + ?Sized> CollisionWorld for Composite<'_, W> {
@@ -152,8 +182,112 @@ impl<W: CollisionWorld + ?Sized> CollisionWorld for Composite<'_, W> {
         if self.solids.is_empty() {
             return world;
         }
-        let boxes = sweep_boxes(hull, start, end, self.solids);
+        let boxes = sweep_bodies(hull, start, end, self.solids, self.own);
         nearer(world, boxes)
+    }
+}
+
+/// Side of a [`BodyGrid`] cell: a few bodies wide.
+const GRID_CELL: f32 = 128.0;
+/// A sweep whose bounds cover more cells than this walks the whole list instead.
+const GRID_MAX_CELLS: i32 = 36;
+/// Candidates one sweep can collect before it walks the whole list instead.
+const GRID_MAX_CANDIDATES: usize = 96;
+
+/// A coarse grid over the bodies of a tick, on the ground plane: which boxes a sweep can
+/// possibly touch. With two hundred bodies in a hall, a mover's sweeps meet a handful of
+/// them, not all; the answer is the same as walking the whole list, in the same order.
+#[derive(Clone, Debug, Default)]
+pub struct BodyGrid {
+    cells:
+        std::collections::HashMap<(i32, i32), Vec<u16>, std::hash::BuildHasherDefault<CellHasher>>,
+}
+
+/// Cell coordinates are small integers: mixing them is all the hashing they need.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CellHasher(u64);
+
+impl std::hash::Hasher for CellHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    fn write_i32(&mut self, v: i32) {
+        self.0 = (self.0 ^ v as u32 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
+impl BodyGrid {
+    fn span(mins: Vec3, maxs: Vec3) -> (i32, i32, i32, i32) {
+        (
+            (mins.x / GRID_CELL).floor() as i32,
+            (mins.y / GRID_CELL).floor() as i32,
+            (maxs.x / GRID_CELL).floor() as i32,
+            (maxs.y / GRID_CELL).floor() as i32,
+        )
+    }
+
+    /// Every box in every cell it reaches into. At most 65,535 boxes.
+    pub fn build(solids: &[(u32, Aabb)]) -> BodyGrid {
+        let mut grid = BodyGrid::default();
+        for (i, (_, b)) in solids.iter().enumerate() {
+            grid.insert(i as u16, b);
+        }
+        grid
+    }
+
+    fn insert(&mut self, index: u16, b: &Aabb) {
+        let (x0, y0, x1, y1) = BodyGrid::span(b.mins, b.maxs);
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                self.cells.entry((x, y)).or_default().push(index);
+            }
+        }
+    }
+
+    /// Box `index` moved from `old` to `new`.
+    pub fn moved(&mut self, index: u16, old: &Aabb, new: &Aabb) {
+        if BodyGrid::span(old.mins, old.maxs) == BodyGrid::span(new.mins, new.maxs) {
+            return;
+        }
+        let (x0, y0, x1, y1) = BodyGrid::span(old.mins, old.maxs);
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                if let Some(cell) = self.cells.get_mut(&(x, y)) {
+                    cell.retain(|i| *i != index);
+                }
+            }
+        }
+        self.insert(index, new);
+    }
+
+    /// The boxes that reach into the region `mins..maxs`, ascending, into `out`; `false`
+    /// when the region is too large or too crowded for the grid to help (walk them all).
+    fn near(&self, mins: Vec3, maxs: Vec3, out: &mut Vec<u16>) -> bool {
+        out.clear();
+        let (x0, y0, x1, y1) = BodyGrid::span(mins, maxs);
+        if (x1 - x0 + 1).saturating_mul(y1 - y0 + 1) > GRID_MAX_CELLS {
+            return false;
+        }
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                if let Some(cell) = self.cells.get(&(x, y)) {
+                    out.extend_from_slice(cell);
+                    if out.len() > GRID_MAX_CANDIDATES {
+                        return false;
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        true
     }
 }
 
@@ -163,20 +297,48 @@ pub struct EntityWorld<'a, W: CollisionWorld + ?Sized> {
     pub world: &'a W,
     pub solids: &'a [(u32, Aabb)],
     pub ignore: u32,
+    /// As [`Composite::own`]: the mover's box as the step begins.
+    pub own: Option<Aabb>,
+    /// The grid over `solids`, when the caller keeps one.
+    pub grid: Option<&'a BodyGrid>,
 }
 
 impl<W: CollisionWorld + ?Sized> CollisionWorld for EntityWorld<'_, W> {
     fn trace(&self, hull: Hull, start: Vec3, end: Vec3) -> Trace {
         let world = self.world.trace(hull, start, end);
-        let boxes = sweep_boxes(
-            hull,
-            start,
-            end,
-            self.solids
-                .iter()
-                .filter(|(id, _)| *id != self.ignore)
-                .map(|(_, b)| b),
-        );
+        // Only the boxes that reach into the sweep's own bounds can meet it.
+        let mut near = Vec::new();
+        let margin = Vec3::splat(1.0);
+        let listed = self.grid.is_some_and(|g| {
+            g.near(
+                start.min(end) + hull.mins() - margin,
+                start.max(end) + hull.maxs() + margin,
+                &mut near,
+            )
+        });
+        let boxes = if listed {
+            sweep_bodies(
+                hull,
+                start,
+                end,
+                near.iter()
+                    .map(|&i| &self.solids[i as usize])
+                    .filter(|(id, _)| *id != self.ignore)
+                    .map(|(_, b)| b),
+                self.own,
+            )
+        } else {
+            sweep_bodies(
+                hull,
+                start,
+                end,
+                self.solids
+                    .iter()
+                    .filter(|(id, _)| *id != self.ignore)
+                    .map(|(_, b)| b),
+                self.own,
+            )
+        };
         nearer(world, boxes)
     }
 }
@@ -212,6 +374,130 @@ impl CollisionWorld for BoxWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_body_inside_another_can_walk_out_but_not_through_a_third() {
+        let floor = BoxWorld::floor();
+        let at = Vec3::new(0.0, 0.0, 24.0);
+        // One body exactly where the mover stands, another 100 units ahead.
+        let solids = [
+            Aabb::around(at, Hull::Player),
+            Aabb::around(at + Vec3::X * 100.0, Hull::Player),
+        ];
+        // Without the mover's own box the old rule holds: it is stuck.
+        let stuck = Composite {
+            world: &floor,
+            solids: &solids,
+            own: None,
+        };
+        assert!(
+            stuck
+                .trace(Hull::Player, at, at + Vec3::X * 200.0)
+                .start_solid
+        );
+        let mine = Aabb::around(at, Hull::Player);
+        let own = Some(mine);
+        let world = Composite {
+            world: &floor,
+            solids: &solids,
+            own,
+        };
+        let t = world.trace(Hull::Player, at, at + Vec3::X * 200.0);
+        assert!(!t.start_solid, "held by the body it stands in");
+        // Out of the first, stopped by the second: 100 minus one hull width.
+        assert!((t.end.x - 68.0).abs() < 0.1, "{:?}", t.end);
+        // The same through the server's wrapper.
+        let tagged = [(1, solids[0]), (2, solids[1]), (3, solids[0])];
+        let world = EntityWorld {
+            world: &floor,
+            solids: &tagged,
+            ignore: 3,
+            own,
+            grid: None,
+        };
+        // Bodies that only touch are not in each other.
+        let beside = Aabb::around(at + Vec3::X * 32.0, Hull::Player);
+        assert!(!entangled(&mine, &beside));
+        assert!(entangled(&mine, &solids[0]));
+        let t = world.trace(Hull::Player, at, at + Vec3::X * 200.0);
+        assert!(
+            !t.start_solid && (t.end.x - 68.0).abs() < 0.1,
+            "{:?}",
+            t.end
+        );
+        // Walls still hold: a start inside the world is solid.
+        let t = world.trace(Hull::Player, at - Vec3::Z * 40.0, at);
+        assert!(t.start_solid);
+    }
+
+    #[test]
+    fn the_grid_answers_like_the_whole_list() {
+        // A crowd of boxes on a floor; sweeps of every kind give the same trace with the
+        // grid as without, bit for bit, also after boxes move.
+        let floor = BoxWorld::floor();
+        let mut rng = crate::rng::Rng::new(77);
+        let mut solids: Vec<(u32, Aabb)> = (0..220u32)
+            .map(|i| {
+                let at = Vec3::new(
+                    rng.range_f32(-900.0, 900.0),
+                    rng.range_f32(-600.0, 600.0),
+                    24.0 + rng.range_f32(0.0, 40.0),
+                );
+                (i + 1, Aabb::around(at, Hull::Player))
+            })
+            .collect();
+        let mut grid = BodyGrid::build(&solids);
+        let mut compared = 0;
+        let mut hits = 0;
+        for round in 0..6 {
+            for _ in 0..400 {
+                let i = rng.below(solids.len() as u32) as usize;
+                let from = solids[i].1.center();
+                // Mostly short moves, some long, some straight down, some of no length.
+                let reach = match rng.below(8) {
+                    0 => 700.0,
+                    1 => 0.0,
+                    _ => 30.0,
+                };
+                let to = from
+                    + Vec3::new(
+                        rng.range_f32(-reach, reach),
+                        rng.range_f32(-reach, reach),
+                        if rng.below(5) == 0 { -34.0 } else { 0.0 },
+                    );
+                for own in [None, Some(solids[i].1)] {
+                    for hull in [Hull::Player, Hull::Point] {
+                        let whole = EntityWorld {
+                            world: &floor,
+                            solids: &solids,
+                            ignore: solids[i].0,
+                            own,
+                            grid: None,
+                        };
+                        let gridded = EntityWorld {
+                            grid: Some(&grid),
+                            ..whole
+                        };
+                        let (a, b) = (whole.trace(hull, from, to), gridded.trace(hull, from, to));
+                        assert_eq!(a, b, "round {round}: {from:?} to {to:?}");
+                        compared += 1;
+                        hits += (a.fraction < 1.0) as u32;
+                    }
+                }
+            }
+            // Everybody shuffles along; the grid follows.
+            for (i, (_, b)) in solids.iter_mut().enumerate() {
+                let step = Vec3::new(rng.range_f32(-90.0, 90.0), rng.range_f32(-90.0, 90.0), 0.0);
+                let old = *b;
+                *b = Aabb::new(old.mins + step, old.maxs + step);
+                grid.moved(i as u16, &old, b);
+            }
+        }
+        assert!(
+            compared == 9600 && hits > 1000,
+            "{compared} sweeps, {hits} hits"
+        );
+    }
 
     #[test]
     fn point_sweep_hits_the_near_face() {
@@ -262,6 +548,7 @@ mod tests {
         let c = Composite {
             world: &world,
             solids: &other,
+            own: None,
         };
         let t = c.trace(
             Hull::Player,

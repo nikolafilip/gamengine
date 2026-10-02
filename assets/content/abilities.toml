@@ -406,3 +406,108 @@ falloff = "linear"
 max_targets = 8
 requires_los = true
 exclude_actor = false
+
+# ---------- Phase 7: support and leadership (COMPANIONS.md 12) ----------
+# New abilities are appended: stored builds name abilities by their position in this file.
+
+[[ability]]
+key = "mend"
+name = "Mend"
+slot = "secondary"
+cost = 4
+cooldown_ms = 2000
+focus = 12
+move_scale = 0.7
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 150
+[ability.step.projectile]
+speed = 1600
+gravity = 0.1
+radius = 6
+lifetime_ms = 3000
+# A packet of amount 0 is not an attack (MATRIX.md 7): the dart only delivers its Regen,
+# to whoever it hits. No homing: a healer aims.
+damage = { amount = 0, type = "blunt" }
+spawn = { weapon = [16, 4, -2] }
+spread = 0.3
+on_hit = [ { status = { status = "regen", duration_ms = 3000, magnitude = 20, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
+
+[[ability]]
+key = "sanctuary"
+name = "Sanctuary"
+slot = "active"
+cost = 10
+cooldown_ms = 14000
+focus = 35
+move_scale = 0.5
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 300
+[ability.step.area_effect]
+shape = { cylinder = { radius = 140, height = 96 } }
+origin = { aim = 500 }
+duration_ms = 6000
+interval_ms = 1000
+effects = [ { status = "regen", duration_ms = 1500, magnitude = 12, max_stacks = 1, stacking = "refresh", target = "area" } ]
+falloff = "none"
+max_targets = 8
+requires_los = false
+exclude_actor = false
+
+[[ability]]
+key = "war_standard"
+name = "War standard"
+slot = "active"
+cost = 10
+squad = 2
+cooldown_ms = 20000
+stamina = 20
+move_scale = 0.8
+[[ability.step]]
+at_ms = 200
+[ability.step.area_effect]
+shape = { cylinder = { radius = 256, height = 96 } }
+origin = "self_feet"
+effects = [ { status = "fortify", duration_ms = 8000, magnitude = 0.15, max_stacks = 1, stacking = "refresh", target = "area" } ]
+falloff = "none"
+max_targets = 8
+requires_los = true
+exclude_actor = false
+
+# ---------- creature abilities (COMPANIONS.md 8.1): no player build may slot these ----------
+
+[[ability]]
+key = "maul"
+name = "Maul"
+slot = "primary"
+cost = 0
+creature = true
+cooldown_ms = 2000
+move_scale = 0.4
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 96, arc = 120, half_height = 48, windup_ms = 550, active_ms = 80, recovery_ms = 600, damage = { amount = 55, type = "blunt", bypass = ["magic_shield"], knockback = 260, stagger = 45 }, max_targets = 4, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 40 }
+
+[[ability]]
+key = "quake"
+name = "Quake"
+slot = "active"
+cost = 0
+creature = true
+aspect = "stone"
+cooldown_ms = 9000
+move_scale = 0.2
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 300
+[ability.step.area_effect]
+shape = { cylinder = { radius = 150, height = 96 } }
+origin = { aim = 700 }
+delay_ms = 1300
+damage = { amount = 70, type = "stone", knockback = 300, stagger = 60 }
+falloff = "none"
+max_targets = 8
+requires_los = false
+exclude_actor = true

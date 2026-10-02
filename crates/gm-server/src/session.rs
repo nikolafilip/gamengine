@@ -14,7 +14,7 @@ use gm_core::sim::{Area, GuardState, Player, Projectile, Zone};
 use gm_core::vocab::{ArchetypeFrame, EntityId, Status};
 use gm_hub_proto::protocol::{ModelId, ModelRef};
 use gm_net::MAX_DATAGRAM_PAYLOAD;
-use gm_net::control::Control;
+use gm_net::control::{BodyKind, Control};
 use gm_net::quant;
 use gm_net::snapshot::{EntityState, OwnState, Snapshot, SpawnInfo, StatusWire, flags};
 use tokio::sync::mpsc;
@@ -64,6 +64,13 @@ pub struct TableEntry {
     /// Stealth radius (MATRIX.md 8); `f32::INFINITY` when not stealthed.
     pub stealth: f32,
     pub is_player: bool,
+    /// For bodies: health, party, whether it is a creature, and the commander of a
+    /// companion (0 for anybody else). Health goes to the body's own party and, for
+    /// creatures, to everyone (COMPANIONS.md 13).
+    pub health: u16,
+    pub party: u32,
+    pub creature: bool,
+    pub owner: EntityId,
 }
 
 /// The shared per-tick view of the zone, ascending by entity id.
@@ -74,12 +81,21 @@ pub struct TickTable {
 
 impl TickTable {
     /// Rebuild from the zone after its step; one leaf lookup per point, once per tick.
-    pub fn rebuild(&mut self, zone: &Zone, world: &ZoneWorld) {
+    /// `kind` says who drives a body (the director knows).
+    pub fn rebuild(&mut self, zone: &Zone, world: &ZoneWorld, kind: &dyn Fn(EntityId) -> BodyKind) {
         self.entries.clear();
         let bsp = &world.bsp;
         for p in zone.players() {
             let origin = p.mover.mv.origin;
+            let kind = kind(p.id);
             self.entries.push(TableEntry {
+                health: p.health.clamp(0, u16::MAX as i32) as u16,
+                party: p.party,
+                creature: matches!(kind, BodyKind::Creature { .. }),
+                owner: match kind {
+                    BodyKind::Companion { owner } => owner,
+                    _ => 0,
+                },
                 id: p.id,
                 origin,
                 leaf: bsp.leaf_for_point(origin),
@@ -103,6 +119,10 @@ impl TickTable {
                 state: projectile_state(pr),
                 stealth: f32::INFINITY,
                 is_player: false,
+                health: 0,
+                party: 0,
+                creature: false,
+                owner: 0,
             });
         }
         for ar in zone.areas() {
@@ -114,6 +134,10 @@ impl TickTable {
                 state: area_state(ar),
                 stealth: f32::INFINITY,
                 is_player: false,
+                health: 0,
+                party: 0,
+                creature: false,
+                owner: 0,
             });
         }
         // Players, projectiles and areas each come out ascending; ids are monotonic across
@@ -143,6 +167,8 @@ pub struct Session {
     pub last_udp_rx: u64,
     stall_gate: RequestGate,
     travel_gate: RequestGate,
+    /// Squad entries last told to this client, so an unchanged squad is not sent again.
+    pub squad_told: Vec<gm_net::control::SquadEntry>,
 }
 
 /// A player's stall and travel requests go to the hub: one of a kind at a time, and at most
@@ -200,7 +226,14 @@ impl Session {
             last_udp_rx: 0,
             stall_gate: RequestGate::default(),
             travel_gate: RequestGate::default(),
+            squad_told: Vec::new(),
         }
+    }
+
+    /// Whether the client is being sent `id` (it was in the last snapshot built for it):
+    /// an `Attack` order may only name such a body (COMPANIONS.md 5.3).
+    pub fn sees(&self, id: EntityId) -> bool {
+        self.history.back().is_some_and(|s| s.find(id).is_some())
     }
 
     /// May this player make a stall request now? `true` reserves it: `end_stall_request`
@@ -293,6 +326,20 @@ impl Session {
             pvs.row(my_leaf).unwrap_or(&[])
         };
         let see_all = see_all || row.is_empty();
+        let my_party = me.party;
+        // Squad sight (COMPANIONS.md 5.2): in the command stance with the button held, the
+        // client also sees through each living companion's eyes.
+        let commanding = commanding(me);
+        let mut squad_eyes: Vec<(Vec3, &[u8])> = Vec::new();
+        if commanding {
+            for e in table.entries.iter().filter(|e| e.owner == self.id) {
+                if e.state.flags & flags::ALIVE != 0
+                    && let Some(r) = pvs.row(e.leaf_top)
+                {
+                    squad_eyes.push((e.origin, r));
+                }
+            }
+        }
 
         let base_idx = self.baseline_index(tick);
         let baseline_tick = base_idx.map_or(0, |i| self.history[i].server_tick);
@@ -319,16 +366,32 @@ impl Session {
                     snap.entities.push(player_state(me, true));
                     continue;
                 }
-                let dist = (e.origin - eye).length();
-                let visible =
+                let mut dist = (e.origin - eye).length();
+                let mut visible =
                     see_all || Bsp::leaf_in_pvs(row, e.leaf) || Bsp::leaf_in_pvs(row, e.leaf_top);
+                for (at, squad_row) in &squad_eyes {
+                    if Bsp::leaf_in_pvs(squad_row, e.leaf)
+                        || Bsp::leaf_in_pvs(squad_row, e.leaf_top)
+                    {
+                        visible = true;
+                        // The band is taken from the nearest squad member.
+                        dist = dist.min((e.origin - *at).length());
+                    }
+                }
                 if e.is_player {
-                    if dist > TOUCH_DIST && (!visible || dist > e.stealth) {
+                    // The client's own companions are always sent, wherever they are.
+                    let mine = e.owner == self.id;
+                    if !mine && dist > TOUCH_DIST && (!visible || dist > e.stealth) {
                         continue;
                     }
                     let scheduled = base_rec.is_none() || band_scheduled(tick, e.id, dist);
                     let rec = match base_rec {
                         Some(b) if !scheduled => *b,
+                        // Health rides along for the client's own party and for creatures.
+                        _ if e.creature || (my_party != 0 && e.party == my_party) => EntityState {
+                            health: Some(e.health),
+                            ..e.state
+                        },
                         _ => e.state,
                     };
                     droppable.push((e.id, dist));
@@ -395,6 +458,14 @@ impl Session {
     }
 }
 
+/// In the command stance with the button held: what grants squad sight and lets orders
+/// through (COMPANIONS.md 5.1).
+pub fn commanding(p: &Player) -> bool {
+    p.alive
+        && p.mover.commanding(p.last_input_tick)
+        && p.mover.buttons_prev & gm_core::sim::buttons::COMMAND != 0
+}
+
 /// Whether an entity in a distance band is listed this tick (PROTOCOL.md 5).
 pub fn band_scheduled(tick: u32, id: EntityId, dist: f32) -> bool {
     if dist <= FULL_RATE_DIST {
@@ -452,6 +523,9 @@ pub fn player_state(p: &Player, own: bool) -> EntityState {
     if own && p.mover.script.is_some() {
         f |= flags::SCRIPT;
     }
+    if own && p.mover.commanding(p.last_input_tick) {
+        f |= flags::COMMANDING;
+    }
     EntityState {
         id: p.id,
         spawn: SpawnInfo::Player {
@@ -500,6 +574,7 @@ pub fn area_state(a: &Area) -> EntityState {
             owner: a.owner,
             def: a.ability as u32,
             radius: a.radius().round() as u32,
+            harmful: a.def.harmful(),
         },
         pos: quant::quantize_pos3(a.origin.into()),
         yaw: quant::yaw_to_wire(a.dir.y.atan2(a.dir.x).to_degrees()),

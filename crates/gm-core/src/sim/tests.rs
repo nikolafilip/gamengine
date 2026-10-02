@@ -2,10 +2,11 @@ use glam::Vec3;
 
 use super::*;
 use crate::build::Build;
-use crate::collide::BoxWorld;
+use crate::collide::{Aabb, BoxWorld};
 use crate::matrix::{ArmourClass, Aspects, Attributes, Element};
 use crate::sim::test_content::{self, phase2_build};
 use crate::tick::TickRate;
+use crate::trace::Hull;
 use crate::vocab::{ArchetypeFrame, EntityId, Status};
 
 const REST_Z: f32 = 24.0;
@@ -133,7 +134,7 @@ fn sword_hits_in_front_and_not_behind() {
             assert_eq!(hp, 110 - 37, "yaw {attacker_yaw}");
             assert!(zone.events.iter().any(|e| matches!(
                 e,
-                ZoneEvent::Hit { attacker, target, amount: 37, kind: HitKind::Melee } if *attacker == a && *target == b
+                ZoneEvent::Hit { attacker, target, amount: 37, kind: HitKind::Melee, .. } if *attacker == a && *target == b
             )));
         } else {
             assert_eq!(hp, 110, "yaw {attacker_yaw}");
@@ -883,4 +884,358 @@ fn respec_applies_at_the_next_respawn() {
         pb.sheet.build.aspects,
         Aspects::two(Element::Frost, Element::Shadow)
     );
+}
+
+// ---------- Phase 7: minds, the command stance, aimed areas, zero packets, held respawns ----------
+
+/// A mind-driven body with a preset build at an exact place.
+fn add_mind(zone: &mut Zone, name: &str, origin: Vec3, yaw: f32) -> EntityId {
+    let build = zone.content.build(name).expect(name).clone();
+    let sheet = crate::build::Sheet::new(build, &zone.content, 0);
+    zone.add_body(sheet, origin, yaw, Driver::Mind)
+}
+
+#[test]
+fn a_mind_runs_exactly_one_frame_a_tick_and_never_starves() {
+    let (world, mut zone, ids) = arena_builds(&[("blade", Vec3::new(48.0, 0.0, REST_Z), 180.0)]);
+    let target = ids[0];
+    let mind = add_mind(&mut zone, "blade", Vec3::new(0.0, 0.0, REST_Z), 0.0);
+    assert_eq!(zone.player(mind).unwrap().party, mind, "its own party");
+    // No frame handed over: the body is not simulated, and that is not starvation.
+    zone.step(&world);
+    let p = zone.player(mind).unwrap();
+    assert_eq!((p.executed_frames, p.starved_ticks), (0, 0));
+    // One frame per tick from the first tick, no reserve: the swing lands on time.
+    for t in 0..20 {
+        let buttons = if t == 0 { buttons::PRIMARY } else { 0 };
+        zone.drive(mind, input(0.0, 0.0, buttons));
+        tick(&mut zone, &world, &[(target, input(180.0, 0.0, 0))], 0);
+    }
+    let p = zone.player(mind).unwrap();
+    assert_eq!(p.executed_frames, 20);
+    assert_eq!(p.last_input_tick, 20);
+    assert_eq!(p.starved_ticks, 0);
+    assert_eq!(hits(&zone, HitKind::Melee), 1);
+    // A client cannot drive a mind's body, and `drive` does nothing for a client's.
+    zone.queue_input(mind, 500, input(0.0, 1.0, 0), 0);
+    zone.drive(target, input(0.0, 1.0, 0));
+    let x = zone.player(mind).unwrap().mover.mv.origin.x;
+    zone.step(&world);
+    assert_eq!(zone.player(mind).unwrap().mover.mv.origin.x, x);
+}
+
+#[test]
+fn the_command_stance_roots_the_body_and_standing_up_takes_400_ms() {
+    let (world, mut zone, ids) = arena_builds(&[("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0)]);
+    let a = ids[0];
+    let exit = command_exit_ticks(RATE.dt());
+    assert_eq!(exit, 26, "400 ms at 64 Hz");
+    // Held with the stick forward and the sword pressed: nothing happens but the stance.
+    let held = input(
+        0.0,
+        1.0,
+        buttons::COMMAND | buttons::PRIMARY | buttons::GUARD,
+    );
+    run(&mut zone, &world, &[(a, held)], 30);
+    let p = zone.player(a).unwrap();
+    assert!(p.mover.commanding(p.last_input_tick));
+    assert!(p.mover.mv.origin.x.abs() < 0.5, "{:?}", p.mover.mv.origin);
+    assert!(p.mover.script.is_none());
+    assert_eq!(p.mover.guard, GuardState::None);
+    assert_eq!(p.anim, anim::COMMAND);
+    assert_eq!(hits(&zone, HitKind::Melee), 0);
+    // Released: still rooted while standing up...
+    let walk = input(0.0, 1.0, 0);
+    run(&mut zone, &world, &[(a, walk)], 20);
+    let p = zone.player(a).unwrap();
+    assert!(p.mover.mv.origin.x.abs() < 0.5, "{:?}", p.mover.mv.origin);
+    assert_eq!(p.anim, anim::COMMAND);
+    // ...and free a little later.
+    run(&mut zone, &world, &[(a, walk)], 40);
+    let p = zone.player(a).unwrap();
+    assert!(!p.mover.commanding(p.last_input_tick));
+    assert!(p.mover.mv.origin.x > 60.0, "{:?}", p.mover.mv.origin);
+}
+
+#[test]
+fn the_stance_waits_for_a_running_script() {
+    let (world, mut zone, ids) = arena_builds(&[("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0)]);
+    let a = ids[0];
+    // Swing first (the sword's script is 19 ticks), then hold the button: the swing is not
+    // cancelled and the body keeps moving until the script is over.
+    tick(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 1.0, buttons::PRIMARY))],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 1.0, buttons::COMMAND))],
+        12,
+    );
+    let p = zone.player(a).unwrap();
+    assert!(p.mover.script.is_some());
+    assert!(!p.mover.commanding(p.last_input_tick));
+    let moving = p.mover.mv.origin.x;
+    assert!(moving > 5.0, "{moving}");
+    // The stance begins when the script ends; friction then brings the body to rest.
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 1.0, buttons::COMMAND))],
+        70,
+    );
+    let p = zone.player(a).unwrap();
+    assert!(p.mover.commanding(p.last_input_tick));
+    let stopped = p.mover.mv.origin.x;
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 1.0, buttons::COMMAND))],
+        30,
+    );
+    assert!((zone.player(a).unwrap().mover.mv.origin.x - stopped).abs() < 0.5);
+}
+
+#[test]
+fn a_mend_dart_heals_whoever_it_hits_and_is_not_an_attack() {
+    let (world, mut zone, ids) = arena_builds(&[
+        ("mender", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        ("ironclad", Vec3::new(200.0, 0.0, REST_Z), 180.0),
+    ]);
+    let (healer, tank) = (ids[0], ids[1]);
+    zone.player_mut(tank).unwrap().health -= 60;
+    let hurt = zone.player(tank).unwrap().health;
+    let full_stamina = zone.player(tank).unwrap().mover.stamina;
+    // The tank holds its shield wall towards the healer: a zero packet is not blocked.
+    let guard = input(180.0, 0.0, buttons::GUARD);
+    tick(
+        &mut zone,
+        &world,
+        &[(healer, input(0.0, 0.0, buttons::SECONDARY)), (tank, guard)],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(healer, input(0.0, 0.0, 0)), (tank, guard)],
+        40,
+    );
+    let p = zone.player(tank).unwrap();
+    assert!(p.mover.statuses.has(Status::Regen), "the dart landed");
+    assert_eq!(hits(&zone, HitKind::Projectile), 0, "no damage event");
+    assert_eq!(p.mover.stamina, full_stamina, "nothing was blocked");
+    assert_eq!(p.mover.guard, GuardState::Block, "and nothing interrupted");
+    // 20/s in pulses of 5 for 3 s, shortened by the ironclad's SPR 20 (x 0.8 = 2.4 s): nine
+    // or ten pulses depending on where the dart landed in the pulse cycle, all credited to
+    // the healer.
+    run(
+        &mut zone,
+        &world,
+        &[(healer, input(0.0, 0.0, 0)), (tank, guard)],
+        200,
+    );
+    let healed = zone.player(tank).unwrap().health - hurt;
+    assert!(healed == 45 || healed == 50, "healed {healed}");
+    let credited: i32 = zone
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            ZoneEvent::Healed {
+                target,
+                source,
+                amount,
+            } if *target == tank && *source == healer => Some(*amount),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(credited, healed);
+}
+
+#[test]
+fn an_aimed_area_lands_under_the_first_body_or_surface_on_the_view_ray() {
+    // At a body: its feet.
+    let (world, mut zone, ids) = arena_builds(&[
+        ("mender", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        ("blade", Vec3::new(300.0, 0.0, REST_Z), 180.0),
+    ]);
+    let (healer, ally) = (ids[0], ids[1]);
+    zone.player_mut(ally).unwrap().health -= 50;
+    let idle = input(180.0, 0.0, 0);
+    tick(
+        &mut zone,
+        &world,
+        &[(healer, active(0.0, 0.0, 1)), (ally, idle)],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(healer, input(0.0, 0.0, 0)), (ally, idle)],
+        24,
+    );
+    assert_eq!(zone.areas().len(), 1);
+    let o = zone.areas()[0].origin;
+    assert!(
+        (o - Vec3::new(300.0, 0.0, 0.0)).length() < 1.0,
+        "under the ally: {o:?}"
+    );
+    // It heals who stands in it, 12/s while they stay.
+    run(
+        &mut zone,
+        &world,
+        &[(healer, input(0.0, 0.0, 0)), (ally, idle)],
+        130,
+    );
+    let healed = zone.player(ally).unwrap().health - (zone.player(ally).unwrap().max_health() - 50);
+    assert!(
+        (20..=30).contains(&healed),
+        "healed {healed} in two seconds"
+    );
+
+    // At the floor: where the ray meets it. Into the sky: the point at the range, dropped.
+    for (pitch, expect_x) in [
+        (30.0f32, 46.0 / 30.0f32.to_radians().tan()),
+        (-45.0, 353.55),
+    ] {
+        let (world, mut zone, ids) = arena_builds(&[("mender", Vec3::new(0.0, 0.0, REST_Z), 0.0)]);
+        let a = ids[0];
+        let aim = |ability: u8| Input {
+            pitch,
+            ability,
+            ..input(0.0, 0.0, 0)
+        };
+        tick(&mut zone, &world, &[(a, aim(1))], 0);
+        run(&mut zone, &world, &[(a, aim(0))], 24);
+        assert_eq!(zone.areas().len(), 1, "pitch {pitch}");
+        let o = zone.areas()[0].origin;
+        assert!(
+            (o.x - expect_x).abs() < 6.0 && o.y.abs() < 0.1 && o.z.abs() < 0.5,
+            "pitch {pitch}: {o:?}, expected x {expect_x}"
+        );
+    }
+}
+
+#[test]
+fn a_quake_is_a_telegraph_you_can_walk_out_of() {
+    for stays in [true, false] {
+        let (world, mut zone, ids) =
+            arena_builds(&[("blade", Vec3::new(260.0, 0.0, REST_Z), 180.0)]);
+        let victim = ids[0];
+        let (_, def) = zone
+            .content
+            .creature("warden")
+            .expect("the fixture's Warden");
+        let sheet = crate::build::Sheet::creature(def, &zone.content, crate::sim::TEAM_WILD);
+        assert_eq!(sheet.derived.health, 7500);
+        let warden = zone.add_body(sheet, Vec3::new(0.0, 0.0, REST_Z), 0.0, Driver::Mind);
+        zone.set_party(warden, 0);
+        zone.set_hold(warden, true);
+        // Quake is the Warden's first active: a 300 ms cast, then a circle under what it
+        // looks at, breaking 1,300 ms later.
+        let away = if stays { 0.0 } else { -1.0 };
+        for t in 0..130 {
+            zone.drive(
+                warden,
+                if t == 0 {
+                    active(0.0, 0.0, 1)
+                } else {
+                    input(0.0, 0.0, 0)
+                },
+            );
+            // The victim faces the Warden; walking backwards takes it out of the circle.
+            tick(&mut zone, &world, &[(victim, input(180.0, away, 0))], 0);
+            if t == 40 {
+                assert_eq!(
+                    zone.areas().len(),
+                    1,
+                    "the circle is an entity before it breaks"
+                );
+                // Under the victim as it stood when the cast finished (it has walked about
+                // 85 u by then if it is leaving); the circle does not follow it afterwards.
+                let o = zone.areas()[0].origin;
+                let expect = if stays { 260.0 } else { 345.0 };
+                assert!((o.x - expect).abs() < 12.0 && o.z.abs() < 0.5, "{o:?}");
+                assert_eq!(hits(&zone, HitKind::Area), 0);
+            }
+        }
+        let p = zone.player(victim).unwrap();
+        if stays {
+            // 70 stone x 1.08 (INT 14) x 2 (Stone into Flame) x 0.73 (ward 0.27) = 110.4.
+            assert_eq!(p.max_health() - p.health, 110);
+        } else {
+            assert_eq!(p.health, p.max_health(), "at {:?}", p.mover.mv.origin);
+        }
+        assert!(zone.areas().is_empty());
+        // The Warden's own quake never touches it.
+        let w = zone.player(warden).unwrap();
+        assert_eq!(w.health, w.max_health());
+    }
+}
+
+#[test]
+fn a_held_body_stays_down_until_it_is_revived_or_released() {
+    let (world, mut zone, ids) = arena_builds(&[
+        ("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        ("blade", Vec3::new(50.0, 0.0, REST_Z), 180.0),
+    ]);
+    let (a, b) = (ids[0], ids[1]);
+    zone.set_hold(b, true);
+    zone.player_mut(b).unwrap().health = 1;
+    let idle = input(180.0, 0.0, 0);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle)],
+        13,
+    );
+    assert!(!zone.player(b).unwrap().alive);
+    let wait = zone.rate.ms_to_ticks(RESPAWN_MS) as usize + 20;
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, idle)],
+        wait,
+    );
+    assert!(!zone.player(b).unwrap().alive, "held: no timed respawn");
+    // Revived where its holder says, with full pools, and the event says so.
+    zone.events.clear();
+    zone.revive(b, Vec3::new(400.0, 0.0, REST_Z), 90.0, false);
+    let p = zone.player(b).unwrap();
+    assert!(p.alive && p.health == p.max_health());
+    assert_eq!(p.mover.mv.origin, Vec3::new(400.0, 0.0, REST_Z));
+    assert!(zone.events.contains(&ZoneEvent::Respawned(b)));
+    // Released while dead: the timed respawn runs from the release.
+    zone.player_mut(b).unwrap().health = 0;
+    zone.player_mut(b).unwrap().alive = false;
+    zone.set_hold(b, false);
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 20);
+    assert!(!zone.player(b).unwrap().alive);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, idle)],
+        wait,
+    );
+    assert!(zone.player(b).unwrap().alive);
+}
+
+#[test]
+fn a_spot_near_somebody_is_free_and_on_the_ground() {
+    let (mut world, zone, ids) = arena_builds(&[("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0)]);
+    let a = ids[0];
+    let at = zone.player(a).unwrap().mover.mv.origin;
+    let spot = zone.spot_near(&world, at, Hull::Player);
+    let me = zone.player(a).unwrap().aabb();
+    assert!(!Aabb::around(spot, Hull::Player).overlaps(&me), "{spot:?}");
+    assert!((spot - at).truncate().length() <= 160.5);
+    assert!((spot.z - REST_Z).abs() < 0.1, "on the floor: {spot:?}");
+    // A wall right beside: the spot is never behind it.
+    world.push(Vec3::new(30.0, -400.0, 0.0), Vec3::new(40.0, 400.0, 200.0));
+    for _ in 0..4 {
+        let spot = zone.spot_near(&world, at, Hull::Player);
+        assert!(spot.x < 30.0 - 16.0 + 0.1, "{spot:?}");
+    }
 }

@@ -42,13 +42,17 @@ struct Args {
     maps_dir: PathBuf,
     /// The first N bots of a hub swarm walk to the market and open a stall.
     stalls: usize,
+    list_for_hire: Option<i64>,
+    hire: usize,
 }
 
 const USAGE: &str = "gm-bot --connect ADDR --cert PATH [--map PATH] [--bots N] [--secs N] \
-[--behaviour wander|hunter|hold|duelist|stroll] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]\n\
+[--behaviour wander|hunter|hold|duelist|stroll|raid] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick]\n\
        gm-bot --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME --zone ID \
 [--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...] \
-[--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall]";
+[--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall] \
+[--list-for-hire COPPER: list the character in the tavern; with --secs 0 it then stays offline] \
+[--hire N: hire up to N avatars from the tavern before entering]";
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
@@ -73,6 +77,8 @@ fn parse_args() -> Result<Args, String> {
         travel_after: 10,
         maps_dir: PathBuf::from("assets/maps/built"),
         stalls: 0,
+        list_for_hire: None,
+        hire: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -107,6 +113,7 @@ fn parse_args() -> Result<Args, String> {
                     "hold" => Behaviour::Hold,
                     "duelist" => Behaviour::Duelist,
                     "stroll" => Behaviour::Stroll,
+                    "raid" => Behaviour::Raid,
                     other => return Err(format!("--behaviour: unknown {other}")),
                 }
             }
@@ -137,6 +144,18 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|e| format!("--stalls: {e}"))?
             }
+            "--list-for-hire" => {
+                a.list_for_hire = Some(
+                    value("--list-for-hire")?
+                        .parse()
+                        .map_err(|e| format!("--list-for-hire: {e}"))?,
+                )
+            }
+            "--hire" => {
+                a.hire = value("--hire")?
+                    .parse()
+                    .map_err(|e| format!("--hire: {e}"))?
+            }
             "--teams" => {
                 a.teams = value("--teams")?
                     .split(',')
@@ -151,6 +170,39 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     Ok(a)
+}
+
+/// A raid leader's run in one line (`scripts/check-dungeon.sh` reads it).
+fn raid_line(r: &gm_bot::BotReport) -> String {
+    let passed: Vec<&str> = r
+        .trials
+        .iter()
+        .filter(|t| t.1)
+        .map(|t| t.0.as_str())
+        .collect();
+    let cleared: Vec<String> = r.cleared.iter().map(|(n, s)| format!("{n}:{s}s")).collect();
+    format!(
+        "raid {}: done={} secs={:.1} squad={} hired={} orders={} refused={} cleared=[{}] resets={} deaths={} loot=[{}] coin={} trials_passed=[{}] creatures={} creature_health_seen={} rx_bytes_per_s={:.0} tx_bytes_per_s={:.0} corrections={} unexplained={}",
+        r.name,
+        r.raid_done,
+        r.secs,
+        r.squad_max,
+        r.squad_hired,
+        r.orders,
+        r.orders_refused,
+        cleared.join(","),
+        r.resets,
+        r.own_deaths,
+        r.loot.join(","),
+        r.coin,
+        passed.join(","),
+        r.creatures_announced,
+        r.creature_health_seen,
+        r.rx_bytes_per_s(),
+        r.tx_bytes_per_s(),
+        r.client.corrections,
+        r.client.corrections_unexplained,
+    )
 }
 
 #[tokio::main]
@@ -213,6 +265,8 @@ async fn main() -> anyhow::Result<()> {
                     stall_tile: (i < args.stalls).then_some(i as u32 * 2),
                 },
                 play: Duration::from_secs(args.secs),
+                list_for_hire: args.list_for_hire,
+                hire: args.hire,
             };
             set.spawn(async move {
                 // Arrive over a few seconds, like people do.
@@ -247,6 +301,27 @@ async fn main() -> anyhow::Result<()> {
                 rep.own_kills,
                 rep.own_deaths
             );
+        }
+        for rep in reports
+            .iter()
+            .filter(|r| r.squad_max > 0 || !r.cleared.is_empty())
+        {
+            println!("{}", raid_line(rep));
+        }
+        for f in flows.iter().filter(|_| !swarm || args.hire > 0) {
+            println!(
+                "character {}: squad=[{}] coin={} items=[{}] trials=[{}]",
+                f.character,
+                f.squad.join(","),
+                f.coin,
+                f.items.join(","),
+                f.trials.join(",")
+            );
+        }
+        if reports.is_empty() {
+            // Nobody entered a zone (--secs 0): the listing or the hiring was the trip.
+            println!("hub bots={} completed={}", count, flows.len());
+            return Ok(());
         }
         let n = reports.len().max(1) as f64;
         println!(
@@ -361,6 +436,12 @@ async fn main() -> anyhow::Result<()> {
         reports.iter().map(|r| r.own_kills).sum::<u32>(),
         reports.iter().map(|r| r.own_deaths).sum::<u32>()
     );
+    for r in reports
+        .iter()
+        .filter(|r| r.squad_max > 0 || !r.cleared.is_empty())
+    {
+        println!("{}", raid_line(r));
+    }
     let respecs: u32 = reports.iter().map(|r| r.respecs).sum();
     if respecs > 0 {
         let mut finals: Vec<&str> = reports.iter().map(|r| r.final_build.as_str()).collect();

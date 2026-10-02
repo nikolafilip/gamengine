@@ -13,12 +13,13 @@ use gm_core::tick::TickRate;
 use gm_core::vocab::EntityId;
 use gm_net::PROTOCOL_VERSION;
 use gm_net::client::{ClientState, ClientStats};
-use gm_net::control::{self, BuildChoice, Control};
+use gm_net::control::{self, BodyKind, BuildChoice, Control, EncounterState};
 use gm_net::transport::SERVER_NAME;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
 use crate::brain::{Behaviour, Brain, View, counter_pick, dominant_enemy_aspects};
+use crate::raid::Raid;
 
 /// Counter-picking bots look at the enemy every this many seconds (after the first look).
 pub const COUNTER_PICK_PERIOD_S: u32 = 10;
@@ -88,6 +89,24 @@ pub struct BotReport {
     pub stalls_seen: usize,
     /// Ground covered, in world units (a bot that never moves is stuck).
     pub travelled: f32,
+    /// A raid leader's run (COMPANIONS.md 14): the most companions it commanded at once,
+    /// how many of them were hired rather than lent, the orders it gave and the ones the
+    /// zone refused, the encounters it was told were cleared (name, seconds) and reset,
+    /// what a kill gave it, the trials judged on it (key, passed, why not), and whether it
+    /// finished the map.
+    pub squad_max: usize,
+    pub squad_hired: usize,
+    pub orders: u32,
+    pub orders_refused: u32,
+    pub cleared: Vec<(String, u32)>,
+    pub resets: u32,
+    pub loot: Vec<String>,
+    pub coin: u32,
+    pub trials: Vec<(String, bool, String)>,
+    pub raid_done: bool,
+    /// Bodies the zone announced as creatures, and the most seen with their health.
+    pub creatures_announced: usize,
+    pub creature_health_seen: usize,
 }
 
 impl BotReport {
@@ -175,6 +194,11 @@ pub async fn run_bot_with_token(
     let mut client = ClientState::new(entity, rate, Sheet::new(own, &pack, team));
     let mut brain = Brain::new(cfg.seed, cfg.behaviour);
     brain.hz = rate.hz();
+    // A raid leader thinks with `gm_ai` instead: the nav grid is flooded here, once.
+    let mut raid = (cfg.behaviour == Behaviour::Raid).then(|| Raid::new(&world, cfg.seed));
+    // The tick the raid was finished at: the loop runs two seconds more, for the last
+    // kill's loot and verdicts to arrive.
+    let mut raid_done_at: Option<u32> = None;
     // A vendor walks to its tile; a taken tile sends it to the next.
     let tiles: Vec<glam::Vec3> = world
         .stall_grids()
@@ -222,15 +246,42 @@ pub async fn run_bot_with_token(
                 report.others_seen_max = report.others_seen_max.max(
                     others.iter().filter(|e| e.kind == gm_net::snapshot::EntityKind::Player).count(),
                 );
-                let input = brain.think(&View {
-                    me: &client.mover,
-                    kit: &client.sheet.kit,
-                    frame: client.sheet.build.frame,
-                    team,
-                    alive: client.own_alive,
-                    others: &others,
-                    tick: client.tick.wrapping_add(1),
-                });
+                let input = match raid.as_mut() {
+                    Some(raid) => {
+                        report.creature_health_seen = report.creature_health_seen.max(
+                            others
+                                .iter()
+                                .filter(|e| {
+                                    e.health.is_some()
+                                        && matches!(
+                                            raid.kinds.get(&e.id),
+                                            Some(BodyKind::Creature { .. })
+                                        )
+                                })
+                                .count(),
+                        );
+                        let (input, order) = raid.think(&client, &others, &world, &pack, team);
+                        if let Some(order) = order {
+                            report.orders += 1;
+                            let _ = control::send(&mut send, &order).await;
+                        }
+                        if raid.done() && raid_done_at.is_none() {
+                            info!(name = %cfg.name, ticks, "raid done");
+                            raid_done_at = Some(ticks);
+                            report.raid_done = true;
+                        }
+                        input
+                    }
+                    None => brain.think(&View {
+                        me: &client.mover,
+                        kit: &client.sheet.kit,
+                        frame: client.sheet.build.frame,
+                        team,
+                        alive: client.own_alive,
+                        others: &others,
+                        tick: client.tick.wrapping_add(1),
+                    }),
+                };
                 if let Some(to) = &cfg.travel_to
                     && cfg.travel_after_ticks > 0
                     && ticks == cfg.travel_after_ticks
@@ -295,6 +346,9 @@ pub async fn run_bot_with_token(
                     next = now;
                 }
                 if cfg.run_ticks != 0 && ticks >= cfg.run_ticks {
+                    break;
+                }
+                if raid_done_at.is_some_and(|at| ticks >= at + 2 * rate.hz()) {
                     break;
                 }
             }
@@ -383,13 +437,59 @@ pub async fn run_bot_with_token(
                         stalls_seen.remove(&id);
                     }
                     Ok(Some(Control::Roster(players))) => {
+                        report.creatures_announced = players
+                            .iter()
+                            .filter(|p| matches!(p.kind, BodyKind::Creature { .. }))
+                            .count();
+                        if let Some(raid) = raid.as_mut() {
+                            raid.kinds = players.iter().map(|p| (p.id, p.kind)).collect();
+                        }
                         wearing = players.into_iter().map(|p| (p.id, p.model)).collect();
                     }
-                    Ok(Some(Control::PlayerInfo { id, model, .. })) => {
+                    Ok(Some(Control::PlayerInfo { id, model, kind, .. })) => {
+                        if matches!(kind, BodyKind::Creature { .. }) && !wearing.contains_key(&id) {
+                            report.creatures_announced += 1;
+                        }
+                        if let Some(raid) = raid.as_mut() {
+                            raid.kinds.insert(id, kind);
+                        }
                         wearing.insert(id, model);
                     }
                     Ok(Some(Control::PlayerLeft(id))) => {
+                        if let Some(raid) = raid.as_mut() {
+                            raid.kinds.remove(&id);
+                        }
                         wearing.remove(&id);
+                    }
+                    Ok(Some(Control::Squad(entries))) => {
+                        report.squad_max = report.squad_max.max(entries.len());
+                        report.squad_hired = report
+                            .squad_hired
+                            .max(entries.iter().filter(|e| !e.recruit).count());
+                        if let Some(raid) = raid.as_mut() {
+                            raid.squad = entries;
+                        }
+                    }
+                    Ok(Some(Control::OrderRefused(why))) => {
+                        report.orders_refused += 1;
+                        debug!(name = %cfg.name, "order refused: {why}");
+                    }
+                    Ok(Some(Control::Encounter { name, state })) => {
+                        info!(name = %cfg.name, encounter = %name, ?state, "encounter");
+                        match state {
+                            EncounterState::Cleared { secs } => report.cleared.push((name, secs)),
+                            EncounterState::Reset => report.resets += 1,
+                            EncounterState::Engaged => {}
+                        }
+                    }
+                    Ok(Some(Control::Loot { items, coin, .. })) => {
+                        info!(name = %cfg.name, ?items, coin, "loot");
+                        report.loot.extend(items);
+                        report.coin += coin;
+                    }
+                    Ok(Some(Control::Trial { key, passed, detail, secs, .. })) => {
+                        info!(name = %cfg.name, trial = %key, passed, secs, %detail, "trial");
+                        report.trials.push((key, passed, detail));
                     }
                     Ok(Some(Control::ModelRevoked(model))) => {
                         report.revocations += 1;

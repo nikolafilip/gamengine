@@ -185,6 +185,15 @@ pub fn pose(i: &AnimInput) -> Pose {
             torso(&mut p, -5.0, 0.0);
             legs(&mut p, -8.0, 10.0, 8.0, 10.0);
         }
+        anim::COMMAND => {
+            // Down on one knee, one arm stretched out ahead: giving orders, and plainly
+            // not fighting (COMPANIONS.md 5.1).
+            legs(&mut p, -85.0, 90.0, 5.0, 95.0);
+            arms(&mut p, 80.0, 0.0, -78.0, 18.0, 6.0);
+            torso(&mut p, 8.0, 0.0);
+            p.rot[HEAD] = ry(-6.0);
+            p.offset.z = -i.hips_z * 0.44;
+        }
         anim::STAGGER => {
             let wobble = 5.0 * (t * 14.0).sin();
             arms(&mut p, 50.0, -15.0, -20.0, 30.0, 25.0);
@@ -290,7 +299,7 @@ mod tests {
     use crate::rig::{self, ALL_BONES};
     use gm_core::vocab::ArchetypeFrame;
 
-    const STATES: [u8; 12] = [
+    const STATES: [u8; 13] = [
         anim::IDLE,
         anim::RUN,
         anim::AIR,
@@ -303,6 +312,7 @@ mod tests {
         anim::PARRY,
         anim::CAST,
         anim::STAGGER,
+        anim::COMMAND,
     ];
 
     fn at(state: u8, t: f32, cycle: f32) -> Pose {

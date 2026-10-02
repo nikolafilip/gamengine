@@ -13,7 +13,7 @@ anti-cheat, and the phased implementation plan with acceptance criteria.
 ```
 Cargo.toml          workspace (crates/*)
 crates/gm-core      shared simulation: entity vocabulary, matrix, builds, statuses, movement, fixed tick. No I/O.
-crates/gm-content   content loader: abilities and builds in TOML, compiled and validated into gm-core packs.
+crates/gm-content   content loader: abilities, builds, creatures and trials in TOML, compiled and validated into gm-core packs.
 crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
 crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
 crates/gm-client    wgpu forward renderer, skinned characters, model cache, Quake movement, zone connection.
@@ -22,14 +22,14 @@ crates/gm-hub       accounts, characters, zone registry, handoff, the economy, a
 crates/gm-hub-proto hub messages, entry tokens and the hub connection used by zones, bots and the client.
 crates/gm-model     avatar models: the standard rig, the .gmm container, the shared animation set, the mannequin.
 crates/gm-ingest    model ingestion: a glTF upload validated against budgets and the frame envelope, re-encoded.
-crates/gm-ai        AI companions (Phase 7).
+crates/gm-ai        minds: companions, creatures, the nav grid, encounters with their ledger, loot split and trial verdicts.
 crates/gm-tools     CLI: map build and generators, WAD generation, budget lint, model and moderation tools.
 crates/gm-bot       headless bots: the client's prediction code with scripted behaviour, for tests and load.
-assets/maps/src     TrenchBroom .map sources and gamengine.fgd (test_room, the 8v8 arena, the town)
+assets/maps/src     TrenchBroom .map sources and gamengine.fgd (test_room, the 8v8 arena, the town, the tutorial dungeon)
 assets/maps/built   compiled .bsp (+ .lit colored lightmaps)
 assets/textures     generated palette and WAD (gm-tools wad make)
-assets/content      abilities and preset builds (TOML), the v1 kits
-docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, BUILDING.md
+assets/content      abilities, preset builds, creatures, trials and items (TOML), the v1 content
+docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md, BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
@@ -81,6 +81,20 @@ cargo run --release -p gm-tools -- model ingest --frame striker striker.glb
 cargo run --release -p gm-client -- --map assets/maps/built/town.bsp --third-person --avatar striker.gmm
 ```
 
+Companions, command and the tutorial dungeon (Phase 7): a player leads a squad of three
+(hired avatars of other players, or recruits a tutorial zone lends), kneels into the command
+stance to see through the squad's eyes and give orders from the tactical viewport (`Tab`),
+and takes it through a gate and a boss; the kill drops its components through the hub and a
+role trial is recorded ([`docs/COMPANIONS.md`](docs/COMPANIONS.md)). Companions and creatures
+are the same body a player has, driven by minds that send the same inputs.
+
+```sh
+cargo run --release -p gm-server -- --map assets/maps/built/dungeon.bsp --cert-out zone-cert.der \
+    --squads --recruits ironclad,mender,frostweaver
+cargo run --release -p gm-client -- --map assets/maps/built/dungeon.bsp --connect 127.0.0.1:4433 \
+    --cert zone-cert.der --build blade --third-person
+```
+
 ## CI gates
 
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then:
@@ -106,6 +120,14 @@ cargo run --release -p gm-client -- --map assets/maps/built/town.bsp --third-per
   one drawn, 60 fps on the reference iGPU, RSS under the ceiling, and the model cache
   directory never above its cap. CI runs a 48-avatar smoke under software Vulkan; `--online`
   runs the whole path (uploads, ingestion, moderation, zone, bots, client).
+- `scripts/check-dungeon.sh` — one leader and three companions clear the tutorial dungeon:
+  offline on eight seeds, over a simulated network, and on a real zone (the clear, the drop,
+  the leader's trial, the wire); then sixteen leaders with their squads in one zone against
+  the tick and mind budgets. `--online` plays it through the hub: recruits first, then three
+  avatars hired with the coin of the first kill, then the zone the trial opens.
+- `crates/gm-server/tests/companions.rs` — the same through hub and Postgres in a test:
+  three hires paid and burned, the squad by name, the drop and the trial in the database,
+  the ledger sound, the gated zone, a hire ended by its avatar's owner.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

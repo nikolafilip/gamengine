@@ -7,14 +7,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gm_hub_proto::protocol::{
-    CharacterId, CharacterState, EconReply, HubNotice, HubRequest, HubResponse, ModelRef,
-    SessionToken, StallSummary, TokenPayload, ZoneEconOp, ZoneId, ZoneTicket, now_secs,
+    CharacterId, CharacterState, EconReply, HiredAvatar, HubNotice, HubRequest, HubResponse,
+    ModelRef, SessionToken, StallSummary, TokenPayload, ZoneEconOp, ZoneId, ZoneTicket, now_secs,
 };
 use gm_hub_proto::{HubClient, HubClientError, TokenError, TokenVerifier};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::net::ClientEvent;
+
+/// A kill is reported this many times at most, a quarter of a second apart at first and
+/// twice as long each time (eight seconds in all).
+const KILL_REPORT_TRIES: u32 = 6;
 
 pub struct HubLinkConfig {
     pub addr: SocketAddr,
@@ -26,6 +30,8 @@ pub struct HubLinkConfig {
     /// What clients connect to.
     pub public_addr: SocketAddr,
     pub zone_cert_der: Vec<u8>,
+    /// Trials that open this zone (COMPANIONS.md 11); empty = open to all.
+    pub requires: Vec<String>,
 }
 
 pub struct HubLink {
@@ -43,6 +49,8 @@ pub struct Claimed {
     pub team: u8,
     /// The avatar model, while it is active (MODELS.md 6.3).
     pub model: Option<ModelRef>,
+    /// The character's active hires (COMPANIONS.md 3.3).
+    pub squad: Vec<HiredAvatar>,
 }
 
 impl HubLink {
@@ -57,6 +65,7 @@ impl HubLink {
                 map_hash: cfg.map_hash,
                 addr: cfg.public_addr,
                 cert_der: cfg.zone_cert_der,
+                requires: cfg.requires,
             })
             .await?;
         let HubResponse::Registered { public_key } = resp else {
@@ -92,12 +101,14 @@ impl HubLink {
                 state,
                 team,
                 model,
+                squad,
             }) => Ok(Claimed {
                 character,
                 name,
                 state,
                 team,
                 model,
+                squad,
             }),
             Ok(other) => Err(format!("unexpected hub answer {other:?}")),
             Err(HubClientError::Refused(e)) => Err(e.to_string()),
@@ -177,6 +188,56 @@ impl HubLink {
             .map(|_| ())
     }
 
+    /// Everything one kill gives, once (ECONOMY.md 9): the report is repeated until the
+    /// hub answers, and the hub pays a `reference` only once. `Ok(false)`: paid before.
+    pub async fn grant_kill(
+        &self,
+        reference: i64,
+        components: Vec<(CharacterId, String)>,
+        coin: Vec<(CharacterId, i64)>,
+    ) -> Result<bool, String> {
+        let op = ZoneEconOp::GrantKill {
+            reference,
+            components,
+            coin,
+        };
+        let mut wait = Duration::from_millis(250);
+        let mut last = String::new();
+        for _ in 0..KILL_REPORT_TRIES {
+            match self.client.request(&HubRequest::ZoneEcon(op.clone())).await {
+                Ok(HubResponse::Econ(EconReply::Ids(_))) => return Ok(true),
+                Ok(HubResponse::Econ(EconReply::Done)) => return Ok(false),
+                Ok(other) => return Err(format!("unexpected hub answer {other:?}")),
+                // Busy is the database asking for a repeat; a lost answer is why the report
+                // may be repeated at all. Any other refusal will not change by asking again.
+                Err(HubClientError::Refused(e)) if e != gm_hub_proto::protocol::HubError::Busy => {
+                    return Err(e.to_string());
+                }
+                Err(e) => last = e.to_string(),
+            }
+            tokio::time::sleep(wait).await;
+            wait *= 2;
+        }
+        Err(last)
+    }
+
+    /// A character of this zone passed a trial (COMPANIONS.md 11).
+    pub async fn trial(
+        &self,
+        character: CharacterId,
+        trial: String,
+        secs: u32,
+    ) -> Result<(), String> {
+        self.client
+            .ok(&HubRequest::Trial {
+                character,
+                trial,
+                secs,
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     /// Every open stall of this zone.
     pub async fn stalls(&self) -> Result<Vec<StallSummary>, String> {
         match self.econ(ZoneEconOp::Stalls).await? {
@@ -220,6 +281,9 @@ impl HubLink {
                     }
                     HubNotice::ModelRevoked { model } => ClientEvent::HubModelRevoked { model },
                     HubNotice::StallClosed { stall } => ClientEvent::HubStallClosed { stall },
+                    HubNotice::HireEnded { hirer, hire } => {
+                        ClientEvent::HubHireEnded { hirer, hire }
+                    }
                 };
                 if tx.send(ev).await.is_err() {
                     break;

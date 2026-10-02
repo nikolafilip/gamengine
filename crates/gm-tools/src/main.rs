@@ -3,6 +3,7 @@
 
 mod arena;
 mod budget;
+mod dungeon;
 mod glb;
 mod hubcli;
 mod mapbuild;
@@ -148,6 +149,11 @@ enum MapCmd {
         #[arg(long, default_value = "assets/maps/src/town.map")]
         out: PathBuf,
     },
+    /// Write the generated tutorial dungeon source map (Phase 7).
+    GenDungeon {
+        #[arg(long, default_value = "assets/maps/src/dungeon.map")]
+        out: PathBuf,
+    },
     /// Print statistics about a compiled .bsp.
     Info { bsp: PathBuf },
 }
@@ -223,6 +229,17 @@ fn main() -> Result<()> {
             let text = town::generate();
             std::fs::write(&out, &text)?;
             println!("gen-town: {} bytes -> {}", text.len(), out.display());
+            Ok(())
+        }
+        Cmd::Map {
+            cmd: MapCmd::GenDungeon { out },
+        } => {
+            if let Some(dir) = out.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let text = dungeon::generate();
+            std::fs::write(&out, &text)?;
+            println!("gen-dungeon: {} bytes -> {}", text.len(), out.display());
             Ok(())
         }
         Cmd::Budget {

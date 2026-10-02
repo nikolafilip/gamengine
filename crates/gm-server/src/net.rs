@@ -8,7 +8,7 @@ use std::time::Duration;
 use glam::Vec3;
 use gm_core::build::{Build, ContentPack};
 use gm_core::vocab::EntityId;
-use gm_hub_proto::protocol::{CharacterId, ModelId, ModelRef, StallSummary};
+use gm_hub_proto::protocol::{CharacterId, HiredAvatar, ModelId, ModelRef, StallSummary};
 use gm_net::PROTOCOL_VERSION;
 use gm_net::control::{self, BuildChoice, Control};
 use gm_net::input::InputDatagram;
@@ -33,6 +33,8 @@ pub struct HubJoin {
     pub play_seconds: u32,
     /// The avatar model the hub says the character wears (MODELS.md 6.3).
     pub model: Option<ModelRef>,
+    /// The character's active hires: its companions here (COMPANIONS.md 3.3).
+    pub squad: Vec<HiredAvatar>,
 }
 
 pub enum ClientEvent {
@@ -91,6 +93,17 @@ pub enum ClientEvent {
     Respec {
         id: EntityId,
         build: BuildChoice,
+    },
+    /// An order for the client's squad (COMPANIONS.md 5.3).
+    Order {
+        id: EntityId,
+        slots: u8,
+        order: control::Order,
+    },
+    /// The hub says a hire ended early: its companion leaves (COMPANIONS.md 3.3).
+    HubHireEnded {
+        hirer: CharacterId,
+        hire: i64,
     },
     Input {
         id: EntityId,
@@ -199,6 +212,7 @@ async fn handle_connection(
                             origin,
                             play_seconds: claimed.state.play_seconds,
                             model: claimed.model,
+                            squad: claimed.squad,
                         }),
                     )
                 }
@@ -320,6 +334,11 @@ async fn handle_connection(
                     }
                     Ok(Some(Control::StallClose)) => {
                         if tx.send(ClientEvent::StallClose { id }).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(Control::Order { slots, order })) => {
+                        if tx.send(ClientEvent::Order { id, slots, order }).await.is_err() {
                             break;
                         }
                     }

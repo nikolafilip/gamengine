@@ -84,6 +84,8 @@ fn play(bsp: &Arc<Bsp>, build_a: &str, build_b: &str, seed: u64, secs: u32) -> O
                 anim: p.anim,
                 flags: if p.alive { flags::ALIVE } else { 0 },
                 status: p.mover.statuses.mask(),
+                health: None,
+                vel: p.mover.mv.velocity,
             })
             .collect();
         let inputs: Vec<(EntityId, Input)> = bots

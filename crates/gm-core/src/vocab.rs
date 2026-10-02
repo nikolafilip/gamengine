@@ -240,7 +240,12 @@ pub enum Origin {
         offset: [f32; 3],
     },
     Point([f32; 3]),
-    Target(EntityId),
+    /// Where the actor aims: the first body or world surface along the view ray within
+    /// `range`, dropped to the ground (under a body: its feet). Nothing homes; an area placed
+    /// here stays where it was put (VOCABULARY.md 4).
+    Aim {
+        range: f32,
+    },
     /// The impact point of the projectile that triggered this effect.
     Impact,
 }
@@ -331,6 +336,21 @@ pub struct AreaEffect {
     /// The caster is never a target (shockwaves from the caster's own feet). Default false:
     /// a fireball at your feet burns you.
     pub exclude_actor: bool,
+}
+
+impl AreaEffect {
+    /// It hurts who stands in it: it deals damage, or puts a status on them that is not a
+    /// boon. What a circle on the floor shows (PROTOCOL.md 5) and what a mind steps out of.
+    pub fn harmful(&self) -> bool {
+        self.damage.is_some_and(|d| d.amount > 0)
+            || self.effects.iter().any(|s| {
+                s.target != StatusTarget::Actor
+                    && !matches!(
+                        s.status,
+                        Status::Regen | Status::Haste | Status::Fortify | Status::Stealth
+                    )
+            })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -491,6 +511,7 @@ pub mod limits {
     pub const MAX_DASH_SPEED: f32 = 1600.0;
     pub const MAX_BLINK_DISTANCE: f32 = 384.0;
     pub const MAX_SCRIPT_S: f32 = 10.0;
+    pub const MAX_AIM_RANGE: f32 = 1024.0;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -569,6 +590,11 @@ fn validate_verb(
             if p.radius < 0.0 {
                 return Err(err("projectile radius negative"));
             }
+            if matches!(p.spawn, Origin::Aim { .. } | Origin::Impact) {
+                return Err(err(
+                    "a projectile spawns at the actor, not at an aim or impact",
+                ));
+            }
             for t in p.on_hit.iter().chain(&p.on_expire) {
                 match t {
                     Trigger::Status(st) => validate_verb(&Verb::ApplyStatus(*st), rate, err)?,
@@ -587,6 +613,11 @@ fn validate_verb(
             }
             if a.duration > 0 && a.interval == 0 {
                 return Err(err("persistent area needs an interval"));
+            }
+            if let Origin::Aim { range } = a.origin
+                && !(1.0..=limits::MAX_AIM_RANGE).contains(&range)
+            {
+                return Err(err("aim range out of range"));
             }
             if a.damage.is_none() && a.effects.is_empty() {
                 return Err(err("area effect does nothing"));

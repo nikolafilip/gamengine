@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use gm_ai::director::{CompanionSpec, CreatureSpawn, Director, DirectorEvent, EncounterState};
 use gm_core::build::{Build, ContentPack};
 use gm_core::sim::{HitKind, Zone, ZoneEvent};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Contents, Hull};
 use gm_core::vocab::EntityId;
-use gm_net::control::{BuildChoice, Control, PlayerEntry, StallEntry};
+use gm_net::control::{self, BodyKind, BuildChoice, Control, PlayerEntry, SquadEntry, StallEntry};
 use rayon::prelude::*;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -20,7 +21,9 @@ use tracing::{info, warn};
 use crate::hub_link::HubLink;
 use crate::net::{ClientEvent, EVENT_CHANNEL, JoinInfo, NetConfig, accept_loop};
 use crate::session::{PvsCache, Session, TickTable};
-use gm_hub_proto::protocol::{CharacterId, CharacterState, ModelId, StallSummary};
+use gm_hub_proto::protocol::{
+    CharacterId, CharacterState, ModelId, ModelRef, StallSummary, now_secs,
+};
 
 /// Zones save every character this often (HUB.md 3.2).
 pub const SAVE_EVERY: Duration = Duration::from_secs(30);
@@ -48,6 +51,16 @@ pub struct ZoneConfig {
     pub default_build: String,
     /// The hub this zone runs under (HUB.md); `None` = open development zone.
     pub hub: Option<Arc<HubLink>>,
+    /// A wild zone (COMPANIONS.md 3.1): every human is team 1 and the map's creatures stand
+    /// on their posts. Otherwise a team zone, as the arena.
+    pub wild: bool,
+    /// Companions come along with their commanders (COMPANIONS.md 3.2).
+    pub squads: bool,
+    /// Preset builds the zone lends to fill squad slots hires left empty (tutorial zones).
+    pub recruits: Vec<String>,
+    /// Every arrival starts at the map's spawns; a saved position is not resumed. For
+    /// dungeons: nobody logs out past the gate and comes back at the boss's feet.
+    pub arrive_at_entry: bool,
 }
 
 impl Default for ZoneConfig {
@@ -63,7 +76,64 @@ impl Default for ZoneConfig {
             content: gm_core::sim::test_content::pack(TickRate::COMBAT),
             default_build: "blade".into(),
             hub: None,
+            wild: false,
+            squads: false,
+            recruits: Vec::new(),
+            arrive_at_entry: false,
         }
+    }
+}
+
+fn wire_kind(kind: gm_ai::BodyKind) -> BodyKind {
+    match kind {
+        gm_ai::BodyKind::Human => BodyKind::Human,
+        gm_ai::BodyKind::Companion { owner } => BodyKind::Companion { owner },
+        gm_ai::BodyKind::Creature { def } => BodyKind::Creature { def },
+    }
+}
+
+fn wire_order(order: gm_ai::Order) -> control::Order {
+    match order {
+        gm_ai::Order::Follow => control::Order::Follow,
+        gm_ai::Order::Hold => control::Order::Hold,
+        gm_ai::Order::MoveTo(p) => control::Order::MoveTo(p.into()),
+        gm_ai::Order::Attack(id) => control::Order::Attack(id),
+    }
+}
+
+fn ai_order(order: control::Order) -> gm_ai::Order {
+    match order {
+        control::Order::Follow => gm_ai::Order::Follow,
+        control::Order::Hold => gm_ai::Order::Hold,
+        control::Order::MoveTo(p) => gm_ai::Order::MoveTo(p.into()),
+        control::Order::Attack(id) => gm_ai::Order::Attack(id),
+    }
+}
+
+/// A commander's squad as its client is told.
+fn squad_entries(director: &Director, zone: &Zone, commander: EntityId) -> Vec<SquadEntry> {
+    director
+        .squad(commander)
+        .iter()
+        .map(|m| SquadEntry {
+            id: m.id,
+            name: m.name.clone(),
+            role: m.role() as u8,
+            order: wire_order(m.mind.order()),
+            max_health: zone
+                .player(m.id)
+                .map_or(0, |p| p.max_health().clamp(0, u16::MAX as i32) as u16),
+            recruit: m.recruit,
+        })
+        .collect()
+}
+
+/// A recruit's name: the preset's, capitalised.
+fn recruit_name(preset: &str) -> String {
+    let mut c = preset.chars();
+    match c.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+        None => "Recruit".into(),
     }
 }
 
@@ -167,6 +237,20 @@ pub struct ZoneReport {
     /// Counters of the players connected right now (not yet folded into the totals).
     pub live_executed_frames: u64,
     pub live_starved_ticks: u64,
+    /// Minds the zone runs (companions and creatures) and what they cost, mean microseconds
+    /// per tick over the window (COMPANIONS.md 14).
+    pub minds: usize,
+    pub minds_us_mean: f64,
+    /// Encounters, totals since start.
+    pub encounters_engaged: u64,
+    pub encounters_reset: u64,
+    pub encounters_cleared: u64,
+    /// The time the last cleared encounter took, seconds.
+    pub last_clear_secs: u32,
+    pub loot_items: u64,
+    pub trials_passed: u64,
+    pub orders: u64,
+    pub orders_refused: u64,
 }
 
 /// Run the zone until `shutdown` resolves or `max_ticks` is reached. The endpoint must already
@@ -212,6 +296,45 @@ pub async fn run(
     }
 
     let mut zone = Zone::new(rate, cfg.seed, world.spawns.clone(), cfg.content.clone());
+    // Minds (COMPANIONS.md): the nav grid, the creatures on their posts, the squads.
+    let seeds: Vec<glam::Vec3> = world.spawns.iter().map(|s| s.origin).collect();
+    let posts: Vec<CreatureSpawn> = if cfg.wild {
+        world
+            .creature_posts
+            .iter()
+            .map(|p| CreatureSpawn {
+                creature: p.creature.clone(),
+                encounter: p.encounter.clone(),
+                origin: p.origin,
+                yaw: p.yaw,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let minded = cfg.squads || !posts.is_empty();
+    let nav_started = std::time::Instant::now();
+    let mut director = Director::new(
+        &mut zone,
+        &world.bsp,
+        &world.name,
+        if minded { &seeds } else { &[] },
+        &posts,
+        cfg.seed,
+    );
+    if minded {
+        info!(
+            nav_nodes = director.nav.len(),
+            nav_ms = format_args!("{:.1}", nav_started.elapsed().as_secs_f64() * 1000.0),
+            creatures = director.minds(),
+            "minds ready"
+        );
+    }
+    director.events.clear();
+    // The avatar models hired companions wear, and when their hires run out.
+    let mut companion_models: BTreeMap<EntityId, ModelRef> = BTreeMap::new();
+    let mut hire_expiry: BTreeMap<EntityId, u64> = BTreeMap::new();
+    let mut squads_dirty: Vec<EntityId> = Vec::new();
     let resolve = |zone: &Zone, choice: Option<&BuildChoice>| -> Result<Build, String> {
         match choice {
             None => zone
@@ -227,6 +350,7 @@ pub async fn run(
             Some(BuildChoice::Custom(b)) => Ok(b.clone()),
         }
     };
+    let started_unix = now_secs();
     let mut sessions: BTreeMap<EntityId, Session> = BTreeMap::new();
     let mut pvs = PvsCache::default();
     let mut table = TickTable::default();
@@ -299,7 +423,9 @@ pub async fn run(
                             continue;
                         }
                     };
-                    let team = if team == 0 || team > 2 {
+                    let team = if cfg.wild {
+                        1
+                    } else if team == 0 || team > 2 {
                         zone.smallest_team()
                     } else {
                         team
@@ -307,7 +433,8 @@ pub async fn run(
                     // A saved position is used when it is still a place to stand (the map
                     // may have been rebuilt since); otherwise the player spawns.
                     let resume = hub.as_ref().and_then(|h| h.origin).filter(|(origin, _)| {
-                        origin.is_finite()
+                        !cfg.arrive_at_entry
+                            && origin.is_finite()
                             && world.bsp.point_contents(Hull::Player, *origin) == Contents::Empty
                     });
                     let id = match resume {
@@ -331,6 +458,7 @@ pub async fn run(
                         .as_ref()
                         .and_then(|h| h.model)
                         .filter(|m| !revoked.iter().any(|(id, _)| *id == m.id));
+                    let hired = hub.as_ref().map(|h| h.squad.clone()).unwrap_or_default();
                     if let Some(h) = hub {
                         hub_slots.insert(
                             id,
@@ -363,20 +491,65 @@ pub async fn run(
                             name: name.clone(),
                             team,
                             model: session.announced,
+                            kind: BodyKind::Human,
                         });
                     }
                     sessions.insert(id, session);
+                    // The squad (COMPANIONS.md 3.2): hired avatars first, then the zone's
+                    // recruits for the slots left.
+                    if cfg.squads {
+                        for h in hired {
+                            let spec = CompanionSpec {
+                                name: h.name.clone(),
+                                build: h.build.clone(),
+                                recruit: false,
+                                hire: Some(h.hire),
+                            };
+                            if let Some(c) = director.add_companion(&mut zone, &world.bsp, id, spec)
+                            {
+                                hire_expiry.insert(c, h.expires_at);
+                                if let Some(m) = h.model.filter(|m| {
+                                    m.frame == crate::session::frame_index(h.build.frame)
+                                        && !revoked.iter().any(|(r, _)| *r == m.id)
+                                }) {
+                                    companion_models.insert(c, m);
+                                }
+                            }
+                        }
+                        for preset in &cfg.recruits {
+                            let Some(build) = zone.content.build(preset).cloned() else {
+                                continue;
+                            };
+                            let spec = CompanionSpec {
+                                name: recruit_name(preset),
+                                build,
+                                recruit: true,
+                                hire: None,
+                            };
+                            director.add_companion(&mut zone, &world.bsp, id, spec);
+                        }
+                    }
                     // The joiner learns everyone, itself included, in one message: a town
                     // of hundreds must not overflow its control queue.
-                    let roster: Vec<PlayerEntry> = sessions
+                    let mut roster: Vec<PlayerEntry> = sessions
                         .values()
                         .map(|s| PlayerEntry {
                             id: s.id,
                             name: s.name.clone(),
                             team: zone.player(s.id).map_or(0, |p| p.team()),
                             model: s.announced,
+                            kind: BodyKind::Human,
                         })
                         .collect();
+                    roster.extend(director.driven().into_iter().map(|(body, name, kind)| {
+                        PlayerEntry {
+                            id: body,
+                            name,
+                            team: zone.player(body).map_or(0, |p| p.team()),
+                            model: companion_models.get(&body).map(|m| m.id),
+                            kind: wire_kind(kind),
+                        }
+                    }));
                     sessions[&id].send_control(Control::Roster(roster));
                     if !stalls.is_empty() {
                         sessions[&id].send_control(Control::Stalls(
@@ -387,6 +560,33 @@ pub async fn run(
                         ));
                     }
                     report.joins += 1;
+                }
+                ClientEvent::Order { id, slots, order } => {
+                    let Some(session) = sessions.get(&id) else {
+                        continue;
+                    };
+                    let visible = |target: EntityId| session.sees(target);
+                    match director.order(&zone, id, slots, ai_order(order), &visible) {
+                        Ok(()) => report.orders += 1,
+                        Err(why) => {
+                            report.orders_refused += 1;
+                            session.send_control(Control::OrderRefused(why));
+                        }
+                    }
+                }
+                ClientEvent::HubHireEnded { hirer, hire } => {
+                    // The companion leaves now, or when its encounter ends (COMPANIONS.md 3.3).
+                    if let Some(commander) = hub_slots
+                        .iter()
+                        .find(|(_, s)| s.character == hirer)
+                        .map(|(id, _)| *id)
+                        && let Some(m) = director
+                            .squad(commander)
+                            .iter()
+                            .find(|m| m.hire == Some(hire))
+                    {
+                        hire_expiry.insert(m.id, 0);
+                    }
                 }
                 ClientEvent::Respec { id, build } => {
                     let result = resolve(&zone, Some(&build))
@@ -440,6 +640,7 @@ pub async fn run(
                                 token: bitcode::encode(&ticket.token),
                             });
                             zone.set_ghost(id, true);
+                            director.human_left(&mut zone, id);
                             if let Some(slot) = hub_slots.get_mut(&id) {
                                 slot.ghost_since = Some(Instant::now());
                             }
@@ -458,6 +659,7 @@ pub async fn run(
                         if let Some(slot) = hub_slots.get_mut(&id) {
                             slot.claimed_elsewhere = true;
                         }
+                        director.human_left(&mut zone, id);
                         zone.remove_player(id);
                         if let Some(s) = sessions.remove(&id) {
                             s.send_control(Control::Kick("claimed by another zone".into()));
@@ -656,6 +858,7 @@ pub async fn run(
                             link.save(slot.character, state, true).await;
                         });
                     }
+                    director.human_left(&mut zone, id);
                     let body = zone.remove_player(id);
                     if let Some(p) = &body {
                         info!(
@@ -734,11 +937,27 @@ pub async fn run(
                         link.save(slot.character, state, true).await;
                     });
                 }
+                director.human_left(&mut zone, id);
                 zone.remove_player(id);
                 for s in sessions.values() {
                     s.send_control(Control::PlayerLeft(id));
                 }
                 report.leaves += 1;
+            }
+        }
+
+        // Hires that ran out, or ended early: the companion leaves once it is not in the
+        // middle of an encounter (COMPANIONS.md 3.3). Looked at once a second.
+        if scheduler.tick().is_multiple_of(rate.hz() as u64) && !hire_expiry.is_empty() {
+            let now = now_secs();
+            let due: Vec<EntityId> = hire_expiry
+                .iter()
+                .filter(|(id, at)| **at <= now && !director.in_encounter(**id))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in due {
+                hire_expiry.remove(&id);
+                director.remove_companion(&mut zone, id);
             }
         }
 
@@ -752,11 +971,159 @@ pub async fn run(
         }
 
         phases.events += t_events.elapsed();
+        let t_minds = Instant::now();
+        director.pre_step(&mut zone, &world.bsp);
+        phases.minds += t_minds.elapsed();
         let t_sim = Instant::now();
         zone.step(&world.bsp);
         phases.sim += t_sim.elapsed();
 
         let events: Vec<ZoneEvent> = zone.events.drain(..).collect();
+        let t_minds = Instant::now();
+        director.post_step(&mut zone, &world.bsp, &events);
+        phases.minds += t_minds.elapsed();
+        // What the director did: rosters, squads, encounters, loot, trials.
+        for ev in std::mem::take(&mut director.events) {
+            match ev {
+                DirectorEvent::Spawned { id, name, kind } => {
+                    let team = zone.player(id).map_or(0, |p| p.team());
+                    let model = companion_models.get(&id).map(|m| m.id);
+                    for s in sessions.values() {
+                        s.send_control(Control::PlayerInfo {
+                            id,
+                            name: name.clone(),
+                            team,
+                            model,
+                            kind: wire_kind(kind),
+                        });
+                    }
+                }
+                DirectorEvent::Removed { id } => {
+                    companion_models.remove(&id);
+                    hire_expiry.remove(&id);
+                    for s in sessions.values() {
+                        s.send_control(Control::PlayerLeft(id));
+                    }
+                }
+                DirectorEvent::Squad { commander } => {
+                    if !squads_dirty.contains(&commander) {
+                        squads_dirty.push(commander);
+                    }
+                }
+                DirectorEvent::Encounter { name, state, tell } => {
+                    let wire = match state {
+                        EncounterState::Engaged => {
+                            report.encounters_engaged += 1;
+                            control::EncounterState::Engaged
+                        }
+                        EncounterState::Reset => {
+                            report.encounters_reset += 1;
+                            control::EncounterState::Reset
+                        }
+                        EncounterState::Cleared { secs } => {
+                            report.encounters_cleared += 1;
+                            report.last_clear_secs = secs;
+                            control::EncounterState::Cleared { secs }
+                        }
+                    };
+                    info!(encounter = %name, ?state, "encounter");
+                    for id in tell {
+                        if let Some(s) = sessions.get(&id) {
+                            s.send_control(Control::Encounter {
+                                name: name.clone(),
+                                state: wire,
+                            });
+                        }
+                    }
+                }
+                DirectorEvent::Loot {
+                    encounter,
+                    kill,
+                    grants,
+                } => {
+                    // The kill's reference: unique across restarts of this zone process.
+                    let reference = ((started_unix & 0xffff_ffff) << 24) as i64 | kill as i64;
+                    let mut items: Vec<(CharacterId, String)> = Vec::new();
+                    let mut coins: Vec<(CharacterId, i64)> = Vec::new();
+                    for g in &grants {
+                        report.loot_items += g.items.len() as u64;
+                        info!(encounter = %encounter, human = g.human, items = ?g.items, coin = g.coin, "loot");
+                        if let Some(s) = sessions.get(&g.human) {
+                            s.send_control(Control::Loot {
+                                encounter: encounter.clone(),
+                                items: g.items.clone(),
+                                coin: g.coin,
+                            });
+                        }
+                        if let Some(slot) = hub_slots.get(&g.human) {
+                            items.extend(g.items.iter().map(|m| (slot.character, m.clone())));
+                            if g.coin > 0 {
+                                coins.push((slot.character, g.coin as i64));
+                            }
+                        }
+                    }
+                    // One report per kill, repeated until the hub answers; the hub pays a
+                    // reference once (ECONOMY.md 9).
+                    if let Some(link) = cfg.hub.clone()
+                        && (!items.is_empty() || !coins.is_empty())
+                    {
+                        tokio::spawn(async move {
+                            match link.grant_kill(reference, items, coins).await {
+                                Ok(true) => {}
+                                Ok(false) => info!(reference, "the kill was already paid"),
+                                Err(e) => warn!(reference, "the drop of a kill is lost: {e}"),
+                            }
+                        });
+                    }
+                }
+                DirectorEvent::Trial {
+                    human,
+                    key,
+                    name,
+                    verdict,
+                    standing,
+                    secs,
+                } => {
+                    let passed = verdict.is_ok();
+                    info!(human, trial = %key, passed, %standing, "trial");
+                    if passed {
+                        report.trials_passed += 1;
+                    }
+                    if let Some(s) = sessions.get(&human) {
+                        s.send_control(Control::Trial {
+                            key: key.clone(),
+                            name,
+                            passed,
+                            // Why not; or, for a pass, what the ledger said.
+                            detail: verdict
+                                .err()
+                                .map_or_else(|| standing.to_string(), |f| f.to_string()),
+                            secs,
+                        });
+                    }
+                    if passed
+                        && let (Some(link), Some(slot)) = (cfg.hub.clone(), hub_slots.get(&human))
+                    {
+                        let character = slot.character;
+                        tokio::spawn(async move {
+                            if let Err(e) = link.trial(character, key, secs).await {
+                                warn!(character, "recording a trial: {e}");
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        // Squads that changed: their commanders are told, once, what the squad is now.
+        for commander in squads_dirty.drain(..) {
+            let entries = squad_entries(&director, &zone, commander);
+            if let Some(s) = sessions.get_mut(&commander)
+                && s.squad_told != entries
+            {
+                s.squad_told = entries.clone();
+                s.send_control(Control::Squad(entries));
+            }
+        }
         for ev in events {
             match ev {
                 ZoneEvent::Hit { kind, .. } => match kind {
@@ -792,6 +1159,7 @@ pub async fn run(
                                 name: name.clone(),
                                 team,
                                 model,
+                                kind: BodyKind::Human,
                             });
                         }
                     }
@@ -810,10 +1178,18 @@ pub async fn run(
 
         let tick = zone.tick;
         let t_snap = Instant::now();
-        table.rebuild(&zone, &world);
+        table.rebuild(&zone, &world, &|id| wire_kind(director.kind_of(id)));
         for s in sessions.values() {
             if let Some(leaf) = s.eye_leaf(&zone, &world) {
                 pvs.prepare(&world.bsp, leaf);
+            }
+            // Squad sight: the rows of a commanding client's companions (COMPANIONS.md 5.2).
+            if zone.player(s.id).is_some_and(crate::session::commanding) {
+                for m in director.squad(s.id) {
+                    if let Some(p) = zone.player(m.id).filter(|p| p.alive) {
+                        pvs.prepare(&world.bsp, world.bsp.leaf_for_point(p.mover.eye()));
+                    }
+                }
             }
         }
         // Each session's snapshot only reads the zone, the table and the PVS rows; the
@@ -861,6 +1237,7 @@ pub async fn run(
                 scheduler.tick(),
             );
             phases.fill(&mut report);
+            report.minds = director.minds();
             phases = Phases::default();
             *hub_stats.lock().unwrap() = (report.players as u32, report.tick_mean_us as f32);
             info!(
@@ -878,6 +1255,8 @@ pub async fn run(
                 sim_us = format_args!("{:.0}", report.sim_us_mean),
                 snapshot_us = format_args!("{:.0}", report.snapshot_us_mean),
                 send_us = format_args!("{:.0}", report.send_us_mean),
+                minds = report.minds,
+                minds_us = format_args!("{:.0}", report.minds_us_mean),
                 starved = report.starved_ticks + report.live_starved_ticks,
                 executed = report.executed_frames + report.live_executed_frames,
                 hits = report.hits_melee + report.hits_projectile + report.hits_area,
@@ -905,6 +1284,7 @@ pub async fn run(
         scheduler.tick(),
     );
     phases.fill(&mut report);
+    report.minds = director.minds();
     // Save everyone before the lights go out (HUB.md 3.2).
     if let Some(link) = &cfg.hub {
         for (&id, slot) in &hub_slots {
@@ -990,6 +1370,7 @@ fn fill_report(
 struct Phases {
     ticks: u64,
     events: Duration,
+    minds: Duration,
     sim: Duration,
     snapshot: Duration,
     send: Duration,
@@ -1002,6 +1383,7 @@ impl Phases {
         report.sim_us_mean = self.sim.as_secs_f64() * 1e6 / n;
         report.snapshot_us_mean = self.snapshot.as_secs_f64() * 1e6 / n;
         report.send_us_mean = self.send.as_secs_f64() * 1e6 / n;
+        report.minds_us_mean = self.minds.as_secs_f64() * 1e6 / n;
     }
 }
 

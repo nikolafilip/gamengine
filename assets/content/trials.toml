@@ -1,0 +1,42 @@
+# Role trials (COMPANIONS.md 11): an encounter plus conditions, judged for each human
+# participant when the encounter is cleared. Shares are per mille.
+
+[[trial]]
+key = "warden_leader"
+name = "Trial of the Warden: the leader"
+map = "dungeon"
+encounter = "warden"
+time_limit_s = 300
+max_party_deaths = 1
+max_humans = 1
+role = { command = 500 }
+
+[[trial]]
+key = "warden_vanguard"
+name = "Trial of the Warden: the vanguard"
+map = "dungeon"
+encounter = "warden"
+time_limit_s = 300
+max_party_deaths = 1
+max_humans = 1
+role = { tank = 500 }
+
+[[trial]]
+key = "warden_striker"
+name = "Trial of the Warden: the striker"
+map = "dungeon"
+encounter = "warden"
+time_limit_s = 300
+max_party_deaths = 1
+max_humans = 1
+role = { damage = 350 }
+
+[[trial]]
+key = "warden_mender"
+name = "Trial of the Warden: the mender"
+map = "dungeon"
+encounter = "warden"
+time_limit_s = 300
+max_party_deaths = 0
+max_humans = 1
+role = { healing = 500 }

@@ -219,6 +219,9 @@ part cheats do worst against server-simulated projectiles with variance.
 ### 4.3 Tactical/commander view [DECIDED]
 Never commands humans. (1) Leadership build commanding 3–5 hired AI; (2) bounty pins funded from the
 guild vault; (3) officer tool at a war table/watchtower with the body exposed.
+*(Phase 7 built (1): any character commands 3 companions, a leadership ability in the build makes it
+5; orders are given from the command stance, in which the body does nothing else. (2) and (3) are
+not built. `docs/COMPANIONS.md` 3 and 5.)*
 
 ### 4.4 Friendly fire and collision [DECIDED, scoped]
 Always on for AoE and projectiles. "Friendly" affects UI only, never damage. Team-kill stats feed reputation.
@@ -235,6 +238,9 @@ Sub-minimum items: keep or drop on the ground; dropped items persist and seed ot
 N guaranteed components per kill. Among competing parties: only parties with a living member present at
 kill time and above the contribution floor are eligible; proportional split; minimum one each; wiped = 0.
 Boss resets/stasis if the aggro-holding party is wiped. No last-hit sniping.
+*(Phase 7, to confirm: taken literally this lets a second party reset the first one's attempt by
+dying on purpose. As built, a party that is out for 5 s has exactly its own damage healed back and
+leaves the ledger; the boss resets when the last party is out. `docs/COMPANIONS.md` 9 and 16.)*
 
 ### 5.3 Crafting [DECIDED]
 Boss shard → passive trait; refined core → weight/durability/physical bias; catalyst → element;
@@ -343,13 +349,16 @@ gamengine/
                  melee, projectile sim, AI companions, loot/contract state machines, zone handoff.
     gm-hub       account/auth service, character DB, shard registry, escrow ledger, asset ingestion API.
     gm-hub-proto hub messages, entry tokens and the hub connection (what zones, bots and the client link).
-    gm-ai        companion behavior trees (tank/heal/dps/scout) driving gm-core inputs like a player.
+    gm-ai        minds: companions (heal/tank/scout/dps, read from the build) and creatures driving gm-core
+                 inputs like a player, the nav grid, and the director a zone runs them with: squads, orders,
+                 encounters with their ledger, the loot split of a kill, trial verdicts.
     gm-tools     CLI: model tools (ingest locally, template, synthetic avatars, upload, wear), moderation
                  tools, map build wrapper (ericw-tools) and map generators, budget checker used by CI.
     gm-bot       headless client for load tests and soak tests.
   assets/        maps (.map source + built .bsp/.lit + gamengine.fgd), textures (generated palette + WAD),
-                 content (abilities + builds, TOML), later models/audio
-  docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, BUILDING.md
+                 content (abilities, builds, creatures, trials, items; TOML), later models/audio
+  docs/          VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md,
+                 BUILDING.md
   PLAN.md        this file stays at the repository root (it is the entry point; README links it)
   budgets.toml   every number CI enforces; read by gm-tools and scripts/
   scripts/       CI gates and the pinned ericw-tools fetch
@@ -460,7 +469,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 4 | Hub: accounts, persistence, zones, handoff, 200-bot swarm | 200 bots on one zone under CPU budget; login → zone → handoff → logout round trip. **Done 2026-10-01** (11.10) |
 | 5 | Economy: stalls, escrow contracts, component drops with corrected split, crafting, decomposition, account storage caps, guild halls, tavern hires, ledger | every coin/item movement is a DB transaction; scam test suite passes (mutation lock, escrow, floors). **Done 2026-10-01** (11.10) |
 | 6 | Custom models: ingestion, hash cache, LRU, silhouette fallback, takedown flag, moderation queue | 100 unique uploaded avatars in a town at 60 fps on iGPU, no disk growth past cap. **Done 2026-10-01** (11.10) |
-| 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars |
+| 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars. **Done 2026-10-01** (11.10) |
 | 8 | WASM/WebGPU/WebTransport build | browser client joins the same zone as native clients |
 | 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account |
 | ∞ | Content, balance, ops, community | permanent |
@@ -749,6 +758,108 @@ build, none estimated; ranges are the spread over repeated runs):
   CDN at deployment); no ETC2/ASTC variant for mobile GPUs (Phase 8); the upload terms are a
   draft; who receives upload privileges is a moderator's decision per account.
 
+**2026-10-01, Phase 7 done** (same machine; all numbers measured with the final build, none
+estimated; ranges are the spread over repeated runs):
+- `docs/COMPANIONS.md` v1 is the contract, reviewed before coding (8 findings accepted, 1 corrected
+  differently, 1 rejected) and after (3 accepted, 1 that was wrong as stated but exposed a real gap,
+  1 already covered, 1 rejected). **One kind of body, three drivers**: a companion and a creature
+  are the same simulated body as a player and send the same inputs; a mind (`gm-ai`) knows what a
+  client in its place would be shown and reacts, turns and aims within stated limits (200 ms, 720°/s,
+  1.5° aim error, no shot through a friend).
+- **Squads and hires.** A character commands 3 companions, 5 with a leadership ability
+  (`war_standard`). A tavern hire is now what it buys: a copy of the listed character (name, build,
+  model) in the hirer's squad for the hire's 12 h, spawned by the zone at the claim; at most the
+  squad's capacity and one copy of an avatar; a hire ends when its owner plays the character or the
+  hirer dismisses it, never in the middle of a fight. Tutorial zones lend recruits to the slots
+  hires left empty, so a character without coin can play the tutorial.
+- **The command stance and the tactical viewport.** Button bit 11 kneels the body: no movement, no
+  action, no guard, 400 ms to stand up; it is part of the predicted mover. Only while it is held
+  does the client see through its companions' eyes and may it give orders (`Follow`, `Hold`,
+  `MoveTo`, `Attack`; eight a second; an `Attack` only on a body the client is being sent). The
+  client's third viewport (`Tab`) is a camera 760 u from the body at 60°, a free cursor, selection
+  and orders by keys and clicks; the world is drawn from the leaves the squad stands in, so where
+  nobody of the squad sees the screen is dark. The client has a HUD for the first time: a 5×7 font
+  drawn in the client, own bars, the squad panel, the bar of the creature being fought, messages.
+- **Creatures, encounters, loot, trials.** Creatures are builds without a budget
+  (`creatures.toml`) with threat tables (no taunt: nearness weighs threat times three), a leash, and
+  kits a reader can learn. An encounter keeps a ledger; the dead wait; a party that is out has its
+  own damage healed back; a clear splits the boss's components with the corrected split of Phase 5,
+  from the `standard` list for a party with companions and the `top` list for humans only (the loot
+  ceiling of 5.6), as **one idempotent hub transaction per kill**. Role trials (3.5) are an encounter
+  judged through a lens (damage, blows taken, healing, damage dealt under orders), recorded at the
+  hub, and a zone can require one (`--requires`).
+- **The tutorial dungeon** (`gm-tools map gen-dungeon`; 123,568 bytes, 2,677 nav nodes): an entry
+  hall, a passage with two turns, a gate of two sentinels (420 health each), a stair, the Warden's
+  hall (7,500 health, a maul every 2 s that must be blocked or stood behind, a telegraphed quake).
+  New content: `mend` and `sanctuary` for a healer (`Origin::Aim`; a packet of amount 0 is not an
+  attack), the presets `mender` and `captain`, four trials on the Warden.
+- **Acceptance: a solo player clears the tutorial dungeon with 3 hired avatars**, shown four ways.
+  - Offline (`crates/gm-ai/tests/dungeon.rs`; five minutes of fighting simulate in 0.1 s): the
+    reference squad (ironclad, mender, frostweaver) under a leader that only commands clears gate
+    and Warden on **8 of 8 seeds in 141–270 s** (the Warden in 94–126 s; one reset in all), drops
+    `core/iron, frame/ash, catalyst/basalt` and 30 copper to the one human, passes the leader's
+    trial with 100% of the damage under orders. Without a healer, or with three blades, the Warden
+    is not beaten in ten minutes on any seed (8–28 resets): the roles matter.
+  - Over the protocol (`crates/gm-server/tests/dungeon.rs`, simulated network, 150 ms round trip,
+    3% loss): a headless client that knows only its snapshots and messages clears it in **24 of 24
+    runs** (121–229 s), 4.6–5.6 KB/s down, 5.5 KB/s up, no unexplained correction.
+  - Through the hub (`crates/gm-server/tests/companions.rs`, real time, Postgres): three owners
+    list avatars at 100 copper, the leader hires them (90 burned, 70 to each owner), enters with
+    them and clears in 155 s (the test takes 162–174 s); the database holds the three components, the coin and the trial,
+    the ledger is sound, a zone that requires the trial was locked before and opens after, and an
+    owner playing its avatar ends that hire without a refund. `scripts/check-dungeon.sh --online`
+    does it with the real binaries: a first clear with recruits (221 s) pays for the three hires
+    of the second (273 s, the Warden in 215 s: a slow one, the damage dealer fell early).
+  - Seen: the windowed client on a virtual display under software Vulkan, driven by real key and
+    mouse events; a companion selected and sent to a point, the squad sent into the dark of the
+    gate room, two right clicks on the sentinels, **the gate cleared in 14 s**.
+- Budgets (`budgets.toml [companions]`, `scripts/check-dungeon.sh`): **16 leaders with 48
+  companions and the 3 creatures in one zone: tick 1.2–1.8 ms mean, 1.8–2.4 ms p99**, no overrun
+  (budget 4 ms); **3.9–6.5 µs per mind per tick** (budget 25); 15.3–17.9 KB/s down per leader, 19.3
+  for the worst (67 bodies in a small dungeon); nav grid of the dungeon in 6–14 ms, of the arena
+  (4,586 nodes) in 14 ms (budget 500 ms). The client in the tactical viewport: 5,400–7,300 fps
+  headless at 1280 × 720, 120 MB peak RSS.
+- What running it found, each with a test or a gate now (COMPANIONS.md 16):
+  - **Two bodies in one place held each other for good**, since Phase 2. A spawn point offered 9
+    places, so a team of 100 in the arena had 72: every swarm run since Phase 4 put the bots that
+    found none inside a body. A body that begins a step inside another is no longer held by it
+    (both sides of the wire, PROTOCOL.md 7.5) and a spawn point offers 25 places; the swarm now
+    lands 40% more hits (737–988 a run against 485–698). That cost the simulation a millisecond,
+    and the gate was at 7.2–7.9 of its 8 ms, until **sweeps against bodies got a grid** (bit-identical
+    to walking the list): **200 bots now take 4.9–6.1 ms a tick (p99 7.1–8.9), the simulation
+    1.3–1.6 ms of it** (Phase 6: 6.5–7.0 and 2.7–3.3 with part of the swarm stuck). This removes
+    the O(N²) of movement against bodies that the Phase 3 review deferred.
+  - A commander was not told when an order ended by itself, and led half its fights without
+    orders (5 of 24 kills at 50–60% under orders; 24 of 24 at 100% after).
+  - A kill's drop was not idempotent although ECONOMY.md said the kill's id made it so, and a
+    grant whose answer was lost was lost: now one transaction that claims `(zone, kill)` first.
+  - A leader who logged out past the gate came back at the Warden's feet (`--arrive-at-entry`).
+  - `tests/counterpick.rs` came within 0.05 of its bar by chance in one run of a dozen, on the
+    Phase 6 build as well (it failed once in a full run): ninety seconds instead of sixty, and it
+    asserts the turn of the match. Since then one failure in 106 runs, the last 90 clean; which
+    assertion it was is not known.
+- Protocol v3 (PROTOCOL.md 14), hub v1.3 (HUB.md 3.5, migration 0005: `hires.ended`, `trials`,
+  `kills`), vocabulary v0.4. `gm-ai` is no longer empty: minds, the nav grid (flood fill of the
+  player hull, A*, strongly connected components tabulated so "is there a way" is two lookups),
+  and the `Director` a zone runs them with.
+- Tests: 249 in the workspace, all green (and one tuning run that is ignored). Other gates on the final build: matrix unchanged to the
+  kill (85 : 30, 156 : 5, 100 : 58, mirror 70 : 69: the simulation changes are neutral for what
+  existed); netcode green; avatars 100 at 507–564 fps (the Phase 6 build measured 450–483 fps on
+  the same day); test room 4,797 fps, 129 MB; software Vulkan 227 fps, 170 MB.
+- Binaries (release, LTO): `gm-client` **8,963,560 bytes (8.55 MiB)**, +153,112 for the HUD, the
+  tactical viewport and the new messages; baseline updated. `gm-server` 5.49 MB (+0.59 MB: the
+  minds), `gm-hub` 7.19 MB, `gm-bot` 4.06 MB, `gm-tools` 4.59 MB.
+- Known limits: the HUD is bars, a squad panel and messages, nothing more (no inventory, tavern,
+  stall, trade or upload screen: hiring is still `gm-bot --hire` or the hub API); no party
+  invitations between humans, so a party is one human and its squad although the ledger, the split
+  and the trials take any number; companions do not use cover, do not kite out of melee and do not
+  interrupt; a fight in which the damage dealer falls early is won slowly by tank and healer (215 s
+  seen, 488 s once) and then fails the trial's 300 s; the simulated-network tests are not
+  bit-for-bit repeatable (QUIC draws its own random numbers), which is why they were run in dozens;
+  one swarm run in twenty lost a bot in its first second and its cause is not known; how often a
+  boss may be farmed is not decided (the Warden is back 120 s after it falls); markers in the
+  tactical view are flat boxes, and an area is a square plate.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -758,4 +869,10 @@ The model numbers are **proposed** in `docs/MODELS.md` 13 (the envelope: head pi
 box, coverage 50–150%, T-pose within 15°; 4 slots, 3 pending, 10 uploads an hour, 3 strikes, trust tier 2
 skips the queue, 8 MiB uploads, 256 MiB of models on the GPU) and so is **who may upload**: today a moderator
 grants `upload_privileges` per account. The upload terms in MODELS.md 10 are a draft for counsel.
+The companion numbers are **proposed** in `docs/COMPANIONS.md` 16 (squad of 3 and 5, the 400 ms of the
+stance, the limits of a mind, the threat rule, the Warden's and the sentinels' health, the four trials and
+their thresholds, respawns of 120 s and 600 s, creature health on the wire, one copy of an avatar per squad,
+dungeons putting every arrival at their entry) and so is the reading of 5.2 noted there. **How often a boss
+may be farmed** is open: the plan keeps a daily cap only as a bot-farm brake and asked to revisit it after
+load testing; nothing limits it today but the fight's length and the respawn.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

@@ -5,7 +5,7 @@
 //! (VOCABULARY.md 9): first person aims from the eyes, third person aims the camera ray at a
 //! world point and re-aims it from the eyes ("camera-to-muzzle re-aim").
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,20 +20,26 @@ use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Hull};
 use gm_model::ModelId;
 use gm_net::client::ClientState;
-use gm_net::control::{BuildChoice, Control, StallEntry};
+use gm_net::control::{
+    BodyKind, BuildChoice, Control, EncounterState, Order, SquadEntry, StallEntry,
+};
 use gm_net::snapshot::{EntityKind, SpawnInfo};
 use gm_net::transport::fnv1a64;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::avatars::{Avatars, Body, OWN, stall_boxes, stall_keeper};
 use crate::hub::{HubLogin, HubSession};
+use crate::hud::{self, Hud};
 use crate::net::{NetClient, NetEvent};
 use crate::render::{EntityDraw, Gpu, Renderer, view_proj};
 use crate::stats::{FrameStats, print_bench, print_bench_avatars};
+use crate::tactical::{self, Tactical, pick_body, pick_ground, project};
 use crate::world::{self, WorldMesh};
 use crate::{Error, Options};
 
@@ -126,7 +132,7 @@ impl Sim {
 }
 
 /// Networked play: the zone connection plus the shared prediction state.
-struct Online {
+pub(crate) struct Online {
     net: NetClient,
     /// `Welcome` arrived; the client state is built when `Content` follows.
     welcome: Option<(u32, u16)>,
@@ -141,6 +147,12 @@ struct Online {
     rate: TickRate,
     /// Everyone in the zone: name, team, avatar model.
     names: HashMap<u32, (String, u8, Option<ModelId>)>,
+    /// Who drives each body (COMPANIONS.md 2.1), as the zone announced it.
+    kinds: HashMap<u32, BodyKind>,
+    /// The own squad, in slot order, as the zone last told it.
+    squad: Vec<SquadEntry>,
+    /// Encounter, loot, trial and order messages: when, what, in which colour.
+    messages: VecDeque<(Instant, String, [f32; 4])>,
     /// The market: open stalls and their keepers (ECONOMY.md 7).
     stalls: Vec<StallEntry>,
     kills: u32,
@@ -154,7 +166,19 @@ struct Online {
     zone_name: String,
 }
 
+/// How long a message stays on the HUD, and how many are kept.
+const MESSAGE_SECS: f32 = 9.0;
+const MESSAGES_KEPT: usize = 6;
+
 impl Online {
+    fn say(&mut self, text: String, colour: [f32; 4]) {
+        log::info!("{text}");
+        self.messages.push_back((Instant::now(), text, colour));
+        while self.messages.len() > MESSAGES_KEPT {
+            self.messages.pop_front();
+        }
+    }
+
     fn build_name_of(&self, pack: &ContentPack, build: &gm_core::build::Build) -> String {
         pack.builds
             .iter()
@@ -171,6 +195,9 @@ struct Input {
     mouse: HashSet<MouseButton>,
     mouse_dx: f32,
     mouse_dy: f32,
+    /// Clicks and wheel turns since the last frame (the tactical viewport reads them).
+    clicks: Vec<MouseButton>,
+    wheel: f32,
 }
 
 impl Input {
@@ -193,6 +220,20 @@ impl Input {
             forward,
             side,
             jump: self.down(KeyCode::Space),
+        }
+    }
+
+    /// A frame in the command stance (COMPANIONS.md 5.1): the button, the facing, nothing
+    /// else. The tactical viewport sends these.
+    fn command_input(&mut self, yaw: f32, pitch: f32) -> SimInput {
+        self.just_pressed.clear();
+        SimInput {
+            buttons: buttons::COMMAND,
+            yaw,
+            pitch,
+            forward: 0.0,
+            side: 0.0,
+            ability: 0,
         }
     }
 
@@ -248,7 +289,8 @@ struct Active {
     gpu: Gpu,
     renderer: Renderer,
     avatars: Avatars,
-    current_leaf: Option<usize>,
+    /// The leaves the visible faces were last gathered from.
+    drawn_from: Vec<usize>,
 }
 
 struct App {
@@ -280,6 +322,16 @@ struct App {
     aim: (f32, f32),
     /// A map to switch to before the next frame (a zone change).
     pending_map: Option<PathBuf>,
+    /// The tactical viewport (COMPANIONS.md 6): over either of the other two.
+    tactical: Tactical,
+    /// Leaves the world is drawn from in the tactical view (the squad's sight).
+    tactical_leaves: Vec<usize>,
+    /// Health bars to draw over bodies this frame: where, how full, the colour.
+    bars: Vec<(Vec3, f32, [f32; 4])>,
+    /// Per squad slot: the companion's health as last sent, and whether it lives.
+    squad_view: Vec<(Option<u16>, bool)>,
+    /// The creature being fought: name, health, maximum.
+    target_view: Option<(String, u16, u16)>,
 }
 
 pub fn run(opts: Options) -> Result<(), Error> {
@@ -359,6 +411,9 @@ pub fn run(opts: Options) -> Result<(), Error> {
                 last_snapshot: Instant::now(),
                 rate: TickRate::COMBAT,
                 names: HashMap::new(),
+                kinds: HashMap::new(),
+                squad: Vec::new(),
+                messages: VecDeque::new(),
                 stalls: Vec::new(),
                 kills: 0,
                 deaths: 0,
@@ -404,7 +459,15 @@ pub fn run(opts: Options) -> Result<(), Error> {
         bench_yaw0: 0.0,
         aim: (0.0, 0.0),
         pending_map: None,
+        tactical: Tactical::new(),
+        tactical_leaves: Vec::new(),
+        bars: Vec::new(),
+        squad_view: Vec::new(),
+        target_view: None,
     };
+    if app.opts.tactical {
+        app.tactical.enter(app.sim.yaw);
+    }
     app.bench_yaw0 = app.sim.yaw;
     event_loop.run_app(&mut app)?;
     if let Some(o) = &mut app.online {
@@ -500,7 +563,200 @@ fn re_aim(
     (yaw, pitch)
 }
 
+/// The faces visible from any of `leaves`, each listed once.
+fn visible_from(bsp: &Bsp, leaves: &[usize]) -> Vec<u32> {
+    let mut seen = vec![false; bsp.faces.len()];
+    let mut out = Vec::new();
+    for &leaf in leaves {
+        for f in bsp.visible_faces(leaf) {
+            if !seen[f as usize] {
+                seen[f as usize] = true;
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+fn role_name(role: u8) -> &'static str {
+    match role {
+        0 => "heal",
+        1 => "tank",
+        2 => "scout",
+        _ => "dps",
+    }
+}
+
+fn order_name(order: &Order) -> &'static str {
+    match order {
+        Order::Follow => "follow",
+        Order::Hold => "hold",
+        Order::MoveTo(_) => "move",
+        Order::Attack(_) => "attack",
+    }
+}
+
+/// The HUD of one frame (COMPANIONS.md 6): the own bars, the squad panel, the creature
+/// being fought and the messages in every viewport; in the tactical one also the health
+/// bars over the bodies and the keys.
+pub(crate) fn build_hud(
+    hud: &mut Hud,
+    online: Option<&Online>,
+    tac: &Tactical,
+    vp: glam::Mat4,
+    bars: &[(Vec3, f32, [f32; 4])],
+    squad_view: &[(Option<u16>, bool)],
+    target: Option<&(String, u16, u16)>,
+) {
+    let (w, h) = hud.size;
+    let s = if h >= 1000.0 { 3.0 } else { 2.0 };
+    let line = (hud::GLYPH_H + 5.0) * s;
+    if tac.active {
+        for (at, frac, colour) in bars {
+            if let Some((x, y)) = project(vp, hud.size, *at) {
+                hud.bar(x - 22.0, y - 3.0, 44.0, 5.0, *frac, *colour);
+            }
+        }
+        let hint = "tab back   1-5 ` select   lmb pick   rmb move / attack   f follow   h hold   wasd pan   q e turn   wheel zoom";
+        // Bottom right: the own bars are bottom left.
+        let tw = Hud::text_width(s * 0.5, hint);
+        hud.label(w - tw - 16.0, h - 14.0 * s, s * 0.5, hud::DIM, hint);
+        let title = "tactical";
+        hud.label(
+            w - Hud::text_width(s, title) - 16.0,
+            16.0,
+            s,
+            hud::YELLOW,
+            title,
+        );
+    } else {
+        // The aim: a dot in the middle.
+        hud.rect(w * 0.5 - 2.0, h * 0.5 - 2.0, 4.0, 4.0, hud::SHADE);
+        hud.rect(w * 0.5 - 1.0, h * 0.5 - 1.0, 2.0, 2.0, hud::WHITE);
+    }
+    let Some(o) = online else { return };
+    let Some(c) = &o.client else { return };
+
+    // The own bars, bottom left.
+    let max_health = c.sheet.derived.health.max(1) as f32;
+    let rows: [(&str, f32, f32, [f32; 4]); 3] = [
+        ("hp", c.own_health.max(0) as f32, max_health, hud::RED),
+        (
+            "st",
+            c.mover.stamina,
+            c.sheet.derived.stamina.max(1.0),
+            hud::YELLOW,
+        ),
+        (
+            "fo",
+            c.mover.focus,
+            c.sheet.derived.focus.max(1.0),
+            hud::BLUE,
+        ),
+    ];
+    let mut y = h - 16.0 - line * rows.len() as f32;
+    if c.mover.commanding(c.tick) {
+        hud.label(16.0, y - line, s, hud::YELLOW, "command stance");
+    }
+    for (name, have, max, colour) in rows {
+        hud.label(16.0, y, s, hud::WHITE, name);
+        let x = 16.0 + 3.0 * hud::ADVANCE * s;
+        hud.bar(
+            x,
+            y + s,
+            180.0,
+            hud::GLYPH_H * s - 2.0 * s,
+            have / max,
+            colour,
+        );
+        hud.label(
+            x + 188.0,
+            y,
+            s,
+            hud::DIM,
+            &format!("{:.0}/{:.0}", have, max),
+        );
+        y += line;
+    }
+
+    // The squad, top left: slot, name, role, order, and its health under it.
+    let mut y = 16.0;
+    for (i, m) in o.squad.iter().enumerate() {
+        let (health, alive) = squad_view.get(i).copied().unwrap_or((None, false));
+        let picked = tac.active && tac.selected & (1 << i) != 0;
+        let colour = match (alive, picked) {
+            (false, _) => hud::RED,
+            (true, true) => hud::GREEN,
+            (true, false) => hud::WHITE,
+        };
+        let text = format!(
+            "{} {}  {}  {}",
+            i + 1,
+            m.name,
+            role_name(m.role),
+            if alive { order_name(&m.order) } else { "down" }
+        );
+        hud.label(16.0, y, s, colour, &text);
+        y += line;
+        let frac = health.map_or(0.0, |v| v as f32 / m.max_health.max(1) as f32);
+        hud.bar(16.0, y - 2.0 * s, 150.0, 3.0 * s, frac, hud::GREEN);
+        y += 6.0 * s;
+    }
+
+    // The creature being fought, top middle; messages under it.
+    let mut y = 16.0;
+    if let Some((name, health, max)) = target {
+        let tw = Hud::text_width(s, name);
+        hud.label((w - tw) * 0.5, y, s, hud::WHITE, name);
+        y += line;
+        let bw = (w * 0.34).min(520.0);
+        hud.bar(
+            (w - bw) * 0.5,
+            y,
+            bw,
+            5.0 * s,
+            *health as f32 / (*max).max(1) as f32,
+            hud::RED,
+        );
+        let count = format!("{health}/{max}");
+        hud.text(
+            (w - Hud::text_width(s * 0.5, &count)) * 0.5,
+            y + 0.75 * s,
+            s * 0.5,
+            hud::WHITE,
+            &count,
+        );
+        y += 5.0 * s + 10.0;
+    }
+    for (at, text, colour) in &o.messages {
+        if at.elapsed().as_secs_f32() > MESSAGE_SECS {
+            continue;
+        }
+        // A long line is cut to the screen: the log has the whole of it.
+        let fit = ((w - 40.0) / (hud::ADVANCE * s)) as usize;
+        let shown: String = text.chars().take(fit).collect();
+        let tw = Hud::text_width(s, &shown);
+        hud.label((w - tw) * 0.5, y, s, *colour, &shown);
+        y += line;
+    }
+}
+
 impl App {
+    /// Tab: into the tactical viewport, or back out of it.
+    fn toggle_tactical(&mut self) {
+        if self.tactical.active {
+            self.tactical.active = false;
+            self.set_grab(self.opts.bench_frames.is_none());
+        } else {
+            self.tactical.enter(self.sim.yaw);
+            self.set_grab(false);
+        }
+        log::info!(
+            "tactical viewport: {}",
+            if self.tactical.active { "on" } else { "off" }
+        );
+    }
+
     fn set_grab(&mut self, grab: bool) {
         let Some(a) = &self.active else { return };
         if grab {
@@ -572,6 +828,9 @@ impl App {
         event_loop: &ActiveEventLoop,
     ) -> Option<(Vec3, f32, f32)> {
         self.respec_hotkeys();
+        let size = self.active.as_ref().map_or((1280.0, 720.0), |a| {
+            (a.config.width as f32, a.config.height as f32)
+        });
         let bsp = &self.bsp;
         let viewport = self.viewport;
         let o = self.online.as_mut()?;
@@ -675,7 +934,9 @@ impl App {
                     }
                     Control::Roster(players) => {
                         o.names.clear();
+                        o.kinds.clear();
                         for p in players {
+                            o.kinds.insert(p.id, p.kind);
                             o.names.insert(p.id, (p.name, p.team, p.model));
                         }
                     }
@@ -684,8 +945,51 @@ impl App {
                         name,
                         team,
                         model,
+                        kind,
                     } => {
+                        o.kinds.insert(id, kind);
                         o.names.insert(id, (name, team, model));
+                    }
+                    Control::Squad(entries) => o.squad = entries,
+                    Control::OrderRefused(why) => {
+                        o.say(format!("order refused: {why}"), hud::ORANGE);
+                    }
+                    Control::Encounter { name, state } => {
+                        let (text, colour) = match state {
+                            EncounterState::Engaged => (format!("{name}: engaged"), hud::WHITE),
+                            EncounterState::Reset => (format!("{name}: reset"), hud::ORANGE),
+                            EncounterState::Cleared { secs } => {
+                                (format!("{name}: cleared in {secs} s"), hud::GREEN)
+                            }
+                        };
+                        o.say(text, colour);
+                    }
+                    Control::Loot {
+                        encounter,
+                        items,
+                        coin,
+                    } => {
+                        let mut what = items.join(", ");
+                        if coin > 0 {
+                            if !what.is_empty() {
+                                what.push_str(", ");
+                            }
+                            what.push_str(&format!("{coin} copper"));
+                        }
+                        o.say(format!("loot ({encounter}): {what}"), hud::YELLOW);
+                    }
+                    Control::Trial {
+                        name,
+                        passed,
+                        detail,
+                        ..
+                    } => {
+                        if passed {
+                            o.say(format!("trial passed: {name}"), hud::GREEN);
+                            o.say(detail, hud::DIM);
+                        } else {
+                            o.say(format!("trial not passed: {name}: {detail}"), hud::DIM);
+                        }
                     }
                     Control::ModelRevoked(id) => {
                         for entry in o.names.values_mut() {
@@ -716,6 +1020,7 @@ impl App {
                     }
                     Control::PlayerLeft(id) => {
                         o.names.remove(&id);
+                        o.kinds.remove(&id);
                     }
                     Control::Killed { victim, killer } => {
                         let me = o.client.as_ref().map(|c| c.my_id);
@@ -762,6 +1067,8 @@ impl App {
                     o.client = None;
                     o.pack = None;
                     o.names.clear();
+                    o.kinds.clear();
+                    o.squad.clear();
                     o.stalls.clear();
                     o.zone_name = zone;
                     o.respec_note = format!("travelling to {}", o.zone_name);
@@ -779,8 +1086,42 @@ impl App {
         o.accumulator += frame_dt.min(0.25);
         let mut steps = 0;
         let bodies = c.latest_boxes();
+        // The tactical viewport's keys are read before the ticks consume them: 1–5 select a
+        // companion, ` selects all, F and H order the selection to follow or hold.
+        let in_tactical = self.tactical.active;
+        let mut orders: Vec<Order> = Vec::new();
+        if in_tactical {
+            let slots = [
+                KeyCode::Digit1,
+                KeyCode::Digit2,
+                KeyCode::Digit3,
+                KeyCode::Digit4,
+                KeyCode::Digit5,
+            ];
+            for (i, k) in slots.iter().enumerate() {
+                if self.input.just_pressed.contains(k) && i < o.squad.len() {
+                    self.tactical.selected = 1 << i;
+                }
+            }
+            if self.input.just_pressed.contains(&KeyCode::Backquote) {
+                self.tactical.selected = 0b1_1111;
+            }
+            if self.input.just_pressed.contains(&KeyCode::KeyF) {
+                orders.push(Order::Follow);
+            }
+            if self.input.just_pressed.contains(&KeyCode::KeyH) {
+                orders.push(Order::Hold);
+            }
+            let (forward, side) = self.input.axes();
+            let turn =
+                self.input.down(KeyCode::KeyE) as i32 - self.input.down(KeyCode::KeyQ) as i32;
+            self.tactical
+                .steer(forward, side, turn as f32, self.input.wheel, frame_dt);
+        }
+        self.input.wheel = 0.0;
         while o.accumulator >= dt && steps < MAX_STEPS_PER_FRAME {
             let (yaw, pitch) = match viewport {
+                _ if in_tactical => (self.sim.yaw, self.sim.pitch),
                 Viewport::First => (self.sim.yaw, self.sim.pitch),
                 Viewport::Third => {
                     let eye = c.mover.eye();
@@ -789,7 +1130,11 @@ impl App {
                 }
             };
             self.aim = (yaw, pitch);
-            let input = self.input.sim_input(yaw, pitch);
+            let input = if in_tactical {
+                self.input.command_input(yaw, pitch)
+            } else {
+                self.input.sim_input(yaw, pitch)
+            };
             let datagram = c.local_tick(bsp, input);
             o.net.send_input(datagram.encode());
             o.prev_origin = o.curr_origin;
@@ -811,16 +1156,114 @@ impl App {
         let t = c.render_tick(extra);
         self.entities.clear();
         self.bodies.clear();
+        self.bars.clear();
         let my_team = o.team;
         let eye = {
             let alpha = (o.accumulator / o.rate.dt()).clamp(0.0, 1.0);
             o.prev_origin.lerp(o.curr_origin, alpha) + Vec3::Z * c.mover.mv.hull.eye_height()
         };
+        let centre = eye - Vec3::Z * c.mover.mv.hull.eye_height();
         let camera = match viewport {
+            _ if in_tactical => self.tactical.camera(centre),
             Viewport::First => eye,
             Viewport::Third => third_person_camera(bsp, eye, self.sim.yaw, self.sim.pitch),
         };
-        for e in c.others_at(t) {
+        let others = c.others_at(t);
+        // What the HUD shows of the squad and of the creature being fought: the one the
+        // squad is ordered onto, or else the nearest one that is hurt.
+        self.squad_view = o
+            .squad
+            .iter()
+            .map(|m| {
+                let e = others.iter().find(|e| e.id == m.id);
+                (e.and_then(|e| e.health), e.is_some_and(|e| e.alive()))
+            })
+            .collect();
+        self.target_view = None;
+        if let Some(pack) = &o.pack {
+            let mut best: Option<(f32, String, u16, u16)> = None;
+            for e in others.iter().filter(|e| e.alive()) {
+                let (Some(BodyKind::Creature { def }), Some(health)) =
+                    (o.kinds.get(&e.id), e.health)
+                else {
+                    continue;
+                };
+                let Some(d) = pack.creatures.get(*def as usize) else {
+                    continue;
+                };
+                let ordered = o
+                    .squad
+                    .iter()
+                    .any(|m| matches!(m.order, Order::Attack(id) if id == e.id));
+                if !ordered && health >= d.health {
+                    continue;
+                }
+                let rank = (e.pos - centre).length() - if ordered { 1.0e6 } else { 0.0 };
+                if best.as_ref().is_none_or(|b| rank < b.0) {
+                    best = Some((rank, d.name.clone(), health, d.health));
+                }
+            }
+            self.target_view = best.map(|(_, name, health, max)| (name, health, max));
+        }
+        if in_tactical {
+            // The world is drawn from where the squad stands: the commander's leaf and
+            // each companion's (squad sight, COMPANIONS.md 5.2).
+            let mut leaves = vec![bsp.leaf_for_point(eye)];
+            for e in &others {
+                if e.alive() && o.squad.iter().any(|m| m.id == e.id) {
+                    leaves.push(bsp.leaf_for_point(e.pos + Vec3::Z * 22.0));
+                }
+            }
+            leaves.retain(|l| *l != 0);
+            leaves.sort_unstable();
+            leaves.dedup();
+            self.tactical_leaves = leaves;
+            // Clicks: left selects the companion under the cursor, right orders the
+            // selection onto the body under it, or to the ground under it.
+            let vp = view_proj(camera, self.tactical.yaw, tactical::PITCH, size.0 / size.1);
+            let (origin, dir) = self.tactical.ray(vp, size);
+            let (mut mates, mut strangers) = (Vec::new(), Vec::new());
+            for e in others
+                .iter()
+                .filter(|e| e.kind == EntityKind::Player && e.alive())
+            {
+                if o.squad.iter().any(|m| m.id == e.id) {
+                    mates.push((e.id, e.pos));
+                } else {
+                    strangers.push((e.id, e.pos));
+                }
+            }
+            for click in self.input.clicks.drain(..) {
+                match click {
+                    MouseButton::Left => {
+                        if let Some(slot) = pick_body(origin, dir, &mates)
+                            .and_then(|id| o.squad.iter().position(|m| m.id == id))
+                        {
+                            self.tactical.selected = 1 << slot;
+                        }
+                    }
+                    MouseButton::Right => match pick_body(origin, dir, &strangers) {
+                        Some(id) => orders.push(Order::Attack(id)),
+                        None => {
+                            if let Some(point) = pick_ground(bsp, origin, dir) {
+                                orders.push(Order::MoveTo(point.into()));
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+            if !o.squad.is_empty() {
+                for order in orders.drain(..) {
+                    o.net.send_control(Control::Order {
+                        slots: self.tactical.selected,
+                        order,
+                    });
+                }
+            }
+        }
+        self.input.clicks.clear();
+        for e in others {
             match e.kind {
                 EntityKind::Player => {
                     let SpawnInfo::Player {
@@ -832,6 +1275,57 @@ impl App {
                     else {
                         continue;
                     };
+                    // Health the zone sends (the own party's and creatures') over the body.
+                    let mate = o.squad.iter().position(|m| m.id == e.id);
+                    let max_health = match (mate, o.kinds.get(&e.id), &o.pack) {
+                        (Some(i), _, _) => Some(o.squad[i].max_health),
+                        (None, Some(BodyKind::Creature { def }), Some(pack)) => {
+                            pack.creatures.get(*def as usize).map(|d| d.health)
+                        }
+                        _ => None,
+                    };
+                    if in_tactical
+                        && e.alive()
+                        && let (Some(h), Some(max)) = (e.health, max_health)
+                    {
+                        let colour = if mate.is_some() { hud::GREEN } else { hud::RED };
+                        self.bars.push((
+                            e.pos + Vec3::Z * 44.0,
+                            h as f32 / max.max(1) as f32,
+                            colour,
+                        ));
+                    }
+                    if in_tactical
+                        && e.alive()
+                        && let Some(i) = mate
+                    {
+                        // A plate under each companion, bright when it is selected.
+                        let lit = self.tactical.selected & (1 << i) != 0;
+                        let feet = e.pos - Vec3::Z * 23.0;
+                        self.entities.push(EntityDraw {
+                            mins: feet - Vec3::new(22.0, 22.0, 0.0),
+                            maxs: feet + Vec3::new(22.0, 22.0, 1.5),
+                            color: if lit {
+                                [0.35, 1.0, 0.45, 1.0]
+                            } else {
+                                [0.12, 0.40, 0.18, 1.0]
+                            },
+                        });
+                    }
+                    if in_tactical
+                        && e.alive()
+                        && o.squad
+                            .iter()
+                            .any(|m| matches!(m.order, Order::Attack(id) if id == e.id))
+                    {
+                        // The mark on whom the squad is ordered to attack.
+                        let feet = e.pos - Vec3::Z * 23.0;
+                        self.entities.push(EntityDraw {
+                            mins: feet - Vec3::new(30.0, 30.0, 0.0),
+                            maxs: feet + Vec3::new(30.0, 30.0, 1.0),
+                            color: [1.0, 0.15, 0.10, 1.0],
+                        });
+                    }
                     self.bodies.push(Body {
                         key: e.id,
                         origin: e.pos,
@@ -856,14 +1350,21 @@ impl App {
                     });
                 }
                 EntityKind::Area => {
-                    let r = match e.spawn {
-                        SpawnInfo::Area { radius, .. } => radius as f32,
-                        _ => 32.0,
+                    // What hurts is orange, what helps is green (PROTOCOL.md 5).
+                    let (r, harmful) = match e.spawn {
+                        SpawnInfo::Area {
+                            radius, harmful, ..
+                        } => (radius as f32, harmful),
+                        _ => (32.0, true),
                     };
                     self.entities.push(EntityDraw {
                         mins: e.pos - Vec3::new(r, r, 0.0),
                         maxs: e.pos + Vec3::new(r, r, 2.0),
-                        color: [1.0, 0.5, 0.1, 1.0],
+                        color: if harmful {
+                            [1.0, 0.5, 0.1, 1.0]
+                        } else {
+                            [0.2, 0.8, 0.4, 1.0]
+                        },
                     });
                 }
             }
@@ -884,9 +1385,22 @@ impl App {
                 self.bodies.push(stall_keeper(stall, camera));
             }
         }
+        if in_tactical {
+            // Where each companion was told to go.
+            for m in &o.squad {
+                if let Order::MoveTo(p) = m.order {
+                    let p = Vec3::from(p);
+                    self.entities.push(EntityDraw {
+                        mins: p - Vec3::new(8.0, 8.0, 24.0),
+                        maxs: p + Vec3::new(8.0, 8.0, -20.0),
+                        color: [0.25, 0.55, 1.0, 1.0],
+                    });
+                }
+            }
+        }
         match viewport {
-            Viewport::First => Some((eye, self.sim.yaw, self.sim.pitch)),
-            Viewport::Third => {
+            Viewport::First if !in_tactical => Some((eye, self.sim.yaw, self.sim.pitch)),
+            _ => {
                 // The own body, posed by the server's animation state.
                 let build = &c.sheet.build;
                 self.bodies.push(Body {
@@ -908,7 +1422,11 @@ impl App {
                     model: o.names.get(&c.my_id).and_then(|n| n.2),
                     distance: 0.0,
                 });
-                Some((camera, self.sim.yaw, self.sim.pitch))
+                if in_tactical {
+                    Some((camera, self.tactical.yaw, tactical::PITCH))
+                } else {
+                    Some((camera, self.sim.yaw, self.sim.pitch))
+                }
             }
         }
     }
@@ -931,7 +1449,7 @@ impl App {
             .count();
         if let Some(a) = &mut self.active {
             a.renderer.set_world(&a.gpu, &mesh);
-            a.current_leaf = None;
+            a.drawn_from = vec![usize::MAX];
         } else {
             self.mesh = Some(mesh);
         }
@@ -979,13 +1497,34 @@ impl App {
             } else {
                 self.input.move_input(self.sim.yaw)
             };
+            // Offline the tactical viewport is a camera and nothing else: there is no squad.
+            let in_tactical = self.tactical.active;
+            let input = if in_tactical {
+                let (forward, side) = self.input.axes();
+                let turn =
+                    self.input.down(KeyCode::KeyE) as i32 - self.input.down(KeyCode::KeyQ) as i32;
+                let turn = if bench { 0.2 } else { turn as f32 };
+                self.tactical
+                    .steer(forward, side, turn, self.input.wheel, frame_dt);
+                MoveInput {
+                    yaw: self.sim.yaw,
+                    ..Default::default()
+                }
+            } else {
+                input
+            };
+            self.input.wheel = 0.0;
+            self.input.clicks.clear();
             self.input.just_pressed.clear();
             self.sim.advance(&self.bsp, &input, frame_dt);
             self.entities.clear();
             self.bodies.clear();
+            self.bars.clear();
+            self.tactical_leaves = vec![self.bsp.leaf_for_point(self.sim.eye())];
+            self.tactical_leaves.retain(|l| *l != 0);
             match self.viewport {
-                Viewport::First => (self.sim.eye(), self.sim.yaw, self.sim.pitch),
-                Viewport::Third => {
+                Viewport::First if !in_tactical => (self.sim.eye(), self.sim.yaw, self.sim.pitch),
+                _ => {
                     let v = self.sim.curr.velocity;
                     self.bodies.push(Body {
                         key: OWN,
@@ -1008,30 +1547,47 @@ impl App {
                         model: None,
                         distance: 0.0,
                     });
-                    (
-                        third_person_camera(
-                            &self.bsp,
-                            self.sim.eye(),
+                    if in_tactical {
+                        if let Some(b) = self.bodies.last_mut() {
+                            b.anim = gm_core::sim::anim::COMMAND;
+                        }
+                        (
+                            self.tactical.camera(self.sim.origin()),
+                            self.tactical.yaw,
+                            tactical::PITCH,
+                        )
+                    } else {
+                        (
+                            third_person_camera(
+                                &self.bsp,
+                                self.sim.eye(),
+                                self.sim.yaw,
+                                self.sim.pitch,
+                            ),
                             self.sim.yaw,
                             self.sim.pitch,
-                        ),
-                        self.sim.yaw,
-                        self.sim.pitch,
-                    )
+                        )
+                    }
                 }
             }
         };
 
         let Some(a) = &mut self.active else { return };
-        let leaf = self.bsp.leaf_for_point(camera);
-        if a.current_leaf != Some(leaf) {
-            a.current_leaf = Some(leaf);
-            if leaf == 0 {
+        // The world is drawn from the camera's leaf; in the tactical viewport, whose camera
+        // hangs in the rock above the ceiling, from the leaves the squad stands in.
+        let leaves = if self.tactical.active {
+            self.tactical_leaves.clone()
+        } else {
+            vec![self.bsp.leaf_for_point(camera)]
+        };
+        if a.drawn_from != leaves {
+            if leaves.is_empty() || leaves.contains(&0) {
                 a.renderer.set_visible_faces(&a.gpu, None);
             } else {
-                let faces = self.bsp.visible_faces(leaf);
-                a.renderer.set_visible_faces(&a.gpu, Some(&faces));
+                a.renderer
+                    .set_visible_faces(&a.gpu, Some(&visible_from(&self.bsp, &leaves)));
             }
+            a.drawn_from = leaves;
         }
 
         let frame = match a.surface.get_current_texture() {
@@ -1098,13 +1654,21 @@ impl App {
             &a.renderer.characters,
             &mut self.entities,
         );
-        a.renderer.render(
-            &a.gpu,
-            &view,
-            view_proj(camera, cam_yaw, cam_pitch, aspect),
-            &self.entities,
-            &a.avatars.draws,
-        );
+        let vp = view_proj(camera, cam_yaw, cam_pitch, aspect);
+        a.renderer.hud.begin((a.config.width, a.config.height));
+        if !bench || self.opts.tactical {
+            build_hud(
+                &mut a.renderer.hud,
+                self.online.as_ref(),
+                &self.tactical,
+                vp,
+                &self.bars,
+                &self.squad_view,
+                self.target_view.as_ref(),
+            );
+        }
+        a.renderer
+            .render(&a.gpu, &view, vp, &self.entities, &a.avatars.draws);
         a.avatars.end_frame(&a.gpu, &mut a.renderer.characters);
         a.window.pre_present_notify();
         a.gpu.queue.present(frame);
@@ -1276,13 +1840,13 @@ impl ApplicationHandler for App {
                 gpu,
                 renderer,
                 avatars,
-                current_leaf: None,
+                drawn_from: vec![usize::MAX],
             })
         })();
         match result {
             Ok(a) => {
                 self.active = Some(a);
-                if self.opts.bench_frames.is_none() {
+                if self.opts.bench_frames.is_none() && !self.tactical.active {
                     self.set_grab(true);
                 }
                 self.last_frame = Instant::now();
@@ -1306,13 +1870,25 @@ impl ApplicationHandler for App {
                 self.set_grab(false);
             }
             WindowEvent::Focused(true) => {
-                if self.opts.bench_frames.is_none() {
+                if self.opts.bench_frames.is_none() && !self.tactical.active {
                     self.set_grab(true);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.tactical.cursor = (position.x as f32, position.y as f32);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.input.wheel += match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+            }
             WindowEvent::MouseInput { state, button, .. } => match state {
                 ElementState::Pressed => {
-                    if !self.grabbed && self.opts.bench_frames.is_none() {
+                    if self.tactical.active {
+                        // The cursor is free here: a click picks or orders.
+                        self.input.clicks.push(button);
+                    } else if !self.grabbed && self.opts.bench_frames.is_none() {
                         self.set_grab(true);
                     } else {
                         self.input.mouse.insert(button);
@@ -1331,7 +1907,9 @@ impl ApplicationHandler for App {
                             }
                             match code {
                                 KeyCode::Escape => self.set_grab(false),
-                                KeyCode::KeyQ => event_loop.exit(),
+                                // Q turns the tactical camera; elsewhere it quits.
+                                KeyCode::KeyQ if !self.tactical.active => event_loop.exit(),
+                                KeyCode::Tab if !event.repeat => self.toggle_tactical(),
                                 KeyCode::KeyV if !event.repeat => {
                                     self.viewport = match self.viewport {
                                         Viewport::First => Viewport::Third,

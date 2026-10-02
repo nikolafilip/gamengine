@@ -102,6 +102,28 @@ pub struct Item {
     pub components: Vec<Component>,
 }
 
+/// A hire in its window that nobody ended (COMPANIONS.md 3.3). `build` is the avatar's
+/// stored build as the database holds it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveHire {
+    pub id: i64,
+    pub avatar: i64,
+    pub name: String,
+    pub build: serde_json::Value,
+    pub expires_unix: i64,
+}
+
+/// A character listed for hire (ECONOMY.md 11).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TavernRow {
+    pub character: i64,
+    pub name: String,
+    pub build: serde_json::Value,
+    pub price: i64,
+    /// Hires in the last 12 h.
+    pub hires: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// Boss dead and the buyer present (alive or not): the sellers are paid.
@@ -621,6 +643,77 @@ impl Economy {
         }
         tx.commit().await.map_err(internal)?;
         Ok(ids)
+    }
+
+    /// Everything one kill gives, as one transaction that happens once (ECONOMY.md 9):
+    /// `components` are `(recipient, material)`, a recipient of `None` being the zone's
+    /// ground (a recipient who has left); `coin` is `(character, copper)`. Returns the item
+    /// ids, or `None` when this kill of this zone was paid before: the report was a repeat.
+    pub async fn grant_kill(
+        &self,
+        zone: &str,
+        reference: i64,
+        components: &[(Option<i64>, String)],
+        coin: &[(i64, i64)],
+    ) -> Result<Option<Vec<i64>>, EconError> {
+        if coin
+            .iter()
+            .any(|(_, amount)| *amount <= 0 || *amount > MAX_PRICE)
+        {
+            return Err(EconError::Invalid("amount".into()));
+        }
+        let mut tx = self.begin().await?;
+        let claimed = sqlx::query(
+            "insert into kills (zone, ref) values ($1, $2) on conflict do nothing returning ref",
+        )
+        .bind(zone)
+        .bind(reference)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?;
+        if claimed.is_none() {
+            return Ok(None);
+        }
+        let source = singleton(&mut tx, "source").await?;
+        let mut targets = Vec::with_capacity(components.len());
+        let mut holders = Vec::new();
+        for (character, _) in components {
+            let holder = match character {
+                Some(c) => Some(character_holder(&mut tx, *c).await?),
+                None => None,
+            };
+            holders.extend(holder);
+            targets.push(holder);
+        }
+        let mut purses = Vec::with_capacity(coin.len());
+        for (character, _) in coin {
+            let holder = character_holder(&mut tx, *character).await?;
+            holders.push(holder);
+            purses.push(holder);
+        }
+        lock_holders(&mut tx, &holders).await?;
+        let mut ids = Vec::with_capacity(components.len());
+        for ((_, material), holder) in components.iter().zip(&targets) {
+            let target = match holder {
+                Some(h) if has_room(&mut tx, *h, 1).await? => *h,
+                _ => ground_holder(&mut tx, zone).await?,
+            };
+            let id = create_component(&mut tx, target, material).await?;
+            sqlx::query("insert into item_moves (item_id, from_holder, to_holder, reason, ref) values ($1, $2, $3, 'drop', $4)")
+                .bind(id)
+                .bind(source)
+                .bind(target)
+                .bind(reference)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?;
+            ids.push(id);
+        }
+        for ((_, amount), holder) in coin.iter().zip(&purses) {
+            move_coin(&mut tx, source, *holder, *amount, "drop", reference).await?;
+        }
+        tx.commit().await.map_err(internal)?;
+        Ok(Some(ids))
     }
 
     /// A coin drop: source → character.
@@ -1984,8 +2077,16 @@ impl Economy {
 
     /// Hire an offline avatar: 30% of the price burns, 70% goes to the avatar. An account
     /// cannot hire its own characters (the burn would otherwise be the only cost of moving
-    /// coin between alts, and the hire the way to farm with them). Returns the amount burned.
-    pub async fn hire(&self, hirer: i64, avatar: i64) -> Result<i64, EconError> {
+    /// coin between alts, and the hire the way to farm with them). `capacity` is the hirer's
+    /// squad capacity (COMPANIONS.md 3.3): a hire beyond it, or a second copy of an avatar
+    /// already in the squad, is refused before any coin moves. Returns the hire's id and the
+    /// amount burned.
+    pub async fn hire(
+        &self,
+        hirer: i64,
+        avatar: i64,
+        capacity: usize,
+    ) -> Result<(i64, i64), EconError> {
         let mut tx = self.begin().await?;
         let r = sqlx::query(
             "select l.price, c.account_id, c.location_kind from hire_listings l join characters c on c.id = l.character_id \
@@ -2012,6 +2113,27 @@ impl Economy {
         let avatar_h = character_holder(&mut tx, avatar).await?;
         let sink = singleton(&mut tx, "sink").await?;
         lock_holders(&mut tx, &[hirer_h, avatar_h]).await?;
+        // Under the hirer's holder lock, so two hires at once cannot both see room.
+        let squad: Vec<i64> = sqlx::query(
+            "select avatar_character from hires where hirer_character = $1 and ended is null \
+             and at > now() - make_interval(hours => $2)",
+        )
+        .bind(hirer)
+        .bind(HIRE_WINDOW_HOURS as i32)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(internal)?
+        .iter()
+        .map(|r| r.try_get("avatar_character").map_err(internal))
+        .collect::<Result<_, _>>()?;
+        if squad.contains(&avatar) {
+            return Err(EconError::State(
+                "that avatar is already in your squad".into(),
+            ));
+        }
+        if squad.len() >= capacity {
+            return Err(EconError::State("your squad is full".into()));
+        }
         let hire_id: i64 = sqlx::query("insert into hires (avatar_character, hirer_character, price, burned) values ($1, $2, $3, $4) returning id")
             .bind(avatar)
             .bind(hirer)
@@ -2025,14 +2147,82 @@ impl Economy {
         move_coin(&mut tx, hirer_h, sink, burn, "hire_burn", hire_id).await?;
         move_coin(&mut tx, hirer_h, avatar_h, price - burn, "hire", hire_id).await?;
         tx.commit().await.map_err(internal)?;
-        Ok(burn)
+        Ok((hire_id, burn))
     }
 
-    /// The tavern list: `(character, price, hires in the window)`, avatars hired three or
-    /// more times in the last 12 h sorted last (diminishing priority).
-    pub async fn tavern(&self) -> Result<Vec<(i64, i64, i64)>, EconError> {
+    /// The active hires of `hirer`, oldest first (COMPANIONS.md 3.3).
+    pub async fn squad(&self, hirer: i64) -> Result<Vec<ActiveHire>, EconError> {
         let rows = sqlx::query(
-            "select l.character_id, l.price, (select count(*) from hires h where h.avatar_character = l.character_id \
+            "select h.id, h.avatar_character, c.name, c.build, \
+             extract(epoch from h.at + make_interval(hours => $2))::bigint as expires \
+             from hires h join characters c on c.id = h.avatar_character \
+             where h.hirer_character = $1 and h.ended is null and h.at > now() - make_interval(hours => $2) \
+             order by h.at, h.id",
+        )
+        .bind(hirer)
+        .bind(HIRE_WINDOW_HOURS as i32)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        rows.iter()
+            .map(|r| {
+                Ok(ActiveHire {
+                    id: r.try_get("id").map_err(internal)?,
+                    avatar: r.try_get("avatar_character").map_err(internal)?,
+                    name: r.try_get("name").map_err(internal)?,
+                    build: r.try_get("build").map_err(internal)?,
+                    expires_unix: r.try_get("expires").map_err(internal)?,
+                })
+            })
+            .collect()
+    }
+
+    /// The hirer sends a hired avatar away before its time. Nothing is refunded.
+    pub async fn dismiss(&self, hirer: i64, hire: i64) -> Result<(), EconError> {
+        let n = sqlx::query(
+            "update hires set ended = now() where id = $1 and hirer_character = $2 and ended is null \
+             and at > now() - make_interval(hours => $3)",
+        )
+        .bind(hire)
+        .bind(hirer)
+        .bind(HIRE_WINDOW_HOURS as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?
+        .rows_affected();
+        if n == 0 {
+            return Err(EconError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// The avatar's owner took the character back (ECONOMY.md 11): every active hire of it
+    /// ends, without a refund. Returns `(hire, hirer)` for each.
+    pub async fn end_hires_of(&self, avatar: i64) -> Result<Vec<(i64, i64)>, EconError> {
+        let rows = sqlx::query(
+            "update hires set ended = now() where avatar_character = $1 and ended is null \
+             and at > now() - make_interval(hours => $2) returning id, hirer_character",
+        )
+        .bind(avatar)
+        .bind(HIRE_WINDOW_HOURS as i32)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    r.try_get("id").map_err(internal)?,
+                    r.try_get("hirer_character").map_err(internal)?,
+                ))
+            })
+            .collect()
+    }
+
+    /// The tavern list, avatars hired three or more times in the last 12 h sorted last
+    /// (diminishing priority).
+    pub async fn tavern(&self) -> Result<Vec<TavernRow>, EconError> {
+        let rows = sqlx::query(
+            "select l.character_id, c.name, c.build, l.price, (select count(*) from hires h where h.avatar_character = l.character_id \
              and h.at > now() - make_interval(hours => $1)) as recent from hire_listings l \
              join characters c on c.id = l.character_id where c.location_kind = 'offline' \
              order by (select count(*) from hires h where h.avatar_character = l.character_id \
@@ -2045,11 +2235,13 @@ impl Economy {
         .map_err(internal)?;
         rows.iter()
             .map(|r| {
-                Ok((
-                    r.try_get("character_id").map_err(internal)?,
-                    r.try_get("price").map_err(internal)?,
-                    r.try_get("recent").map_err(internal)?,
-                ))
+                Ok(TavernRow {
+                    character: r.try_get("character_id").map_err(internal)?,
+                    name: r.try_get("name").map_err(internal)?,
+                    build: r.try_get("build").map_err(internal)?,
+                    price: r.try_get("price").map_err(internal)?,
+                    hires: r.try_get("recent").map_err(internal)?,
+                })
             })
             .collect()
     }

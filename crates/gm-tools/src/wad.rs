@@ -78,7 +78,7 @@ pub struct Texture {
 
 /// The textures every map can rely on. Names are at most 15 characters (WAD limit).
 /// `skip`, `clip` and `trigger` are tool textures qbsp looks up by name.
-pub const BASE_TEXTURES: [&str; 16] = [
+pub const BASE_TEXTURES: [&str; 19] = [
     "floor_stone",
     "wall_brick",
     "ceil_plaster",
@@ -96,6 +96,10 @@ pub const BASE_TEXTURES: [&str; 16] = [
     "roof_tile",
     "market_tile",
     "sky_day",
+    // The dungeon (Phase 7).
+    "dungeon_wall",
+    "dungeon_floor",
+    "rune_stone",
 ];
 
 fn hash(x: i32, y: i32, seed: u32) -> f32 {
@@ -343,6 +347,85 @@ fn generate_rgb(name: &str, x: i32, y: i32) -> [f32; 3] {
                     0.9 + 0.14 * smooth_noise(x, y, p, 16, 121)
                         + 0.05 * (noise(x, y, p, p, 122) - 0.5),
                 )
+            }
+        }
+        "dungeon_wall" => {
+            // Big ashlar blocks, cold grey, each a little different, dark joints, damp
+            // streaks running down.
+            let (bw, bh) = (32, 32);
+            let row = y.div_euclid(bh);
+            let xo = if row % 2 == 0 { 0 } else { bw / 2 };
+            let bx = (x + xo).div_euclid(bw);
+            let (u, v) = ((x + xo).rem_euclid(bw), y.rem_euclid(bh));
+            let joint = u < 2 || v < 2;
+            if joint {
+                scale([0.10, 0.10, 0.12], 0.8 + 0.4 * noise(x, y, p, p, 131))
+            } else {
+                let base = mix(
+                    [0.30, 0.31, 0.36],
+                    [0.40, 0.40, 0.44],
+                    noise(bx, row, p / bw, p / bh, 132),
+                );
+                let chisel = 0.88
+                    + 0.18 * smooth_noise(x, y, p, 8, 133)
+                    + 0.07 * (noise(x, y, p, p, 134) - 0.5);
+                let streak = 1.0 - 0.18 * smooth_noise(x, 0, p, 4, 135) * (v as f32 / bh as f32);
+                // A bevel: lit along the top edge, dark along the bottom.
+                let bevel = if v < 4 {
+                    1.12
+                } else if v >= bh - 3 {
+                    0.82
+                } else {
+                    1.0
+                };
+                scale(base, chisel * streak * bevel)
+            }
+        }
+        "dungeon_floor" => {
+            // Worn flagstones of two sizes, darker than the walls.
+            let tile = 32;
+            let (tx, ty) = (x.div_euclid(tile), y.div_euclid(tile));
+            let split = noise(tx, ty, p / tile, p / tile, 141) > 0.6;
+            let (u, v) = (x.rem_euclid(tile), y.rem_euclid(tile));
+            let grout = u < 1 || v < 1 || (split && (v - tile / 2).abs() < 1);
+            if grout {
+                [0.07, 0.07, 0.08]
+            } else {
+                let base = mix(
+                    [0.22, 0.22, 0.24],
+                    [0.30, 0.29, 0.29],
+                    noise(
+                        tx,
+                        ty + if split && v > tile / 2 { 7 } else { 0 },
+                        p / tile,
+                        97,
+                        142,
+                    ),
+                );
+                scale(
+                    base,
+                    0.85 + 0.25 * smooth_noise(x, y, p, 8, 143)
+                        + 0.06 * (noise(x, y, p, p, 144) - 0.5),
+                )
+            }
+        }
+        "rune_stone" => {
+            // Black stone with a lattice of faintly glowing lines: the Warden's own.
+            let (xx, yy) = (x.rem_euclid(32), y.rem_euclid(32));
+            let line = xx == 15 || xx == 16 || yy == 15 || yy == 16;
+            let knot =
+                (xx - 16).abs() + (yy - 16).abs() <= 5 && (xx - 16).abs() + (yy - 16).abs() >= 4;
+            let glow = [0.25, 0.75, 0.85];
+            let stone = scale(
+                [0.13, 0.13, 0.16],
+                0.85 + 0.3 * smooth_noise(x, y, p, 8, 151),
+            );
+            if knot {
+                glow
+            } else if line {
+                mix(stone, glow, 0.55)
+            } else {
+                stone
             }
         }
         // Flat on purpose: any pattern in a tiled sky shows as a grid overhead.

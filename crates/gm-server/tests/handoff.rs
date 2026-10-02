@@ -73,6 +73,7 @@ async fn start_zone(
         map_hash: world.hash,
         public_addr: addr,
         zone_cert_der: identity.cert_der().to_vec(),
+        requires: Vec::new(),
     })
     .await
     .expect("zone registers");
@@ -159,6 +160,8 @@ async fn login_zone_handoff_logout_round_trip() {
             stall_tile: None,
         },
         play: Duration::from_secs(7),
+        list_for_hire: None,
+        hire: 0,
     }));
 
     // Poll the database for the expected locations (event-driven on the hub's side; the test

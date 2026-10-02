@@ -1238,6 +1238,9 @@ dependencies = [
 name = "gm-ai"
 version = "0.1.0"
 dependencies = [
+ "glam",
+ "gm-bsp",
+ "gm-content",
  "gm-core",
 ]
 
@@ -1249,6 +1252,7 @@ dependencies = [
  "bitcode",
  "bytes",
  "glam",
+ "gm-ai",
  "gm-bsp",
  "gm-content",
  "gm-core",
@@ -1407,6 +1411,7 @@ dependencies = [
  "bitcode",
  "bytes",
  "glam",
+ "gm-ai",
  "gm-bot",
  "gm-bsp",
  "gm-content",

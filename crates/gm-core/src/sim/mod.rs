@@ -15,10 +15,11 @@ mod tests;
 
 pub use mover::{
     Action, CAST_ANIM_NONE, Dash, GuardState, Input, Mover, Script, anim, buttons, capsule_at,
-    melee_hit_point, step_mover, view_dir,
+    command_exit_ticks, melee_hit_point, step_mover, view_dir,
 };
 pub use zone::{
-    Area, DOT_INTERVAL_TICKS, History, HitKind, Player, Projectile, Spawn, Swing, Zone, ZoneEvent,
+    Area, DOT_INTERVAL_TICKS, Driver, History, HitKind, Player, Projectile, Spawn, Swing, Zone,
+    ZoneEvent,
 };
 
 use crate::tick::Tick;
@@ -44,6 +45,10 @@ pub const RESPAWN_MS: u32 = 3000;
 pub const MAX_ABILITIES: usize = 8;
 /// Stamina regeneration pauses this long after a spend (MATRIX.md 6).
 pub const REGEN_PAUSE_MS: u32 = 1000;
+/// Standing up from the command stance takes this long (COMPANIONS.md 5.1).
+pub const COMMAND_EXIT_MS: u32 = 400;
+/// The team of creatures in a wild zone (COMPANIONS.md 3.1).
+pub const TEAM_WILD: u8 = 3;
 
 /// Wrapping tick difference `a - b`.
 pub fn tick_delta(a: Tick, b: Tick) -> i32 {

@@ -10,9 +10,11 @@ mod cache;
 mod characters;
 mod headless;
 mod hub;
+mod hud;
 mod net;
 mod render;
 mod stats;
+mod tactical;
 mod world;
 
 use std::path::PathBuf;
@@ -68,10 +70,12 @@ pub struct Options {
     pub vram_mb: u64,
     /// Offline: stand here instead of at the map's start: `(x, y, z, yaw)`.
     pub start: Option<[f32; 4]>,
+    /// Start in the tactical viewport (COMPANIONS.md 6); Tab toggles it.
+    pub tactical: bool,
 }
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
-[--third-person] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
+[--third-person] [--tactical] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
 [--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--crowd N [--crowd-dir DIR]] \
 [--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW]\n\
        gm-client --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME [--zone ID] [--build NAME] \
@@ -112,6 +116,7 @@ fn parse_args() -> Result<Options, String> {
         cache_mb: 2048,
         vram_mb: 256,
         start: None,
+        tactical: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -135,6 +140,7 @@ fn parse_args() -> Result<Options, String> {
                     .map_err(|e| format!("--team: {e}"))?
             }
             "--third-person" => o.third_person = true,
+            "--tactical" => o.tactical = true,
             "--hub" => o.hub = Some(value("--hub")?.parse().map_err(|e| format!("--hub: {e}"))?),
             "--hub-cert" => o.hub_cert = PathBuf::from(value("--hub-cert")?),
             "--user" => o.user = value("--user")?,

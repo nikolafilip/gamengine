@@ -5,7 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "GPL-3.0-or-later"
-description = "gamengine AI companions: behavior trees driving gm-core inputs."
+description = "gamengine minds: navigation, companions and creatures that drive gm-core inputs like a player."
 
 [dependencies]
 gm-core = { workspace = true }
+glam = { workspace = true }
+
+[dev-dependencies]
+gm-bsp = { workspace = true }
+gm-content = { workspace = true }

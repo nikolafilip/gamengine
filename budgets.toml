@@ -45,6 +45,17 @@ max_tick_mean_us = 8000
 max_tick_p99_us = 12000
 max_rss_bytes = 536870912   # 512 MiB with 200 players
 
+[companions]
+# COMPANIONS.md 14, PLAN.md 11.8 Phase 7 (scripts/check-dungeon.sh): the tutorial dungeon with
+# `leaders` raid leaders and their squads of three in one zone, bots on the same machine.
+leaders = 16
+max_mind_us = 25            # mean microseconds per mind per tick; measured 3.9-6.5
+max_nav_build_ms = 500      # flooding the map at zone start; measured 6 (dungeon), 14 (arena)
+max_tick_p99_us = 4000      # 16 humans + 48 companions + 3 creatures; measured 1,830-2,360
+min_clear_s = 45            # the Warden, engaged to dead, for the reference squad
+max_clear_s = 300           # (also the trial's limit)
+max_bytes_per_player_s = 30720  # as [net]; measured 17,900 mean with 67 bodies in the dungeon
+
 [hub]
 # HUB.md 5: the hub's share of login -> zone -> handoff -> logout on loopback, milliseconds.
 round_trip_ms = 2000

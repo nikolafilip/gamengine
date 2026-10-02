@@ -1,8 +1,10 @@
 # Content v1
 
-`abilities.toml` and `builds.toml` are the shipped content (MATRIX.md 10). `gm-content`
-compiles them against the zone tick rate and validates them against VOCABULARY.md 11 and
-MATRIX.md 9; the zone sends the compiled pack to every client after `Welcome`.
+`abilities.toml`, `builds.toml`, `creatures.toml` and `trials.toml` are the shipped content
+(MATRIX.md 10, COMPANIONS.md 8 and 11). `gm-content` compiles them against the zone tick rate
+and validates them against VOCABULARY.md 11 and MATRIX.md 9; the zone sends the compiled pack
+to every client after `Welcome`. New abilities go at the end of `abilities.toml`: stored
+builds name abilities by their place in it.
 `gm_core::sim::test_content` mirrors this pack in code for tests; `gm-content`'s tests fail
 when the two drift.
 
@@ -34,10 +36,35 @@ when the two drift.
 | vanish | active | 8 | shadow | Stealth 256 u for 6 s |
 | poison_cloud | active | 8 | shadow | 96 u cloud ahead for 5 s: Bleed 6/s |
 | fireball | active | 12 | flame | 20 flame bolt, 96 u splash 30 flame + Burn |
+| mend | secondary | 4 | — | a dart that deals nothing: Regen 20/s for 3 s on whoever it hits, friend or foe; 12 focus, 2 s |
+| sanctuary | active | 10 | — | a circle of 140 u where the caster aims (within 500 u) for 6 s: Regen 12/s on every body in it; 35 focus, 14 s |
+| war_standard | active | 10 | — | two more squad slots (five companions); used: Fortify 15% for 8 s on every body within 256 u, enemies included |
+| maul | primary | creature | — | 55 blunt through magic shields, 120° arc, 96 u reach, 550 ms windup, heavy knockback, one every 2 s |
+| quake | active | creature | stone | a circle of 150 u under whatever is aimed at within 700 u; breaks 1.3 s later for 70 stone |
 
 Presets (all exactly 100 points): **ironclad** (colossus, plate, stone), **blade** (striker,
 mail, flame), **frostweaver** (caster, cloth, frost + shadow), **shade** (infiltrator, leather,
-shadow). MATRIX.md 11 records how they fare against each other.
+shadow), **mender** (caster, cloth, storm: the healer) and **captain** (striker, mail, flame,
+`war_standard`: the leader of five). MATRIX.md 11 records how the first four fare against
+each other; a bot that counter-picks takes the first preset listed among those that score
+the same.
+
+## Creatures and trials
+
+`creatures.toml` (COMPANIONS.md 8.1): a creature is a build without a budget, with its health
+set here, how far it sees, how far it is leashed to its post, when it comes back, and for a
+boss what it drops. Abilities marked `creature = true` are theirs alone. A map places them
+with `gm_creature` entities.
+
+| Key | Body | Health | Kit | Sight / leash | Back after | Drops |
+|---|---|---|---|---|---|---|
+| sentinel | striker, mail, flame | 420 | sword, crossbow, parry; overhead, dash | 700 / 900 | 600 s | nothing |
+| warden (boss) | colossus, plate, stone | 7,500 (stagger 400) | maul, stone_throw; quake, stomp | 900 / 1,100 | 120 s | 3 components (standard: core/iron, frame/ash, catalyst/basalt; top: core/dragonbone, shard/boss_scale, catalyst/basalt), 30 copper |
+
+`trials.toml` (COMPANIONS.md 11): an encounter of a map judged through a lens. The four of
+the tutorial are on the Warden, 300 s, one human: `warden_leader` (500‰ of the party's damage
+under the candidate's orders, at most one party death), `warden_vanguard` (500‰ of the blows),
+`warden_striker` (350‰ of the damage), `warden_mender` (500‰ of the healing, no death).
 
 ## Items
 

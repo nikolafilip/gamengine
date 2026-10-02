@@ -1,7 +1,7 @@
 # Hub: accounts, characters, zones, handoff
 
-Status: v1.2 (Phase 4; the economy requests of Phase 5; models, stalls in the world and the
-saved position's zone of Phase 6). This document is the contract between `gm-hub`, `gm-server` and the
+Status: v1.3 (Phase 4; the economy requests of Phase 5; models, stalls in the world and the
+saved position's zone of Phase 6; squads, trials and gated zones of Phase 7, section 3.5). This document is the contract between `gm-hub`, `gm-server` and the
 clients for everything that outlives a zone process: accounts, characters, where a character is,
 and how it moves between zones. PLAN.md 2.1 (Postgres via sqlx, in-memory session state), 11.3
 (hub-directed handoff with a ghost until the ack), 11.4 (data model) and 11.7 (one zone process
@@ -65,14 +65,17 @@ enum HubRequest {
     CreateCharacter { session: SessionId, name: String, build: BuildChoice },  // preset name or full build
     SetBuild { session: SessionId, character: CharacterId, build: BuildChoice },
     ListZones { session: SessionId },
+    Trials { session: SessionId, character: CharacterId },       // what it has passed (3.5)
     Enter { session: SessionId, character: CharacterId, zone: ZoneId },
     Logout { session: SessionId },
     // zones (authenticated by the zone secret in ZoneHello, once per connection)
-    ZoneHello { secret: String, zone: ZoneId, map: String, map_hash: u64, addr: SocketAddr, cert_der: Vec<u8> },
+    ZoneHello { secret: String, zone: ZoneId, map: String, map_hash: u64, addr: SocketAddr, cert_der: Vec<u8>,
+                requires: Vec<String> },         // trials that open the zone; empty = open to all (3.5)
     Heartbeat { players: u32, tick_mean_us: f32 },
     Claim { token: SessionToken },
     Save { character: CharacterId, state: CharacterState, leaving: bool },
     Handoff { character: CharacterId, state: CharacterState, to_zone: ZoneId },
+    Trial { character: CharacterId, trial: String, secs: u32 },  // a character here passed it (3.5)
     // the economy (ECONOMY.md): a session for one of its own characters; a zone for itself
     Econ { session: SessionId, character: CharacterId, op: EconOp },
     ZoneEcon(ZoneEconOp),
@@ -91,23 +94,26 @@ enum HubNotice {                   // hub → zone, unidirectional streams
     Kick { character: CharacterId, reason: String },
     ModelRevoked { model: ModelId },            // to every zone (MODELS.md 6.3)
     StallClosed { stall: i64 },                 // to the stall's zone (ECONOMY.md 7)
+    HireEnded { hirer: CharacterId, hire: i64 },// to the hirer's zone (3.5)
 }
 
 enum HubResponse {
     Ok,
     Err(HubError),                 // typed: Credentials, Taken, NotFound, Busy, Unauthorized,
                                    // Invalid(String), Internal, Insufficient, Full, Cooldown,
-                                   // Gone (taken down, not served)
+                                   // Gone (taken down, not served), Locked(trials) (3.5)
     Session { session: SessionId, account: AccountId },
     Characters(Vec<CharacterSummary>),
     Character(CharacterSummary),
+    Trials(Vec<(String, u32)>),    // trial key, best time in seconds
     Zones(Vec<ZoneSummary>),       // id, map, players, address, cert hash, up for ms
     Ticket(ZoneTicket),            // addr, cert_der, token
     Claimed { character: CharacterId, name: String, state: CharacterState, team: u8,
-              model: Option<ModelRef> },  // what the character wears, while it is active
+              model: Option<ModelRef>,    // what the character wears, while it is active
+              squad: Vec<HiredAvatar> },  // its active hires (3.5)
     Registered { public_key: [u8; 32] },  // the hub's token verification key
     Econ(EconReply),               // Done, Id, Ids, Holder, TradeView, Trade, Decided, Tavern,
-                                   // Stall, Stalls
+                                   // Squad, Stall, Stalls
     Models(Vec<ModelSummary>),
     ModelAccepted { model: ModelId, status: ModelStatus },
     Blob { len: u32 },             // + len bytes
@@ -208,9 +214,28 @@ spawn. Nothing can wedge a character forever.
 The hub opens a unidirectional stream to a zone for each notice: `HubNotice::Claimed {
 character }` (drop the ghost), `HubNotice::Kick { character, reason }` (the account logged
 out, or an operator removed it), `HubNotice::ModelRevoked { model }` (to every zone: a takedown,
-MODELS.md 6.3) and `HubNotice::StallClosed { stall }` (to the stall's zone: its owner closed it
-or its 48 h ran out, ECONOMY.md 7). Notices are advisory for the zone's bookkeeping; the
-database is already updated when they are sent.
+MODELS.md 6.3), `HubNotice::StallClosed { stall }` (to the stall's zone: its owner closed it
+or its 48 h ran out, ECONOMY.md 7) and `HubNotice::HireEnded { hirer, hire }` (to the zone the
+hirer plays in: the avatar's owner took it back, or the hirer dismissed it). Notices are
+advisory for the zone's bookkeeping; the database is already updated when they are sent.
+
+### 3.5 Squads, trials and gated zones (COMPANIONS.md 3.3, 10, 11)
+
+- **The squad at the claim.** `Claimed.squad` lists the character's active hires, oldest
+  first, at most the squad capacity of its build (three, five with a leadership ability):
+  `HiredAvatar { hire, character, name, build, model, expires_at }`. The zone spawns a
+  companion for each; a hire whose stored build no longer validates against the content is
+  left out. The same claim ends every active hire *of* the claimed character as an avatar
+  (its owner is playing it now, ECONOMY.md 11) and tells the hirers' zones.
+- **Trials.** `Trial { character, trial, secs }` is accepted from a zone only for a
+  character playing in it and only for a trial the content gives to that zone's map; it is
+  stored once per character and trial with the fastest time (`trials`). `Trials` answers a
+  session what one of its characters has passed.
+- **Gated zones.** A zone that registers with `requires` (trial keys of the content; at most
+  16) is entered only by characters that have passed one of them: `Enter` and `Handoff`
+  answer `Locked` with the trials' names otherwise.
+- **A kill** is reported with `ZoneEconOp::GrantKill` (ECONOMY.md 9): one transaction, once
+  per `(zone, reference)`.
 
 ## 4. Database (PLAN.md 11.4)
 
@@ -231,7 +256,8 @@ every zone of a deployment load the same `assets/content`, and the hub refuses a
 `map_hash`/content differ from what it knows for that zone id). Items, stalls, escrow and the
 ledger arrive in Phase 5 as separate tables (ECONOMY.md); Phase 6 adds `models`,
 `model_holders`, `model_events`, `characters.model` and three account columns (MODELS.md 6.1),
-and `characters.pos_zone` (section 3.2). Migrations are embedded in the binary and run at
+and `characters.pos_zone` (section 3.2); Phase 7 adds `hires.ended`, `trials (character_id,
+trial, zone, secs, passed_at)` and `kills (zone, ref)` (migration 0005). Migrations are embedded in the binary and run at
 start in order; the hub refuses to start on an unknown newer schema.
 
 Passwords: argon2id with the crate defaults (19 MiB, 2 iterations, parallelism 1), one hash per

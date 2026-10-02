@@ -204,7 +204,10 @@ mod tests {
     fn rejects_garbage() {
         assert_eq!(InputDatagram::decode(&[]), Err(NetError::Overrun));
         assert_eq!(InputDatagram::decode(&[9, 0, 0]), Err(NetError::Version(9)));
-        assert_eq!(InputDatagram::decode(&[2, 7]), Err(NetError::Kind(7)));
+        assert_eq!(
+            InputDatagram::decode(&[crate::PROTOCOL_VERSION, 7]),
+            Err(NetError::Kind(7))
+        );
         let mut d = InputDatagram::new(0, 0, 1);
         d.push(InputFrame {
             buttons: 0x8000,

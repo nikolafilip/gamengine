@@ -29,6 +29,7 @@ async fn zone(addr: std::net::SocketAddr, cert: &[u8], id: &str) -> HubClient {
             map_hash: 0,
             addr: "127.0.0.1:9".parse().unwrap(),
             cert_der: vec![1, 2, 3],
+            requires: Vec::new(),
         })
         .await
         .unwrap();
@@ -521,10 +522,84 @@ async fn the_economy_over_the_wire() {
         Ok(EconReply::Done)
     );
 
-    // Every copper is accounted for: 900 created, nothing burned, 900 in circulation.
+    // A kill is one report and pays once (ECONOMY.md 9). The smith and the buyer share it; a
+    // third recipient is playing elsewhere, so its coin is not made and its component lies
+    // on the town's ground. The same report again, as a zone that got no answer would send
+    // it, changes nothing.
+    let (_idler_conn, _idler_s, idler) =
+        player(addr, &cert, &other_zone, "elsewhere", "Idler").await;
+    let holds = |r: Result<EconReply, HubError>| match r {
+        Ok(EconReply::Holder { coin, items }) => (coin, items.len()),
+        other => panic!("inventory: {other:?}"),
+    };
+    let smith_before = holds(econ(&smith_conn, smith_s, smith, EconOp::Inventory).await);
+    let buyer_before = holds(econ(&buyer_conn, buyer_s, buyer, EconOp::Inventory).await);
+    let kill = ZoneEconOp::GrantKill {
+        reference: 77,
+        components: vec![
+            (smith, "core/iron".to_string()),
+            (buyer, "frame/ash".to_string()),
+            (idler, "catalyst/basalt".to_string()),
+        ],
+        coin: vec![(smith, 10), (buyer, 10), (idler, 10)],
+    };
+    let Ok(EconReply::Ids(dropped)) = zone_econ(&town, kill.clone()).await else {
+        panic!("the kill was not paid")
+    };
+    assert_eq!(dropped.len(), 3);
+    assert_eq!(zone_econ(&town, kill.clone()).await, Ok(EconReply::Done));
+    assert_eq!(
+        holds(econ(&smith_conn, smith_s, smith, EconOp::Inventory).await),
+        (smith_before.0 + 10, smith_before.1 + 1)
+    );
+    assert_eq!(
+        holds(econ(&buyer_conn, buyer_s, buyer, EconOp::Inventory).await),
+        (buyer_before.0 + 10, buyer_before.1 + 1)
+    );
+    // The idler's component is on the ground here: whoever stands in the town picks it up.
+    assert_eq!(
+        zone_econ(
+            &town,
+            ZoneEconOp::Pickup {
+                character: smith,
+                item: dropped[2]
+            }
+        )
+        .await,
+        Ok(EconReply::Done)
+    );
+    // The name of a kill is its zone's: another zone's kill 77 is another kill. And a purse
+    // over the cap is refused whole, before anything is claimed.
+    assert!(matches!(
+        zone_econ(
+            &other_zone,
+            ZoneEconOp::GrantKill {
+                reference: 77,
+                components: vec![(idler, "core/iron".to_string())],
+                coin: Vec::new(),
+            }
+        )
+        .await,
+        Ok(EconReply::Ids(_))
+    ));
+    assert!(matches!(
+        zone_econ(
+            &town,
+            ZoneEconOp::GrantKill {
+                reference: 78,
+                components: Vec::new(),
+                coin: vec![(smith, 10_001)],
+            }
+        )
+        .await,
+        Err(HubError::Invalid(_))
+    ));
+
+    // Every copper is accounted for: 900 and the two purses of the kill created, nothing
+    // burned, all of it in circulation.
     let e = Economy::new(db.pool().clone());
     assert_eq!(e.audit().await.unwrap(), 0);
     let s = e.supply().await.unwrap();
-    assert_eq!((s.created, s.burned, s.circulating), (900, 0, 900));
+    assert_eq!((s.created, s.burned, s.circulating), (920, 0, 920));
     hub.abort();
 }

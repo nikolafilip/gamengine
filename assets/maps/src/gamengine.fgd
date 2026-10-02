@@ -50,20 +50,19 @@
 @SolidClass = func_illusionary : "Visible, non-solid brushes" []
 @SolidClass base(Targetname) = func_wall : "Solid brush entity compiled as a separate model" []
 
-@PointClass size(-16 -16 -24, 16 16 32) color(255 0 0) = gm_spawn : "Player spawn with a team (0 = any); also the NPC spawn of later phases" [
+@PointClass size(-16 -16 -24, 16 16 32) color(255 0 0) = gm_spawn : "Player spawn with a team (0 = any)" [
     team(choices) : "Team" : 0 =
     [
         0 : "Any"
         1 : "Team 1"
         2 : "Team 2"
     ]
-    archetype(choices) : "Archetype frame (NPCs, Phase 7)" : "striker" =
-    [
-        "colossus" : "Colossus"
-        "striker" : "Striker"
-        "caster" : "Caster"
-        "infiltrator" : "Infiltrator"
-    ]
+    angle(integer) : "Facing yaw" : 0
+]
+
+@PointClass size(-16 -16 -24, 16 16 32) color(255 60 200) = gm_creature : "Creature post (COMPANIONS.md 8): a creature of assets/content/creatures.toml stands here until something hostile comes. Creatures that share an encounter name fight, reset and are cleared together. A map with any of these runs as a wild zone." [
+    creature(string) : "Creature key (creatures.toml)" : "sentinel"
+    encounter(string) : "Encounter name (empty: its own)" : ""
     angle(integer) : "Facing yaw" : 0
 ]
 

@@ -23,6 +23,10 @@ pub const ARENA: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/maps/built/arena.bsp"
 );
+pub const DUNGEON: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/maps/built/dungeon.bsp"
+);
 pub const BUDGETS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../budgets.toml");
 pub const CONTENT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/content");
 const PORT: u16 = 4433;
@@ -63,6 +67,9 @@ pub struct Match {
     /// Teams whose bots counter-pick (empty: nobody).
     pub counter_pick_teams: Vec<u8>,
     pub report_every: Duration,
+    /// The zone lets squads in and lends these builds as recruits (COMPANIONS.md 3.2).
+    pub squads: bool,
+    pub recruits: Vec<String>,
 }
 
 impl Match {
@@ -85,6 +92,8 @@ impl Match {
             teams: Vec::new(),
             counter_pick_teams: Vec::new(),
             report_every: Duration::from_secs(5),
+            squads: false,
+            recruits: Vec::new(),
         }
     }
 }
@@ -142,12 +151,15 @@ pub fn play(m: Match) -> Outcome {
         let seed = m.seed;
         let content = content.clone();
         let report_every = m.report_every;
+        let squads = m.squads;
+        let recruits = m.recruits.clone();
         sim.host("server", move || {
             let identity = identity.clone();
             let zone_world = zone_world.clone();
             let server_report = server_report.clone();
             let windows = windows.clone();
             let content = content.clone();
+            let recruits = recruits.clone();
             async move {
                 let socket = TurmoilSocket::bind(("0.0.0.0", PORT), loss, seed ^ 0x5eed).await?;
                 let endpoint = Endpoint::new_with_abstract_socket(
@@ -176,6 +188,11 @@ pub fn play(m: Match) -> Outcome {
                     content,
                     default_build: "blade".into(),
                     hub: None,
+                    // A map that posts creatures is a wild zone, as the binary decides it.
+                    wild: !zone_world.creature_posts.is_empty(),
+                    squads,
+                    recruits,
+                    arrive_at_entry: false,
                 };
                 let report =
                     gm_server::run(cfg, zone_world, endpoint, std::future::pending()).await?;

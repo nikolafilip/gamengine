@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, VecDeque};
 use glam::Vec3;
 
 use crate::build::{Build, BuildError, ContentPack, Sheet};
-use crate::collide::{Aabb, EntityWorld};
-use crate::geom::{Capsule, sweep_sphere_capsule};
+use crate::collide::{Aabb, BodyGrid, EntityWorld};
+use crate::geom::{Capsule, ray_capsule, sweep_sphere_capsule};
 use crate::matrix::{
     AttackerStats, DOT_PULSES_PER_S, DefenderStats, STAGGER_DECAY_PER_S, STAGGER_IMMUNITY_MS,
     STAGGER_MS, resolve_damage,
@@ -32,6 +32,8 @@ use crate::vocab::{
 
 /// Damage- and heal-over-time pulse every this many server ticks (MATRIX.md 8: 4 per second).
 pub const DOT_INTERVAL_TICKS: Tick = 64 / DOT_PULSES_PER_S;
+/// From this many living bodies on, a tick keeps a grid over them for its sweeps.
+const GRID_FROM: usize = 24;
 
 /// A spawn point: hull origin, facing, team (0 = any).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,7 +43,17 @@ pub struct Spawn {
     pub team: u8,
 }
 
-/// A player as the server sees it.
+/// Who produces a body's frames (COMPANIONS.md 2.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Driver {
+    /// A client, through the frame ledger (PROTOCOL.md 4).
+    #[default]
+    Client,
+    /// A mind: exactly one frame per server tick, handed over with [`Zone::drive`].
+    Mind,
+}
+
+/// A body as the server sees it: a player, a companion or a creature.
 #[derive(Clone, Debug)]
 pub struct Player {
     pub id: EntityId,
@@ -73,6 +85,15 @@ pub struct Player {
     /// In transit to another zone (HUB.md 3.3): the body stays, visible and hittable, but no
     /// frames run.
     pub ghost: bool,
+    pub driver: Driver,
+    /// The party the body belongs to (COMPANIONS.md 3.1): its own id until it joins another,
+    /// its commander's for a companion, 0 for a creature. Damage never reads it.
+    pub party: u32,
+    /// No timed respawn: the body stays down until [`Zone::revive`] (an encounter holds its
+    /// dead, a creature belongs to its encounter).
+    pub hold: bool,
+    /// A mind's frame for the next tick.
+    next: Option<Input>,
 }
 
 impl Player {
@@ -209,9 +230,14 @@ pub enum ZoneEvent {
         target: EntityId,
         amount: i32,
         kind: HitKind,
+        /// What the target's block took off the hit (0 when it was not blocked).
+        absorbed: i32,
     },
     Healed {
         target: EntityId,
+        /// Who put the Regen there (0 = nobody).
+        source: EntityId,
+        /// Health actually restored: healing a full body is not healing.
         amount: i32,
     },
     Killed {
@@ -345,8 +371,14 @@ impl Zone {
     /// Add a player at an exact hull origin (zone handoff arrivals, tests). The build is
     /// trusted (validate it first).
     pub fn add_player_at(&mut self, build: Build, team: u8, origin: Vec3, yaw: f32) -> EntityId {
-        let id = self.alloc_id();
         let sheet = Sheet::new(build, &self.content, team);
+        self.add_body(sheet, origin, yaw, Driver::Client)
+    }
+
+    /// Add a body with a ready sheet (a player's, a companion's or a creature's) at an exact
+    /// hull origin. Its party is itself; see [`Zone::set_party`].
+    pub fn add_body(&mut self, sheet: Sheet, origin: Vec3, yaw: f32, driver: Driver) -> EntityId {
+        let id = self.alloc_id();
         let mover = Mover::spawn(origin, yaw, &sheet);
         let health = sheet.derived.health;
         let p = Player {
@@ -371,9 +403,107 @@ impl Zone {
             pending_build: None,
             last_hit_tick: 0,
             ghost: false,
+            driver,
+            party: id,
+            hold: false,
+            next: None,
         };
         self.players.insert(id, p);
         id
+    }
+
+    pub fn set_party(&mut self, id: EntityId, party: u32) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.party = party;
+        }
+    }
+
+    /// Hold a body's respawn (or release it): a held body stays down until [`Zone::revive`].
+    /// Releasing a dead body lets the timed respawn run from now.
+    pub fn set_hold(&mut self, id: EntityId, hold: bool) {
+        let now = self.tick;
+        let respawn_ticks = self.respawn_ticks;
+        if let Some(p) = self.players.get_mut(&id) {
+            if p.hold && !hold && !p.alive {
+                p.respawn_at = now.wrapping_add(respawn_ticks);
+            }
+            p.hold = hold;
+        }
+    }
+
+    /// A mind's frame for the next tick (COMPANIONS.md 2.1). Ignored for client-driven bodies.
+    pub fn drive(&mut self, id: EntityId, input: Input) {
+        if let Some(p) = self.players.get_mut(&id)
+            && p.driver == Driver::Mind
+        {
+            p.next = Some(input);
+        }
+    }
+
+    /// Put a body back on its feet at `origin` with full pools and nothing running: a held
+    /// body's respawn, or a creature restored by its encounter. Cooldowns are cleared too
+    /// when `fresh` (a reset creature starts over; a respawning player keeps them).
+    pub fn revive(&mut self, id: EntityId, origin: Vec3, yaw: f32, fresh: bool) {
+        self.swings.retain(|s| s.attacker != id);
+        let content = &self.content;
+        let Some(p) = self.players.get_mut(&id) else {
+            return;
+        };
+        let was_dead = !p.alive;
+        if let Some(build) = p.pending_build.take() {
+            p.sheet = Sheet::new(build, content, p.team());
+        }
+        let cooldowns = p.mover.cooldowns;
+        p.mover = Mover::spawn(origin, yaw, &p.sheet);
+        if !fresh {
+            p.mover.cooldowns = cooldowns;
+        } else {
+            // Ready at once in the body's own frame clock.
+            p.mover.cooldowns = [p.last_input_tick; crate::sim::MAX_ABILITIES];
+        }
+        p.health = p.sheet.derived.health;
+        p.alive = true;
+        p.stagger = 0.0;
+        p.next = None;
+        if was_dead {
+            self.events.push(ZoneEvent::Respawned(id));
+        }
+    }
+
+    /// A free place to stand near `near`: the point itself, then rings around it, where the
+    /// hull is in open space, has ground under it and overlaps no living body. Falls back to
+    /// `near`.
+    pub fn spot_near(&self, world: &dyn CollisionWorld, near: Vec3, hull: Hull) -> Vec3 {
+        let free = |origin: Vec3| -> Option<Vec3> {
+            if world.point_contents(hull, origin) != Contents::Empty {
+                return None;
+            }
+            // Reachable in a straight line from the point (not through a wall).
+            if world.trace(Hull::Point, near, origin).fraction < 1.0 {
+                return None;
+            }
+            let down = world.trace(hull, origin, origin - Vec3::Z * 96.0);
+            if down.start_solid || down.fraction >= 1.0 {
+                return None;
+            }
+            let bb = Aabb::around(down.end, hull);
+            (!self
+                .players
+                .values()
+                .any(|p| p.alive && p.aabb().overlaps(&bb)))
+            .then_some(down.end)
+        };
+        for radius in [0.0f32, 48.0, 80.0, 112.0, 160.0] {
+            let steps = if radius == 0.0 { 1 } else { 8 };
+            for i in 0..steps {
+                let a = i as f32 * core::f32::consts::TAU / steps as f32;
+                let p = near + Vec3::new(a.cos(), a.sin(), 0.0) * radius;
+                if let Some(spot) = free(p) {
+                    return spot;
+                }
+            }
+        }
+        near
     }
 
     /// Mark a player as a ghost (or back); a ghost's frames are consumed but never run.
@@ -462,12 +592,10 @@ impl Zone {
             .filter(|o| o.alive)
             .map(|o| (o.id, o.aabb()))
             .collect();
+        // With a crowd, a grid over the boxes: each sweep looks at its neighbours only.
+        let mut grid = (solids.len() >= GRID_FROM && solids.len() <= u16::MAX as usize)
+            .then(|| BodyGrid::build(&solids));
         for &id in &ids {
-            let composite = EntityWorld {
-                world,
-                solids: &solids,
-                ignore: id,
-            };
             let p = self.players.get_mut(&id).expect("id from keys");
             p.credits = (p.credits + 1.0).min(CREDIT_BURST);
             p.stagger = (p.stagger - STAGGER_DECAY_PER_S * dt).max(0.0);
@@ -482,6 +610,30 @@ impl Zone {
             let mut executed = 0;
             let mut actions: Vec<(u32, Tick, Action)> = Vec::new();
             let mut sink = Vec::new();
+            if p.driver == Driver::Mind {
+                // A mind's body runs exactly one frame per tick, in its own frame clock, and
+                // its swings are not rewound: it has no latency to compensate.
+                allowed = 0;
+                if let Some(input) = p.next.take() {
+                    let t = p.last_input_tick.wrapping_add(1);
+                    p.last_input_tick = t;
+                    p.executed_frames += 1;
+                    p.view_tick = now;
+                    executed = 1;
+                    if p.alive {
+                        let sheet = &p.sheet;
+                        let composite = EntityWorld {
+                            world,
+                            solids: &solids,
+                            ignore: id,
+                            own: Some(p.mover.aabb()),
+                            grid: grid.as_ref(),
+                        };
+                        step_mover(&composite, sheet, &mut p.mover, &input, t, dt, &mut sink);
+                        actions.extend(sink.drain(..).map(|a| (t, now, a)));
+                    }
+                }
+            }
             while allowed > 0 && executed < MAX_FRAMES_PER_TICK && p.credits >= 1.0 {
                 let Some((t, input, view)) = p.queue.pop_front() else {
                     break;
@@ -493,6 +645,13 @@ impl Zone {
                 p.executed_frames += 1;
                 if p.alive && !p.ghost {
                     let sheet = &p.sheet;
+                    let composite = EntityWorld {
+                        world,
+                        solids: &solids,
+                        ignore: id,
+                        own: Some(p.mover.aabb()),
+                        grid: grid.as_ref(),
+                    };
                     step_mover(&composite, sheet, &mut p.mover, &input, t, dt, &mut sink);
                     actions.extend(sink.drain(..).map(|a| (t, view, a)));
                 } else {
@@ -501,13 +660,17 @@ impl Zone {
                     p.mover.buttons_prev = input.buttons;
                 }
             }
-            if executed == 0 {
+            if executed == 0 && p.driver == Driver::Client {
                 p.starved_ticks += 1;
             }
             if p.alive
                 && let Ok(i) = solids.binary_search_by_key(&id, |(e, _)| *e)
             {
-                solids[i].1 = p.aabb();
+                let (old, new) = (solids[i].1, p.aabb());
+                solids[i].1 = new;
+                if let Some(g) = grid.as_mut() {
+                    g.moved(i as u16, &old, &new);
+                }
             }
             let stats = p.attacker_stats();
             for (t, view_tick, a) in actions {
@@ -562,7 +725,7 @@ impl Zone {
             self.fire(world, owner, ability, step, input_tick, view_tick);
         }
         for (owner, ability, step) in area_spawns {
-            self.spawn_area_from_step(owner, ability, step);
+            self.spawn_area_from_step(world, owner, ability, step);
         }
 
         // 4: projectiles.
@@ -576,12 +739,12 @@ impl Zone {
             self.pulse_dots();
         }
 
-        // 7: respawns.
+        // 7: respawns (a held body waits for whoever holds it).
         for &id in &ids {
             let due = self
                 .players
                 .get(&id)
-                .is_some_and(|p| !p.alive && tick_delta(now, p.respawn_at) >= 0);
+                .is_some_and(|p| !p.alive && !p.hold && tick_delta(now, p.respawn_at) >= 0);
             if due {
                 self.respawn(world, id);
             }
@@ -918,7 +1081,13 @@ impl Zone {
         }
     }
 
-    fn spawn_area_from_step(&mut self, owner: EntityId, ability: u8, step: u8) {
+    fn spawn_area_from_step(
+        &mut self,
+        world: &dyn CollisionWorld,
+        owner: EntityId,
+        ability: u8,
+        step: u8,
+    ) {
         let Some(p) = self.players.get(&owner) else {
             return;
         };
@@ -932,9 +1101,39 @@ impl Zone {
         };
         let ae = ae.clone();
         let stats = p.attacker_stats();
-        let origin = resolve_origin(p, ae.origin, None);
+        let origin = match ae.origin {
+            Origin::Aim { range } => self.aim_point(world, p, range),
+            other => resolve_origin(p, other, None),
+        };
         let dir = p.mover.view_dir();
         self.spawn_area(owner, ability, ae, stats, origin, dir);
+    }
+
+    /// `Origin::Aim` (VOCABULARY.md 4): the first body or world surface along the actor's view
+    /// ray within `range`, dropped to the ground; under a body, its feet. Current positions:
+    /// what is placed is a spot on the floor, and it does not follow anyone.
+    pub fn aim_point(&self, world: &dyn CollisionWorld, p: &Player, range: f32) -> Vec3 {
+        let eye = p.mover.eye();
+        let dir = p.mover.view_dir();
+        let tr = world.trace(Hull::Point, eye, eye + dir * range);
+        let mut reach = range * tr.fraction;
+        let mut body: Option<Vec3> = None;
+        for o in self.players.values() {
+            if o.id == p.id || !o.alive {
+                continue;
+            }
+            if let Some(t) = ray_capsule(eye, dir, reach, &o.capsule()) {
+                reach = t;
+                body = Some(o.mover.mv.origin + Vec3::new(0.0, 0.0, o.mover.mv.hull.mins().z));
+            }
+        }
+        // From just above the feet, or from a little short of the surface the ray met.
+        let from = match body {
+            Some(feet) => feet + Vec3::Z * 8.0,
+            None => eye + dir * (reach - 4.0).max(0.0),
+        };
+        let down = world.trace(Hull::Point, from, from - Vec3::Z * 1024.0);
+        if down.start_solid { from } else { down.end }
     }
 
     fn spawn_area(
@@ -1100,6 +1299,7 @@ impl Zone {
                             if healed > 0 {
                                 self.events.push(ZoneEvent::Healed {
                                     target: id,
+                                    source,
                                     amount: healed,
                                 });
                             }
@@ -1177,6 +1377,11 @@ impl Zone {
         let frame_now = t.last_input_tick;
         if t.mover.invulnerable(frame_now) {
             return false;
+        }
+        // A packet of amount 0 is not an attack (MATRIX.md 7): it lands for its triggers and
+        // does nothing else. Nothing guards against it and it interrupts nothing.
+        if packet.amount == 0 {
+            return true;
         }
         // Guard (VOCABULARY.md 5.6): facing test against the attacker for melee, against
         // where the shot came from for projectiles (the shooter may have moved since).
@@ -1270,6 +1475,15 @@ impl Zone {
             block,
         };
         let amount = resolve_damage(packet, &stats, &defender);
+        let absorbed = if block.is_some() {
+            let unblocked = DefenderStats {
+                block: None,
+                ..defender
+            };
+            (resolve_damage(packet, &stats, &unblocked) - amount).max(0)
+        } else {
+            0
+        };
         t.health -= amount;
         t.last_hit_tick = now;
         let knock = dir * packet.knockback * stats.knockback_dealt * d.knockback_taken;
@@ -1287,6 +1501,7 @@ impl Zone {
             target,
             amount,
             kind,
+            absorbed,
         });
         // Stagger build-up (guard mitigation does not reduce it), immunity window.
         let mut stagger = guard_broke;
@@ -1375,7 +1590,9 @@ impl Zone {
         }
         let n = candidates.len();
         let start = self.rng.below(n as u32) as usize;
-        let offsets: [Vec3; 9] = [
+        // The point itself, the eight places round it, then the sixteen round those: a
+        // crowd arriving at once (squads come four bodies to a player) still finds room.
+        let mut offsets: Vec<Vec3> = vec![
             Vec3::ZERO,
             Vec3::new(40.0, 0.0, 0.0),
             Vec3::new(-40.0, 0.0, 0.0),
@@ -1386,6 +1603,13 @@ impl Zone {
             Vec3::new(40.0, -40.0, 0.0),
             Vec3::new(-40.0, 40.0, 0.0),
         ];
+        for a in -2..=2i32 {
+            for b in -2..=2i32 {
+                if a.abs() == 2 || b.abs() == 2 {
+                    offsets.push(Vec3::new(a as f32 * 40.0, b as f32 * 40.0, 0.0));
+                }
+            }
+        }
         for &off in &offsets {
             for i in 0..n {
                 let s = candidates[(start + i) % n];
@@ -1433,9 +1657,9 @@ fn resolve_origin(p: &Player, origin: Origin, impact: Option<Vec3>) -> Vec3 {
             eye + fwd * offset[0] + right * offset[1] + Vec3::Z * offset[2]
         }
         Origin::Point(pt) => Vec3::from(pt),
-        // Other entities are not resolvable here; the caster stands in.
-        Origin::Target(_) => p.mover.mv.origin,
-        Origin::Impact => impact.unwrap_or(eye),
+        // An aim is resolved against the world and the bodies (`Zone::aim_point`); where that
+        // is not possible (a trigger), the impact or the eyes stand in.
+        Origin::Aim { .. } | Origin::Impact => impact.unwrap_or(eye),
     }
 }
 
@@ -1492,6 +1716,9 @@ fn compute_anim(p: &Player) -> u8 {
     }
     if p.mover.statuses.staggered() {
         return anim::STAGGER;
+    }
+    if p.mover.commanding(p.last_input_tick) {
+        return anim::COMMAND;
     }
     if p.mover.dash.is_some() {
         return anim::DASH;

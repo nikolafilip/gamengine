@@ -48,6 +48,31 @@ pub struct ModelRef {
     pub frame: u8,
 }
 
+/// A hired avatar as the hirer's zone is told about it (COMPANIONS.md 3.3): a copy of the
+/// listed character, driven by a mind until the hire ends.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct HiredAvatar {
+    pub hire: i64,
+    pub character: CharacterId,
+    pub name: String,
+    pub build: Build,
+    pub model: Option<ModelRef>,
+    /// Unix seconds.
+    pub expires_at: u64,
+}
+
+/// A character listed for hire, as the tavern shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct TavernEntry {
+    pub character: CharacterId,
+    pub name: String,
+    pub price: i64,
+    /// Hires in the last 12 h (three or more sort last).
+    pub hires: i64,
+    /// What it brings: the hirer reads the role from it.
+    pub build: Build,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ModelStatus {
     Pending,
@@ -259,6 +284,11 @@ pub enum HubRequest {
     ListZones {
         session: SessionId,
     },
+    /// The trials a character of the session's account has passed (COMPANIONS.md 11).
+    Trials {
+        session: SessionId,
+        character: CharacterId,
+    },
     Enter {
         session: SessionId,
         character: CharacterId,
@@ -275,6 +305,9 @@ pub enum HubRequest {
         map_hash: u64,
         addr: SocketAddr,
         cert_der: Vec<u8>,
+        /// Trials that open this zone: a character must have passed one of them to be let
+        /// in (COMPANIONS.md 11); empty = open to all.
+        requires: Vec<String>,
     },
     Heartbeat {
         players: u32,
@@ -292,6 +325,12 @@ pub enum HubRequest {
         character: CharacterId,
         state: CharacterState,
         to_zone: ZoneId,
+    },
+    /// A character playing in this zone passed a trial (COMPANIONS.md 11).
+    Trial {
+        character: CharacterId,
+        trial: String,
+        secs: u32,
     },
     // a session, about one of its characters (ECONOMY.md)
     Econ {
@@ -432,6 +471,12 @@ pub enum EconOp {
         avatar: CharacterId,
     },
     Tavern,
+    /// The character's active hires (COMPANIONS.md 3.3).
+    Squad,
+    /// End one of them early; nothing is refunded.
+    Dismiss {
+        hire: i64,
+    },
 }
 
 /// What a zone reports (ECONOMY.md 8, 9): only a registered zone connection may send these.
@@ -446,6 +491,15 @@ pub enum ZoneEconOp {
         character: CharacterId,
         amount: i64,
         reference: i64,
+    },
+    /// Everything one kill gives (ECONOMY.md 9, COMPANIONS.md 10): one transaction, and
+    /// one only per `reference`, so the zone may repeat it until it is answered. A
+    /// recipient who is no longer playing in the zone gets no coin, and its components lie
+    /// on the zone's ground. Answered `Ids`, or `Done` when the kill was paid before.
+    GrantKill {
+        reference: i64,
+        components: Vec<(CharacterId, String)>,
+        coin: Vec<(CharacterId, i64)>,
     },
     ContractReport {
         contract: i64,
@@ -531,8 +585,8 @@ pub enum EconReply {
     },
     /// The report decided the contract (false: it was already decided).
     Decided(bool),
-    /// `(character, price, hires in the last 12 h)`.
-    Tavern(Vec<(CharacterId, i64, i64)>),
+    Tavern(Vec<TavernEntry>),
+    Squad(Vec<HiredAvatar>),
     Stall(StallSummary),
     Stalls(Vec<StallSummary>),
 }
@@ -554,6 +608,8 @@ pub enum HubError {
     Cooldown,
     /// The content was removed and is not served (MODELS.md 6.2).
     Gone,
+    /// The zone opens only to characters that passed one of these trials.
+    Locked(String),
 }
 
 impl std::fmt::Display for HubError {
@@ -570,6 +626,7 @@ impl std::fmt::Display for HubError {
             HubError::Full => write!(f, "no room"),
             HubError::Cooldown => write!(f, "too soon after the last change"),
             HubError::Gone => write!(f, "removed"),
+            HubError::Locked(trials) => write!(f, "locked: pass one of {trials} first"),
         }
     }
 }
@@ -586,6 +643,8 @@ pub enum HubResponse {
     },
     Characters(Vec<CharacterSummary>),
     Character(CharacterSummary),
+    /// `(trial key, best time in seconds)`.
+    Trials(Vec<(String, u32)>),
     Zones(Vec<ZoneSummary>),
     Ticket(ZoneTicket),
     Claimed {
@@ -595,6 +654,8 @@ pub enum HubResponse {
         team: u8,
         /// The avatar model, present only while it is active (MODELS.md 6.3).
         model: Option<ModelRef>,
+        /// The character's active hires, at most its squad capacity (COMPANIONS.md 3.3).
+        squad: Vec<HiredAvatar>,
     },
     Registered {
         public_key: [u8; 32],
@@ -630,6 +691,12 @@ pub enum HubNotice {
     /// A stall of this zone closed: its owner closed it, or its 48 h ran out (ECONOMY.md 7).
     StallClosed {
         stall: i64,
+    },
+    /// A hire of a character playing in this zone ended early: the avatar's owner took it
+    /// back, or the hirer dismissed it (COMPANIONS.md 3.3).
+    HireEnded {
+        hirer: CharacterId,
+        hire: i64,
     },
 }
 

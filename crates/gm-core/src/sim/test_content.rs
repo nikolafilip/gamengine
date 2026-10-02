@@ -3,9 +3,10 @@
 //! mirrors its v1 abilities and the four preset builds of MATRIX.md 11 closely enough that
 //! simulation tests mean something, but it is a fixture, not the source of truth.
 
-use crate::build::{AbilityDef, Build, ContentPack, NamedBuild, Sheet, Slot};
+use crate::build::{AbilityDef, Build, ContentPack, CreatureDef, Loot, NamedBuild, Sheet, Slot};
 use crate::matrix::{ArmourClass, Aspects, Attributes, Element};
 use crate::tick::TickRate;
+use crate::trial::{Lens, TrialDef};
 use crate::vocab::{
     Ability, AbilityId, ApplyStatus, ArchetypeFrame, AreaEffect, Block, Bounce, Bypass, Cooldown,
     Cost, DamagePacket, DamageType, Falloff, Interrupt, MeleeArc, MoveKind, MoveSelf, Origin,
@@ -139,6 +140,8 @@ fn def(key: &str, slot: Slot, cost: u8, aspect: Option<Element>, ability: Abilit
         slot,
         cost,
         aspect,
+        squad: 0,
+        creature: false,
     }
 }
 
@@ -1012,10 +1015,225 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 r,
             ),
         ),
+        // ---------- Phase 7 (COMPANIONS.md 12) ----------
+        def(
+            "mend",
+            Secondary,
+            4,
+            None,
+            ability(
+                43,
+                "Mend",
+                2000,
+                0,
+                12,
+                0.7,
+                Interrupt::OnDamage,
+                vec![(
+                    150,
+                    Verb::Projectile(Projectile {
+                        speed: 1600.0,
+                        gravity_scale: 0.1,
+                        radius: 6.0,
+                        lifetime: r.ms_to_ticks(3000),
+                        // Amount 0: not an attack, only the carrier of its Regen.
+                        damage: packet(0, Blunt, 0.0, 0),
+                        pierce: 0,
+                        bounce: Bounce::default(),
+                        drag: 0.0,
+                        spawn: Origin::Weapon {
+                            offset: [16.0, 4.0, -2.0],
+                        },
+                        inherit_velocity: 0.0,
+                        spread_deg: 0.3,
+                        count: 1,
+                        on_hit: vec![Trigger::Status(status(
+                            Status::Regen,
+                            3000,
+                            20.0,
+                            StackRule::Refresh,
+                            1,
+                            StatusTarget::Hit,
+                            r,
+                        ))],
+                        on_expire: vec![],
+                    }),
+                )],
+                r,
+            ),
+        ),
+        def(
+            "sanctuary",
+            Active,
+            10,
+            None,
+            ability(
+                44,
+                "Sanctuary",
+                14000,
+                0,
+                35,
+                0.5,
+                Interrupt::OnDamage,
+                vec![(
+                    300,
+                    Verb::AreaEffect(AreaEffect {
+                        shape: Shape::Cylinder {
+                            radius: 140.0,
+                            height: 96.0,
+                        },
+                        origin: Origin::Aim { range: 500.0 },
+                        delay: 0,
+                        duration: r.ms_to_ticks(6000),
+                        interval: r.ms_to_ticks(1000),
+                        damage: None,
+                        effects: vec![status(
+                            Status::Regen,
+                            1500,
+                            12.0,
+                            StackRule::Refresh,
+                            1,
+                            StatusTarget::Area,
+                            r,
+                        )],
+                        falloff: Falloff::None,
+                        max_targets: 8,
+                        requires_los: false,
+                        exclude_actor: false,
+                    }),
+                )],
+                r,
+            ),
+        ),
+        AbilityDef {
+            squad: 2,
+            ..def(
+                "war_standard",
+                Active,
+                10,
+                None,
+                ability(
+                    45,
+                    "War standard",
+                    20000,
+                    20,
+                    0,
+                    0.8,
+                    Interrupt::Never,
+                    vec![(
+                        200,
+                        Verb::AreaEffect(AreaEffect {
+                            shape: Shape::Cylinder {
+                                radius: 256.0,
+                                height: 96.0,
+                            },
+                            origin: Origin::SelfFeet,
+                            delay: 0,
+                            duration: 0,
+                            interval: 0,
+                            damage: None,
+                            effects: vec![status(
+                                Status::Fortify,
+                                8000,
+                                0.15,
+                                StackRule::Refresh,
+                                1,
+                                StatusTarget::Area,
+                                r,
+                            )],
+                            falloff: Falloff::None,
+                            max_targets: 8,
+                            requires_los: true,
+                            exclude_actor: false,
+                        }),
+                    )],
+                    r,
+                ),
+            )
+        },
+        // ---------- creature abilities (COMPANIONS.md 8.1) ----------
+        AbilityDef {
+            creature: true,
+            ..def(
+                "maul",
+                Primary,
+                0,
+                None,
+                ability(
+                    46,
+                    "Maul",
+                    2000,
+                    0,
+                    0,
+                    0.4,
+                    Interrupt::OnStagger,
+                    vec![(
+                        0,
+                        Verb::MeleeArc(MeleeArc {
+                            reach: 96.0,
+                            arc_deg: 120.0,
+                            half_height: 48.0,
+                            timing: Timing {
+                                windup: r.ms_to_ticks(550),
+                                active: r.ms_to_ticks(80),
+                                recovery: r.ms_to_ticks(600),
+                            },
+                            damage: DamagePacket {
+                                bypass: Bypass::MAGIC_SHIELD,
+                                ..packet(55, Blunt, 260.0, 45)
+                            },
+                            max_targets: 4,
+                            cleave_falloff: 1.0,
+                            parryable: true,
+                            hit_stop: r.ms_to_ticks(40),
+                        }),
+                    )],
+                    r,
+                ),
+            )
+        },
+        AbilityDef {
+            creature: true,
+            ..def(
+                "quake",
+                Active,
+                0,
+                Some(Element::Stone),
+                ability(
+                    47,
+                    "Quake",
+                    9000,
+                    0,
+                    0,
+                    0.2,
+                    Interrupt::OnStagger,
+                    vec![(
+                        300,
+                        Verb::AreaEffect(AreaEffect {
+                            shape: Shape::Cylinder {
+                                radius: 150.0,
+                                height: 96.0,
+                            },
+                            origin: Origin::Aim { range: 700.0 },
+                            delay: r.ms_to_ticks(1300),
+                            duration: 0,
+                            interval: 0,
+                            damage: Some(packet(70, Stone, 300.0, 60)),
+                            effects: vec![],
+                            falloff: Falloff::None,
+                            max_targets: 8,
+                            requires_los: false,
+                            exclude_actor: true,
+                        }),
+                    )],
+                    r,
+                ),
+            )
+        },
     ];
     let mut pack = ContentPack {
         abilities,
-        builds: Vec::new(),
+        ..ContentPack::default()
     };
     let id = |p: &ContentPack, k: &str| p.find(k).expect(k);
     let builds = vec![
@@ -1079,8 +1297,143 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 ],
             },
         },
+        NamedBuild {
+            name: "mender".into(),
+            build: Build {
+                frame: ArchetypeFrame::Caster,
+                attributes: Attributes::new(11, 20, 20, 20, 20),
+                armour: ArmourClass::Cloth,
+                aspects: Aspects::one(Element::Storm),
+                primary: id(&pack, "staff"),
+                secondary: id(&pack, "mend"),
+                guard: Some(id(&pack, "brace")),
+                actives: vec![
+                    id(&pack, "sanctuary"),
+                    id(&pack, "haste"),
+                    id(&pack, "thunderclap"),
+                ],
+            },
+        },
+        NamedBuild {
+            name: "captain".into(),
+            build: Build {
+                frame: ArchetypeFrame::Striker,
+                attributes: Attributes::new(20, 20, 20, 11, 20),
+                armour: ArmourClass::Mail,
+                aspects: Aspects::one(Element::Flame),
+                primary: id(&pack, "sword"),
+                secondary: id(&pack, "crossbow"),
+                guard: Some(id(&pack, "parry")),
+                actives: vec![id(&pack, "war_standard"), id(&pack, "dash")],
+            },
+        },
     ];
     pack.builds = builds;
+    pack.creatures = vec![
+        CreatureDef {
+            key: "sentinel".into(),
+            name: "Sentinel".into(),
+            build: Build {
+                frame: ArchetypeFrame::Striker,
+                attributes: Attributes::new(16, 14, 16, 8, 10),
+                armour: ArmourClass::Mail,
+                aspects: Aspects::one(Element::Flame),
+                primary: id(&pack, "sword"),
+                secondary: id(&pack, "crossbow"),
+                guard: Some(id(&pack, "parry")),
+                actives: vec![id(&pack, "overhead"), id(&pack, "dash")],
+            },
+            health: 420,
+            stagger_threshold: 0,
+            sight: 700.0,
+            leash: 900.0,
+            boss: false,
+            respawn_s: 600,
+            loot: None,
+        },
+        CreatureDef {
+            key: "warden".into(),
+            name: "The Warden".into(),
+            build: Build {
+                frame: ArchetypeFrame::Colossus,
+                attributes: Attributes::new(20, 8, 20, 14, 14),
+                armour: ArmourClass::Plate,
+                aspects: Aspects::one(Element::Stone),
+                primary: id(&pack, "maul"),
+                secondary: id(&pack, "stone_throw"),
+                guard: None,
+                actives: vec![id(&pack, "quake"), id(&pack, "stomp")],
+            },
+            health: 7500,
+            stagger_threshold: 400,
+            sight: 900.0,
+            leash: 1100.0,
+            boss: true,
+            respawn_s: 120,
+            loot: Some(Loot {
+                components: 3,
+                standard: vec![
+                    "core/iron".into(),
+                    "frame/ash".into(),
+                    "catalyst/basalt".into(),
+                ],
+                top: vec![
+                    "core/dragonbone".into(),
+                    "shard/boss_scale".into(),
+                    "catalyst/basalt".into(),
+                ],
+                coin: 30,
+            }),
+        },
+    ];
+    let trial = |key: &str, role: &str, deaths: u8, lens: Lens| TrialDef {
+        key: key.into(),
+        name: format!("Trial of the Warden: the {role}"),
+        map: "dungeon".into(),
+        encounter: "warden".into(),
+        time_limit_s: 300,
+        max_party_deaths: Some(deaths),
+        max_humans: 1,
+        lens,
+    };
+    pack.trials = vec![
+        trial(
+            "warden_leader",
+            "leader",
+            1,
+            Lens {
+                command: 500,
+                ..Lens::default()
+            },
+        ),
+        trial(
+            "warden_vanguard",
+            "vanguard",
+            1,
+            Lens {
+                tank: 500,
+                ..Lens::default()
+            },
+        ),
+        trial(
+            "warden_striker",
+            "striker",
+            1,
+            Lens {
+                damage: 350,
+                ..Lens::default()
+            },
+        ),
+        trial(
+            "warden_mender",
+            "mender",
+            0,
+            Lens {
+                healing: 500,
+                ..Lens::default()
+            },
+        ),
+    ];
     pack
 }
 

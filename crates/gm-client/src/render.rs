@@ -6,6 +6,7 @@ use wgpu::util::DeviceExt;
 
 use crate::Error;
 use crate::characters::{CharacterDraw, Characters};
+use crate::hud::Hud;
 use crate::world::{FaceRange, TEXTURE_SIZE, Vertex, WorldMesh};
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -239,9 +240,11 @@ pub struct Renderer {
     depth_size: (u32, u32),
     /// Models, mannequins and this frame's skinning blocks.
     pub characters: Characters,
+    /// Text and bars over the frame; filled by the caller before `render`.
+    pub hud: Hud,
     pub lightmap_scale: f32,
     pub faces_drawn: usize,
-    /// Draw calls of the last frame: the world, the boxes, one per character.
+    /// Draw calls of the last frame: the world, the boxes, one per character, the HUD.
     pub draw_calls: usize,
 }
 
@@ -640,6 +643,7 @@ impl Renderer {
         });
 
         let characters = Characters::new(gpu, color_format, &globals_layout);
+        let hud = Hud::new(gpu, color_format);
         let world = world_gpu(
             gpu,
             &textures_layout,
@@ -663,6 +667,7 @@ impl Renderer {
             depth_view: make_depth(device, size),
             depth_size: size,
             characters,
+            hud,
             lightmap_scale: 2.0,
             draw_calls: 0,
         }
@@ -755,9 +760,11 @@ impl Renderer {
             );
         }
         self.characters.prepare(gpu, characters);
+        self.hud.prepare(gpu);
         self.draw_calls = (self.world.index_count > 0) as usize
             + !self.entity_vertices.is_empty() as usize
-            + self.characters.drawn;
+            + self.characters.drawn
+            + !self.hud.is_empty() as usize;
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -807,6 +814,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.entity_buf.slice(..));
                 pass.draw(0..self.entity_vertices.len() as u32, 0..1);
             }
+            self.hud.draw(&mut pass);
         }
         gpu.queue.submit([encoder.finish()]);
     }
