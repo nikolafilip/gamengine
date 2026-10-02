@@ -32,9 +32,12 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowId};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::window::CursorGrabMode;
+use winit::window::{Window, WindowId};
 
 use crate::avatars::{Avatars, Body, OWN, stall_boxes, stall_keeper};
+use crate::bag::{Bag, BagAction};
 use crate::front::{Action, Auto, Front, PANEL_UNITS};
 use crate::hub::{Account, Hub, HubApi, ticket_addr};
 use crate::hud::{self, Hud};
@@ -391,6 +394,10 @@ struct App {
     /// The game menu when it is open, and the chat (CLIENT.md 4.4, 5).
     menu: Option<GameMenu>,
     chat: Chat,
+    /// The inventory or a stall, when one is open (ITEMS.md 6), and the character being
+    /// played: the one the hub is asked about.
+    bag: Option<Bag>,
+    character: Option<gm_hub_proto::protocol::CharacterId>,
     /// The toolkit's memory, and what happened since the last frame for it.
     ui: UiState,
     ui_input: UiInput,
@@ -528,6 +535,8 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         front: start.front,
         menu: None,
         chat: Chat::default(),
+        bag: None,
+        character: None,
         ui: UiState::default(),
         ui_input: UiInput::default(),
         cursor: (0.0, 0.0),
@@ -1407,7 +1416,74 @@ impl App {
     /// A screen has the pointer and the keys: one before the game, or the game menu
     /// (CLIENT.md 6).
     fn screen_up(&self) -> bool {
-        self.front_up || self.menu.is_some() || self.title.is_some()
+        self.front_up || self.menu.is_some() || self.bag.is_some() || self.title.is_some()
+    }
+
+    /// The hub and the session and character it is asked about, while one is played.
+    fn owner(
+        &self,
+    ) -> Option<(
+        &Hub,
+        gm_hub_proto::protocol::SessionId,
+        gm_hub_proto::protocol::CharacterId,
+    )> {
+        let playing = self.online.as_ref().is_some_and(|o| o.client.is_some());
+        match (&self.hub, &self.account, self.character) {
+            (Some(hub), Some(account), Some(character)) if playing => {
+                Some((hub, account.session, character))
+            }
+            _ => None,
+        }
+    }
+
+    /// The stall the body stands at (ITEMS.md 5): the nearest one in reach, by the rule
+    /// the zone decides a purchase with.
+    fn stall_in_reach(online: Option<&Online>) -> Option<&StallEntry> {
+        let o = online?;
+        let c = o.client.as_ref()?;
+        let feet = c.mover.mv.origin + Vec3::Z * Hull::Player.mins().z;
+        let far = |s: &StallEntry| (Vec3::from(s.pos) - feet).truncate().length_squared();
+        o.stalls
+            .iter()
+            .filter(|s| gm_net::control::stall_in_reach(s.pos, feet.into()))
+            .min_by(|a, b| far(a).total_cmp(&far(b)))
+    }
+
+    /// `I`: the inventory of the character being played.
+    fn open_inventory(&mut self) {
+        match self.owner() {
+            Some((hub, session, character)) => {
+                self.bag = Some(Bag::inventory(hub, session, character, Instant::now()));
+                self.menu = None;
+                self.release_keys();
+            }
+            None => self.note("there is no inventory without a hub"),
+        }
+    }
+
+    /// `E`: what the stall the body stands at has for sale.
+    fn open_stall(&mut self) {
+        let near = Self::stall_in_reach(self.online.as_ref());
+        let Some((id, owner)) = near.map(|s| (s.id, s.owner.clone())) else {
+            return;
+        };
+        match self.owner() {
+            Some((hub, session, character)) => {
+                let now = Instant::now();
+                self.bag = Some(Bag::stall(hub, session, character, id, &owner, now));
+                self.menu = None;
+                self.release_keys();
+            }
+            None => self.note("there is nothing to look at without a hub"),
+        }
+    }
+
+    /// A word in the window's title and the log, as the stall keys say theirs.
+    fn note(&mut self, text: &str) {
+        log::info!("{text}");
+        if let Some(o) = &mut self.online {
+            o.respec_note = text.to_string();
+        }
     }
 
     /// The keys are the toolkit's: a screen is up, or the chat line is open.
@@ -1462,6 +1538,9 @@ impl App {
                 self.menu = Some(GameMenu::default());
                 self.release_keys();
             }
+            // The tactical view has its own use for the keys around it.
+            Key::Inventory if !self.tactical.active => self.open_inventory(),
+            Key::Use if !self.tactical.active => self.open_stall(),
             _ => {}
         }
     }
@@ -1522,6 +1601,8 @@ impl App {
     fn leave_zone(&mut self, why: &str) {
         self.hang_up();
         self.menu = None;
+        self.bag = None;
+        self.character = None;
         self.chat.clear();
         self.entities.clear();
         self.bodies.clear();
@@ -1618,6 +1699,7 @@ impl App {
         match entered {
             Ok(online) => {
                 self.online = Some(online);
+                self.character = Some(ticket.token.payload.character);
                 // Remembered for a person; a command line that named it leaves no trace.
                 if self.returns_to_screens() {
                     self.settings.character = name;
@@ -1633,6 +1715,32 @@ impl App {
     }
 
     /// What the screens, the menu and the chat line asked for in this frame.
+    /// What the inventory or the stall asked for: buying and wearing are said to the
+    /// zone (ITEMS.md 5).
+    fn bag_act(&mut self, action: BagAction) {
+        let say = match action {
+            BagAction::None => return,
+            BagAction::Close => {
+                self.bag = None;
+                return;
+            }
+            BagAction::Buy {
+                stall,
+                listing,
+                price,
+            } => Control::StallBuy {
+                stall,
+                listing,
+                price,
+            },
+            BagAction::Wear { item } => Control::Wear { item },
+            BagAction::TakeOff { item } => Control::TakeOff { item },
+        };
+        if let Some(o) = &mut self.online {
+            o.net.send_control(say);
+        }
+    }
+
     fn act(
         &mut self,
         front: Action,
@@ -1646,6 +1754,7 @@ impl App {
         match menu {
             MenuAction::None => {}
             MenuAction::Resume => self.menu = None,
+            MenuAction::Inventory => self.open_inventory(),
             MenuAction::Travel(zone) => {
                 if let Some(o) = &mut self.online {
                     o.net.send_control(Control::Travel(zone.clone()));
@@ -1795,6 +1904,16 @@ impl App {
 
     fn set_grab(&mut self, grab: bool) {
         let Some(a) = &self.active else { return };
+        // In a browser the page asks for the pointer itself: a refusal there is an answer
+        // the page takes, not an error left in the console.
+        #[cfg(target_arch = "wasm32")]
+        if grab {
+            self.grab_asked = Some(Instant::now());
+            crate::web::ask_for_pointer();
+        } else {
+            crate::web::give_pointer_back();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if grab {
             self.grab_asked = Some(Instant::now());
             let ok = a
@@ -2200,6 +2319,38 @@ impl App {
                         };
                         log::info!("{}", o.respec_note);
                     }
+                    // The answers the inventory and the stall wait for (ITEMS.md 5). One
+                    // that no open screen is waiting for (the screen was closed, or it is
+                    // the answer to an earlier request) is said where the game says
+                    // things, and moves nothing on a screen.
+                    Control::BuyResult { listing, result } => {
+                        log::info!("buy of listing {listing}: {result:?}");
+                        let good = result.is_ok();
+                        let elsewhere = match (&mut self.bag, &self.hub) {
+                            (Some(bag), Some(hub)) => bag.bought(hub, listing, result),
+                            _ => Some(match result {
+                                Ok(()) => "bought: it is in the inventory".to_string(),
+                                Err(e) => format!("not bought: {e}"),
+                            }),
+                        };
+                        if let Some(text) = elsewhere {
+                            o.say(text, if good { hud::DIM } else { hud::ORANGE });
+                        }
+                    }
+                    Control::WearResult { item, result } => {
+                        log::info!("wear of item {item}: {result:?}");
+                        let good = result.is_ok();
+                        let elsewhere = match (&mut self.bag, &self.hub) {
+                            (Some(bag), Some(hub)) => bag.worn(hub, item, result),
+                            _ => Some(match result {
+                                Ok(()) => "what is worn changed".to_string(),
+                                Err(e) => format!("what is worn did not change: {e}"),
+                            }),
+                        };
+                        if let Some(text) = elsewhere {
+                            o.say(text, if good { hud::DIM } else { hud::ORANGE });
+                        }
+                    }
                     Control::PlayerLeft(id) => {
                         o.names.remove(&id);
                         o.kinds.remove(&id);
@@ -2275,6 +2426,7 @@ impl App {
                     o.stalls.clear();
                     o.zone_name = zone;
                     o.respec_note = format!("travelling to {}", o.zone_name);
+                    self.bag = None;
                     self.entities.clear();
                     self.bodies.clear();
                 }
@@ -3150,15 +3302,26 @@ impl App {
         // The screens, the menu and the chat, over the HUD (CLIENT.md 4 to 6).
         let mut front_actions = [Action::None, Action::None];
         let (mut menu_action, mut said) = (MenuAction::None, None);
+        let mut bag_action = BagAction::None;
         if !bench {
             let playing = self.online.as_ref().is_some_and(|o| o.client.is_some());
-            let screen = match (&self.front, &self.menu) {
+            let screen = match (&self.front, &self.menu, &self.bag) {
                 _ if self.title.is_some() => "title",
-                (Some(front), _) if self.front_up => front.screen.name(),
-                (_, Some(menu)) => menu.page.name(),
+                (Some(front), _, _) if self.front_up => front.screen.name(),
+                (_, Some(menu), _) => menu.page.name(),
+                (_, _, Some(bag)) => bag.page.name(),
                 _ if self.chat.open => "chat",
                 _ => "game",
             };
+            // Whose stall the body stands at, for the corner of the screen.
+            let near = Self::stall_in_reach(self.online.as_ref())
+                .filter(|_| playing && self.hub.is_some() && !self.tactical.active)
+                .map(|s| s.owner.clone());
+            let me = self.opts.name.clone();
+            let keeps_stall = self
+                .online
+                .as_ref()
+                .is_some_and(|o| o.stalls.iter().any(|s| s.owner == me));
             self.ui_input.cursor = self.cursor;
             self.ui_input.time = self.started.elapsed().as_secs_f32();
             let mut ui = Ui::begin_at(
@@ -3186,7 +3349,19 @@ impl App {
                     // Between two zones nothing is drawn of it: nor does it keep the keys.
                     self.chat.drop_line();
                 }
+                // The game goes away under an open inventory as under the menu; a body
+                // that stopped playing (a travel, the zone gone) has neither.
+                if !playing {
+                    self.bag = None;
+                }
+                match (&mut self.bag, &self.hub) {
+                    (Some(bag), Some(hub)) if self.menu.is_none() => {
+                        bag_action = bag.frame(&mut ui, hub, keeps_stall, Instant::now());
+                    }
+                    _ => {}
+                }
                 match &mut self.menu {
+                    Some(_) if self.bag.is_some() => {}
                     Some(menu) => {
                         let hub = self
                             .hub
@@ -3195,6 +3370,7 @@ impl App {
                             .map(|(hub, account)| (hub as &dyn HubApi, account.session));
                         // A page's tab is closed and made fullscreen by the browser.
                         let offers = Offers {
+                            inventory: playing && hub.is_some() && self.character.is_some(),
                             travel: playing && hub.is_some(),
                             leave: returns && self.online.is_some(),
                             fullscreen: cfg!(not(target_arch = "wasm32")),
@@ -3203,6 +3379,7 @@ impl App {
                         let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
                         menu_action = menu.frame(&mut ui, hub, offers, here, &mut self.settings);
                     }
+                    None if self.bag.is_some() => {}
                     None if playing && !self.chat.open && !self.tactical.active => {
                         // Where this is, and the two keys nothing else tells of.
                         let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
@@ -3213,6 +3390,11 @@ impl App {
                         };
                         let (w, h) = ui.size();
                         ui.small(w - 16.0, h - 14.0 * ui.scale, ui::FAINT, &hint);
+                        // And the stall the body stands at, whose it is and the key.
+                        if let Some(owner) = &near {
+                            let look = format!("{owner}'s stall  E look");
+                            ui.small(w - 16.0, h - 24.0 * ui.scale, ui::TEXT, &look);
+                        }
                     }
                     None => {}
                 }
@@ -3336,6 +3518,7 @@ impl App {
             event_loop.exit();
         }
         let [answered, clicked] = front_actions;
+        self.bag_act(bag_action);
         self.act(answered, menu_action, said, event_loop);
         self.act(clicked, MenuAction::None, None, event_loop);
     }
@@ -3559,6 +3742,9 @@ impl ApplicationHandler for App {
                             _ => {}
                         }
                         match code {
+                            // The inventory, and the stall the body stands at.
+                            KeyCode::KeyI if !event.repeat => self.ui_key(Key::Inventory),
+                            KeyCode::KeyE if !event.repeat => self.ui_key(Key::Use),
                             KeyCode::Tab if !event.repeat => self.toggle_tactical(),
                             KeyCode::KeyV if !event.repeat => {
                                 self.viewport = match self.viewport {

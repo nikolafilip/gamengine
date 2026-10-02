@@ -247,7 +247,7 @@ async fn trade_commit_verifies_everything_again() {
     cooldown(&econ).await;
     let v5 = econ.trade_version(t5).await.unwrap();
     econ.trade_accept(t5, b, v5).await.unwrap();
-    econ.craft(a, "sword", &[core, frame]).await.unwrap();
+    econ.craft(a, "sword", &[core, frame], None).await.unwrap();
     assert!(matches!(
         econ.trade_accept(t5, a, v5).await,
         Err(EconError::State(_))
@@ -296,7 +296,7 @@ async fn stalls_snap_to_the_grid_and_sell_exactly_once() {
     let Some(econ) = setup().await else { return };
     let seller = player(&econ, 0).await;
     let rival = player(&econ, 0).await;
-    econ.stall_open(seller, "stall_town", 4, 7).await.unwrap();
+    let stall = econ.stall_open(seller, "stall_town", 4, 7).await.unwrap();
     // The stall-blocking scam: the tile is taken, by constraint.
     assert!(matches!(
         econ.stall_open(rival, "stall_town", 4, 7).await,
@@ -307,16 +307,50 @@ async fn stalls_snap_to_the_grid_and_sell_exactly_once() {
         econ.stall_open(seller, "stall_town", 5, 7).await,
         Err(EconError::State(_))
     ));
-    econ.stall_open(rival, "stall_town", 5, 7).await.unwrap();
+    let rivals = econ.stall_open(rival, "stall_town", 5, 7).await.unwrap();
 
     let item = component(&econ, seller, "catalyst/ember").await;
-    let listing = econ.stall_list(seller, item, 300).await.unwrap();
+    // A stall is kept where it stands: listing names the zone its keeper plays in, and a
+    // stall that stands elsewhere is not found from there.
+    assert_eq!(
+        econ.stall_list(seller, "another_town", item, 300).await,
+        Err(EconError::NotFound)
+    );
+    let listing = econ
+        .stall_list(seller, "stall_town", item, 300)
+        .await
+        .unwrap();
+    // A listing comes back out (a price put wrong is put right): only its keeper's, only
+    // from the stall's zone, and only once.
+    assert_eq!(
+        econ.stall_unlist(rival, "stall_town", listing).await,
+        Err(EconError::NotFound),
+        "not a listing of the rival's stall"
+    );
+    assert_eq!(
+        econ.stall_unlist(seller, "another_town", listing).await,
+        Err(EconError::NotFound)
+    );
+    econ.stall_unlist(seller, "stall_town", listing)
+        .await
+        .unwrap();
+    assert!(has(&econ, seller, item).await, "back in the inventory");
+    assert_eq!(
+        econ.stall_unlist(seller, "stall_town", listing).await,
+        Err(EconError::NotFound)
+    );
+    assert!(econ.stall_view(stall).await.unwrap().2.is_empty());
+    let listing = econ
+        .stall_list(seller, "stall_town", item, 300)
+        .await
+        .unwrap();
     assert!(
         !has(&econ, seller, item).await,
         "a listed item sits in the stall"
     );
     assert_eq!(
-        econ.stall_buy(seller, listing, 300).await,
+        econ.stall_buy(seller, "stall_town", stall, listing, 300)
+            .await,
         Err(EconError::Invalid("that is your own stall".into()))
     );
 
@@ -327,14 +361,42 @@ async fn stalls_snap_to_the_grid_and_sell_exactly_once() {
     }
     // A buyer shown another price is refused (the price-swap scam).
     assert!(matches!(
-        econ.stall_buy(buyers[0], listing, 30).await,
+        econ.stall_buy(buyers[0], "stall_town", stall, listing, 30)
+            .await,
         Err(EconError::State(_))
     ));
+    // A stall is a place (ITEMS.md 1): the listing must be of the stall the buyer's zone
+    // saw it standing at, and that stall must be one of that zone's.
+    assert_eq!(
+        econ.stall_buy(buyers[0], "stall_town", rivals, listing, 300)
+            .await,
+        Err(EconError::NotFound),
+        "standing at the stall next door"
+    );
+    assert_eq!(
+        econ.stall_buy(buyers[0], "another_town", stall, listing, 300)
+            .await,
+        Err(EconError::NotFound),
+        "a zone the stall is not in"
+    );
+    // What a stall shows: its keeper and its listings, from anywhere.
+    let (owner, _name, listings) = econ.stall_view(stall).await.unwrap();
+    assert_eq!(owner, seller);
+    assert_eq!(
+        listings
+            .iter()
+            .map(|l| (l.id, l.item.id, l.price))
+            .collect::<Vec<_>>(),
+        vec![(listing, item, 300)]
+    );
+    assert_eq!(listings[0].item.components[0].material, "catalyst/ember");
+    assert!(econ.stall_view(rivals).await.unwrap().2.is_empty());
+    assert_eq!(econ.stall_view(stall + 99).await, Err(EconError::NotFound));
     let mut tasks = Vec::new();
     for &b in &buyers {
         let econ = econ.clone();
         tasks.push(tokio::spawn(async move {
-            econ.stall_buy(b, listing, 300).await
+            econ.stall_buy(b, "stall_town", stall, listing, 300).await
         }));
     }
     let mut won = 0;
@@ -360,9 +422,13 @@ async fn stalls_snap_to_the_grid_and_sell_exactly_once() {
     );
     // A buyer who cannot pay gets nothing and the listing stays.
     let item2 = component(&econ, seller, "catalyst/ember").await;
-    let listing2 = econ.stall_list(seller, item2, 1_000).await.unwrap();
+    let listing2 = econ
+        .stall_list(seller, "stall_town", item2, 1_000)
+        .await
+        .unwrap();
     assert_eq!(
-        econ.stall_buy(buyers[0], listing2, 1_000).await,
+        econ.stall_buy(buyers[0], "stall_town", stall, listing2, 1_000)
+            .await,
         Err(EconError::Insufficient)
     );
     econ.stall_close(seller).await.unwrap();
@@ -427,11 +493,16 @@ async fn a_full_owner_cannot_keep_a_stall_tile() {
     let mut listed = Vec::new();
     for _ in 0..STALL_SLOTS {
         let item = component(&econ, owner, "shard/glass").await;
-        econ.stall_list(owner, item, 999_999).await.unwrap();
+        econ.stall_list(owner, "full_town", item, 999_999)
+            .await
+            .unwrap();
         listed.push(item);
     }
     let extra = component(&econ, owner, "shard/glass").await;
-    assert_eq!(econ.stall_list(owner, extra, 1).await, Err(EconError::Full));
+    assert_eq!(
+        econ.stall_list(owner, "full_town", extra, 1).await,
+        Err(EconError::Full)
+    );
     // Fill the storage and the inventory with junk.
     for _ in 0..STORAGE_SLOTS {
         let j = component(&econ, owner, "shard/glass").await;
@@ -643,23 +714,36 @@ async fn crafting_and_decomposition_never_create_anything() {
     let gem3 = component(&econ, p, "gem/opal").await;
 
     // Invalid recipes are refused and consume nothing.
-    assert!(econ.craft(p, "sword", &[core]).await.is_err());
+    assert!(econ.craft(p, "sword", &[core], None).await.is_err());
     assert!(
-        econ.craft(p, "sword", &[core, frame, gem1, gem2, gem3])
+        econ.craft(p, "sword", &[core, frame, gem1, gem2, gem3], None)
             .await
             .is_err()
     );
-    assert!(econ.craft(p, "sword", &[core, core, frame]).await.is_err());
-    assert!(econ.craft(p, "component", &[core, frame]).await.is_err());
+    assert!(
+        econ.craft(p, "sword", &[core, core, frame], None)
+            .await
+            .is_err()
+    );
+    assert!(
+        econ.craft(p, "component", &[core, frame], None)
+            .await
+            .is_err()
+    );
     let other = player(&econ, 0).await;
     assert_eq!(
-        econ.craft(other, "sword", &[core, frame]).await,
+        econ.craft(other, "sword", &[core, frame], None).await,
         Err(EconError::Forbidden)
     );
     assert_eq!(econ.inventory(p).await.unwrap().1.len(), 7);
 
     let sword = econ
-        .craft(p, "sword", &[core, frame, shard, catalyst, gem1, gem2])
+        .craft(
+            p,
+            "sword",
+            &[core, frame, shard, catalyst, gem1, gem2],
+            None,
+        )
         .await
         .unwrap();
     let (_, items) = econ.inventory(p).await.unwrap();
@@ -674,7 +758,27 @@ async fn crafting_and_decomposition_never_create_anything() {
         6
     );
     // The consumed components are gone: they cannot be used or traded again.
-    assert!(econ.craft(p, "axe", &[core, frame]).await.is_err());
+    assert!(econ.craft(p, "axe", &[core, frame], None).await.is_err());
+    // A template has room for some layers and not for others (ITEMS.md 3.2): a part of a
+    // layer it has no room for is refused, and nothing is consumed.
+    let core2 = component(&econ, p, "core/iron").await;
+    let frame2 = component(&econ, p, "frame/oak").await;
+    let ember = component(&econ, p, "catalyst/ember").await;
+    let room: Vec<String> = ["shard", "core", "frame", "gem"]
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(
+        econ.craft(p, "cuirass", &[core2, frame2, ember], Some(&room))
+            .await,
+        Err(EconError::Invalid("a cuirass takes no catalyst".into()))
+    );
+    assert!(has(&econ, p, ember).await && has(&econ, p, core2).await);
+    let cuirass = econ
+        .craft(p, "cuirass", &[core2, frame2], Some(&room))
+        .await
+        .unwrap();
+    assert!(has(&econ, p, cuirass).await);
 
     // Decomposition returns half, rounded down, and the item is gone.
     let back = econ.decompose(p, sword).await.unwrap();
@@ -684,7 +788,9 @@ async fn crafting_and_decomposition_never_create_anything() {
         econ.decompose(p, back[0]).await.is_err(),
         "a lone component does not decompose"
     );
-    assert_eq!(econ.inventory(p).await.unwrap().1.len(), 4);
+    // The three that came back, one part bought apart earlier, the cuirass and the ember
+    // it had no room for.
+    assert_eq!(econ.inventory(p).await.unwrap().1.len(), 6);
 
     // Padding a craft with junk never raises what comes back above half.
     for item in 0..2_000i64 {
@@ -934,20 +1040,26 @@ async fn crossing_movements_neither_deadlock_nor_lose_coin() {
     // lock orders if the code were careless.
     let a = player(&econ, 10_000).await;
     let b = player(&econ, 10_000).await;
-    econ.stall_open(a, "cross_town", 0, 0).await.unwrap();
-    econ.stall_open(b, "cross_town", 1, 0).await.unwrap();
+    let sa = econ.stall_open(a, "cross_town", 0, 0).await.unwrap();
+    let sb = econ.stall_open(b, "cross_town", 1, 0).await.unwrap();
     let mut tasks = Vec::new();
     for round in 0..10 {
         let ia = component(&econ, a, "gem/quartz").await;
         let ib = component(&econ, b, "gem/quartz").await;
-        let la = econ.stall_list(a, ia, 100 + round).await.unwrap();
-        let lb = econ.stall_list(b, ib, 200 + round).await.unwrap();
+        let la = econ
+            .stall_list(a, "cross_town", ia, 100 + round)
+            .await
+            .unwrap();
+        let lb = econ
+            .stall_list(b, "cross_town", ib, 200 + round)
+            .await
+            .unwrap();
         let (e1, e2) = (econ.clone(), econ.clone());
         tasks.push(tokio::spawn(async move {
-            e1.stall_buy(b, la, 100 + round).await
+            e1.stall_buy(b, "cross_town", sa, la, 100 + round).await
         }));
         tasks.push(tokio::spawn(async move {
-            e2.stall_buy(a, lb, 200 + round).await
+            e2.stall_buy(a, "cross_town", sb, lb, 200 + round).await
         }));
         let (e3, e4) = (econ.clone(), econ.clone());
         tasks.push(tokio::spawn(async move { e3.grant_coin(a, 1, 0).await }));
@@ -977,6 +1089,19 @@ async fn a_storm_of_mixed_movements_never_deadlocks() {
     for _ in 0..6 {
         who.push(player(&econ, 50_000).await);
     }
+    // They play in a zone, so that they can put things on (ITEMS.md 2).
+    sqlx::query(
+        "update characters set location_kind = 'zone', location_zone = 'storm' where id = any($1)",
+    )
+    .bind(&who)
+    .execute(econ_pool(&econ))
+    .await
+    .unwrap();
+    let items = gm_content::items::load_items(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/content"
+    )))
+    .expect("items");
     let started = std::time::Instant::now();
     let mut tasks: Vec<tokio::task::JoinHandle<Result<(), EconError>>> = Vec::new();
     let mut ops = 0u32;
@@ -985,24 +1110,27 @@ async fn a_storm_of_mixed_movements_never_deadlocks() {
         let next = who[(i + 1) % 6];
         let prev = who[(i + 5) % 6];
         let e = econ.clone();
-        ops += 8 * 12;
+        let content = items.clone();
+        ops += 8 * 15;
         // Each character runs eight rounds of its own (sixteen items: the inventory never fills); the six run at once and every round
         // reaches into both neighbours' holders.
         tasks.push(tokio::spawn(async move {
             for round in 0..8i32 {
                 let town = format!("storm_{round}");
                 // A stall with a listing and a buy order; the neighbour buys and fills.
-                e.stall_open(me, &town, i as i32, 0).await?;
+                let stall = e.stall_open(me, &town, i as i32, 0).await?;
                 let item = e
                     .grant_components(&town, &[(me, "gem/quartz".into())], 0)
                     .await?[0];
-                let listing = e.stall_list(me, item, 10).await?;
+                let listing = e.stall_list(me, &town, item, 10).await?;
                 let order = e.buy_order_post(me, "core/iron", 7, 2).await?;
                 let theirs = e
                     .grant_components(&town, &[(next, "core/iron".into())], 0)
                     .await?[0];
                 let (e1, e2, e3) = (e.clone(), e.clone(), e.clone());
-                let buy = tokio::spawn(async move { e1.stall_buy(next, listing, 10).await });
+                let at = town.clone();
+                let buy =
+                    tokio::spawn(async move { e1.stall_buy(next, &at, stall, listing, 10).await });
                 let fill =
                     tokio::spawn(async move { e2.buy_order_fill(next, order, theirs).await });
                 // A contract accepted and decided while the coin is moving.
@@ -1017,13 +1145,51 @@ async fn a_storm_of_mixed_movements_never_deadlocks() {
                 report.await.unwrap()?;
                 e.buy_order_cancel(me, order).await?;
                 e.stall_close(me).await?;
-                // The stall returned the delivered core; with a frame it becomes a hammer,
+                // The stall returned the delivered core; with a frame it becomes a cuirass,
                 // which is decomposed again.
                 let frame = e
                     .grant_components(&town, &[(me, "frame/oak".into())], 0)
                     .await?[0];
-                let hammer = e.craft(me, "hammer", &[theirs, frame]).await?;
-                e.decompose(me, hammer).await?;
+                let cuirass = e.craft(me, "cuirass", &[theirs, frame], None).await?;
+                // Worn, it cannot be taken apart; taken off, it can. (An armour: the
+                // weapon's place is being fought over by the sword below.)
+                e.wear(me, "storm", cuirass, &content).await?;
+                if e.decompose(me, cuirass).await.is_ok() {
+                    return Err(EconError::Invalid("a worn cuirass was decomposed".into()));
+                }
+                e.take_off(me, "storm", cuirass, &content).await?;
+                e.decompose(me, cuirass).await?;
+            }
+            Ok(())
+        }));
+        // A sword is put on and taken off while it is being offered in trades to a
+        // neighbour who accepts whatever is there: it must never be worn and on offer, and
+        // never leave the one who wears it.
+        let (e, a, b, content) = (econ.clone(), who[i], who[(i + 2) % 6], items.clone());
+        ops += 10 * 4;
+        tasks.push(tokio::spawn(async move {
+            let parts = ["core/iron".to_string(), "frame/oak".to_string()];
+            let sword = e.grant_item(a, "sword", &parts, None).await?;
+            for round in 0..10 {
+                let t = e.trade_open(a, b).await?;
+                let (e1, e2, c1) = (e.clone(), e.clone(), content.clone());
+                let offer = tokio::spawn(async move { e1.trade_offer_item(t, a, sword).await });
+                let wear = tokio::spawn(async move { e2.wear(a, "storm", sword, &c1).await });
+                let offered = offer.await.unwrap();
+                wear.await.unwrap()?;
+                // Whichever came first, the sword is worn now and in no offer.
+                match offered {
+                    Ok(()) | Err(EconError::State(_)) => {}
+                    Err(other) => return Err(other),
+                }
+                let (_, mine, _) = e.trade_view(t, a).await?;
+                if !mine.2.is_empty() {
+                    return Err(EconError::Invalid(format!(
+                        "round {round}: a worn sword is on offer"
+                    )));
+                }
+                e.take_off(a, "storm", sword, &content).await?;
+                e.trade_cancel(t, a).await?;
             }
             Ok(())
         }));

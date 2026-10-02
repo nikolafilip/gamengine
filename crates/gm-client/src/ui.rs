@@ -142,6 +142,11 @@ pub enum Key {
     End,
     PageUp,
     PageDown,
+    /// The game's own two keys that open a screen (ITEMS.md 6): `I`, the inventory, and
+    /// `E`, the stall the body stands at. They are keys only in the game: while a screen
+    /// has the keyboard the same keys are letters.
+    Inventory,
+    Use,
 }
 
 impl Key {
@@ -162,6 +167,8 @@ impl Key {
             "End" => Key::End,
             "PageUp" => Key::PageUp,
             "PageDown" => Key::PageDown,
+            "I" => Key::Inventory,
+            "E" => Key::Use,
             _ => return None,
         })
     }
@@ -231,6 +238,10 @@ pub struct UiState {
     /// Texts the last frame had no room to draw whole (a label cut, a paragraph with
     /// lines left over), titles and list cells apart: a test asks that there are none.
     pub clipped: Vec<String>,
+    /// Cells of lists the last frame cut to their column. Some lists may (a long name in
+    /// the characters' list); a screen whose cells are prices and numbers asks that there
+    /// are none.
+    pub cut_cells: Vec<String>,
 }
 
 impl UiState {
@@ -277,6 +288,8 @@ pub struct Field {
     pub no_spaces: bool,
     /// Whatever the keyboard gives is taken, drawable by the font or not (a password).
     pub any: bool,
+    /// Only the ten digits are taken (an amount).
+    pub digits: bool,
 }
 
 impl Field {
@@ -287,6 +300,14 @@ impl Field {
             max_bytes: usize::MAX,
             no_spaces: false,
             any: false,
+            digits: false,
+        }
+    }
+
+    pub const fn number(max_digits: usize) -> Field {
+        Field {
+            digits: true,
+            ..Field::text(max_digits)
         }
     }
 
@@ -298,6 +319,11 @@ impl Field {
         }
     }
 }
+
+/// A list's selection when no row is picked: none is lit, the arrow keys start from an
+/// end, and nothing can be activated. (What was picked is gone: nothing takes its place by
+/// standing in its row.)
+pub const NONE: usize = usize::MAX;
 
 /// What a list was asked to do this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,6 +347,7 @@ pub struct Ui<'a, C: Canvas> {
     order: Vec<String>,
     seen: Vec<Seen>,
     clipped: Vec<String>,
+    cut: Vec<String>,
     /// A row of a list was pressed this frame.
     row_pressed: bool,
 }
@@ -368,6 +395,7 @@ impl<'a, C: Canvas> Ui<'a, C> {
             order: Vec::new(),
             seen: Vec::new(),
             clipped: Vec::new(),
+            cut: Vec::new(),
             row_pressed: false,
         }
     }
@@ -510,6 +538,28 @@ impl<'a, C: Canvas> Ui<'a, C> {
         self.canvas.text(x, y, self.scale, color, &shown);
         let rect = Rect::new(x, y, self.text_width(&shown), GLYPH_H * self.scale);
         self.note(SeenKind::Label, text, rect);
+    }
+
+    /// One line in several colours, its parts a space apart (an amount of coin: a colour
+    /// for each unit). A script sees it as one text. Returns its width.
+    pub fn spans(&mut self, x: f32, y: f32, parts: &[(String, [f32; 4])]) -> f32 {
+        let mut whole = String::new();
+        for (text, color) in parts {
+            if !whole.is_empty() {
+                whole.push(' ');
+            }
+            // Every part on the same grid of characters as a line written in one go.
+            let at = x + whole.chars().count() as f32 * ADVANCE * self.scale;
+            self.canvas.text(at, y, self.scale, *color, text);
+            whole.push_str(text);
+        }
+        let w = self.text_width(&whole);
+        self.note(
+            SeenKind::Label,
+            &whole,
+            Rect::new(x, y, w, GLYPH_H * self.scale),
+        );
+        w
     }
 
     /// Small print, ending at `right`: a word in a corner, at half the scale and never
@@ -673,10 +723,21 @@ impl<'a, C: Canvas> Ui<'a, C> {
             if !self.text_used {
                 self.text_used = true;
                 let mut bytes: usize = chars.iter().map(|c| c.len_utf8()).sum();
-                for c in self.input.text.chars() {
+                // An amount that arrives all at once (a paste) with anything but digits in
+                // it is not an amount this field can read: `12.50` is not 1250.
+                let pasted = self.input.text.chars().count() > 1;
+                let amount = self.input.text.chars().all(|c| c.is_ascii_digit());
+                let text = if how.digits && pasted && !amount {
+                    ""
+                } else {
+                    self.input.text.as_str()
+                };
+                for c in text.chars() {
                     let fits = chars.len() < how.max_chars && bytes + c.len_utf8() <= how.max_bytes;
                     let known = how.any || font::has_glyph(c);
-                    if fits && known && !(how.no_spaces && c == ' ') {
+                    let wanted =
+                        !(how.no_spaces && c == ' ') && (!how.digits || c.is_ascii_digit());
+                    if fits && known && wanted {
                         chars.insert(caret, c);
                         caret += 1;
                         bytes += c.len_utf8();
@@ -739,8 +800,8 @@ impl<'a, C: Canvas> Ui<'a, C> {
         let mut event = ListEvent::None;
         let before = *selected;
         if rows.is_empty() {
-            *selected = 0;
-        } else {
+            *selected = if *selected == NONE { NONE } else { 0 };
+        } else if *selected != NONE {
             *selected = (*selected).min(rows.len() - 1);
         }
         let mut first = *self.state.scrolls.get(&id).unwrap_or(&0);
@@ -755,7 +816,17 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 if self.used[i] {
                     continue;
                 }
+                // With nothing picked the keys start from an end.
+                let nothing = *selected == NONE;
                 let done = match self.input.keys[i] {
+                    Key::Up | Key::PageUp | Key::End if nothing => {
+                        *selected = last;
+                        true
+                    }
+                    Key::Down | Key::PageDown | Key::Home if nothing => {
+                        *selected = 0;
+                        true
+                    }
                     Key::Up => {
                         *selected = selected.saturating_sub(1);
                         true
@@ -781,7 +852,9 @@ impl<'a, C: Canvas> Ui<'a, C> {
                         true
                     }
                     Key::Enter => {
-                        event = ListEvent::Activated;
+                        if !nothing {
+                            event = ListEvent::Activated;
+                        }
                         true
                     }
                     _ => false,
@@ -796,7 +869,8 @@ impl<'a, C: Canvas> Ui<'a, C> {
         // The selection stays in view when the keys moved it, and when it was changed
         // from outside since this list was last drawn (the character played last, the
         // one just made).
-        if *selected != before || self.state.selections.get(&id) != Some(&*selected) {
+        let moved = *selected != before || self.state.selections.get(&id) != Some(&*selected);
+        if moved && *selected != NONE {
             if *selected < first {
                 first = *selected;
             } else if *selected >= first + room {
@@ -836,6 +910,9 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 let x = rr.x + 4.0 * s + (rr.w - 8.0 * s) * from;
                 let fit = self.fit((rr.w - 8.0 * s) * (to - from) - 2.0 * s);
                 let shown: String = cell.chars().take(fit).collect();
+                if shown.len() < cell.len() {
+                    self.cut.push(cell.clone());
+                }
                 let ink = if c == 0 { TEXT } else { FAINT };
                 self.canvas.text(x, rr.y + 3.0 * s, s, ink, &shown);
             }
@@ -1016,6 +1093,7 @@ impl<'a, C: Canvas> Ui<'a, C> {
         self.state.order = std::mem::take(&mut self.order);
         self.state.seen = std::mem::take(&mut self.seen);
         self.state.clipped = std::mem::take(&mut self.clipped);
+        self.state.cut_cells = std::mem::take(&mut self.cut);
     }
 }
 

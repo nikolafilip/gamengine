@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 
 use bitcode::{Decode, Encode};
 use gm_core::build::Build;
+use gm_core::matrix::Gear;
 pub use gm_net::control::BuildChoice;
 
 pub type AccountId = i64;
@@ -618,14 +619,14 @@ pub enum EconOp {
     TradeView {
         trade: i64,
     },
+    /// Into the caller's own open stall, which stands in the zone the character plays in.
     StallList {
         item: ItemId,
         price: i64,
     },
-    /// `price` is the price the buyer was shown.
-    StallBuy {
+    /// Out of it again, back into the inventory.
+    StallUnlist {
         listing: i64,
-        price: i64,
     },
     StallClose,
     BuyOrderPost {
@@ -673,6 +674,12 @@ pub enum EconOp {
     /// End one of them early; nothing is refunded.
     Dismiss {
         hire: i64,
+    },
+    /// What a stall has for sale and whose it is, from anywhere. Buying is not here: it is
+    /// done standing at the stall, through the zone (`ZoneEconOp::StallBuy`); nor is
+    /// wearing, which the zone asks for too (`ZoneEconOp::Wear`).
+    StallView {
+        stall: i64,
     },
 }
 
@@ -724,6 +731,27 @@ pub enum ZoneEconOp {
     StallClose { character: CharacterId },
     /// Every open stall of this zone (asked once, when the zone starts).
     Stalls,
+    /// A character standing at a stall of this zone buys one of its listings (ITEMS.md 5):
+    /// the zone vouches for the place, the hub for everything else. `price` is the price
+    /// the buyer was shown.
+    StallBuy {
+        character: CharacterId,
+        stall: i64,
+        listing: i64,
+        price: i64,
+    },
+    /// A character playing in this zone puts an item of its inventory on, or takes one
+    /// off (ITEMS.md 2). The zone asks, because the zone is where gear takes effect and
+    /// where it is known whether the body is in a fight; answered `Gear`, what the
+    /// character's worn items do from now on.
+    Wear {
+        character: CharacterId,
+        item: ItemId,
+    },
+    TakeOff {
+        character: CharacterId,
+        item: ItemId,
+    },
 }
 
 /// An open stall as its zone shows it: where it is and who keeps it.
@@ -747,12 +775,46 @@ pub enum ContractOutcome {
     Abandon,
 }
 
+/// Where an item is worn (ITEMS.md 2); `PLACE_NONE` for what is not (a component).
+pub const PLACE_NONE: u8 = 0;
+pub const PLACE_WEAPON: u8 = 1;
+pub const PLACE_ARMOUR: u8 = 2;
+
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct ItemSummary {
     pub id: ItemId,
     pub template: String,
     /// `(layer, material)` in layer order.
     pub components: Vec<(String, String)>,
+    /// Where it is worn: `PLACE_WEAPON`, `PLACE_ARMOUR`, or `PLACE_NONE`.
+    pub place: u8,
+    /// Its edge there, per mille per damage type in `DamageType`'s order (ITEMS.md 3.2).
+    pub edge: [u16; 8],
+    /// Its holder wears it now.
+    pub worn: bool,
+    /// What it is, in words: `a weapon, 220 of 250`; `a core, for crafting`.
+    pub what: String,
+    /// What it does, in words, the strongest first: `slash +11.0%`. A screen shows these
+    /// and works nothing out.
+    pub does: Vec<String>,
+}
+
+/// A reading of what a character's worn items do to damage (ITEMS.md 3.3). `seq` orders
+/// the hub's readings: of two a zone has for one character, the one with the larger number
+/// is true, whichever arrived first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct GearReading {
+    pub seq: u64,
+    pub gear: Gear,
+}
+
+/// One thing a stall has for sale.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct ListingSummary {
+    pub id: i64,
+    pub item: ItemSummary,
+    /// In copper.
+    pub price: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
@@ -786,6 +848,15 @@ pub enum EconReply {
     Squad(Vec<HiredAvatar>),
     Stall(StallSummary),
     Stalls(Vec<StallSummary>),
+    /// A stall's keeper and what it sells; `mine` when the asker keeps it.
+    Listings {
+        owner: String,
+        mine: bool,
+        listings: Vec<ListingSummary>,
+    },
+    /// What a character's worn items do to damage, read after the change (the answer to
+    /// a zone's `Wear` and `TakeOff`).
+    Gear(GearReading),
 }
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -877,6 +948,9 @@ pub enum HubResponse {
         model: Option<ModelRef>,
         /// The character's active hires, at most its squad capacity (COMPANIONS.md 3.3).
         squad: Vec<HiredAvatar>,
+        /// What its worn items do to damage (ITEMS.md 3), read after the character
+        /// became this zone's.
+        gear: GearReading,
     },
     Registered {
         public_key: [u8; 32],
@@ -942,7 +1016,7 @@ pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 /// carry); any change to them is a new one. A stream that speaks them begins with it, in
 /// a frame of one byte, and the hub answers with its own before anything else: zones,
 /// tools and bots of another build are told so instead of being garbled at.
-pub const HUB_VERSION: u8 = 6;
+pub const HUB_VERSION: u8 = 7;
 pub const HUB_PREAMBLE: [u8; 3] = [0, 1, HUB_VERSION];
 pub const HUB_BIDI_STREAMS: u32 = 1024;
 /// Password hashes running at once; more answer `Busy`.

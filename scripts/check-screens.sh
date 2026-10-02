@@ -159,6 +159,13 @@ stamp() { # log, text, pid
 }
 since() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", b - a }'; }
 
+# What the client itself called an error: a browser shows it in its console and plays on
+# (the WebGL build drew no town for two phases, and said so there).
+quiet() { # log, label
+  local first; first="$(/usr/bin/grep -a -m1 '^\[ERROR\]\|^EXCEPTION' "$1" || true)"
+  if [[ -z "$first" ]]; then ok "$2: the client logged no error"; else fail "$2: the client logged an error: ${first:0:200}"; fi
+}
+
 desktop() {
   command -v Xvfb >/dev/null || { fail "--desktop needs Xvfb"; return; }
   command -v xdotool >/dev/null || { fail "--desktop needs xdotool"; return; }
@@ -425,6 +432,7 @@ browser() {
       continue
     fi
     if /usr/bin/grep -aq "^GM-BUILD $build" "$tmp/browser-$build.log"; then ok "$build: that build ran"; else fail "$build: another build ran"; fi
+    quiet "$tmp/browser-$build.log" "$build, in the town and the arena"
     if plain "$tmp/arena.log" | /usr/bin/grep -a "player joined" | /usr/bin/grep -a "name=$name .*web=true" > /dev/null; then
       ok "$build: the arena took $name from a WebTransport session"
     else

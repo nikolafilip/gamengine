@@ -15,4 +15,4 @@ pub mod zone;
 pub use hub_link::{HubLink, HubLinkConfig};
 pub use net::WebListener;
 pub use world::ZoneWorld;
-pub use zone::{ReplayConfig, ZoneConfig, ZoneReport, run, run_with_web};
+pub use zone::{GEAR_AFTER_FIGHT, ReplayConfig, ZoneConfig, ZoneReport, run, run_with_web};

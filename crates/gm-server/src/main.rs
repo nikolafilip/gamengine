@@ -334,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
             bytes_per_hour: args.replay_mb_per_hour * 1024 * 1024,
             zone: args.zone_id.clone(),
         }),
+        gear_after_fight: gm_server::GEAR_AFTER_FIGHT,
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

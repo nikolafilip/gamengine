@@ -21,7 +21,16 @@ struct Args {
     /// Where a character that was in no zone enters (CLIENT.md 7).
     start_zone: Option<String>,
     grant_moderator: Option<String>,
+    /// An operator's hand (ITEMS.md 4): coin, or a crafted item, for a character by name.
+    grant_coin: Option<(String, i64)>,
+    grant_item: Option<(String, String, Vec<String>)>,
+    /// Where an offline character stands when it next enters: its name, the zone, the
+    /// place and the way it faces.
+    place: Option<(String, String, [f32; 3], f32)>,
+    /// Say whether the books are sound, and what moved, and exit.
+    audit: bool,
     auth_per_minute: f64,
+    econ_per_second: f64,
     /// A WebTransport listener for browsers beside the QUIC one (WEB.md 2).
     web_listen: Option<SocketAddr>,
     web_cert: Option<PathBuf>,
@@ -32,10 +41,14 @@ struct Args {
 }
 
 const USAGE: &str = "gm-hub --database-url URL [--listen ADDR] [--cert-out PATH] [--key PATH] [--content DIR] \
-[--zone-secret S] [--models-dir DIR] [--start-zone ID] [--auth-per-minute N] [--migrate-only] [--wipe] \
+[--zone-secret S] [--models-dir DIR] [--start-zone ID] [--auth-per-minute N] [--econ-per-second N] [--migrate-only] [--wipe] \
 [--web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url https://HOST:PORT] [--web-origin ORIGIN]... [--web-info-out PATH]]   \
 (env: DATABASE_URL, GM_ZONE_SECRET)\n\
        gm-hub --database-url URL --grant-moderator EMAIL     make an existing account a moderator, then exit\n\
+       gm-hub --database-url URL --grant-coin CHARACTER COPPER   give a character coin (through the ledger), then exit\n\
+       gm-hub --database-url URL --grant-item CHARACTER TEMPLATE MATERIAL,MATERIAL,...   give it a crafted item, then exit\n\
+       gm-hub --database-url URL --place CHARACTER ZONE X,Y,Z YAW   where an offline character stands when it next enters, then exit\n\
+       gm-hub --database-url URL --audit                     say whether the books are sound and what moved, then exit (1: they are not)\n\
        gm-hub ingest-worker --frame NAME --in FILE --out DIR   (run by the hub itself, MODELS.md 6.2)";
 
 fn parse_args() -> Result<Args, String> {
@@ -51,7 +64,12 @@ fn parse_args() -> Result<Args, String> {
         models_dir: PathBuf::from("models"),
         start_zone: None,
         grant_moderator: None,
+        grant_coin: None,
+        grant_item: None,
+        place: None,
+        audit: false,
         auth_per_minute: 10.0,
+        econ_per_second: 5.0,
         web_listen: None,
         web_cert: None,
         web_key: None,
@@ -76,10 +94,52 @@ fn parse_args() -> Result<Args, String> {
             "--models-dir" => a.models_dir = PathBuf::from(value("--models-dir")?),
             "--start-zone" => a.start_zone = Some(value("--start-zone")?),
             "--grant-moderator" => a.grant_moderator = Some(value("--grant-moderator")?),
+            "--grant-coin" => {
+                let name = value("--grant-coin")?;
+                let copper = value("--grant-coin")?
+                    .parse()
+                    .map_err(|e| format!("--grant-coin: {e}"))?;
+                a.grant_coin = Some((name, copper));
+            }
+            "--grant-item" => {
+                let name = value("--grant-item")?;
+                let template = value("--grant-item")?;
+                let materials = value("--grant-item")?
+                    .split(',')
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .collect();
+                a.grant_item = Some((name, template, materials));
+            }
+            "--audit" => a.audit = true,
+            "--place" => {
+                let name = value("--place")?;
+                let zone = value("--place")?;
+                let at: Vec<f32> = value("--place")?
+                    .split(',')
+                    .map(|n| n.trim().parse::<f32>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| format!("--place: {e}"))?;
+                let yaw: f32 = value("--place")?
+                    .parse()
+                    .map_err(|e| format!("--place: {e}"))?;
+                let [x, y, z] = at[..] else {
+                    return Err("--place: the place is X,Y,Z".into());
+                };
+                if !(x.is_finite() && y.is_finite() && z.is_finite() && yaw.is_finite()) {
+                    return Err("--place: not a place".into());
+                }
+                a.place = Some((name, zone, [x, y, z], yaw));
+            }
             "--auth-per-minute" => {
                 a.auth_per_minute = value("--auth-per-minute")?
                     .parse()
                     .map_err(|e| format!("--auth-per-minute: {e}"))?
+            }
+            "--econ-per-second" => {
+                a.econ_per_second = value("--econ-per-second")?
+                    .parse()
+                    .map_err(|e| format!("--econ-per-second: {e}"))?
             }
             "--web-listen" => {
                 a.web_listen = Some(
@@ -108,7 +168,12 @@ fn parse_args() -> Result<Args, String> {
     if a.database_url.is_empty() {
         return Err("--database-url (or DATABASE_URL) is required".into());
     }
-    if a.zone_secret.is_empty() && !a.migrate_only && a.grant_moderator.is_none() {
+    let operator = a.grant_moderator.is_some()
+        || a.grant_coin.is_some()
+        || a.grant_item.is_some()
+        || a.place.is_some()
+        || a.audit;
+    if a.zone_secret.is_empty() && !a.migrate_only && !operator {
         return Err("--zone-secret (or GM_ZONE_SECRET) is required".into());
     }
     Ok(a)
@@ -161,6 +226,94 @@ fn main() -> anyhow::Result<()> {
         .block_on(run())
 }
 
+/// An operator's hand (ITEMS.md 4): coin or a made item for a character, through the
+/// ledger like every drop, under the reason `grant`, and only what the content knows; or
+/// where an offline character stands when it next enters.
+async fn operator(db: Db, args: &Args) -> anyhow::Result<()> {
+    let econ = gm_hub::economy::Economy::new(db.pool().clone());
+    let character = |name: &str| {
+        let (db, name) = (db.clone(), name.to_string());
+        async move {
+            db.character_by_name(&name)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?
+                .ok_or_else(|| anyhow::anyhow!("no character called {name:?}"))
+        }
+    };
+    if let Some((name, copper)) = &args.grant_coin {
+        let id = character(name).await?;
+        econ.grant_coin_as(id, *copper, "grant", 0)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        info!(%name, copper, "coin granted");
+    }
+    if let Some((name, template, materials)) = &args.grant_item {
+        let id = character(name).await?;
+        let items = gm_content::items::load_items(&args.content)?;
+        let known = items
+            .templates
+            .iter()
+            .find(|t| &t.id == template)
+            .ok_or_else(|| anyhow::anyhow!("no template called {template:?}"))?;
+        if let Some(m) = materials
+            .iter()
+            .find(|m| !items.materials.iter().any(|x| &x.id == *m))
+        {
+            anyhow::bail!("no material called {m:?}");
+        }
+        let item = econ
+            .grant_item(id, template, materials, Some(&known.layers))
+            .await
+            .map_err(|e| anyhow::anyhow!("the {template}: {e}"))?;
+        info!(%name, %template, item, "item granted");
+    }
+    if let Some((name, zone, at, yaw)) = &args.place {
+        let id = character(name).await?;
+        if !db
+            .place(id, zone, *at, *yaw)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?
+        {
+            anyhow::bail!("{name:?} is playing: a character is placed while it is offline");
+        }
+        info!(%name, %zone, ?at, yaw, "placed");
+    }
+    Ok(())
+}
+
+/// The books in one line (ECONOMY.md 1.2, ITEMS.md 4): the coin made, in the world and
+/// destroyed; how many balances disagree with the ledger or worn items are astray (0:
+/// sound); how many items are worn; and the coin that moved under each reason.
+async fn audit(db: Db) -> anyhow::Result<()> {
+    use sqlx::Row;
+    let econ = gm_hub::economy::Economy::new(db.pool().clone());
+    let supply = econ.supply().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let unsound = econ.audit().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let worn: i64 = sqlx::query("select count(*) from worn")
+        .fetch_one(db.pool())
+        .await?
+        .try_get(0)?;
+    let moved = sqlx::query(
+        "select reason, sum(amount)::bigint as coin from coin_ledger group by reason order by reason",
+    )
+    .fetch_all(db.pool())
+    .await?
+    .iter()
+    .map(|r| Ok(format!("{}={}", r.try_get::<String, _>("reason")?, r.try_get::<i64, _>("coin")?)))
+    .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    println!(
+        "audit: created={} circulating={} burned={} unsound={unsound} worn={worn} moved: {}",
+        supply.created,
+        supply.circulating,
+        supply.burned,
+        moved.join(" ")
+    );
+    if unsound != 0 {
+        anyhow::bail!("the books are not sound");
+    }
+    Ok(())
+}
+
 async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -189,6 +342,12 @@ async fn run() -> anyhow::Result<()> {
         }
         anyhow::bail!("no account with the email {email:?}");
     }
+    if args.grant_coin.is_some() || args.grant_item.is_some() || args.place.is_some() {
+        return operator(db, &args).await;
+    }
+    if args.audit {
+        return audit(db).await;
+    }
     if args.migrate_only {
         return Ok(());
     }
@@ -204,7 +363,8 @@ async fn run() -> anyhow::Result<()> {
         key,
         session_secs: gm_hub::protocol::SESSION_SECS,
         auth_per_minute: args.auth_per_minute,
-        templates: gm_content::items::load_items(&args.content)?.template_ids(),
+        econ_per_second: args.econ_per_second,
+        items: gm_content::items::load_items(&args.content)?,
         max_coin_grant: 10_000,
         models_dir: args.models_dir,
         // Uploads are parsed by this same binary in a child process.

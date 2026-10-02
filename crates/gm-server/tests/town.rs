@@ -77,6 +77,7 @@ fn flow(
         },
         play: Duration::from_secs(secs),
         list_for_hire: None,
+        sell_at: None,
         hire: 0,
     }
 }
@@ -117,7 +118,8 @@ async fn avatars_and_stalls_in_the_town() {
             key: HubKey::generate(),
             session_secs: 3600,
             auth_per_minute: 1000.0,
-            templates: Vec::new(),
+            econ_per_second: 1000.0,
+            items: Default::default(),
             max_coin_grant: 10_000,
             models_dir: models_dir.clone(),
             ingest: IngestMode::InProcess,

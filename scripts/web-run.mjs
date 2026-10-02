@@ -2,11 +2,14 @@
 // Run the browser client in headless Chromium and print what it says (docs/WEB.md 8).
 //   node scripts/web-run.mjs --url URL [--seconds N] [--screenshot FILE [--at S]] [--software]
 //                            [--chrome BIN] [--size WxH] [--profile DIR] [--cache NAME]
-//                            [--login EMAIL --password PW [--register]]
+//                            [--login EMAIL --password PW [--register]] [--click-canvas S]
 // --cache NAME reads every entry of that Cache API cache back at the end and prints
 // "GM-CACHE entries=N bytes=M": what the browser holds, whatever the page believes.
 // --login fills the page's own form as a person would (docs/CLIENT.md 4.1): a click into the
 // field, the text, Tab, the password, Enter, all as input events of the browser itself.
+// --click-canvas S clicks the middle of the game's canvas S seconds in, as a person's first
+// click would, and prints "web-run: after a click the pointer is held by: ID" (the element
+// the browser gave the pointer to, or "nothing"): the game asks for the pointer on a click.
 // Console lines go to stdout as they come. Exit 0 when the page reported GM-DONE, 1 on
 // GM-ERROR, on a timeout, and on anything that goes wrong on the way (the browser is ended
 // and its files removed in every case). Needs Node 22+ (its built-in WebSocket) and a Chromium.
@@ -125,6 +128,16 @@ async function main() {
     } else if (msg.method === "Runtime.exceptionThrown") {
       const d = msg.params.exceptionDetails;
       console.log("EXCEPTION " + (d.exception?.description || d.text));
+    } else if (msg.method === "Log.entryAdded") {
+      // What the browser itself says, beside what the page logs: a WebGPU or WebGL
+      // validation error is said here and nowhere else, and the page plays on. Those are
+      // printed as errors of the client (the gates fail on a line that begins so); the
+      // rest (a favicon that is not there) is printed for whoever reads the log.
+      const e = msg.params.entry;
+      const text = `${e.source}: ${e.text}`.replace(/\s+/g, " ");
+      const graphics = e.source === "rendering" || /WebGL|WebGPU|GPUValidationError|GL_INVALID/.test(e.text);
+      if (e.level === "error" && graphics) console.log(`[ERROR] browser ${text}`);
+      else if (e.level === "error" || e.level === "warning") console.log(`[BROWSER ${e.level}] ${text}`);
     }
   });
   await new Promise((resolve, reject) => {
@@ -132,6 +145,7 @@ async function main() {
     ws.addEventListener("error", () => reject(new Error("the DevTools socket did not open")), { once: true });
   });
   await send("Runtime.enable");
+  await send("Log.enable");
   await send("Page.enable");
   await send("Page.navigate", { url });
   const started = Date.now();
@@ -184,9 +198,33 @@ async function main() {
       console.log(`web-run: the login form was filled and sent (the form says: ${said})`);
     }
   }
+  const clickAt = opt("--click-canvas");
+  let clicked = clickAt === undefined;
   let shot = !screenshot;
   while (Date.now() - started < (seconds + 8) * 1000 && !finished) {
     await new Promise((r) => setTimeout(r, 100));
+    if (!clicked && Date.now() - started >= Number(clickAt) * 1000) {
+      clicked = true;
+      const value = async (expression) =>
+        (await send("Runtime.evaluate", { expression, returnByValue: true })).result?.value;
+      const at = await value(`(() => {
+        const c = document.getElementById("gm-canvas");
+        if (!c) return null;
+        const r = c.getBoundingClientRect();
+        return [r.left + r.width / 2, r.top + r.height / 2];
+      })()`);
+      if (!at) {
+        console.log("web-run: after a click the pointer is held by: nothing (the page has no canvas)");
+      } else {
+        for (const type of ["mousePressed", "mouseReleased"]) {
+          await send("Input.dispatchMouseEvent", { type, x: at[0], y: at[1], button: "left", clickCount: 1 });
+        }
+        // The browser answers the asking a moment later.
+        await new Promise((r) => setTimeout(r, 700));
+        const holder = await value(`document.pointerLockElement ? (document.pointerLockElement.id || "an element without an id") : "nothing"`);
+        console.log(`web-run: after a click the pointer is held by: ${holder}`);
+      }
+    }
     if (!shot && (Date.now() - started >= shotAt * 1000 || verdict !== null)) {
       shot = true;
       const png = await send("Page.captureScreenshot", { format: "png" });

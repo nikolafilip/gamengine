@@ -207,8 +207,10 @@ pointer only to a click: the first click on the canvas takes it, `Esc` releases 
 browser's rule), the next click takes it again. That `Esc` never reaches the page, so the
 client asks every frame whether it still has the pointer, and takes losing it for the key:
 the menu opens, or the chat line is dropped (CLIENT.md 6). Browsers apply the system's mouse
-acceleration under pointer lock unless asked not to; the client does not ask (winit's lock),
-so aim feel differs slightly from native. Listed in 10.
+acceleration under pointer lock unless asked not to; the client does not ask, so aim feel
+differs slightly from native. Listed in 10. The page asks for the pointer itself
+(`web::ask_for_pointer`, since Phase 11; winit's own asking left a refusal in the console as
+an uncaught rejection): a browser that says no has answered, and the next click asks again.
 
 ## 4. The model cache without a filesystem
 
@@ -482,3 +484,28 @@ unchanged; `C` free as a key.
   longer rewritten by a test run.
 - `scripts/web-run.mjs --login EMAIL --password PW [--register]` fills the form by the
   browser's own input events; the driver ends the browser on every way out.
+
+## 14. Changes in Phase 11 (possessions, docs/ITEMS.md)
+
+- The browser shows the inventory, the storage and a stall (ITEMS.md 6) and asks the hub
+  for them in the players' messages (`PlayerRequest::Econ`, HUB.md 3.9): the WebGPU build
+  is **1,005,086 bytes (335,607 packed)**, the WebGL2 build **2,993,885 (908,530
+  packed)**, 38 KB more than Phase 10. The budgets of 9 are unchanged; the megabyte has
+  43,490 bytes left.
+- **The WebGL2 build drew no town.** The map was black, with the bodies, the stalls and the
+  HUD in place: wgpu's GL backend cannot be told what a texture will be viewed as and
+  guesses from its layer count (one layer: a plain texture; six: a cube; a larger multiple
+  of six: a cube array), and the town has twelve textures where the arena has seven. The
+  client said so in the browser's console and played on, and no gate had looked at the
+  town in that build since Phase 8. The world's texture array now never has such a count
+  (`render::array_layers`), and the three gates that run a browser (`check-web.sh`,
+  `check-screens.sh`, `check-items.sh`) fail when the client logs an error, when the
+  browser reports a rendering error of its own (`scripts/web-run.mjs` now listens to the
+  browser's log as well as the page's console), and on an uncaught exception.
+- **The pointer is asked for by the page itself.** winit asked the browser for the pointer
+  and let a refusal (no person's click behind the asking: a page that entered the game by
+  itself, an entry that took longer than a click lasts) fall into the console as an
+  uncaught rejection, on every such entry. The page now asks (`web::ask_for_pointer`) and
+  takes the refusal as the answer it is; the next click on the canvas asks again (3.4).
+  The gate through the hub clicks the canvas twenty seconds in and asks the browser who
+  holds the pointer (`web-run.mjs --click-canvas`): until now no gate had.

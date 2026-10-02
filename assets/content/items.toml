@@ -1,36 +1,55 @@
 # Item content v1 (ECONOMY.md 4). Templates say which layers a craft may fill; materials say
 # which layer they are and how large an edge they give, in per mille of the item's base
 # stats. The loader refuses any template whose best possible craft exceeds 250 (PLAN.md 0:
-# the gear edge is capped at 25%). The simulation reads the edges in a later phase.
+# the gear edge is capped at 25%).
+#
+# What a worn item does (ITEMS.md 3.2): a weapon raises the damage its wearer deals, an
+# armour lowers what its wearer takes, each layer for its own kinds of damage. A weapon's
+# core sharpens the kind the weapon `strikes` with; an armour's core dulls what the armour
+# `guards` against (`physical`: slash, pierce and blunt; `elements`: the five); a catalyst
+# counts for its element; shard, frame and gems count for the kinds the core and the
+# catalyst reach and for no other. An item is for one build and not for another.
 
 [[template]]
 id = "sword"
 kind = "weapon"
+strikes = "slash"
+layers = ["shard", "core", "catalyst", "frame", "gem"]
+
+[[template]]
+id = "dagger"
+kind = "weapon"
+strikes = "slash"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
 
 [[template]]
 id = "hammer"
 kind = "weapon"
+strikes = "blunt"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
 
 [[template]]
 id = "staff"
 kind = "weapon"
+strikes = "blunt"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
 
 [[template]]
 id = "crossbow"
 kind = "weapon"
+strikes = "pierce"
 layers = ["shard", "core", "frame", "gem"]
 
 [[template]]
 id = "cuirass"
 kind = "armour"
+guards = "physical"
 layers = ["shard", "core", "frame", "gem"]
 
 [[template]]
 id = "robe"
 kind = "armour"
+guards = "elements"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
 
 # Cores: weight and physical bias.

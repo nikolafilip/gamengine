@@ -379,6 +379,39 @@ printf 'wait screen login\nclick "New account"\nfield email\ntype me@example.com
 cargo run --release -p gm-client -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --settings /tmp/s.toml --ui-script walk.ui
 ```
 
+## Possessions: the inventory, a stall, what is worn (Phase 11)
+
+`docs/ITEMS.md` is the contract. In the game `I` opens the inventory (also **Inventory** in
+the menu) and `E` the stall the body stands at. A sword is worn from the inventory; a worn
+weapon adds to the damage of its own kinds and a worn armour takes from it, a place for half
+of what its item's edge says.
+
+Nothing drops items for a new world yet except a boss (ECONOMY.md 9), so an operator hands
+things out with the hub's own program, on the hub's database, while the hub runs or not:
+
+```sh
+HUB="cargo run --release -p gm-hub -- --database-url postgres://localhost/gamengine"
+$HUB --grant-coin Aldric 15000                           # 1 g 50 s, through the ledger (reason: grant)
+$HUB --grant-item Aldric sword core/iron,frame/oak       # a made item; what the content knows, what the template has room for
+$HUB --place Aldric town 200,-320,25 0                   # where an OFFLINE character stands when it next enters (x,y,z and yaw)
+$HUB --audit                                             # the books in a line; exit status 1 when they are not sound
+```
+
+A stall is opened standing on a market tile (`B`; `N` closes it), filled from the inventory
+(**Sell**: a price in gold, silver and copper), and bought from by anybody who walks up to
+it (`E`, **Buy**). A bot can keep one for a test:
+
+```sh
+cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --user keeper@bots.test \
+    --password keeper-password --register --character Keeper --zone town --bots 1 --stalls 1 --sell-at 12000 \
+    --secs 900 --behaviour stroll --maps-dir assets/maps/built
+# its log says where its stall stands ("stall stands ... x= y= z= yaw="); whatever it is
+# handed that can be worn, it lists at 1 g 20 s
+```
+
+In a UI script the two keys are `key I` and `key E`, and the pages are called `inventory`,
+`storage`, `price` and `stall`.
+
 ## CI gates locally
 
 ```sh
@@ -404,6 +437,9 @@ scripts/check-web.sh --browser --hub  # also login, 48 avatars through the brows
 scripts/check-screens.sh              # the screens as tests: every screen whole at every window size, every refusal in words
 scripts/check-screens.sh --desktop    # also the windowed client on an Xvfb of its own: a cold start by UI script, then by real keys and clicks (xdotool)
 scripts/check-screens.sh --browser    # also both browser builds: the page's form by the browser's own input, then the canvas screens
+scripts/check-items.sh                # the gear term, the item content, the inventory and stall screens; with a database the hub and a zone with clients by hand
+scripts/check-items.sh --desktop      # also a bot that keeps a stall, and a buyer through the windowed client: looks, buys, wears; then E and I from a real keyboard
+scripts/check-items.sh --browser      # the same purchase in both browser builds
 ```
 
 `check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and

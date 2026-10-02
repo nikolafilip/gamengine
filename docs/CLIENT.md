@@ -7,6 +7,8 @@ press, the chat line, and the settings. PLAN.md 3.3 (**archetype first, math lat
 and 2.7 (budgets, gates), 2.8 (one client for the desktop and the browser) and 6 (small
 numbers, nothing a scammer can dress up) are binding. When the code and this document
 disagree, the document wins. Section 12 records the reviews and what running it found.
+The inventory, the storage and a stall (Phase 11) are ITEMS.md 6: more screens of this
+toolkit, under the rules of this document.
 
 Until Phase 10 the client was started by a command line that named the account, the
 password, the character and the zone, and it ended when its connection did. That is how
@@ -83,7 +85,11 @@ focus, the scroll positions, the carets and the widget the button went down on.
   (rows of columns, one selected; wheel, arrows, Page Up and Down, Home, End; a click
   picks, a double click or Enter activates; a selection made by the screen itself is
   scrolled into view), a checkbox, a slider, a choice (one of a few, in a row). A widget
-  is identified by its label within its screen.
+  is identified by its label within its screen. Since Phase 11: a list may have **no row
+  picked** (`ui::NONE`: none is lit, the arrows start from an end, nothing can be
+  activated), which is what a screen shows when the thing that was picked is gone; a field
+  for a **number** (digits only, and a paste with anything else in it is not taken:
+  `12.50` is not 1250); a line in several colours (an amount of coin, a colour a unit).
 - **Focus.** One widget has the keyboard. `Tab` and `Shift+Tab` move it, a click moves it.
   `Enter` presses the button that has the keyboard, and only when none has it the
   screen's main one; `Escape` is the screen's way back. A key held down does not press
@@ -103,7 +109,9 @@ focus, the scroll positions, the carets and the widget the button went down on.
   their values unless secret, rows, boxes, sliders) is kept with its rectangle until the
   next frame: a UI script (9) finds a button by its text, and a test asks what a screen
   said. So is every text that had no room to be drawn whole: a test asks that there is
-  none.
+  none. The cells of a list that were cut to their column are recorded apart (a long name
+  in the characters' list may be cut; a price may not, and the screens of ITEMS.md 6 are
+  tested for none).
 
 ## 4. Screens
 
@@ -170,7 +178,7 @@ back with the reason.
 
 The HUD as before, and:
 
-- **Escape** opens the **menu**: Resume, Travel, Settings, Keys, Leave, Quit. While it is
+- **Escape** opens the **menu**: Resume, Inventory, Travel, Settings, Keys, Leave, Quit. While it is
   up the body stands (the frames sent to the zone hold no keys) and can be hit: there is no
   pause in a shared world, and the menu says so. A replay and an offline walk have the
   menu too: it is where Quit and the settings are.
@@ -179,8 +187,11 @@ The HUD as before, and:
   travel (`Control::Travel`, as the `T` key does for the zone named on the command line).
 - **Keys** says what the keys do: nothing else tells a new player.
 - **Enter** opens the chat line (5).
+- **I** opens the inventory, and **E** the stall the body stands at (ITEMS.md 6): screens
+  like the menu's, with the body standing while one is up.
 - Bottom right while nothing else is there: where this is and the two keys nothing else
-  tells of, `town  Esc menu  Enter chat`.
+  tells of, `town  Esc menu  Enter chat`; and above it, standing at a stall, whose it is
+  and its key, `Keeper's stall  E look`.
 
 **Leave** hangs up on the zone (which saves the character through the hub) and shows 4.2
 again. **Quit** logs out of the hub and ends the program. Closing the window is Quit.
@@ -238,7 +249,10 @@ Decided once per frame, in this order:
    screen for no hub): `Tab`, arrows, `Enter`, `Escape`; the game gets nothing, keys that
    were held are let go, and the frames sent to the zone hold no keys.
 3. The game, as before (`W A S D`, the mouse, `1`–`4`, `V`, `Tab` for the tactical view,
-   `F9` to report, and the rest of the Keys page), plus `Enter` and `Escape`.
+   `F9` to report, and the rest of the Keys page), plus `Enter` and `Escape`, and since
+   Phase 11 `I` and `E`, which open a screen (not in the tactical view, which has its own
+   use for the keys around it). They are keys only here: under rules 1 and 2 they are
+   letters.
 
 `Q` no longer quits (it is a letter one types, and the tactical view turns with it): Quit
 is in the menu, and closing the window still works. In benchmarks nothing changes: no
@@ -326,6 +340,7 @@ wait screen characters        until that screen is up
 field email                   give the field with that label the keyboard (a click on it)
 type someone@example.com      characters, as if typed
 key Enter                     Enter | Escape | Tab | BackTab | Backspace | Delete | Left | Right | Up | Down | Home | End | PageUp | PageDown
+                              | I | E (the game's own two that open a screen)
 click "New character"         the button, row or box with that text
 dclick "Aldric"               the same, twice
 expect "Aldric"               some text on the screen contains it
@@ -336,7 +351,8 @@ quit                          print `ui-script: ok` and end the program
 ```
 
 Screens are named `login`, `characters`, `new character`, `entering`, `game`, `chat`,
-`menu`, `travel`, `settings`, `keys`, `title`. A line that waits (`wait`, `expect`, `click`,
+`menu`, `travel`, `settings`, `keys`, `title`, and `inventory`, `storage`, `price`, `stall`
+(ITEMS.md 6). A line that waits (`wait`, `expect`, `click`,
 `where`) gives up after 30 seconds (longer than the screens themselves keep trying): the
 script then fails with its line and what the screen showed instead, and the client exits
 with an error. After every line the script lets two drawn frames pass, so that the next
@@ -402,8 +418,9 @@ Measured on the reference machine (Ryzen 7 4800U, Renoir iGPU):
 
 ## 11. Deliberately absent
 
-- An inventory, equipment, stalls, the tavern, trade, storage, crafting: Phase 11. Parties,
-  invitations, whisper and party chat, friends: Phase 12. Sound: Phase 13.
+- The inventory, what is worn, the storage and a stall came in Phase 11 (ITEMS.md 6). The
+  tavern, a trade between two players, crafting; parties, invitations, whisper and party
+  chat, friends: Phase 12. Sound: Phase 13.
 - The point-buy editor and the model browser (PLAN.md 3.3's "Build & Model Browser"); a
   tutorial; key rebinding; a gamepad; localisation (the screens are in English).
 - Deleting or renaming a character (the hub has no such request yet).

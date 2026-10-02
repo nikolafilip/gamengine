@@ -22,15 +22,17 @@ use tracing::{debug, info, warn};
 use crate::db::Db;
 use gm_hub_proto::protocol::{
     AccountId, BuildChoice, CLOCK_SKEW_SECS, CharacterId, ContractOutcome, EconOp, EconReply,
-    HASH_PERMITS, HUB_PREAMBLE, HUB_VERSION, HiredAvatar, HubError, HubNotice, HubRequest,
-    HubResponse, ItemSummary, LocationSummary, MAX_REPLAY_BYTES, MAX_SESSIONS_PER_ACCOUNT, ModOp,
-    ModelRef, SESSION_LIFETIMES, SessionId, StallSummary, TOKEN_VALID_SECS, TavernEntry,
-    TradeOffer, ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
+    GearReading, HASH_PERMITS, HUB_PREAMBLE, HUB_VERSION, HiredAvatar, HubError, HubNotice,
+    HubRequest, HubResponse, ItemSummary, ListingSummary, LocationSummary, MAX_REPLAY_BYTES,
+    MAX_SESSIONS_PER_ACCOUNT, ModOp, ModelRef, PLACE_ARMOUR, PLACE_NONE, PLACE_WEAPON,
+    SESSION_LIFETIMES, SessionId, StallSummary, TOKEN_VALID_SECS, TavernEntry, TradeOffer,
+    ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
 };
 
 use crate::conduct::Conduct;
 use crate::economy::{EconError, Economy, Outcome, TradeStatus};
 use crate::models::{IngestMode, Models};
+use gm_content::items::{ItemContent, Place};
 
 /// The body of an upload must arrive within ten seconds plus its length at 64 KiB/s
 /// (MODELS.md 6.2): 15 s for 300 KB, 138 s for the 8 MiB limit. A slow sender holds one of
@@ -52,8 +54,12 @@ pub struct HubConfig {
     pub session_secs: u64,
     /// `Register`/`Login` attempts per minute per source address.
     pub auth_per_minute: f64,
-    /// Item templates a craft may name (`assets/content/items.toml`); empty = any.
-    pub templates: Vec<String>,
+    /// Economy requests one account may make a second, with four seconds' worth in hand
+    /// (ITEMS.md 4): each is a transaction, and a session is all it takes to ask.
+    pub econ_per_second: f64,
+    /// The item content (`assets/content/items.toml`): the templates a craft may name
+    /// (none listed: any), and what a worn item does (ITEMS.md 3.2).
+    pub items: gm_content::items::ItemContent,
     /// The largest coin drop a zone may report in one grant, in copper (ECONOMY.md 9).
     pub max_coin_grant: i64,
     /// Where ingested models, their previews and the uploads live (MODELS.md 6.1).
@@ -108,12 +114,43 @@ struct Bucket {
     last: Instant,
 }
 
+impl Bucket {
+    /// One token, if there is one: `per_sec` come back a second, up to `full`.
+    fn take(&mut self, now: Instant, per_sec: f64, full: f64) -> bool {
+        self.tokens =
+            (self.tokens + now.duration_since(self.last).as_secs_f64() * per_sec).min(full);
+        self.last = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     sessions: HashMap<SessionId, Session>,
     zones: HashMap<ZoneId, ZoneEntry>,
     buckets: HashMap<IpAddr, Bucket>,
+    econ_buckets: HashMap<AccountId, Bucket>,
     last_sweep: Option<Instant>,
+}
+
+impl State {
+    /// Buckets nobody has used for ten minutes are forgotten, once a minute.
+    fn sweep_buckets(&mut self, now: Instant) {
+        if self
+            .last_sweep
+            .is_none_or(|t| now.duration_since(t) > Duration::from_secs(60))
+        {
+            let fresh = |b: &Bucket| now.duration_since(b.last) < Duration::from_secs(600);
+            self.buckets.retain(|_, b| fresh(b));
+            self.econ_buckets.retain(|_, b| fresh(b));
+            self.last_sweep = Some(now);
+        }
+    }
 }
 
 struct Hub {
@@ -577,27 +614,27 @@ impl Hub {
         let mut st = self.state.lock().unwrap();
         let per_min = self.cfg.auth_per_minute.max(1.0);
         let now = Instant::now();
-        if st
-            .last_sweep
-            .is_none_or(|t| now.duration_since(t) > Duration::from_secs(60))
-        {
-            st.buckets
-                .retain(|_, b| now.duration_since(b.last) < Duration::from_secs(600));
-            st.last_sweep = Some(now);
-        }
+        st.sweep_buckets(now);
         let b = st.buckets.entry(ip).or_insert(Bucket {
             tokens: per_min,
             last: now,
         });
-        b.tokens =
-            (b.tokens + now.duration_since(b.last).as_secs_f64() * per_min / 60.0).min(per_min);
-        b.last = now;
-        if b.tokens >= 1.0 {
-            b.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
+        b.take(now, per_min / 60.0, per_min)
+    }
+
+    /// Token bucket per account for the economy's requests: each is a transaction, and
+    /// some read a row per item.
+    fn econ_allowed(&self, account: AccountId) -> bool {
+        let mut st = self.state.lock().unwrap();
+        let per_sec = self.cfg.econ_per_second.max(1.0);
+        let burst = per_sec * 4.0;
+        let now = Instant::now();
+        st.sweep_buckets(now);
+        let b = st.econ_buckets.entry(account).or_insert(Bucket {
+            tokens: burst,
+            last: now,
+        });
+        b.take(now, per_sec, burst)
     }
 
     /// A preset name or a full build, validated against the hub's content (MATRIX.md 9).
@@ -1215,17 +1252,29 @@ async fn handle(
                 let squad = hub
                     .hired(row.id, row.build.squad_capacity(&hub.cfg.content))
                     .await?;
-                Ok::<_, HubError>((squad, hub.models.worn(row.id).await?))
+                // Read after the character became this zone's (ITEMS.md 3.3): whatever it
+                // put on through the zone it came from is in it.
+                let (seq, gear) = hub
+                    .econ
+                    .gear(row.id, &hub.cfg.items)
+                    .await
+                    .map_err(econ_err)?;
+                Ok::<_, HubError>((
+                    squad,
+                    hub.models.worn(row.id).await?,
+                    GearReading { seq, gear },
+                ))
             }
             .await;
             match rest {
-                Ok((squad, model)) => Ok(HubResponse::Claimed {
+                Ok((squad, model, gear)) => Ok(HubResponse::Claimed {
                     character: row.id,
                     name: row.name.clone(),
                     state,
                     team: 0,
                     model,
                     squad,
+                    gear,
                 }),
                 Err(e) => {
                     let _ = hub.db.release(row.id, &zone).await;
@@ -1295,6 +1344,9 @@ async fn handle(
             op,
         } => {
             let account = hub.session_account(session)?;
+            if !hub.econ_allowed(account) {
+                return Err(HubError::Busy);
+            }
             let row = hub
                 .db
                 .character(character)
@@ -1514,10 +1566,27 @@ fn econ_err(e: EconError) -> HubError {
     }
 }
 
-fn item_summary(i: crate::economy::Item) -> ItemSummary {
+/// An item as a person is shown it: where it is worn, what it does there and the words
+/// for both are the content's to say (ITEMS.md 3.2), so that no client works them out.
+fn item_summary(content: &ItemContent, i: crate::economy::Item) -> ItemSummary {
+    let view = content.view(
+        &i.template,
+        i.components
+            .iter()
+            .map(|c| (c.layer.as_str(), c.material.as_str())),
+    );
     ItemSummary {
         id: i.id,
         template: i.template,
+        place: match view.place {
+            Some(Place::Weapon) => PLACE_WEAPON,
+            Some(Place::Armour) => PLACE_ARMOUR,
+            None => PLACE_NONE,
+        },
+        edge: view.edge,
+        worn: i.worn,
+        what: view.what,
+        does: view.does,
         components: i
             .components
             .into_iter()
@@ -1526,18 +1595,30 @@ fn item_summary(i: crate::economy::Item) -> ItemSummary {
     }
 }
 
-fn trade_offer((coin, accepted, items): (i64, bool, Vec<crate::economy::Item>)) -> TradeOffer {
+fn trade_offer(
+    content: &ItemContent,
+    (coin, accepted, items): (i64, bool, Vec<crate::economy::Item>),
+) -> TradeOffer {
     TradeOffer {
         coin,
         accepted,
-        items: items.into_iter().map(item_summary).collect(),
+        items: items
+            .into_iter()
+            .map(|i| item_summary(content, i))
+            .collect(),
     }
 }
 
-fn holder_reply((coin, items): (i64, Vec<crate::economy::Item>)) -> EconReply {
+fn holder_reply(
+    content: &ItemContent,
+    (coin, items): (i64, Vec<crate::economy::Item>),
+) -> EconReply {
     EconReply::Holder {
         coin,
-        items: items.into_iter().map(item_summary).collect(),
+        items: items
+            .into_iter()
+            .map(|i| item_summary(content, i))
+            .collect(),
     }
 }
 
@@ -1550,6 +1631,7 @@ async fn econ_op(
     op: EconOp,
 ) -> Result<EconReply, HubError> {
     let e = &hub.econ;
+    let items = &hub.cfg.items;
     let here = || {
         zone.clone()
             .ok_or_else(|| HubError::Invalid("the character is not in a zone".into()))
@@ -1557,18 +1639,29 @@ async fn econ_op(
     let done = |r: Result<(), EconError>| r.map(|()| EconReply::Done).map_err(econ_err);
     let id = |r: Result<i64, EconError>| r.map(EconReply::Id).map_err(econ_err);
     match op {
-        EconOp::Inventory => e.inventory(me).await.map(holder_reply).map_err(econ_err),
-        EconOp::Storage => e.storage(me).await.map(holder_reply).map_err(econ_err),
+        EconOp::Inventory => e
+            .inventory(me)
+            .await
+            .map(|h| holder_reply(items, h))
+            .map_err(econ_err),
+        EconOp::Storage => e
+            .storage(me)
+            .await
+            .map(|h| holder_reply(items, h))
+            .map_err(econ_err),
         EconOp::StorageDeposit { item } => done(e.storage_deposit(me, item).await),
         EconOp::StorageWithdraw { item } => done(e.storage_withdraw(me, item).await),
         EconOp::Craft {
             template,
             components,
         } => {
-            if !hub.cfg.templates.is_empty() && !hub.cfg.templates.contains(&template) {
+            // The content decides which templates exist and what each has room for; a hub
+            // that was given no content (a test) takes any.
+            let layers = items.layers(&template);
+            if layers.is_none() && !items.templates.is_empty() {
                 return Err(HubError::Invalid(format!("unknown template {template:?}")));
             }
-            id(e.craft(me, &template, &components).await)
+            id(e.craft(me, &template, &components, layers).await)
         }
         EconOp::Decompose { item } => e
             .decompose(me, item)
@@ -1601,12 +1694,30 @@ async fn econ_op(
             .await
             .map(|(version, mine, theirs)| EconReply::TradeView {
                 version,
-                mine: trade_offer(mine),
-                theirs: trade_offer(theirs),
+                mine: trade_offer(items, mine),
+                theirs: trade_offer(items, theirs),
             })
             .map_err(econ_err),
-        EconOp::StallList { item, price } => id(e.stall_list(me, item, price).await),
-        EconOp::StallBuy { listing, price } => done(e.stall_buy(me, listing, price).await),
+        // A stall is kept where it stands: its keeper lists and unlists while playing in
+        // the stall's zone, not from the other end of the world.
+        EconOp::StallList { item, price } => id(e.stall_list(me, &here()?, item, price).await),
+        EconOp::StallUnlist { listing } => done(e.stall_unlist(me, &here()?, listing).await),
+        EconOp::StallView { stall } => e
+            .stall_view(stall)
+            .await
+            .map(|(owner, name, listings)| EconReply::Listings {
+                owner: name,
+                mine: owner == me,
+                listings: listings
+                    .into_iter()
+                    .map(|l| ListingSummary {
+                        id: l.id,
+                        item: item_summary(items, l.item),
+                        price: l.price,
+                    })
+                    .collect(),
+            })
+            .map_err(econ_err),
         EconOp::StallClose => {
             // The owner may close from anywhere; the zone the stall stands in is told.
             let (stall, stall_zone) = e.stall_close(me).await.map_err(econ_err)?;
@@ -1785,6 +1896,32 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
             Ok(EconReply::Done)
         }
         ZoneEconOp::Stalls => Ok(EconReply::Stalls(stall_summaries(hub, zone, None).await?)),
+        ZoneEconOp::StallBuy {
+            character,
+            stall,
+            listing,
+            price,
+        } => {
+            if hub.db.zone_of(character).await?.as_ref() != Some(zone) {
+                return Err(HubError::Unauthorized);
+            }
+            e.stall_buy(character, zone, stall, listing, price)
+                .await
+                .map(|()| EconReply::Done)
+                .map_err(econ_err)
+        }
+        // That the character plays in this zone is checked inside the transaction, with
+        // its row held: a claim elsewhere sees the change or comes first (ITEMS.md 3.3).
+        ZoneEconOp::Wear { character, item } => e
+            .wear(character, zone, item, &hub.cfg.items)
+            .await
+            .map(|(seq, gear)| EconReply::Gear(GearReading { seq, gear }))
+            .map_err(econ_err),
+        ZoneEconOp::TakeOff { character, item } => e
+            .take_off(character, zone, item, &hub.cfg.items)
+            .await
+            .map(|(seq, gear)| EconReply::Gear(GearReading { seq, gear }))
+            .map_err(econ_err),
         ZoneEconOp::Drop { character, item } | ZoneEconOp::Pickup { character, item }
             if hub.db.zone_of(character).await?.as_ref() != Some(zone) =>
         {

@@ -344,6 +344,17 @@ fn upload_layer(
     }
 }
 
+/// How many layers the texture array of a map with `textures` textures gets. wgpu's GL
+/// backend (WebGL2) cannot be told what a texture will be viewed as and guesses from the
+/// count: one layer is a plain texture, six a cube, a larger multiple of six a cube array,
+/// and the array view of any of those draws nothing (the town, with its twelve textures,
+/// was black in that build). So the array never has such a count: a layer nobody samples
+/// is added.
+fn array_layers(textures: usize) -> u32 {
+    let n = textures.max(2) as u32;
+    if n.is_multiple_of(6) { n + 1 } else { n }
+}
+
 /// Upload one map: its texture array, its lightmap atlas, its vertices and indices.
 fn world_gpu(
     gpu: &Gpu,
@@ -354,7 +365,7 @@ fn world_gpu(
 ) -> WorldGpu {
     let device = &gpu.device;
     // Diffuse texture array with a full mip chain.
-    let layers = world.texture_layers.len().max(1) as u32;
+    let layers = array_layers(world.texture_layers.len());
     let mip_count = TEXTURE_SIZE.ilog2() + 1;
     let diffuse = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("diffuse array"),
@@ -834,5 +845,35 @@ impl Renderer {
             self.hud.draw(&mut pass);
         }
         gpu.queue.submit([encoder.finish()]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::array_layers;
+
+    #[test]
+    fn a_texture_array_never_has_a_count_the_gl_backend_takes_for_something_else() {
+        for textures in 0..200usize {
+            let layers = array_layers(textures);
+            assert!(
+                layers as usize >= textures,
+                "{textures}: room for every texture"
+            );
+            assert!(
+                layers >= 2,
+                "{textures}: one layer is a plain texture there"
+            );
+            assert!(
+                !layers.is_multiple_of(6),
+                "{textures}: {layers} is a cube's count"
+            );
+            assert!(
+                layers as usize <= textures.max(2) + 1,
+                "{textures}: at most one spare"
+            );
+        }
+        // The arena's seven stay seven; the town's twelve become thirteen.
+        assert_eq!((array_layers(7), array_layers(12)), (7, 13));
     }
 }

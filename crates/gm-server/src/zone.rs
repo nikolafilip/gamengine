@@ -1,18 +1,21 @@
 //! The zone process: tick loop over `gm_core::sim::Zone`, sessions, snapshots and reports.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use glam::Vec3;
 use gm_ai::director::{CompanionSpec, CreatureSpawn, Director, DirectorEvent, EncounterState};
 use gm_core::build::{Build, ContentPack};
 use gm_core::sim::{HitKind, MAX_CLAIMED_VIEW_LAG, Zone, ZoneEvent};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Contents, Hull};
 use gm_core::vocab::EntityId;
-use gm_net::control::{self, BodyKind, BuildChoice, Control, PlayerEntry, SquadEntry, StallEntry};
+use gm_net::control::{
+    self, BodyKind, BuildChoice, Control, PlayerEntry, SquadEntry, StallEntry, stall_in_reach,
+};
 use rayon::prelude::*;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -23,7 +26,7 @@ use crate::net::{ClientEvent, EVENT_CHANNEL, JoinInfo, NetConfig, accept_loop};
 use crate::recorder::{Recorder, RecorderConfig, Written};
 use crate::session::{PvsCache, Session, TickTable};
 use gm_hub_proto::protocol::{
-    CharacterId, CharacterState, ModelId, ModelRef, StallSummary, now_secs,
+    CharacterId, CharacterState, GearReading, ModelId, ModelRef, StallSummary, now_secs,
 };
 use gm_replay::RosterEntry;
 
@@ -66,6 +69,9 @@ pub struct ZoneConfig {
     /// Record fights between players and reports as replays (ANTICHEAT.md 3); the live aim
     /// statistics run with it.
     pub replay: Option<ReplayConfig>,
+    /// What a body wears does not change until it has neither dealt nor taken damage for
+    /// this long (ITEMS.md 5).
+    pub gear_after_fight: Duration,
 }
 
 /// Where replays go and how much of them an hour may hold.
@@ -96,6 +102,7 @@ impl Default for ZoneConfig {
             recruits: Vec::new(),
             arrive_at_entry: false,
             replay: None,
+            gear_after_fight: GEAR_AFTER_FIGHT,
         }
     }
 }
@@ -263,7 +270,23 @@ struct HubSlot {
     ghost_since: Option<Instant>,
     /// Another zone claimed the character: no save on leave.
     claimed_elsewhere: bool,
+    /// The number of the hub's reading of its gear that the body has (ITEMS.md 3.3): a
+    /// reading with a smaller number that arrives later changes nothing.
+    gear_seq: u64,
 }
+
+/// A reading of gear for a character that has no body here at the moment is kept this
+/// long: an answer to the body it had, arriving while it joins again.
+const GEAR_KEPT: Duration = Duration::from_secs(120);
+/// How long the zone waits for the hub on a player's buy or wear before it says so and
+/// lets the player ask again.
+const HUB_PATIENCE: Duration = Duration::from_secs(10);
+
+/// What a body wears does not change in a fight (ITEMS.md 5): not until it has neither
+/// dealt nor taken damage for this long.
+pub const GEAR_AFTER_FIGHT: Duration = Duration::from_secs(10);
+/// What a player is told when the hub did not answer in `HUB_PATIENCE`.
+const HUB_SILENT: &str = "the hub did not answer: try again";
 
 /// A stall as clients see it: the tile's centre, the keeper's looks. `None` when the tile is
 /// not on this map (a stall left over from another build of it).
@@ -425,6 +448,8 @@ pub async fn run_with_web(
     let mut revoked: Vec<(ModelId, Instant)> = Vec::new();
     // The market: open stalls by id (the hub is their owner; this is its mirror).
     let mut stalls: BTreeMap<i64, StallSummary> = BTreeMap::new();
+    // Readings of gear for characters that have no body here at the moment.
+    let mut gear_kept: HashMap<CharacterId, (GearReading, Instant)> = HashMap::new();
     if let Some(link) = cfg.hub.clone().filter(|_| !world.stall_grids.is_empty()) {
         let tx = event_tx.clone();
         tokio::spawn(async move {
@@ -592,11 +617,24 @@ pub async fn run_with_web(
                             .find(|(_, s)| s.character == h.character)
                             .map(|(id, _)| *id)
                     {
+                        // What the old body wore, by the hub's own numbering, is kept for
+                        // the new one: the claim's reading may be the older of the two.
+                        if let (Some(slot), Some(p)) = (hub_slots.get(&old), zone.player(old)) {
+                            let reading = GearReading {
+                                seq: slot.gear_seq,
+                                gear: p.gear,
+                            };
+                            gear_kept.insert(h.character, (reading, Instant::now()));
+                        }
                         zone.remove_player(old);
                         if let Some(s) = sessions.remove(&old) {
                             s.conn.close(4, b"character joined again");
                         }
                         hub_slots.remove(&old);
+                        // (The old session's own leave finds nothing left to announce.)
+                        for s in sessions.values() {
+                            s.send_control(Control::PlayerLeft(old));
+                        }
                         depart(
                             &mut recorder,
                             cfg.hub.as_ref(),
@@ -653,9 +691,21 @@ pub async fn run_with_web(
                         .filter(|m| !revoked.iter().any(|(id, _)| *id == m.id));
                     let hired = hub.as_ref().map(|h| h.squad.clone()).unwrap_or_default();
                     if let Some(h) = hub {
+                        // What it wears (ITEMS.md 3.3): the hub's reading at the claim, or a
+                        // later one this zone already has for the character (the answer to
+                        // a change its last body asked for). From here on it changes only
+                        // through this zone.
+                        let mut reading = h.gear;
+                        if let Some((kept, _)) = gear_kept.remove(&h.character)
+                            && kept.seq > reading.seq
+                        {
+                            reading = kept;
+                        }
+                        zone.set_gear(id, reading.gear);
                         hub_slots.insert(
                             id,
                             HubSlot {
+                                gear_seq: reading.seq,
                                 character: h.character,
                                 joined: Instant::now(),
                                 play_seconds_before: h.play_seconds,
@@ -1050,6 +1100,203 @@ pub async fn run_with_web(
                         }
                     }
                 }
+                ClientEvent::StallBuy {
+                    id,
+                    stall,
+                    listing,
+                    price,
+                } => {
+                    let Some(session) = sessions.get_mut(&id) else {
+                        continue;
+                    };
+                    // A buy is always answered: somebody is looking at a screen.
+                    let refuse = |session: &Session, why: &str| {
+                        session.send_control(Control::BuyResult {
+                            listing,
+                            result: Err(why.to_string()),
+                        });
+                    };
+                    if !session.begin_stall_request() {
+                        refuse(session, "one thing at a time: try again in a moment");
+                        continue;
+                    }
+                    // Only the zone knows where the buyer stands: alive, in person, and at
+                    // that stall (ITEMS.md 5). The rest is the hub's to check.
+                    let request = (|| {
+                        let link = cfg.hub.clone().ok_or("this zone has no market")?;
+                        let slot = hub_slots.get(&id).ok_or("this zone has no market")?;
+                        let p = zone
+                            .player(id)
+                            .filter(|p| p.alive && !p.ghost)
+                            .ok_or("you cannot buy now")?;
+                        let at = stalls
+                            .get(&stall)
+                            .and_then(|s| {
+                                world
+                                    .stall_grids
+                                    .iter()
+                                    .find_map(|g| g.centre(s.tile_x, s.tile_y))
+                            })
+                            .ok_or("that stall has closed")?;
+                        let feet = p.mover.mv.origin + Vec3::Z * Hull::Player.mins().z;
+                        if !stall_in_reach(at.into(), feet.into()) {
+                            return Err("walk up to the stall to buy");
+                        }
+                        Ok((link, slot.character))
+                    })();
+                    match request {
+                        Ok((link, character)) => {
+                            let tx = event_tx.clone();
+                            tokio::spawn(async move {
+                                let asked = link.stall_buy(character, stall, listing, price);
+                                let result = tokio::time::timeout(HUB_PATIENCE, asked)
+                                    .await
+                                    .unwrap_or_else(|_| Err(HUB_SILENT.to_string()));
+                                let done = ClientEvent::StallBought {
+                                    id,
+                                    listing,
+                                    result,
+                                };
+                                let _ = tx.send(done).await;
+                            });
+                        }
+                        Err(why) => {
+                            // The hub was not asked: this does not count against the next.
+                            session.cancel_stall_request();
+                            refuse(session, why);
+                        }
+                    }
+                }
+                ClientEvent::StallBought {
+                    id,
+                    listing,
+                    result,
+                } => {
+                    if let Some(s) = sessions.get_mut(&id)
+                        && s.end_stall_request()
+                    {
+                        s.send_control(Control::BuyResult { listing, result });
+                    }
+                }
+                ClientEvent::Wear { id, item, on } => {
+                    let Some(session) = sessions.get_mut(&id) else {
+                        continue;
+                    };
+                    let refuse = |session: &Session, why: &str| {
+                        session.send_control(Control::WearResult {
+                            item,
+                            result: Err(why.to_string()),
+                        });
+                    };
+                    if !session.begin_gear_request() {
+                        refuse(session, "one thing at a time: try again in a moment");
+                        continue;
+                    }
+                    // What a body wears changes while it stands alive and in person, and
+                    // not in a fight (ITEMS.md 5): only the zone knows either.
+                    let request = (|| {
+                        let link = cfg.hub.clone().ok_or("nothing is worn in this zone")?;
+                        let slot = hub_slots.get(&id).ok_or("nothing is worn in this zone")?;
+                        let p = zone
+                            .player(id)
+                            .filter(|p| p.alive && !p.ghost)
+                            .ok_or("not now")?;
+                        let fight = zone
+                            .rate
+                            .ms_to_ticks(cfg.gear_after_fight.as_millis() as u32);
+                        if p.fought_within(zone.tick, fight) {
+                            return Err("not in a fight: wait a moment");
+                        }
+                        Ok((link, slot.character))
+                    })();
+                    match request {
+                        Ok((link, character)) => {
+                            let tx = event_tx.clone();
+                            tokio::spawn(async move {
+                                let worn = |result, tell| ClientEvent::Worn {
+                                    id,
+                                    character,
+                                    item,
+                                    result,
+                                    tell,
+                                };
+                                let asked = link.wear(character, item, on);
+                                tokio::pin!(asked);
+                                match tokio::time::timeout(HUB_PATIENCE, &mut asked).await {
+                                    Ok(result) => {
+                                        let _ = tx.send(worn(result, true)).await;
+                                    }
+                                    Err(_) => {
+                                        // The player is told and may ask again; what the
+                                        // hub answers in the end is still what the
+                                        // character wears, and is applied when it comes.
+                                        let silent = Err(HUB_SILENT.to_string());
+                                        let _ = tx.send(worn(silent, true)).await;
+                                        let late = asked.await;
+                                        if late.is_ok() {
+                                            let _ = tx.send(worn(late, false)).await;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        Err(why) => {
+                            session.cancel_gear_request();
+                            refuse(session, why);
+                        }
+                    }
+                }
+                ClientEvent::Worn {
+                    id,
+                    character,
+                    item,
+                    result,
+                    tell,
+                } => {
+                    // What the hub holds is what the body has, at once: a build waits for
+                    // the respawn because the client predicts with it; gear it does not.
+                    // It goes to the body the *character* has now (it may have joined
+                    // again since it asked), and only if it is newer than what that has.
+                    if let Ok(reading) = &result {
+                        let here = hub_slots
+                            .iter_mut()
+                            .find(|(_, slot)| slot.character == character);
+                        match here {
+                            Some((body, slot)) => {
+                                if reading.seq > slot.gear_seq {
+                                    slot.gear_seq = reading.seq;
+                                    zone.set_gear(*body, reading.gear);
+                                    info!(
+                                        character,
+                                        dealt = ?reading.gear.dealt,
+                                        taken = ?reading.gear.taken,
+                                        "gear"
+                                    );
+                                }
+                            }
+                            None => {
+                                // No body at the moment: kept for the one a join in
+                                // flight is about to make.
+                                gear_kept.retain(|_, (_, at)| at.elapsed() < GEAR_KEPT);
+                                let newer = gear_kept
+                                    .get(&character)
+                                    .is_none_or(|(known, _)| reading.seq > known.seq);
+                                if newer {
+                                    gear_kept.insert(character, (*reading, Instant::now()));
+                                }
+                            }
+                        }
+                    }
+                    if tell
+                        && let Some(s) = sessions.get_mut(&id)
+                        && s.end_gear_request()
+                    {
+                        s.send_control(Control::WearResult {
+                            item,
+                            result: result.map(|_| ()),
+                        });
+                    }
+                }
                 ClientEvent::Input { id, datagram } => {
                     if let Some(s) = sessions.get_mut(&id) {
                         s.last_input_at = scheduler.tick();
@@ -1282,7 +1529,11 @@ pub async fn run_with_web(
                     slot.ghost_since = None;
                     match sessions.get(&id) {
                         Some(s) => {
-                            // The other zone never claimed: the player plays on here.
+                            // The other zone never claimed: the player plays on here. The
+                            // hub still has the character on its way, and learns that it
+                            // is here again from a save: at once (the block below), not in
+                            // up to half a minute.
+                            slot.last_save = now - SAVE_EVERY;
                             zone.set_ghost(id, false);
                             s.send_control(Control::TravelRefused(
                                 "the other zone never claimed you".into(),

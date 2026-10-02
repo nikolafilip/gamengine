@@ -1,14 +1,15 @@
 # Wire Protocol
 
-Status: v5 (Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+Status: v6 (Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
 and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
 document disagree, the document wins and the code is wrong; changes to either go in one commit.
 
-Protocol version byte: **5**. Any change to sections 2–5 or to the layout of a `Control`
+Protocol version byte: **6**. Any change to sections 2–5 or to the layout of a `Control`
 message bumps it. Section 11 lists what v2 changed over v1, section 14 what v3 changed over
-v2, section 15 what v4 changed over v3, section 16 what v5 changed over v4.
+v2, section 15 what v4 changed over v3, section 16 what v5 changed over v4, section 18 what
+v6 changed over v5.
 
 Section 10 records the independent design review this version went through and what changed.
 
@@ -382,6 +383,12 @@ enum Control {
     Encounter { name: String, state: EncounterState },
     Loot { encounter: String, items: Vec<String>, coin: u32 },
     Trial { key: String, name: String, passed: bool, detail: String, secs: u32 },
+    // v6 (section 18), appended whichever way they travel
+    StallBuy { stall: i64, listing: i64, price: i64 },        // client → zone: at the stall the player stands at
+    Wear { item: i64 },                                       // client → zone: an item of the inventory
+    TakeOff { item: i64 },                                    // client → zone
+    BuyResult { listing: i64, result: Result<(), String> },   // the answer to StallBuy, always
+    WearResult { item: i64, result: Result<(), String> },     // the answer to Wear / TakeOff, always
 }
 
 enum BodyKind { Human, Companion { owner: u32 }, Creature { def: u16 } }
@@ -427,8 +434,10 @@ The market (ECONOMY.md 7): a joiner receives `Stalls`, then `StallOpened` and `S
 they happen. A stall's keeper is drawn from the `StallEntry` (frame, armour class, model) as a
 body that does not move; it costs no snapshot bytes. `StallOpen` and `StallClose` are answered
 by `StallResult`; the zone forwards at most one such request per player per second to the hub
-and drops the rest unanswered. A map has at most 512 stall tiles, so `Stalls` always fits one
-message.
+and drops the rest unanswered. `StallBuy` shares that gate and `Wear` and `TakeOff` have one
+of their own, and all three are always answered (`BuyResult`, `WearResult`), a refusal by the
+gate included: section 18, ITEMS.md 5. A map has at most 512 stall tiles, so `Stalls` always
+fits one message.
 
 Minds (COMPANIONS.md): `Roster` and `PlayerInfo` list companions and creatures like players,
 with their `kind` (a creature's `def` indexes the content pack's creatures, which is where a
@@ -608,3 +617,35 @@ implementation; verdicts are ours):
   replaces its own body before the zone's room is counted.
 - A client now speaks to the hub in the players' messages (HUB.md 3.8) and shows screens
   (CLIENT.md); nothing a zone sees of it is different.
+
+## 18. Changes in v6 (Phase 11)
+
+- Five messages, **appended** to `Control` after `Trial`: client → zone `StallBuy { stall, listing, price }`, `Wear { item }`
+  and `TakeOff { item }`; zone → client `BuyResult { listing, result }` and `WearResult {
+  item, result }`, each naming what it answers (ITEMS.md 5). The zone asks the hub for all
+  three (`ZoneEconOp::StallBuy`, `Wear`, `TakeOff`): it is the zone that knows where a body
+  stands and whether it is in a fight.
+- **What a version adds goes at the end of `Control`**, whichever way it travels: the
+  variants before it keep their numbers, so a client and a zone of different versions can
+  still read each other's `Hello`, `Reject` and `Kick` and say what is wrong. A unit test
+  pins the bytes of those messages to the ones the v5 build produced.
+- **Reach**: a body buys at a stall when its feet are within 120 units of the middle of the
+  stall's tile along the ground and within 96 above or below
+  (`gm_net::control::stall_in_reach`; the client offers a stall by the same function).
+- **The fight lock**: what a body wears does not change until it has neither dealt nor taken
+  damage for 10 s.
+- **Gates**: the stall requests (open, close, buy) share the gate they had (one at a time,
+  one a second, per player); wearing has a gate of its own of the same size. A `StallBuy`,
+  `Wear` or `TakeOff` the gate stops is **answered** with a refusal, where a stopped
+  `StallOpen` or `StallClose` is dropped as before: these three are sent by a screen that
+  waits for the answer. A request the zone refuses by its own checks did not ask the hub
+  and does not count against the next. Before the gates, in the connection's own task, the
+  three are limited to four a second with eight in hand; past that they are dropped unread,
+  so a flood costs the tick loop nothing.
+- **Patience**: the zone waits ten seconds for the hub's answer to a buy or a change of
+  gear, then answers the client itself; a late answer to a change of gear is still applied.
+- A refusal's text is for the person and is the zone's or the hub's own words (the table in
+  ITEMS.md 5).
+- Nothing in sections 2 to 7 changed: gear moves damage in the zone, and a client predicts
+  none of it. A replay written before v6 reads as before (its frames carry no protocol
+  version).

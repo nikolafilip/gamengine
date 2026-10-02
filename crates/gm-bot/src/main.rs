@@ -55,6 +55,8 @@ struct Args {
     stalls: usize,
     list_for_hire: Option<i64>,
     hire: usize,
+    /// Keepers of a stall put what they carry up for sale at this price.
+    sell_at: Option<i64>,
 }
 
 const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:PORT [--web-cert SHA256HEX]) [--map PATH] [--bots N] [--secs N] \
@@ -63,7 +65,8 @@ const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:POR
 [--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...] \
 [--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall] \
 [--list-for-hire COPPER: list the character in the tavern; with --secs 0 it then stays offline] \
-[--hire N: hire up to N avatars from the tavern before entering]";
+[--hire N: hire up to N avatars from the tavern before entering] \
+[--sell-at COPPER: a bot that keeps a stall lists whatever it carries that can be worn, at this price]";
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
@@ -96,6 +99,7 @@ fn parse_args() -> Result<Args, String> {
         stalls: 0,
         list_for_hire: None,
         hire: 0,
+        sell_at: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -194,6 +198,15 @@ fn parse_args() -> Result<Args, String> {
                 a.hire = value("--hire")?
                     .parse()
                     .map_err(|e| format!("--hire: {e}"))?
+            }
+            "--sell-at" => {
+                let price: i64 = value("--sell-at")?
+                    .parse()
+                    .map_err(|e| format!("--sell-at: {e}"))?;
+                if price <= 0 {
+                    return Err("--sell-at: a price is more than nothing".into());
+                }
+                a.sell_at = Some(price);
             }
             "--teams" => {
                 a.teams = value("--teams")?
@@ -312,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
                 },
                 play: Duration::from_secs(args.secs),
                 list_for_hire: args.list_for_hire,
+                sell_at: args.sell_at,
                 hire: args.hire,
             };
             set.spawn(async move {

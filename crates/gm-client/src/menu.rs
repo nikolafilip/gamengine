@@ -37,6 +37,8 @@ pub enum MenuAction {
     None,
     /// Close the menu and play on.
     Resume,
+    /// Close the menu and open the inventory (ITEMS.md 6).
+    Inventory,
     Travel(String),
     /// Say goodbye to the zone and show the characters.
     Leave,
@@ -49,6 +51,7 @@ pub enum MenuAction {
 /// through and no characters to go back to.
 #[derive(Clone, Copy, Debug)]
 pub struct Offers {
+    pub inventory: bool,
     pub travel: bool,
     pub leave: bool,
     pub fullscreen: bool,
@@ -104,12 +107,15 @@ impl GameMenu {
         let s = ui.scale;
         let gap = 5.0 * s;
         let h = ui.button_height();
-        let inner = 6.0 * (h + gap) + 2.0 * ui.line();
+        let inner = 7.0 * (h + gap) + 2.0 * ui.line();
         let panel = Rect::centred(ui.size(), 160.0 * s, ui.panel_height(inner, true));
         let inner = ui.panel(panel, "menu");
         let mut col = Column::new(inner, gap);
         if ui.button(col.take(h), "Resume") || ui.key(Key::Escape) {
             return MenuAction::Resume;
+        }
+        if ui.button_if(col.take(h), "Inventory", offers.inventory) {
+            return MenuAction::Inventory;
         }
         if ui.button_if(col.take(h), "Travel", offers.travel && hub.is_some())
             && let Some((hub, session)) = hub
@@ -152,8 +158,10 @@ impl GameMenu {
             ("V", "first or third person"),
             ("Tab", "the tactical view and the squad"),
             ("Enter", "say something"),
-            ("F9", "report the player under the crosshair"),
-            ("B and N", "open and close a stall on a market tile"),
+            ("F9", "report the player you look at"),
+            ("I", "the inventory"),
+            ("E", "look at the stall you stand at"),
+            ("B and N", "open, close a stall on a tile"),
             ("Escape", "this menu"),
         ];
         let s = ui.scale;
@@ -578,6 +586,7 @@ mod tests {
 
     const S: SessionId = SessionId([9; 16]);
     const ALL: Offers = Offers {
+        inventory: true,
         travel: true,
         leave: true,
         fullscreen: true,
@@ -640,6 +649,10 @@ mod tests {
         assert_eq!(
             click(&mut menu, &mut st, "Resume", Some(&hub), ALL, &mut set),
             MenuAction::Resume
+        );
+        assert_eq!(
+            click(&mut menu, &mut st, "Inventory", Some(&hub), ALL, &mut set),
+            MenuAction::Inventory
         );
         assert_eq!(
             click(&mut menu, &mut st, "Leave", Some(&hub), ALL, &mut set),
@@ -740,6 +753,7 @@ mod tests {
         let (mut menu, mut st, mut set) =
             (GameMenu::default(), UiState::default(), Settings::default());
         let none = Offers {
+            inventory: false,
             travel: false,
             leave: false,
             fullscreen: false,
@@ -754,6 +768,7 @@ mod tests {
             &mut set,
         );
         assert!(st.find("Travel").is_none() && st.find("Leave").is_none());
+        assert!(st.find("Inventory").is_none(), "no hub: nothing to ask");
         assert!(st.find("Resume").is_some() && st.find("Quit").is_some());
         // The settings change what they say they change, at once.
         click(&mut menu, &mut st, "Settings", None, none, &mut set);
@@ -812,6 +827,14 @@ mod tests {
                     menu.frame(&mut ui, Some((&hub, S)), ALL, "town", &mut set);
                     ui.end();
                     crate::ui::tests::tidy(&canvas, &st, 300.0);
+                    // Nothing a page says is cut short (two lines of the keys page were,
+                    // at every size, and no test looked).
+                    assert!(
+                        st.clipped.is_empty(),
+                        "{} at {size:?}: {:?}",
+                        page.name(),
+                        st.clipped
+                    );
                 }
             }
             // The screen of a client with no hub to talk to, with paths as long as they

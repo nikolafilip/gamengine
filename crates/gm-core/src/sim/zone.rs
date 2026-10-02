@@ -9,7 +9,7 @@ use crate::build::{Build, BuildError, ContentPack, Sheet};
 use crate::collide::{Aabb, BodyGrid, EntityWorld};
 use crate::geom::{Capsule, ray_capsule, sweep_sphere_capsule};
 use crate::matrix::{
-    AttackerStats, DOT_PULSES_PER_S, DefenderStats, STAGGER_DECAY_PER_S, STAGGER_IMMUNITY_MS,
+    AttackerStats, DOT_PULSES_PER_S, DefenderStats, Gear, STAGGER_DECAY_PER_S, STAGGER_IMMUNITY_MS,
     STAGGER_MS, resolve_damage,
 };
 use crate::movement::{MoveVars, yaw_vectors};
@@ -93,10 +93,16 @@ pub struct Player {
     pub pending_build: Option<Build>,
     /// Server tick of the last hit taken (statistics, diagnostics).
     pub last_hit_tick: Tick,
+    /// Server tick at which it last dealt or took damage; `None`: never. The zone reads
+    /// it (what a body wears does not change in a fight, ITEMS.md 5); the sim does not.
+    pub fought_at: Option<Tick>,
     /// In transit to another zone (HUB.md 3.3): the body stays, visible and hittable, but no
     /// frames run.
     pub ghost: bool,
     pub driver: Driver,
+    /// What it wears, as the damage pipeline reads it (ITEMS.md 3): nothing, until the zone
+    /// is told otherwise. It stays through a respawn and a change of build.
+    pub gear: Gear,
     /// The party the body belongs to (COMPANIONS.md 3.1): its own id until it joins another,
     /// its commander's for a companion, 0 for a creature. Damage never reads it.
     pub party: u32,
@@ -132,10 +138,17 @@ impl Player {
         self.sheet.derived.health
     }
 
+    /// Whether it dealt or took damage within the last `ticks` ticks.
+    pub fn fought_within(&self, now: Tick, ticks: Tick) -> bool {
+        self.fought_at
+            .is_some_and(|at| (tick_delta(now, at).max(0) as u32) < ticks)
+    }
+
     fn attacker_stats(&self) -> AttackerStats {
         AttackerStats::from_derived(
             &self.sheet.derived,
             self.mover.statuses.magnitude(Status::Weaken),
+            &self.gear,
         )
     }
 }
@@ -428,14 +441,31 @@ impl Zone {
             stagger: 0.0,
             pending_build: None,
             last_hit_tick: 0,
+            fought_at: None,
             ghost: false,
             driver,
+            gear: Gear::NONE,
             party: id,
             hold: false,
             next: None,
         };
         self.players.insert(id, p);
         id
+    }
+
+    /// Ticks between the pulses of a status at this zone's rate: four pulses a second
+    /// (`DOT_INTERVAL_TICKS` is this at 64 Hz; a zone at 20 Hz pulsed every 0.8 s by it,
+    /// and its statuses did a third of what they say).
+    fn dot_interval(&self) -> Tick {
+        (self.rate.hz() / DOT_PULSES_PER_S).max(1)
+    }
+
+    /// What a body wears from now on (ITEMS.md 3.3): at once, for every packet made or
+    /// landing after this. Kept within the cap whatever was told.
+    pub fn set_gear(&mut self, id: EntityId, gear: Gear) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.gear = gear.clamped();
+        }
     }
 
     pub fn set_party(&mut self, id: EntityId, party: u32) {
@@ -774,7 +804,7 @@ impl Zone {
         self.pulse_areas(world);
 
         // 6: statuses tick (damage and healing over time).
-        if now.is_multiple_of(DOT_INTERVAL_TICKS) {
+        if now.is_multiple_of(self.dot_interval()) {
             self.pulse_dots();
         }
 
@@ -1300,7 +1330,7 @@ impl Zone {
             let slots: Vec<_> = p.mover.statuses.active().copied().collect();
             // Fractional magnitudes accumulate across the four pulses of a second so that a
             // magnitude of m deals exactly floor(m) per second, never 0 and never rounded up.
-            let pulse = (self.tick / DOT_INTERVAL_TICKS) % DOT_PULSES_PER_S;
+            let pulse = (self.tick / self.dot_interval()) % DOT_PULSES_PER_S;
             for slot in slots {
                 let per = slot.magnitude / DOT_PULSES_PER_S as f32;
                 let amount =
@@ -1508,6 +1538,21 @@ impl Zone {
                 _ => {}
             }
         }
+        // The hit lands: both are in a fight from now.
+        if let Some(a) = self.players.get_mut(&attacker) {
+            a.fought_at = Some(now);
+        }
+        // The pulses of a status take no gear on either side (ITEMS.md 3.1): a pulse is a
+        // point or two, and a factor on that is a step, not an edge.
+        let geared = kind != HitKind::Dot;
+        let stats = if geared {
+            stats
+        } else {
+            AttackerStats {
+                gear: [0; 8],
+                ..stats
+            }
+        };
         let t = self.players.get_mut(&target).expect("still there");
         let d = &t.sheet.derived;
         let defender = DefenderStats {
@@ -1520,6 +1565,7 @@ impl Zone {
             evading: t.mover.evading(frame_now),
             exposed: t.mover.statuses.has(Status::Expose),
             block,
+            gear: if geared { t.gear.taken } else { [0; 8] },
         };
         let amount = resolve_damage(packet, &stats, &defender);
         let absorbed = if block.is_some() {
@@ -1533,6 +1579,7 @@ impl Zone {
         };
         t.health -= amount;
         t.last_hit_tick = now;
+        t.fought_at = Some(now);
         let knock = dir * packet.knockback * stats.knockback_dealt * d.knockback_taken;
         t.mover.mv.velocity += knock;
         if knock.z > 0.0 {

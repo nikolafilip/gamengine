@@ -514,6 +514,18 @@ pub async fn run_bot_on_link(
                     }
                     Ok(Some(Control::StallOpened(stall))) => {
                         stalls_seen.insert(stall.id);
+                        // Where the bot's own stall stands, for whoever sends it a buyer.
+                        if stall.owner == cfg.name {
+                            info!(
+                                name = %cfg.name,
+                                stall = stall.id,
+                                x = stall.pos[0],
+                                y = stall.pos[1],
+                                z = stall.pos[2],
+                                yaw = stall.yaw,
+                                "stall stands"
+                            );
+                        }
                     }
                     Ok(Some(Control::StallClosed(id))) => {
                         stalls_seen.remove(&id);

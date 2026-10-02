@@ -1,8 +1,11 @@
 //! Item content (ECONOMY.md 4): templates and materials from `items.toml`, with the gear
-//! edge cap (PLAN.md 0) checked at load.
+//! edge cap (PLAN.md 0) checked at load, and what a crafted item does to damage
+//! (ITEMS.md 3.2).
 
 use std::path::Path;
 
+use gm_core::matrix::Gear;
+use gm_core::vocab::DamageType;
 use serde::Deserialize;
 
 use crate::ContentError;
@@ -19,6 +22,141 @@ pub struct ItemTemplate {
     pub id: String,
     pub kind: String,
     pub layers: Vec<String>,
+    /// A weapon: the physical kind it strikes with (`slash`, `pierce`, `blunt`). Its core's
+    /// edge sharpens that kind and no other (ITEMS.md 3.2).
+    #[serde(default)]
+    pub strikes: Option<String>,
+    /// An armour: what its core guards against, `physical` (the three kinds of blow) or
+    /// `elements` (the five).
+    #[serde(default)]
+    pub guards: Option<String>,
+}
+
+const PHYSICAL: [DamageType; 3] = [DamageType::Slash, DamageType::Pierce, DamageType::Blunt];
+const ELEMENTS: [DamageType; 5] = [
+    DamageType::Flame,
+    DamageType::Shadow,
+    DamageType::Storm,
+    DamageType::Frost,
+    DamageType::Stone,
+];
+/// The eight kinds of damage as a person reads them, in `DamageType`'s order.
+const KINDS: [&str; 8] = [
+    "slash", "pierce", "blunt", "flame", "shadow", "storm", "frost", "stone",
+];
+
+/// An item as a person is shown it (ITEMS.md 6): everything a screen says about what it
+/// is and does, so that no client works any of it out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemView {
+    /// Where it is worn; `None` for a part, and for what this content does not know.
+    pub place: Option<Place>,
+    /// Its edge per damage type, per mille (zeros for what is not worn).
+    pub edge: [u16; 8],
+    /// What it is: `a weapon, 220 of 250`, `a core, for crafting`.
+    pub what: String,
+    /// What it does, the strongest first: `slash +11.0%`, `flame +9.5%`.
+    pub does: Vec<String>,
+}
+
+/// An edge in per mille as what it does (ITEMS.md 3.1): a weapon deals that much more of
+/// the kind, an armour takes what `SCALE / (SCALE + edge)` leaves off it; in tenths of a
+/// per cent, rounded.
+fn per_cent(place: Place, edge: u16) -> String {
+    let e = edge as u32;
+    match place {
+        Place::Weapon => {
+            let more = (e * 1000 + Gear::SCALE / 2) / Gear::SCALE;
+            format!("+{}.{}%", more / 10, more % 10)
+        }
+        Place::Armour => {
+            let off = (e * 1000 + (Gear::SCALE + e) / 2) / (Gear::SCALE + e);
+            format!("-{}.{}%", off / 10, off % 10)
+        }
+    }
+}
+
+/// The edges in words, the strongest first. Kinds of one group that share an edge are
+/// said together (`physical`, `elements`, or `other elements` beside one that stands out).
+fn words(place: Place, edge: &[u16; 8]) -> Vec<String> {
+    let mut said: Vec<(u16, String)> = Vec::new();
+    for (group, name) in [(&PHYSICAL[..], "physical"), (&ELEMENTS[..], "elements")] {
+        let of = |v: u16| group.iter().filter(|k| edge[**k as usize] == v).count();
+        // What most of the group shares, if two or more share anything.
+        let shared = group
+            .iter()
+            .map(|k| edge[*k as usize])
+            .filter(|v| *v > 0 && of(*v) >= 2)
+            .max_by_key(|v| (of(*v), *v));
+        let mut alone = false;
+        for k in group {
+            let v = edge[*k as usize];
+            if v > 0 && Some(v) != shared {
+                said.push((v, KINDS[*k as usize].to_string()));
+                alone = true;
+            }
+        }
+        match shared {
+            Some(v) if of(v) == group.len() => said.push((v, name.to_string())),
+            // All but one, and that one said by its own name: these are the others.
+            Some(v) if of(v) == group.len() - 1 && alone => said.push((v, format!("other {name}"))),
+            // Some of the group, and no word for which: each by its own name.
+            Some(v) => {
+                for k in group.iter().filter(|k| edge[**k as usize] == v) {
+                    said.push((v, KINDS[*k as usize].to_string()));
+                }
+            }
+            None => {}
+        }
+    }
+    said.sort_by_key(|(v, _)| std::cmp::Reverse(*v));
+    said.into_iter()
+        .map(|(v, what)| format!("{what} {}", per_cent(place, v)))
+        .collect()
+}
+
+/// Where an item is worn (ITEMS.md 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    Weapon,
+    Armour,
+}
+
+impl Place {
+    pub fn name(self) -> &'static str {
+        match self {
+            Place::Weapon => "weapon",
+            Place::Armour => "armour",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Place> {
+        match name {
+            "weapon" => Some(Place::Weapon),
+            "armour" => Some(Place::Armour),
+            _ => None,
+        }
+    }
+}
+
+fn physical(kind: &str) -> Option<DamageType> {
+    match kind {
+        "slash" => Some(DamageType::Slash),
+        "pierce" => Some(DamageType::Pierce),
+        "blunt" => Some(DamageType::Blunt),
+        _ => None,
+    }
+}
+
+fn element(name: &str) -> Option<DamageType> {
+    match name {
+        "flame" => Some(DamageType::Flame),
+        "shadow" => Some(DamageType::Shadow),
+        "storm" => Some(DamageType::Storm),
+        "frost" => Some(DamageType::Frost),
+        "stone" => Some(DamageType::Stone),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -76,6 +214,129 @@ impl ItemContent {
         self.templates.iter().map(|t| t.id.clone()).collect()
     }
 
+    /// Where an item of this template is worn; `None` for a component, and for a template
+    /// this content does not know.
+    pub fn place(&self, template: &str) -> Option<Place> {
+        let t = self.templates.iter().find(|t| t.id == template)?;
+        Place::parse(&t.kind)
+    }
+
+    /// What an item of `template` made of `materials` does (ITEMS.md 3.2): where it is
+    /// worn, its edge per damage type in `DamageType`'s order (per mille: a weapon's is
+    /// what its wearer deals more of, an armour's what its wearer takes less of), and its
+    /// whole edge. Each layer puts its material's edge into some of the eight:
+    ///
+    /// - the core into what the item is made for: the kind a weapon strikes with, the
+    ///   three kinds of blow or the five elements an armour guards against;
+    /// - the catalyst into its element;
+    /// - shard, frame and gems into every kind the core and the catalyst reach, and no
+    ///   other: an item is for one build and not for another.
+    ///
+    /// A material this content does not know, or of a layer the template has no room for,
+    /// adds nothing.
+    pub fn edges<'a>(
+        &self,
+        template: &str,
+        materials: impl IntoIterator<Item = &'a str>,
+    ) -> Option<(Place, [u16; 8], u16)> {
+        let t = self.templates.iter().find(|t| t.id == template)?;
+        let place = Place::parse(&t.kind)?;
+        let known: Vec<&Material> = materials
+            .into_iter()
+            .filter_map(|id| self.materials.iter().find(|m| m.id == id))
+            .filter(|m| t.layers.iter().any(|l| l == m.layer()))
+            .collect();
+        // What the item is for.
+        let mut made_for = [false; 8];
+        match place {
+            Place::Weapon => {
+                if let Some(kind) = t.strikes.as_deref().and_then(physical) {
+                    made_for[kind as usize] = true;
+                }
+            }
+            Place::Armour => {
+                let kinds = match t.guards.as_deref() {
+                    Some("elements") => &ELEMENTS[..],
+                    _ => &PHYSICAL[..],
+                };
+                for kind in kinds {
+                    made_for[*kind as usize] = true;
+                }
+            }
+        }
+        let core = made_for;
+        for m in &known {
+            if m.layer() == "catalyst"
+                && let Some(e) = m.element.as_deref().and_then(element)
+            {
+                made_for[e as usize] = true;
+            }
+        }
+        let mut out = [0u32; 8];
+        let mut whole = 0u32;
+        for m in &known {
+            whole += m.edge;
+            let mut into = [false; 8];
+            match m.layer() {
+                "core" => into = core,
+                "catalyst" => {
+                    if let Some(e) = m.element.as_deref().and_then(element) {
+                        into[e as usize] = true;
+                    }
+                }
+                _ => into = made_for,
+            }
+            for (kind, on) in into.iter().enumerate() {
+                if *on {
+                    out[kind] += m.edge;
+                }
+            }
+        }
+        Some((
+            place,
+            out.map(|e| e.min(MAX_EDGE_PER_MILLE) as u16),
+            whole.min(u16::MAX as u32) as u16,
+        ))
+    }
+
+    /// The item as a person is shown it. `components` are `(layer, material)`.
+    pub fn view<'a>(
+        &self,
+        template: &str,
+        components: impl IntoIterator<Item = (&'a str, &'a str)> + Clone,
+    ) -> ItemView {
+        let materials = components.clone().into_iter().map(|(_, m)| m);
+        match self.edges(template, materials) {
+            Some((place, edge, whole)) => ItemView {
+                place: Some(place),
+                edge,
+                what: format!(
+                    "{} {}, {whole} of {MAX_EDGE_PER_MILLE}",
+                    if place == Place::Weapon { "a" } else { "an" },
+                    place.name()
+                ),
+                does: words(place, &edge),
+            },
+            None => ItemView {
+                what: match components.into_iter().next() {
+                    Some((layer, _)) if template == "component" => {
+                        format!("a {layer}, for crafting")
+                    }
+                    _ => "nothing this world knows".to_string(),
+                },
+                ..ItemView::default()
+            },
+        }
+    }
+
+    /// The layers a craft of this template may fill; `None`: the content does not know it.
+    pub fn layers(&self, template: &str) -> Option<&[String]> {
+        self.templates
+            .iter()
+            .find(|t| t.id == template)
+            .map(|t| &t.layers[..])
+    }
+
     fn validate(&self) -> Result<(), ContentError> {
         let bad = |s: String| Err(ContentError::Invalid(s));
         for (i, m) in self.materials.iter().enumerate() {
@@ -109,6 +370,22 @@ impl ItemContent {
             }
             if !["weapon", "armour"].contains(&t.kind.as_str()) {
                 return bad(format!("template {:?}: unknown kind {:?}", t.id, t.kind));
+            }
+            match (t.kind.as_str(), t.strikes.as_deref(), t.guards.as_deref()) {
+                ("weapon", Some(kind), None) if physical(kind).is_some() => {}
+                ("weapon", _, _) => {
+                    return bad(format!(
+                        "template {:?}: a weapon strikes with slash, pierce or blunt, and guards against nothing",
+                        t.id
+                    ));
+                }
+                (_, None, Some("physical" | "elements")) => {}
+                _ => {
+                    return bad(format!(
+                        "template {:?}: an armour guards against physical or elements, and strikes with nothing",
+                        t.id
+                    ));
+                }
             }
             for layer in &t.layers {
                 if !LAYERS.contains(&layer.as_str()) {
@@ -159,7 +436,7 @@ mod tests {
     #[test]
     fn shipped_items_load_under_the_edge_cap() {
         let items = load_items(Path::new(DIR)).expect("items load");
-        assert!(items.templates.len() >= 6 && items.materials.len() >= 15);
+        assert!(items.templates.len() >= 7 && items.materials.len() >= 15);
         let best = items
             .templates
             .iter()
@@ -171,11 +448,121 @@ mod tests {
     }
 
     #[test]
+    fn each_layer_sharpens_its_own_kind_of_damage() {
+        let items = load_items(Path::new(DIR)).expect("items load");
+        let at = |t: DamageType| t as usize;
+        // The best sword, with an ember catalyst (ITEMS.md 3.2): its core is for the
+        // sword's own kind, its catalyst for its element, the rest for those two.
+        let best = [
+            "shard/boss_scale",
+            "core/dragonbone",
+            "catalyst/ember",
+            "frame/whalebone",
+            "gem/opal",
+            "gem/opal",
+        ];
+        let (place, sword, whole) = items.edges("sword", best).unwrap();
+        assert_eq!((place, whole), (Place::Weapon, 250));
+        let mut expect = [0u16; 8];
+        expect[at(DamageType::Slash)] = 220;
+        expect[at(DamageType::Flame)] = 190;
+        assert_eq!(sword, expect, "nothing for a kind the sword is not for");
+        // The same parts in a hammer sharpen Blunt, not Slash.
+        let (_, hammer, _) = items.edges("hammer", best).unwrap();
+        assert_eq!(
+            (hammer[at(DamageType::Blunt)], hammer[at(DamageType::Slash)]),
+            (220, 0)
+        );
+        // A cuirass guards against blows and takes no catalyst: one handed to it (an item
+        // made before the rule) adds nothing.
+        let plain = [
+            "shard/boss_scale",
+            "core/dragonbone",
+            "frame/whalebone",
+            "gem/opal",
+            "gem/opal",
+        ];
+        let (place, cuirass, whole) = items.edges("cuirass", plain).unwrap();
+        assert_eq!((place, whole), (Place::Armour, 220));
+        assert_eq!(cuirass, [220, 220, 220, 0, 0, 0, 0, 0]);
+        assert_eq!(items.edges("cuirass", best).unwrap().1, cuirass);
+        // A robe guards against the elements, and its catalyst against one the more.
+        let (_, robe, whole) = items.edges("robe", best).unwrap();
+        assert_eq!(whole, 250);
+        assert_eq!(robe, [0, 0, 0, 250, 220, 220, 220, 220]);
+        let (_, robe, _) = items
+            .edges("robe", ["core/iron", "catalyst/rime", "frame/oak"])
+            .unwrap();
+        assert_eq!(robe[at(DamageType::Frost)], 70);
+        assert_eq!(robe[at(DamageType::Flame)], 40);
+        assert_eq!(robe[at(DamageType::Slash)], 0);
+        // A component is worn nowhere; nor is what the content does not know. A material it
+        // does not know adds nothing.
+        assert_eq!(items.edges("component", ["core/iron"]), None);
+        assert_eq!(items.place("sword"), Some(Place::Weapon));
+        assert_eq!(items.place("lute"), None);
+        let (_, odd, _) = items
+            .edges("sword", ["core/iron", "core/moonsilver"])
+            .unwrap();
+        assert_eq!(odd[at(DamageType::Slash)], 30);
+        // Nothing an item can be made of goes past the cap in any one number.
+        for t in &items.templates {
+            let all: Vec<&str> = items.materials.iter().map(|m| m.id.as_str()).collect();
+            let (_, edges, _) = items.edges(&t.id, all).unwrap();
+            assert!(edges.iter().all(|e| *e <= 250), "{}", t.id);
+        }
+    }
+
+    #[test]
+    fn an_item_is_put_into_words_by_the_content() {
+        let items = load_items(Path::new(DIR)).expect("items load");
+        let parts = |list: &[&'static str]| -> Vec<(&'static str, &'static str)> {
+            list.iter()
+                .map(|m| (m.split_once('/').unwrap().0, *m))
+                .collect()
+        };
+        let best = parts(&[
+            "shard/boss_scale",
+            "core/dragonbone",
+            "catalyst/ember",
+            "frame/whalebone",
+            "gem/opal",
+            "gem/opal",
+        ]);
+        // A place counts for half its item's edge (ITEMS.md 3.1): 220 per mille is 11%.
+        let sword = items.view("sword", best.clone());
+        assert_eq!(sword.what, "a weapon, 250 of 250");
+        assert_eq!(sword.does, ["slash +11.0%", "flame +9.5%"]);
+        // An armour takes off what 2000 / 2220 leaves: 9.9%.
+        let cuirass = items.view("cuirass", parts(&["core/dragonbone", "frame/whalebone"]));
+        assert_eq!(cuirass.what, "an armour, 105 of 250");
+        assert_eq!(cuirass.does, ["physical -5.0%"]);
+        let robe = items.view("robe", best.clone());
+        assert_eq!(robe.does, ["flame -11.1%", "other elements -9.9%"]);
+        let robe = items.view("robe", parts(&["core/iron", "frame/oak"]));
+        assert_eq!(robe.does, ["elements -2.0%"]);
+        // Half a per mille is rounded, not lost: 45 is 2.3%.
+        let staff = items.view("staff", parts(&["core/tin", "frame/ash", "gem/quartz"]));
+        assert_eq!(staff.does, ["blunt +2.3%"]);
+        // A part says what it is; what nobody knows says so.
+        let part = items.view("component", parts(&["catalyst/ember"]));
+        assert_eq!(
+            (part.place, part.what.as_str()),
+            (None, "a catalyst, for crafting")
+        );
+        assert!(part.does.is_empty() && part.edge == [0; 8]);
+        assert_eq!(items.view("lute", best).what, "nothing this world knows");
+        assert_eq!(items.layers("crossbow").unwrap().len(), 4);
+        assert_eq!(items.layers("lute"), None);
+    }
+
+    #[test]
     fn an_item_over_the_cap_is_refused() {
         let text = r#"
             [[template]]
             id = "sword"
             kind = "weapon"
+            strikes = "slash"
             layers = ["core", "frame", "gem"]
             [[material]]
             id = "core/a"
@@ -196,5 +583,22 @@ mod tests {
                 .is_err()
         );
         assert!(load_items_str(&text.replace("core/a", "a")).is_err());
+        // A weapon says what it strikes with, and only a weapon does.
+        let ok = text.replace("edge = 25", "edge = 20");
+        assert!(load_items_str(&ok.replace("strikes = \"slash\"", "")).is_err());
+        assert!(load_items_str(&ok.replace("strikes = \"slash\"", "strikes = \"flame\"")).is_err());
+        assert!(load_items_str(&ok.replace("kind = \"weapon\"", "kind = \"armour\"")).is_err());
+        // An armour says what it guards against, and only an armour does.
+        let armour = ok.replace("kind = \"weapon\"", "kind = \"armour\"");
+        let guards = armour.replace("strikes = \"slash\"", "guards = \"elements\"");
+        assert!(load_items_str(&guards).is_ok());
+        assert!(load_items_str(&guards.replace("elements", "everything")).is_err());
+        assert!(
+            load_items_str(&ok.replace(
+                "strikes = \"slash\"",
+                "strikes = \"slash\"\nguards = \"physical\""
+            ))
+            .is_err()
+        );
     }
 }

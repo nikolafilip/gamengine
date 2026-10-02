@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use gm_content::items::{ItemContent, Place};
+use gm_core::matrix::Gear;
 use sqlx::postgres::PgPool;
 use sqlx::{Postgres, Row, Transaction};
 
@@ -18,9 +20,15 @@ pub const HIRES_BEFORE_DEMOTION: i64 = 3;
 pub const MAX_PRICE: i64 = 1_000_000_000_000;
 pub const LAYERS: [&str; 5] = ["shard", "core", "catalyst", "frame", "gem"];
 pub const MAX_GEMS: usize = 2;
+/// The most parts an item is made of: a shard, a core, a catalyst, a frame and the gems.
+pub const MAX_PARTS: usize = 4 + MAX_GEMS;
 pub const CHEST_SLOTS: i32 = 48;
 /// An active contract the zone never reported on is refunded after this long.
 pub const CONTRACT_TIMEOUT_MINUTES: i32 = 120;
+/// What every mover says to a worn item (ITEMS.md 2).
+pub const WORN: &str = "it is worn: take it off first";
+/// What is said of an item somebody would wear and does not carry.
+pub const NOT_CARRIED: &str = "that is not in the inventory";
 
 /// Which components survive a decomposition (ECONOMY.md 10): ⌊k / 2⌋ of them, ordered by a
 /// hash of the item id and the component's index. The crafter cannot choose the item id, so
@@ -81,6 +89,10 @@ fn internal(e: sqlx::Error) -> EconError {
         if d.is_check_violation() {
             return EconError::Insufficient;
         }
+        // Migration 0009's trigger: a worn item was about to leave its wearer.
+        if d.code().as_deref() == Some("GM001") {
+            return EconError::State(WORN.into());
+        }
         if matches!(d.code().as_deref(), Some("40P01" | "40001")) {
             return EconError::Busy;
         }
@@ -100,6 +112,16 @@ pub struct Item {
     pub id: i64,
     pub template: String,
     pub components: Vec<Component>,
+    /// Somebody wears it (ITEMS.md 2): only ever true in its wearer's inventory.
+    pub worn: bool,
+}
+
+/// What a stall has for sale: the listing's id, the item and its price in copper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub id: i64,
+    pub item: Item,
+    pub price: i64,
 }
 
 /// A hire in its window that nobody ended (COMPANIONS.md 3.3). `build` is the avatar's
@@ -302,6 +324,9 @@ async fn move_item_opt(
     if holder != expect_from {
         return Err(EconError::Forbidden);
     }
+    if is_worn(tx, item).await? {
+        return Err(EconError::State(WORN.into()));
+    }
     if expect_from != to {
         let target = locked
             .iter()
@@ -471,9 +496,130 @@ async fn create_component(tx: &mut Tx<'_>, holder: i64, material: &str) -> Resul
     Ok(id)
 }
 
-/// An item about to be destroyed leaves every trade it was offered in, and those trades
-/// lose their accepts: nobody commits to an offer that silently shrank.
-async fn detach_from_trades(tx: &mut Tx<'_>, item: i64) -> Result<(), EconError> {
+/// The character's row, held against a change of where it is until the transaction ends
+/// (a claim, a handoff and a save take it whole), and the proof that it plays in `zone`:
+/// not offline, not on its way anywhere.
+async fn playing_in(tx: &mut Tx<'_>, character: i64, zone: &str) -> Result<(), EconError> {
+    let r =
+        sqlx::query("select location_kind, location_zone from characters where id = $1 for share")
+            .bind(character)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(internal)?
+            .ok_or(EconError::NotFound)?;
+    let kind: String = r.try_get("location_kind").map_err(internal)?;
+    let at: Option<String> = r.try_get("location_zone").map_err(internal)?;
+    if kind != "zone" || at.as_deref() != Some(zone) {
+        return Err(EconError::Forbidden);
+    }
+    Ok(())
+}
+
+/// What the character's worn items do (ITEMS.md 3.2), within a transaction.
+async fn gear_in(
+    tx: &mut Tx<'_>,
+    character: i64,
+    content: &ItemContent,
+) -> Result<Gear, EconError> {
+    let rows = sqlx::query(
+        "select w.slot, i.id, i.template from worn w join items i on i.id = w.item_id \
+         where w.character_id = $1",
+    )
+    .bind(character)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(internal)?;
+    let mut gear = Gear::NONE;
+    for r in rows {
+        let slot: String = r.try_get("slot").map_err(internal)?;
+        let id: i64 = r.try_get("id").map_err(internal)?;
+        let template: String = r.try_get("template").map_err(internal)?;
+        let parts = components_of(tx, id).await?;
+        let materials = parts.iter().map(|c| c.material.as_str());
+        // Content that no longer knows the template, or knows it as another kind than
+        // the place it was put into, gives nothing.
+        match content.edges(&template, materials) {
+            Some((Place::Weapon, edges, _)) if slot == Place::Weapon.name() => gear.dealt = edges,
+            Some((Place::Armour, edges, _)) if slot == Place::Armour.name() => gear.taken = edges,
+            _ => {}
+        }
+    }
+    Ok(gear)
+}
+
+/// Whether somebody wears the item (ITEMS.md 2). Asked with the item's row locked.
+async fn is_worn(tx: &mut Tx<'_>, item: i64) -> Result<bool, EconError> {
+    Ok(sqlx::query("select 1 from worn where item_id = $1")
+        .bind(item)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(internal)?
+        .is_some())
+}
+
+/// What an item may be made of (ECONOMY.md 10): one core and one frame, at most one shard
+/// and one catalyst, at most two gems, and nothing of a layer its template has no room for.
+fn check_parts(
+    parts: &[Component],
+    template: &str,
+    layers: Option<&[String]>,
+) -> Result<(), EconError> {
+    if let Some(layers) = layers
+        && let Some(odd) = parts.iter().find(|c| !layers.contains(&c.layer))
+    {
+        return Err(EconError::Invalid(format!(
+            "a {template} takes no {}",
+            odd.layer
+        )));
+    }
+    let count = |layer: &str| parts.iter().filter(|c| c.layer == layer).count();
+    if count("core") != 1 || count("frame") != 1 {
+        return Err(EconError::Invalid(
+            "a craft needs exactly one core and one frame".into(),
+        ));
+    }
+    if count("shard") > 1 || count("catalyst") > 1 || count("gem") > MAX_GEMS {
+        return Err(EconError::Invalid("too many components for a layer".into()));
+    }
+    Ok(())
+}
+
+/// A new item of `template` made of `parts`, in `holder`. The caller writes its move.
+async fn create_item(
+    tx: &mut Tx<'_>,
+    holder: i64,
+    template: &str,
+    parts: &[Component],
+) -> Result<i64, EconError> {
+    let id: i64 =
+        sqlx::query("insert into items (template, holder_id) values ($1, $2) returning id")
+            .bind(template)
+            .bind(holder)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(internal)?
+            .try_get("id")
+            .map_err(internal)?;
+    let mut pos = std::collections::HashMap::<&str, i16>::new();
+    for c in parts {
+        let p = pos.entry(c.layer.as_str()).or_insert(0);
+        sqlx::query("insert into item_components (item_id, layer, position, material) values ($1, $2, $3, $4)")
+            .bind(id)
+            .bind(&c.layer)
+            .bind(*p)
+            .bind(&c.material)
+            .execute(&mut **tx)
+            .await
+            .map_err(internal)?;
+        *p += 1;
+    }
+    Ok(id)
+}
+
+/// An item leaves every open trade it is offered in, and those trades lose their accepts:
+/// nobody commits to an offer that silently shrank. What finished trades wrote down of it
+/// stays written.
+async fn leave_open_offers(tx: &mut Tx<'_>, item: i64) -> Result<(), EconError> {
     sqlx::query(
         "update trades set a_accepted = false, b_accepted = false, changed_at = now(), version = version + 1 \
          where state = 'open' and id in (select trade_id from trade_items where item_id = $1)",
@@ -482,6 +628,21 @@ async fn detach_from_trades(tx: &mut Tx<'_>, item: i64) -> Result<(), EconError>
     .execute(&mut **tx)
     .await
     .map_err(internal)?;
+    sqlx::query(
+        "delete from trade_items where item_id = $1 \
+         and trade_id in (select id from trades where state = 'open')",
+    )
+    .bind(item)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    Ok(())
+}
+
+/// An item about to be destroyed leaves every trade: the open ones as above, and the rows
+/// finished trades kept of it, which refer to an item that will not be there.
+async fn detach_from_trades(tx: &mut Tx<'_>, item: i64) -> Result<(), EconError> {
+    leave_open_offers(tx, item).await?;
     sqlx::query("delete from trade_items where item_id = $1")
         .bind(item)
         .execute(&mut **tx)
@@ -549,11 +710,14 @@ impl Economy {
             .map_err(internal)?
             .try_get("coin")
             .map_err(internal)?;
-        let rows = sqlx::query("select id, template from items where holder_id = $1 order by id")
-            .bind(holder)
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(internal)?;
+        let rows = sqlx::query(
+            "select id, template, exists (select 1 from worn w where w.item_id = items.id) as worn \
+             from items where holder_id = $1 order by id",
+        )
+        .bind(holder)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(internal)?;
         let mut items = Vec::with_capacity(rows.len());
         for r in rows {
             let id: i64 = r.try_get("id").map_err(internal)?;
@@ -561,9 +725,129 @@ impl Economy {
                 id,
                 template: r.try_get("template").map_err(internal)?,
                 components: components_of(tx, id).await?,
+                worn: r.try_get("worn").map_err(internal)?,
             });
         }
         Ok((coin, items))
+    }
+
+    // ---------- what is worn (ITEMS.md 2) ----------
+
+    /// A character playing in `zone` puts an item of its own inventory into its place
+    /// (the template's kind says which); whatever was there is taken off and stays in the
+    /// inventory. The item leaves every trade it was offered in: what is worn is not for
+    /// sale. Returns a reading of what the character's worn items do, made after the
+    /// change was committed.
+    ///
+    /// The character's row is held against a change of where it is until this commits: a
+    /// claim by another zone either sees what was put on, or comes first and this is
+    /// refused.
+    pub async fn wear(
+        &self,
+        character: i64,
+        zone: &str,
+        item: i64,
+        content: &ItemContent,
+    ) -> Result<(u64, Gear), EconError> {
+        let mut tx = self.begin().await?;
+        playing_in(&mut tx, character, zone).await?;
+        let inv = character_holder(&mut tx, character).await?;
+        lock_holders(&mut tx, &[inv]).await?;
+        // Whose it is, before anything of anybody else's is touched.
+        let holder: i64 = sqlx::query("select holder_id from items where id = $1")
+            .bind(item)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal)?
+            .ok_or(EconError::NotFound)?
+            .try_get("holder_id")
+            .map_err(internal)?;
+        if holder != inv {
+            return Err(EconError::Invalid(NOT_CARRIED.into()));
+        }
+        // Holder, trades, item: the lock order of a trade commit.
+        leave_open_offers(&mut tx, item).await?;
+        let r = sqlx::query("select holder_id, template from items where id = $1 for update")
+            .bind(item)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal)?
+            .ok_or(EconError::NotFound)?;
+        let holder: i64 = r.try_get("holder_id").map_err(internal)?;
+        if holder != inv {
+            return Err(EconError::Invalid(NOT_CARRIED.into()));
+        }
+        let template: String = r.try_get("template").map_err(internal)?;
+        let place = content
+            .place(&template)
+            .ok_or_else(|| EconError::Invalid("that cannot be worn".into()))?;
+        sqlx::query("delete from worn where character_id = $1 and slot = $2")
+            .bind(character)
+            .bind(place.name())
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        sqlx::query("insert into worn (character_id, slot, item_id) values ($1, $2, $3)")
+            .bind(character)
+            .bind(place.name())
+            .bind(item)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        tx.commit().await.map_err(internal)?;
+        self.gear(character, content).await
+    }
+
+    /// A character playing in `zone` takes an item off: it stays in the inventory. Taking
+    /// off what is not worn changes nothing and is no error (the answer says what is worn
+    /// now, which is what was asked for). An item whose template the content no longer
+    /// knows comes off like any other.
+    pub async fn take_off(
+        &self,
+        character: i64,
+        zone: &str,
+        item: i64,
+        content: &ItemContent,
+    ) -> Result<(u64, Gear), EconError> {
+        let mut tx = self.begin().await?;
+        playing_in(&mut tx, character, zone).await?;
+        let inv = character_holder(&mut tx, character).await?;
+        lock_holders(&mut tx, &[inv]).await?;
+        sqlx::query("delete from worn where character_id = $1 and item_id = $2")
+            .bind(character)
+            .bind(item)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        tx.commit().await.map_err(internal)?;
+        self.gear(character, content).await
+    }
+
+    /// A reading of what the character's worn items do to damage (ITEMS.md 3.2), as its
+    /// zone applies it: the weapon's edges are what it deals more of, the armour's what it
+    /// takes less of. A character that does not exist, or wears nothing, has none.
+    ///
+    /// The number orders readings (ITEMS.md 3.3). It is drawn **before** the rows are
+    /// read, and each statement sees what was committed before it began: so the reading a
+    /// change makes of itself (after its commit) has a larger number than any reading that
+    /// could have missed it. A zone that keeps, for each character, the reading with the
+    /// largest number holds what the hub holds, in whatever order the answers arrive.
+    pub async fn gear(
+        &self,
+        character: i64,
+        content: &ItemContent,
+    ) -> Result<(u64, Gear), EconError> {
+        let mut conn = self.pool.acquire().await.map_err(internal)?;
+        let seq: i64 = sqlx::query("select nextval('gear_seq') as seq")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(internal)?
+            .try_get("seq")
+            .map_err(internal)?;
+        let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(internal)?;
+        let gear = gear_in(&mut tx, character, content).await?;
+        tx.commit().await.map_err(internal)?;
+        Ok((seq as u64, gear))
     }
 
     /// Money supply (ECONOMY.md 1.2).
@@ -603,7 +887,21 @@ impl Economy {
         .map_err(internal)?
         .try_get(0)
         .map_err(internal)?;
-        Ok(n)
+        // What is worn is in its wearer's own inventory, and in no stall and no offer.
+        let astray: i64 = sqlx::query(
+            "select count(*) from worn w join items i on i.id = w.item_id where \
+             i.holder_id is distinct from (select h.id from holders h where h.kind = 'character' \
+             and h.character_id = w.character_id) \
+             or exists (select 1 from listings l where l.item_id = w.item_id) \
+             or exists (select 1 from trade_items t join trades tr on tr.id = t.trade_id \
+             where t.item_id = w.item_id and tr.state = 'open')",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(internal)?
+        .try_get(0)
+        .map_err(internal)?;
+        Ok(n + astray)
     }
 
     // ---------- drops (zone-reported) ----------
@@ -723,13 +1021,65 @@ impl Economy {
         amount: i64,
         reference: i64,
     ) -> Result<(), EconError> {
+        self.grant_coin_as(character, amount, "drop", reference)
+            .await
+    }
+
+    /// An operator's hand (ITEMS.md 4): a made item appears in a character's inventory,
+    /// out of the source like a drop and under the reason `grant` in the log. What it is
+    /// made of obeys a craft's rule; a full inventory refuses (nothing goes to the ground).
+    pub async fn grant_item(
+        &self,
+        character: i64,
+        template: &str,
+        materials: &[String],
+        layers: Option<&[String]>,
+    ) -> Result<i64, EconError> {
+        if template.is_empty() || template == "component" || template.len() > 48 {
+            return Err(EconError::Invalid("template".into()));
+        }
+        let mut parts = Vec::with_capacity(materials.len());
+        for m in materials {
+            parts.push(Component {
+                layer: material_layer(m)?.to_string(),
+                material: m.clone(),
+            });
+        }
+        check_parts(&parts, template, layers)?;
+        let mut tx = self.begin().await?;
+        let source = singleton(&mut tx, "source").await?;
+        let inv = character_holder(&mut tx, character).await?;
+        lock_holders(&mut tx, &[inv]).await?;
+        if !has_room(&mut tx, inv, 1).await? {
+            return Err(EconError::Full);
+        }
+        let id = create_item(&mut tx, inv, template, &parts).await?;
+        sqlx::query("insert into item_moves (item_id, from_holder, to_holder, reason, ref) values ($1, $2, $3, 'grant', 0)")
+            .bind(id)
+            .bind(source)
+            .bind(inv)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        tx.commit().await.map_err(internal)?;
+        Ok(id)
+    }
+
+    /// The same under another reason in the ledger (`grant`: an operator's hand).
+    pub async fn grant_coin_as(
+        &self,
+        character: i64,
+        amount: i64,
+        reason: &str,
+        reference: i64,
+    ) -> Result<(), EconError> {
         if amount <= 0 || amount > MAX_PRICE {
             return Err(EconError::Invalid("amount".into()));
         }
         let mut tx = self.begin().await?;
         let source = singleton(&mut tx, "source").await?;
         let holder = character_holder(&mut tx, character).await?;
-        move_coin(&mut tx, source, holder, amount, "drop", reference).await?;
+        move_coin(&mut tx, source, holder, amount, reason, reference).await?;
         tx.commit().await.map_err(internal)
     }
 
@@ -874,14 +1224,23 @@ impl Economy {
 
     /// Combine component items into one item (ECONOMY.md 10): core and frame mandatory, at
     /// most one shard and one catalyst, at most two gems. The components are consumed.
+    ///
+    /// `layers` are the layers the template has room for, when the content knows it: a
+    /// part of any other layer is refused (a cuirass takes no catalyst).
     pub async fn craft(
         &self,
         character: i64,
         template: &str,
         components: &[i64],
+        layers: Option<&[String]>,
     ) -> Result<i64, EconError> {
         if template.is_empty() || template == "component" || template.len() > 48 {
             return Err(EconError::Invalid("template".into()));
+        }
+        // No craft takes more parts than there are places for them: asked for more, the
+        // hub does nothing at all (each id below costs it statements before it is looked at).
+        if components.len() > MAX_PARTS {
+            return Err(EconError::Invalid("too many components".into()));
         }
         let mut ids = components.to_vec();
         ids.sort_unstable();
@@ -916,37 +1275,8 @@ impl Economy {
             }
             parts.extend(components_of(&mut tx, id).await?);
         }
-        let count = |layer: &str| parts.iter().filter(|c| c.layer == layer).count();
-        if count("core") != 1 || count("frame") != 1 {
-            return Err(EconError::Invalid(
-                "a craft needs exactly one core and one frame".into(),
-            ));
-        }
-        if count("shard") > 1 || count("catalyst") > 1 || count("gem") > MAX_GEMS {
-            return Err(EconError::Invalid("too many components for a layer".into()));
-        }
-        let new_id: i64 =
-            sqlx::query("insert into items (template, holder_id) values ($1, $2) returning id")
-                .bind(template)
-                .bind(inv)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(internal)?
-                .try_get("id")
-                .map_err(internal)?;
-        let mut pos = std::collections::HashMap::<String, i16>::new();
-        for c in &parts {
-            let p = pos.entry(c.layer.clone()).or_insert(0);
-            sqlx::query("insert into item_components (item_id, layer, position, material) values ($1, $2, $3, $4)")
-                .bind(new_id)
-                .bind(&c.layer)
-                .bind(*p)
-                .bind(&c.material)
-                .execute(&mut *tx)
-                .await
-                .map_err(internal)?;
-            *p += 1;
-        }
+        check_parts(&parts, template, layers)?;
+        let new_id = create_item(&mut tx, inv, template, &parts).await?;
         for &id in &ids {
             sqlx::query("insert into item_moves (item_id, from_holder, to_holder, reason, ref) values ($1, $2, null, 'craft', $3)")
                 .bind(id)
@@ -989,6 +1319,9 @@ impl Economy {
         let tpl: String = r.try_get("template").map_err(internal)?;
         if holder != inv {
             return Err(EconError::Forbidden);
+        }
+        if is_worn(&mut tx, item).await? {
+            return Err(EconError::State(WORN.into()));
         }
         let parts = components_of(&mut tx, item).await?;
         if tpl == "component" || parts.len() < 2 {
@@ -1098,8 +1431,11 @@ impl Economy {
         item: i64,
     ) -> Result<(), EconError> {
         let mut tx = self.begin().await?;
-        let (side, _, _) = Self::trade_side(&mut tx, trade, character).await?;
+        // The holder first (then the trade row, then the item: one lock order everywhere):
+        // putting the item on and offering it cannot both go through.
         let inv = character_holder(&mut tx, character).await?;
+        lock_holders(&mut tx, &[inv]).await?;
+        let (side, _, _) = Self::trade_side(&mut tx, trade, character).await?;
         let holder: i64 = sqlx::query("select holder_id from items where id = $1")
             .bind(item)
             .fetch_optional(&mut *tx)
@@ -1110,6 +1446,9 @@ impl Economy {
             .map_err(internal)?;
         if holder != inv {
             return Err(EconError::Forbidden);
+        }
+        if is_worn(&mut tx, item).await? {
+            return Err(EconError::State(WORN.into()));
         }
         sqlx::query("insert into trade_items (trade_id, side, item_id) values ($1, $2, $3)")
             .bind(trade)
@@ -1213,6 +1552,8 @@ impl Economy {
                     id,
                     template: row.try_get("template").map_err(internal)?,
                     components: components_of(&mut tx, id).await?,
+                    // A worn item is in no offer: wearing it took it out of every one.
+                    worn: false,
                 });
             }
             let coin: i64 = r
@@ -1443,30 +1784,75 @@ impl Economy {
         Ok(id)
     }
 
-    /// `(stall id, holder, owner)` with the stall row locked.
-    async fn stall_of_owner(tx: &mut Tx<'_>, character: i64) -> Result<(i64, i64), EconError> {
-        let r =
-            sqlx::query("select id, holder_id from stalls where owner_character = $1 for update")
-                .bind(character)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(internal)?
-                .ok_or(EconError::NotFound)?;
+    /// `(stall id, holder)` of the character's stall, with the stall row locked. With a
+    /// zone named, the stall must stand in it.
+    async fn stall_of_owner(
+        tx: &mut Tx<'_>,
+        character: i64,
+        zone: Option<&str>,
+    ) -> Result<(i64, i64), EconError> {
+        let r = sqlx::query(
+            "select id, holder_id, zone from stalls where owner_character = $1 for update",
+        )
+        .bind(character)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(internal)?
+        .ok_or(EconError::NotFound)?;
+        let at: String = r.try_get("zone").map_err(internal)?;
+        if zone.is_some_and(|z| z != at) {
+            return Err(EconError::NotFound);
+        }
         Ok((
             r.try_get("id").map_err(internal)?,
             r.try_get("holder_id").map_err(internal)?,
         ))
     }
 
+    /// Take a listing out of the character's own stall in `zone`, back into its inventory
+    /// (which must have room).
+    pub async fn stall_unlist(
+        &self,
+        character: i64,
+        zone: &str,
+        listing: i64,
+    ) -> Result<(), EconError> {
+        let mut tx = self.begin().await?;
+        let (stall, holder) = Self::stall_of_owner(&mut tx, character, Some(zone)).await?;
+        let inv = character_holder(&mut tx, character).await?;
+        lock_holders(&mut tx, &[holder, inv]).await?;
+        let item: i64 =
+            sqlx::query("select item_id from listings where id = $1 and stall_id = $2 for update")
+                .bind(listing)
+                .bind(stall)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal)?
+                .ok_or(EconError::NotFound)?
+                .try_get("item_id")
+                .map_err(internal)?;
+        move_item(&mut tx, item, holder, inv, "withdraw", stall).await?;
+        sqlx::query("delete from listings where id = $1")
+            .bind(listing)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        tx.commit().await.map_err(internal)
+    }
+
+    /// Put an item of the inventory up for sale in the character's own stall, which
+    /// stands in `zone` (the zone the character plays in: a stall is not a bag that is
+    /// reached from the other end of the world).
     pub async fn stall_list(
         &self,
         character: i64,
+        zone: &str,
         item: i64,
         price: i64,
     ) -> Result<i64, EconError> {
         check_price(price)?;
         let mut tx = self.begin().await?;
-        let (stall, holder) = Self::stall_of_owner(&mut tx, character).await?;
+        let (stall, holder) = Self::stall_of_owner(&mut tx, character, Some(zone)).await?;
         let inv = character_holder(&mut tx, character).await?;
         move_item(&mut tx, item, inv, holder, "deposit", stall).await?;
         let id: i64 = sqlx::query(
@@ -1484,24 +1870,75 @@ impl Economy {
         Ok(id)
     }
 
-    /// Buy a listing: coin to the owner and the item to the buyer in one transaction. The
-    /// price the buyer saw must be the price paid.
+    /// What a stall has for sale and whose it is: `(owner, the owner's name, listings)`.
+    /// From anywhere: looking is what a town board does (ITEMS.md 1).
+    pub async fn stall_view(&self, stall: i64) -> Result<(i64, String, Vec<Listing>), EconError> {
+        let mut tx = self.begin().await?;
+        let r = sqlx::query(
+            "select s.owner_character, c.name from stalls s \
+             join characters c on c.id = s.owner_character where s.id = $1",
+        )
+        .bind(stall)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?
+        .ok_or(EconError::NotFound)?;
+        let rows = sqlx::query(
+            "select l.id, l.price, l.item_id, i.template from listings l \
+             join items i on i.id = l.item_id where l.stall_id = $1 order by l.id",
+        )
+        .bind(stall)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(internal)?;
+        let mut listings = Vec::with_capacity(rows.len());
+        for row in rows {
+            let item: i64 = row.try_get("item_id").map_err(internal)?;
+            listings.push(Listing {
+                id: row.try_get("id").map_err(internal)?,
+                price: row.try_get("price").map_err(internal)?,
+                item: Item {
+                    id: item,
+                    template: row.try_get("template").map_err(internal)?,
+                    components: components_of(&mut tx, item).await?,
+                    worn: false,
+                },
+            });
+        }
+        tx.commit().await.map_err(internal)?;
+        Ok((
+            r.try_get("owner_character").map_err(internal)?,
+            r.try_get("name").map_err(internal)?,
+            listings,
+        ))
+    }
+
+    /// Buy a listing of the stall the buyer stands at: coin to the owner and the item to
+    /// the buyer in one transaction. The price the buyer saw must be the price paid, and
+    /// the listing must be that stall's (the zone vouched for the place, not for the id).
     pub async fn stall_buy(
         &self,
         buyer: i64,
+        zone: &str,
+        stall: i64,
         listing: i64,
         expected_price: i64,
     ) -> Result<(), EconError> {
         let mut tx = self.begin().await?;
         // Holders first, then the listing row: the same order as a closing stall.
         let who = sqlx::query(
-            "select s.holder_id, s.owner_character from listings l join stalls s on s.id = l.stall_id where l.id = $1",
+            "select s.id, s.zone, s.holder_id, s.owner_character from listings l join stalls s on s.id = l.stall_id where l.id = $1",
         )
         .bind(listing)
         .fetch_optional(&mut *tx)
         .await
         .map_err(internal)?
         .ok_or(EconError::NotFound)?;
+        if who.try_get::<i64, _>("id").map_err(internal)? != stall
+            || who.try_get::<String, _>("zone").map_err(internal)? != zone
+        {
+            return Err(EconError::NotFound);
+        }
         let owner: i64 = who.try_get("owner_character").map_err(internal)?;
         if owner == buyer {
             return Err(EconError::Invalid("that is your own stall".into()));
@@ -1560,7 +1997,7 @@ impl Economy {
             .checked_mul(quantity as i64)
             .ok_or_else(|| EconError::Invalid("order too large".into()))?;
         let mut tx = self.begin().await?;
-        let (stall, holder) = Self::stall_of_owner(&mut tx, character).await?;
+        let (stall, holder) = Self::stall_of_owner(&mut tx, character, None).await?;
         let inv = character_holder(&mut tx, character).await?;
         move_coin(&mut tx, inv, holder, total, "buy_order", stall).await?;
         let id: i64 = sqlx::query("insert into buy_orders (stall_id, material, price, quantity) values ($1, $2, $3, $4) returning id")
@@ -1649,7 +2086,7 @@ impl Economy {
     /// Cancel a buy order: the unspent escrow returns to the owner.
     pub async fn buy_order_cancel(&self, character: i64, order: i64) -> Result<(), EconError> {
         let mut tx = self.begin().await?;
-        let (stall, holder) = Self::stall_of_owner(&mut tx, character).await?;
+        let (stall, holder) = Self::stall_of_owner(&mut tx, character, None).await?;
         let inv = character_holder(&mut tx, character).await?;
         lock_holders(&mut tx, &[holder, inv]).await?;
         let r = sqlx::query(
@@ -1685,7 +2122,7 @@ impl Economy {
     /// the tile is always freed. Returns the stall's id and its zone, for whoever must be told.
     pub async fn stall_close(&self, character: i64) -> Result<(i64, String), EconError> {
         let mut tx = self.begin().await?;
-        let (stall, holder) = Self::stall_of_owner(&mut tx, character).await?;
+        let (stall, holder) = Self::stall_of_owner(&mut tx, character, None).await?;
         let zone: String = sqlx::query("select zone from stalls where id = $1")
             .bind(stall)
             .fetch_one(&mut *tx)

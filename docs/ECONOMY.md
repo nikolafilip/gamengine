@@ -5,7 +5,8 @@ crafting, storage, guild halls and tavern hires. PLAN.md 0, 5 and 6 are binding:
 deterministic drops, no chore sinks, no listing tax, everything trades, and **every coin and item
 movement is one database transaction**. `gm-hub::economy` implements this document; when they
 disagree, the document wins. Section 12 holds the proposed numbers the director has not yet
-confirmed and the review log.
+confirmed and the review log. What a character wears, what gear does, and the screens for the
+inventory and a stall are ITEMS.md (Phase 11).
 
 ## 1. Principles
 
@@ -68,7 +69,8 @@ component row and the `component` template; a crafted item carries one row per f
 weight/physical bias, catalyst → element, frame → speed/stamina/crit, gems → counter-meta).
 Each material carries an `edge` in per mille of the item's base stats; `gm-content` refuses any
 template whose best possible craft exceeds **250** (PLAN.md 0: the gear edge is capped at 25%).
-The shipped best sword is exactly 250. The simulation reads the edges in a later phase.
+The shipped best sword is exactly 250. A weapon template says what it `strikes` with and an
+armour what it `guards` against; what a worn item's edges do, kind by kind, is ITEMS.md 3.
 
 ## 5. Moves and the ledger
 
@@ -84,7 +86,13 @@ and append the log row, in the caller's transaction. One lock order everywhere: 
 movements cannot deadlock. Creation and destruction (drops, crafting, decomposition) write
 `item_moves` rows with a null side. Reasons are an enum: `drop`,
 `trade`, `stall_sale`, `buy_order`, `escrow_lock`, `escrow_pay`, `escrow_refund`, `hire`,
-`hire_burn`, `craft`, `decompose`, `deposit`, `withdraw`, `pickup`, `ground`.
+`hire_burn`, `craft`, `decompose`, `deposit`, `withdraw`, `pickup`, `ground`, and `grant` (an
+operator's hand, ITEMS.md 4: out of the source like a drop).
+
+A **worn** item (ITEMS.md 2) is moved by nothing and destroyed by nothing: `move_item` and
+decomposition refuse it in words, an offer refuses it, and the database refuses whatever else
+would try. The lock order with it: the character's row (shared, when a zone changes what a
+character wears), holders, trade rows, the item, the worn row.
 
 ## 6. Trade window
 
@@ -126,12 +134,18 @@ every joiner (`Control::Stalls`) and everyone present when one opens or closes; 
 the zone when a stall closes for any reason (`HubNotice::StallClosed`). A stall is drawn as a
 counter on its tile with its **keeper**: the owner's frame, armour class and avatar model as a
 body that stands there whether the owner is online or not, replaced by the owner in person
-while the owner stands behind the counter. Listings, buying and the town board have no screen
-yet (Phase 7 brings the HUD); the keeper and the tile are what the world shows today.
+while the owner stands behind the counter. Since Phase 11 a stall has a screen (ITEMS.md 6):
+what it sells is looked at from anywhere (`EconOp::StallView`) and **bought standing at it**,
+through the zone (`Control::StallBuy`, `ZoneEconOp::StallBuy`: the session-level
+`EconOp::StallBuy`, which let a program buy from anywhere, is gone as `StallOpen` went). Its
+keeper lists and unlists (`StallList`, `StallUnlist`) while playing in the stall's zone. The
+town board has no screen yet.
 
 - `listings (stall_id, item_id, price)`: the item sits in the stall's holder. `buy` names the
-  price the buyer was shown and is refused when it differs; it moves the coin buyer → owner and
-  the item stall → buyer in one transaction. An owner cannot buy from their own stall.
+  stall the buyer's zone saw it standing at and the price the buyer was shown, and is refused
+  when the listing is not that stall's or the price differs; it moves the coin buyer → owner
+  and the item stall → buyer in one transaction. An owner cannot buy from their own stall, and
+  takes a listing back with `unlist` (the inventory must have room).
 - `buy_orders (stall_id, template, material, price, quantity)`: the stall owner escrows
   `price × quantity` into the stall holder when posting (checked multiplication, at most 1,000
   units, prices at most 10^12); a seller fills an order by handing over a matching component
@@ -199,8 +213,9 @@ with `gm_core::loot::split` and asks the hub to create the items (source → cha
 ## 10. Crafting and decomposition (PLAN.md 5.3, 5.4)
 
 - **Craft**: a template plus component items for its layers (core and frame mandatory, the rest
-  optional, up to 2 gems). One transaction: the component items are deleted, the new item is
-  created with their rows. No fee, no failure chance.
+  optional, up to 2 gems; nothing of a layer the template has no room for: a cuirass takes no
+  catalyst). One transaction: the component items are deleted, the new item is created with
+  their rows. No fee, no failure chance.
 - **Decompose**: an item with k component rows returns **⌊k / 2⌋** of them as component items;
   the rest are destroyed. Which ones is decided by a hash of the item id and the component's
   index (`salvage_indices`): fixed for the item, visible before decomposing, and not steerable
@@ -242,6 +257,11 @@ Also proposed: stacking of materials is **not** in v1 (every component is a row 
 the 120 min contract timeout; the 1 gold cap on a single coin grant; no self-hire; one copy
 of an avatar per squad; a recipient who left the zone before its kill is reported forfeits
 (Phase 7).
+
+**Phase 11 (2026-10-02, ITEMS.md)** added what is worn and moved buying to the zone; its
+proposed numbers and open decisions are ITEMS.md 9 (among them: the storage is reached from
+anywhere, buy orders are still filled from anywhere). The economy's requests of a session are
+now limited per account (five a second, twenty in hand).
 
 **2026-10-01, design reviewed by Gemini 3.1 Pro** (before the module was finished):
 - Accepted: the ledger invariant was worded as a sum of the ledger, which is volume, not supply

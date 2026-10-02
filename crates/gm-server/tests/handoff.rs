@@ -144,7 +144,8 @@ async fn login_zone_handoff_logout_round_trip() {
         key: HubKey::generate(),
         session_secs: 3600,
         auth_per_minute: 100.0,
-        templates: Vec::new(),
+        econ_per_second: 1000.0,
+        items: Default::default(),
         max_coin_grant: 10_000,
         models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
         ingest: gm_hub::IngestMode::InProcess,
@@ -214,6 +215,7 @@ async fn login_zone_handoff_logout_round_trip() {
         },
         play: Duration::from_secs(7),
         list_for_hire: None,
+        sell_at: None,
         hire: 0,
     }));
 

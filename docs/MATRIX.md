@@ -6,7 +6,7 @@ the document wins and the code is wrong. Changes to either go in one commit.
 
 PLAN.md 3.1, 3.2 and 0 are binding: no levels, no gear tiers, a fixed budget, rock-paper-scissors
 counters with stacking multipliers and a dual-type 4×, compressed stat bands, top gear a 15–25%
-edge (Phase 5). PLAN.md 12 listed "full type matrix and attribute set" as open; this document is
+edge (the `gear` term of section 7, built in Phase 11: ITEMS.md 3). PLAN.md 12 listed "full type matrix and attribute set" as open; this document is
 the proposal that Phase 3 implements. The director's calls are recorded in section 12.
 
 ## 1. Principles
@@ -52,8 +52,9 @@ Mass divides knockback taken. Mobility multiplies move speed.
 
 ## 4. Armour class
 
-A build choice in Phase 3; in Phase 5 it comes from the worn gear and the build points are
-refunded (gear is balanced by the same penalties, PLAN.md 3.4).
+A build choice. (It was to come from the worn gear, with the build points refunded. Phase 11
+gave gear its edge and left the class with the build: ITEMS.md 9 says what moving it would
+cost.)
 
 | Class | Cost | Speed | Stamina regen | Bonus |
 |---|---|---|---|---|
@@ -155,7 +156,9 @@ layer  = physical  && !bypass ARMOR        ? 1 − D.armour            : 1
        × D.Fortify && !bypass MAGIC_SHIELD ? 1 − fortify             : 1
        × D.evading && !bypass EVASION      ? 1 − D.evasion           : 1
 guard  = D guarding toward A && (melee || stops_projectiles) ? 1 − block.mitigation : 1
-gear   = Phase 5, net ≤ 1.25 over standard
+gear   = (2000 + A.dealt[t]) / (2000 + D.taken[t])              ITEMS.md 3.1: the edge of
+         A's worn weapon and of D's worn armour on the packet's type, per mille, at most 250
+         each; 1 for the pulses of a status, and for two bodies in nothing
 damage = max(1, round(base × type × layer × guard × gear))
 ```
 

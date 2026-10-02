@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gm_bsp::Bsp;
 use gm_core::tick::TickRate;
 use gm_hub_proto::protocol::{
-    BuildChoice, EconOp, EconReply, HubRequest, HubResponse, SessionId, ZoneTicket,
+    BuildChoice, EconOp, EconReply, HubRequest, HubResponse, PLACE_NONE, SessionId, ZoneTicket,
 };
 use gm_hub_proto::{HubClient, HubClientError};
 use gm_net::transport::client_config;
@@ -44,6 +44,18 @@ pub struct HubFlowConfig {
     /// Hire this many avatars from the tavern, in its order, before entering (the character
     /// pays; slots it has already filled are not hired again).
     pub hire: usize,
+    /// Keep the stall: whatever the character carries that can be worn and is not, is put
+    /// up for sale at this price as it comes to hand (ITEMS.md 7).
+    pub sell_at: Option<i64>,
+}
+
+/// A task that ends when this is dropped.
+struct Keeper(tokio::task::JoinHandle<()>);
+
+impl Drop for Keeper {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Timings of the round trip (HUB.md 5).
@@ -232,6 +244,52 @@ pub async fn run_hub_flow(cfg: HubFlowConfig) -> anyhow::Result<HubFlowReport> {
         other => anyhow::bail!("unexpected enter answer {other:?}"),
     };
     info!(zone = %ticket.zone, addr = %ticket.addr, "ticket");
+    // A keeper lists what it carries. Nothing can be listed before the stall stands, and
+    // things come to hand later: it looks twice a second, for as long as it plays. What
+    // was refused is tried again only every ten seconds (a thing that can never be listed
+    // must not spend the account's requests), and the task ends with this function
+    // however that ends.
+    let _keeper = cfg.sell_at.map(|price| {
+        let hub = hub.clone();
+        Keeper(tokio::spawn(async move {
+            let ask = |op: EconOp| HubRequest::Econ {
+                session,
+                character,
+                op,
+            };
+            let mut refused: std::collections::HashMap<i64, Instant> =
+                std::collections::HashMap::new();
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let Ok(HubResponse::Econ(EconReply::Holder { items, .. })) =
+                    hub.request(&ask(EconOp::Inventory)).await
+                else {
+                    continue;
+                };
+                for item in items.iter().filter(|i| !i.worn && i.place != PLACE_NONE) {
+                    if refused
+                        .get(&item.id)
+                        .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+                    {
+                        continue;
+                    }
+                    let list = EconOp::StallList {
+                        item: item.id,
+                        price,
+                    };
+                    match hub.request(&ask(list)).await {
+                        Ok(HubResponse::Econ(EconReply::Id(listing))) => {
+                            info!(item = item.id, template = %item.template, listing, price, "listed");
+                        }
+                        other => {
+                            tracing::debug!(item = item.id, "not listed yet: {other:?}");
+                            refused.insert(item.id, Instant::now());
+                        }
+                    }
+                }
+            }
+        }))
+    });
     let name = cfg.character.clone();
     let mut remaining = cfg.play;
     let first_run = cfg.travel_after.unwrap_or(cfg.play).min(cfg.play);
@@ -259,6 +317,7 @@ pub async fn run_hub_flow(cfg: HubFlowConfig) -> anyhow::Result<HubFlowReport> {
         out.zones.push(format!("{}:{}", next.zone, map));
         out.reports.push(report);
     }
+    drop(_keeper);
     // What the trip left the character with.
     if let HubResponse::Econ(EconReply::Holder { coin, items }) =
         hub.request(&econ(EconOp::Inventory)).await?

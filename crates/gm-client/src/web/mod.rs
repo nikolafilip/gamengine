@@ -131,6 +131,44 @@ pub fn take_login() -> Option<(String, String, bool)> {
     Some((text("user")?, text("password")?, register))
 }
 
+thread_local! {
+    /// What a refusal of the pointer falls into: nothing.
+    static REFUSED: Closure<dyn FnMut(JsValue)> = Closure::new(|_why: JsValue| {});
+}
+
+/// Ask the browser for the pointer on the game's canvas (WEB.md 3.4). The browser may say
+/// no: nobody's click is behind the asking (a page that entered the game by itself, an
+/// entry that took longer than a click lasts). That is an answer, not an error, and the
+/// next click on the canvas asks again. (winit asks too, and lets the refusal fall into
+/// the console as an uncaught rejection: so the page asks for itself.)
+pub fn ask_for_pointer() {
+    let canvas = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("gm-canvas"));
+    let Some(canvas) = canvas else { return };
+    let Ok(ask) = Reflect::get(&canvas, &"requestPointerLock".into()) else {
+        return;
+    };
+    let Ok(ask) = ask.dyn_into::<Function>() else {
+        return;
+    };
+    // A promise in today's browsers, nothing in older ones.
+    if let Ok(answer) = ask.call0(&canvas)
+        && let Ok(promise) = answer.dyn_into::<Promise>()
+    {
+        REFUSED.with(|refused| {
+            let _ = promise.catch(refused);
+        });
+    }
+}
+
+/// Give the pointer back to the browser.
+pub fn give_pointer_back() {
+    if let Some(d) = web_sys::window().and_then(|w| w.document()) {
+        d.exit_pointer_lock();
+    }
+}
+
 /// Whether the page's canvas holds the pointer (the browser gives it up by itself when
 /// Escape is pressed, and that key press never reaches the page, WEB.md 3.4).
 pub fn pointer_locked() -> bool {

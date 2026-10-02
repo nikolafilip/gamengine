@@ -75,6 +75,15 @@ jobs:
           name: screens-desktop
           path: ${{ runner.temp }}/screens
           if-no-files-found: ignore
+      - name: Items gate (the gear term, worn items at the hub and in a zone; a stall bought from and a sword worn through the desktop client)
+        run: KEEP="$RUNNER_TEMP/items" scripts/check-items.sh --desktop
+      - name: The items gate's logs, when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: items-desktop
+          path: ${{ runner.temp }}/items
+          if-no-files-found: ignore
 
   gates:
     name: binary size, RAM, software render
@@ -144,6 +153,15 @@ jobs:
         with:
           name: screens-browser
           path: ${{ runner.temp }}/screens
+          if-no-files-found: ignore
+      - name: Items gate in the browser (the same purchase in both builds)
+        run: CHROME=google-chrome SKIP_TESTS=1 KEEP="$RUNNER_TEMP/items" scripts/check-items.sh --browser --software
+      - name: The items gate's logs, when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: items-browser
+          path: ${{ runner.temp }}/items
           if-no-files-found: ignore
 
   # Frame time on a real integrated GPU (PLAN.md 2.7). Enabled once a self-hosted runner exists.

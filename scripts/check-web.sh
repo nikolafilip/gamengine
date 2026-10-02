@@ -135,6 +135,12 @@ run() { # build name, query flag
     tail -15 "$tmp/browser-$build.log"; echo "FAIL: the $build build did not finish its run"; status=1; return
   fi
   echo "$build: $done_line"
+  # What the client itself called an error: a browser shows it in its console and plays on.
+  if /usr/bin/grep -aq '^\[ERROR\]\|^EXCEPTION' "$tmp/browser-$build.log"; then
+    echo "FAIL: the $build build logged an error: $(/usr/bin/grep -a -m1 '^\[ERROR\]\|^EXCEPTION' "$tmp/browser-$build.log" | cut -c1-200)"; status=1
+  else
+    echo "OK: the $build build logged no error"
+  fi
   leave="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | /usr/bin/grep -a 'session at leave' | /usr/bin/grep -a 'name=browser' | tail -1 || true)"
   echo "$build: zone: $(echo "$leave" | sed -n 's/.*\(entity=[0-9]*.*\)/\1/p')"
   f() { echo "$done_line" | sed -n "s/.* $1=\([0-9.A-Za-z]*\).*/\1/p"; }
@@ -206,8 +212,11 @@ hub_run() {
   local soft=(); [[ "$SOFTWARE" == 1 ]] && soft=(--software)
   local base="http://127.0.0.1:$http/?user=web%40gm.test&password=web-password&character=Webby&zone=town&build=blade&report=1&third-person=1&cache-mb=$cache_mb"
   # First visit: nothing cached; every model comes from the hub and the cache must evict.
+  # Twenty seconds in, a click on the canvas, as a person's first: the game asks the browser
+  # for the pointer on it (the page entered the game by itself, and a browser gives the
+  # pointer to a click only: WEB.md 3.4).
   timeout 180 node scripts/web-run.mjs --profile "$tmp/profile" --url "$base&register=1&seconds=30" --seconds 30 --cache gm-models-v1 \
-    --screenshot "$tmp/browser-town.png" --at 24 ${CHROME:+--chrome "$CHROME"} "${soft[@]}" > "$tmp/browser-town.log" 2>&1 || true
+    --click-canvas 20 --screenshot "$tmp/browser-town.png" --at 16 ${CHROME:+--chrome "$CHROME"} "${soft[@]}" > "$tmp/browser-town.log" 2>&1 || true
   # Second visit, same browser profile: most models come from the cache; then to the arena.
   timeout 180 node scripts/web-run.mjs --profile "$tmp/profile" --url "$base&seconds=24&travel-to=arena&travel-after=12" --seconds 24 --cache gm-models-v1 \
     ${CHROME:+--chrome "$CHROME"} "${soft[@]}" > "$tmp/browser-travel.log" 2>&1 || true
@@ -218,6 +227,18 @@ hub_run() {
     tail -8 "$tmp/browser-town.log" "$tmp/browser-travel.log"; echo "FAIL: the browser did not finish its visits through the hub"; status=1; return
   fi
   echo "town: $first"; echo "town again, then the arena: $second"
+  if /usr/bin/grep -aq '^\[ERROR\]\|^EXCEPTION' "$tmp/browser-town.log" "$tmp/browser-travel.log"; then
+    echo "FAIL: the client logged an error through the hub: $(/usr/bin/grep -ah -m1 '^\[ERROR\]\|^EXCEPTION' "$tmp/browser-town.log" "$tmp/browser-travel.log" | head -1 | cut -c1-200)"; status=1
+  else
+    echo "OK: the client logged no error in the town or on the way to the arena"
+  fi
+  local holder
+  holder="$(sed -n 's/^web-run: after a click the pointer is held by: //p' "$tmp/browser-town.log" | tail -1)"
+  if [[ "$holder" == "gm-canvas" ]]; then
+    echo "OK: a click on the canvas takes the pointer for the game"
+  else
+    echo "FAIL: after a click on the canvas the pointer is held by: ${holder:-(the runner did not say)}"; status=1
+  fi
   g() { echo "$1" | sed -n "s/.* $2=\([0-9.A-Za-z-]*\).*/\1/p"; }
   # The last report in the town of the second visit (the final line is from the arena).
   local in_town

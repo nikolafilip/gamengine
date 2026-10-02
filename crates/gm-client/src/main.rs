@@ -8,6 +8,7 @@
 
 mod app;
 mod avatars;
+mod bag;
 mod cache;
 mod characters;
 mod font;

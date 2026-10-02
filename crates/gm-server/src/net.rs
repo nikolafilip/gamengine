@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use glam::Vec3;
 use gm_core::build::{Build, ContentPack};
 use gm_core::vocab::EntityId;
-use gm_hub_proto::protocol::{CharacterId, HiredAvatar, ModelId, ModelRef, StallSummary};
+use gm_hub_proto::protocol::{
+    CharacterId, GearReading, HiredAvatar, ModelId, ModelRef, StallSummary,
+};
 use gm_net::PROTOCOL_VERSION;
 use gm_net::control::{self, BuildChoice, Control};
 use gm_net::input::InputDatagram;
@@ -36,6 +38,40 @@ pub struct HubJoin {
     pub model: Option<ModelRef>,
     /// The character's active hires: its companions here (COMPANIONS.md 3.3).
     pub squad: Vec<HiredAvatar>,
+    /// What its worn items do, as the hub read it at the claim (ITEMS.md 3.3).
+    pub gear: GearReading,
+}
+
+/// A person asks a screen's question a second at most, and the zone answers every one it
+/// is handed: so that a program sending thousands costs the tick loop nothing, a
+/// connection hands on four a second with eight in hand and drops the rest unread.
+struct AskBucket {
+    tokens: f32,
+    last: Instant,
+}
+
+impl AskBucket {
+    const PER_SEC: f32 = 4.0;
+    const FULL: f32 = 8.0;
+
+    fn new(now: Instant) -> AskBucket {
+        AskBucket {
+            tokens: Self::FULL,
+            last: now,
+        }
+    }
+
+    fn take(&mut self, now: Instant) -> bool {
+        let gained = now.duration_since(self.last).as_secs_f32() * Self::PER_SEC;
+        self.tokens = (self.tokens + gained).min(Self::FULL);
+        self.last = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub enum ClientEvent {
@@ -85,6 +121,34 @@ pub enum ClientEvent {
     },
     StallClose {
         id: EntityId,
+    },
+    /// The client buys a listing of a stall it says it stands at (ITEMS.md 5).
+    StallBuy {
+        id: EntityId,
+        stall: i64,
+        listing: i64,
+        price: i64,
+    },
+    StallBought {
+        id: EntityId,
+        listing: i64,
+        result: Result<(), String>,
+    },
+    /// The client puts an item on (`on`) or takes it off (ITEMS.md 2), and the hub's
+    /// answer: what the character's worn items do from now on.
+    Wear {
+        id: EntityId,
+        item: i64,
+        on: bool,
+    },
+    /// `tell`: the client is waiting for this answer. (An answer that came after the
+    /// zone stopped waiting is still what the character wears, and is applied.)
+    Worn {
+        id: EntityId,
+        character: CharacterId,
+        item: i64,
+        result: Result<GearReading, String>,
+        tell: bool,
     },
     /// The hub's answers, and its word that a stall of this zone closed.
     StallOpened {
@@ -379,6 +443,7 @@ async fn handle_connection(
                             play_seconds: claimed.state.play_seconds,
                             model: claimed.model,
                             squad: claimed.squad,
+                            gear: claimed.gear,
                         }),
                     )
                 }
@@ -458,6 +523,9 @@ async fn handle_connection(
         None => Arc::new(std::sync::Mutex::new(ChatBucket::new(Instant::now()))),
     };
     let mut flooding = false;
+    // What a screen asks of the zone (a buy, a change of what is worn): a few a second
+    // reach the tick loop, the rest are dropped here (PROTOCOL.md 18).
+    let mut asks = AskBucket::new(Instant::now());
 
     let writer = tokio::spawn(async move {
         while let Some(msg) = control_rx.recv().await {
@@ -554,6 +622,37 @@ async fn handle_connection(
                             break;
                         }
                     }
+                    Ok(Some(Control::StallBuy {
+                        stall,
+                        listing,
+                        price,
+                    })) => {
+                        if !asks.take(Instant::now()) {
+                            continue;
+                        }
+                        let ev = ClientEvent::StallBuy {
+                            id,
+                            stall,
+                            listing,
+                            price,
+                        };
+                        if tx.send(ev).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(msg @ (Control::Wear { .. } | Control::TakeOff { .. }))) => {
+                        if !asks.take(Instant::now()) {
+                            continue;
+                        }
+                        let ev = match msg {
+                            Control::Wear { item } => ClientEvent::Wear { id, item, on: true },
+                            Control::TakeOff { item } => ClientEvent::Wear { id, item, on: false },
+                            _ => unreachable!("matched above"),
+                        };
+                        if tx.send(ev).await.is_err() {
+                            break;
+                        }
+                    }
                     Ok(Some(Control::Report { target, reason })) => {
                         if tx.send(ClientEvent::Report { id, target, reason }).await.is_err() {
                             break;
@@ -583,6 +682,21 @@ async fn handle_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flood_of_screen_requests_is_dropped_before_the_tick_loop() {
+        let t0 = Instant::now();
+        let at = |secs: f32| t0 + Duration::from_secs_f32(secs);
+        let mut asks = AskBucket::new(t0);
+        // Eight in hand, then four a second: ten thousand in a second hand on twelve.
+        let passed = (0..10_000)
+            .filter(|i| asks.take(at(*i as f32 / 10_000.0)))
+            .count();
+        assert!((11..=12).contains(&passed), "{passed}");
+        // A person's pace is never stopped: one a second for a minute.
+        let mut asks = AskBucket::new(t0);
+        assert!((0..60).all(|i| asks.take(at(i as f32))));
+    }
 
     #[test]
     fn a_chat_bucket_gives_five_lines_and_forgets_refusals_slowly() {

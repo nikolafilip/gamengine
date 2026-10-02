@@ -172,6 +172,7 @@ fn play(
         },
         play: Duration::from_secs(secs),
         list_for_hire: None,
+        sell_at: None,
         hire: 0,
     }))
 }
@@ -207,7 +208,8 @@ async fn what_the_screens_lean_on() {
             key: HubKey::generate(),
             session_secs: 15,
             auth_per_minute: 1000.0,
-            templates: Vec::new(),
+            econ_per_second: 1000.0,
+            items: Default::default(),
             max_coin_grant: 10_000,
             models_dir: scratch.join("models"),
             ingest: gm_hub::IngestMode::InProcess,

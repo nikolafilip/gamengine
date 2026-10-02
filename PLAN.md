@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-10-02 (Phases 0–8 implemented; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-10-02 (Phases 0–11 implemented; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -340,7 +340,9 @@ gamengine/
     gm-core      shared simulation: entity vocabulary, movement, damage/type matrix, builds, status, fixed-tick step.
                  Runs identically on client (prediction) and server (authority). No I/O, no rendering.
     gm-content   content loader: abilities and preset builds authored in TOML, compiled and validated into
-                 gm-core packs. Zones load it; clients receive the compiled pack over the wire.
+                 gm-core packs. Zones load it; clients receive the compiled pack over the wire. Since
+                 Phase 11 also what a made item does: its edge per kind of damage, and the words for it
+                 (the hub loads the items; a zone is told sixteen numbers and a client the words).
     gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing. Used by client and server.
     gm-net       protocol: bit writer/reader, snapshot delta encoding, input frames, reliable messages.
                  `link`: one connection type over quinn and a wtransport (WebTransport) session, for
@@ -350,7 +352,8 @@ gamengine/
                  The same crate is the browser client (`src/web/`: the browser's WebTransport, its
                  Cache API as the model store, fetch for maps). Since Phase 10 the screens: a toolkit on
                  the HUD's primitives (`ui.rs`, `font.rs`), the screens before the game (`front.rs`), the
-                 menu and the chat (`menu.rs`), settings, UI scripts. (egui, 11.2's dev UI, is still not
+                 menu and the chat (`menu.rs`), settings, UI scripts; since Phase 11 the inventory, the
+                 storage and a stall (`bag.rs`). (egui, 11.2's dev UI, is still not
                  linked: the screens did not need it, and it would not fit the browser's megabyte. Audio
                  is still to come.)
     gm-model     avatar models as the client needs them: the standard rig, the `.gmm` container and its
@@ -493,8 +496,8 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 8 | WASM/WebGPU/WebTransport build | browser client joins the same zone as native clients. **Done 2026-10-02** (11.10) |
 | 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account. **Done 2026-10-02** (11.10) |
 | 10 | The client's screens: login, characters, a new character from the archetypes, the game menu, chat, settings; UI scripts | a person with nothing but the program gets from a cold start into the town and on to another zone, on the desktop and in a browser, by clicking; no refusal ends the program. **Done 2026-10-02** (11.10) |
-| 11 | *(proposed)* Possessions: the inventory and what is worn, gear's edges in the simulation (3.4), the stall and tavern screens, trade between two players | a character buys a weapon at another's stall with coin it was paid, wears it, and the zone's hits show the edge; all by clicking |
-| 12 | *(proposed)* Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans | two people clear the tutorial dungeon together and split what it drops |
+| 11 | Possessions: the inventory, the storage and what is worn; gear's edge in the simulation (3.4); a stall looked at, bought from and sold at | a character buys a weapon at another's stall, wears it, and the zone's hits show the edge; the purchase by clicking, on the desktop and in a browser. **Done 2026-10-02** (11.10; the tavern and trade screens moved to 12, the buyer's coin is an operator's grant) |
+| 12 | *(proposed)* Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans; the tavern and a trade between two players as screens | two people clear the tutorial dungeon together and split what it drops, and one sells the other what it got |
 | 13 | *(proposed)* Sound | steps, hits and the town are heard, inside the size budgets of both targets |
 | ∞ | Content, balance, ops, community | permanent |
 
@@ -1109,6 +1112,89 @@ phases a playable slice still needed (11.8), taken on the standing instruction t
   may play at once is not limited (both open, section 12); whether Chrome offers to save the page form's
   password was not tried by hand; the screens gate has not run on CI's machines yet.
 
+**2026-10-02, Phase 11 done** (same machine; all numbers measured with the final build, none estimated;
+ranges are the spread over repeated runs). Possessions: the second of the phases a playable slice needs:
+- `docs/ITEMS.md` v1 is the contract. **A character wears a weapon and an armour**, and what is worn is
+  the `gear` term MATRIX.md 7 had left open: `(2000 + A.dealt[t]) / (2000 + D.taken[t])`, the edge of the
+  attacker's weapon over the edge of the defender's armour on the packet's type, per mille. **A place
+  counts for half** of what its item's edge says, so that the 15–25% of section 0 is a *character's* edge:
+  the best of both places wins a like-for-like exchange by **23%** over a body in nothing and **18%** over
+  iron and oak (the first draft gave each item a full quarter: 49% and 38%; open in section 12).
+- **An item is for one build and not for another** (3.4): each layer of a craft puts its edge into the
+  item's own kinds of damage and no other. A weapon's core sharpens the kind it strikes with, an armour's
+  core guards against blows (a cuirass) or against the elements (a robe), a catalyst counts for its
+  element, and shard, frame and gems for the kinds those reach. A craft takes only the layers its template
+  has room for. The best sword: slash +11.0%, its catalyst's element +9.5%; the best cuirass: physical
+  −9.9%. (5.3's speed, stamina, crit, traits and 3.4's penalties are not built: they are numbers a client
+  predicts with. Open.)
+- **What happens to a body is asked of its zone.** Wearing and buying go client → zone → hub, as opening a
+  stall does: the zone knows where the body stands and whether it is in a fight (**no change of gear
+  within ten seconds of dealing or taking damage**, one a second), the hub checks the rest inside one
+  transaction that holds the character's row, and the zone applies the answer at once. What the hub says
+  of a character's gear is **numbered**, the number drawn before the reading: the reading a change makes
+  of itself is always the newest, so a zone holds what the hub holds in whatever order answers arrive.
+  The pulses of Bleed and Burn take no gear (on a point or two a factor is a step, not an edge).
+- **A stall is a place**: looked at from anywhere, bought from standing at it (120 units), listed and
+  unlisted by its keeper in the zone it stands in. The session request that bought from anywhere is gone.
+- **Screens** (CLIENT.md's toolkit, the same on the desktop and in the browser): the inventory (`I`, and
+  in the menu), the account's storage, a price in gold, silver and copper said back in words, a stall
+  (`E` standing at one). Everything shown is the hub's word, numbers and words both; what is picked is
+  picked by what it is, and when that is gone nothing is picked; a list is asked for when a page opens
+  and after something the person did, and never moves under the pointer.
+- **The hub, v1.7** (protocol v6; the players' messages v2): `ZoneEconOp::Wear`, `TakeOff`, `StallBuy`;
+  `EconOp::StallView`, `StallUnlist`; `PlayerEcon`; items that say themselves in words; a limit of five
+  economy requests a second per account; a craft of at most six parts; an operator's hand
+  (`gm-hub --grant-coin`, `--grant-item`, `--place`, `--audit`); migration 0009 (`worn`, a trigger that
+  keeps a worn item with its wearer, the readings' sequence).
+- **Acceptance** (`scripts/check-items.sh --desktop --browser`): the term to the point in the pipeline and
+  in a simulated fight (a sword swing of 37 on cloth becomes 41 with the best sword, 34 against the best
+  cuirass, 37 with both); the hub with a database (worn items refused by everything that moves or destroys
+  them and by the database itself; **a storm of 1,176 transactions with wearing in it at 1,432–1,815 a
+  second**, the audit sound); a zone with clients driven by hand (a buy from across the square refused,
+  every refusal at the counter in words, the fight lock, and the zone's hits: **15 in nothing, 16 with the
+  best sword, 15 against the best cuirass too, 15 after the buyer left and came back, 13 with the cuirass
+  alone**); and by somebody who is not a person: a bot keeps a stall, an operator hands it swords, a new
+  character made through the screens is given coin and stood at the counter, and by UI script it looks,
+  buys at the price shown, wears, and finds the sword worn through the menu too, on the desktop (then `E`
+  and `I` from a real keyboard) and in both browser builds. **0.5–0.6 s** from `E` to the sword being
+  worn (software GPU).
+- **Cost**: a frame with a page up, on the integrated GPU at 1280×720, uncapped, in the town at a stall
+  (three runs): the game alone 0.39–0.45 ms, the stall's page 0.47–0.50, the inventory 0.48–0.49, the
+  storage 0.47–0.49: under a tenth of a millisecond for a page. The browser build grew by 38 KB.
+- **Found by running it** (ITEMS.md 10): **the WebGL build drew no town** (black map, bodies and HUD in
+  place) and had not since Phase 8: wgpu's GL backend takes a texture array of twelve layers for a cube
+  array, the town has twelve textures, and no gate had looked at the town in that build. The browser gates
+  now fail on any error the client or the browser logs. In a 20 Hz zone a status pulsed every 0.8 s and
+  did a third of what it says (fixed, tested at both rates). A page's request for the pointer left an
+  uncaught rejection in the console on every entry without a click behind it (the page now asks itself,
+  and the web gate clicks the canvas and asks the browser who holds the pointer: no gate had).
+- Reviews (ITEMS.md 10). **Google AI Studio still answered HTTP 402** (credits depleted), so the design
+  review and the code review were done by independent agents. Design: 13 findings, all accepted, and they
+  changed the design before most of it was written (a ghost could take its sword off unheard and keep the
+  edge; gear rode on unordered notices; 25% a packet was 49% a character; a pulse of one point moved by a
+  third; wearing was unthrottled). Code, three reviewers: 35 findings, 32 acted on, 3 written down as
+  gaps. Two were High: a character that joined its own zone again could keep an edge the hub no longer
+  held (answers are now numbered and applied by character), and **a stall's pick slid onto the next listing after a refusal, so
+  a second click bought something else** (nothing is picked when the picked thing is gone). Also: the new
+  messages had been put in the middle of `Control`, so a v5 client could not read a v6 zone's rejection
+  (appended, bytes pinned by a test); the test that pulses take no gear could not fail (it can now, and
+  does with the rule broken). Gemini should be run over ITEMS.md and the diff once the account has credit.
+- Tests: the workspace suite green (**329 tests**, 310 before); every earlier gate green on the final
+  build: netcode, matrix, swarm 5.8 ms mean / 7.9 ms p99 with 200 bots, perf 2,281–5,610 fps (peak RSS
+  124 MB), 100 avatars at 603–714 fps offline and 243 fps through the hub (cap 250), dungeon (online, 33
+  checks), anti-cheat (online and swarm: 68 µs for the recorder, 6.4 ms / 9.0 ms with it), web (both
+  builds and through the hub: 60 fps, 145 and 271 ms to the first frame), screens (0.5 s to the town,
+  127–129 ms a round).
+- Binaries (release, LTO): `gm-client` **9,547,168 bytes (9.10 MiB)**, +72,784; baseline updated.
+  `gm-server` 6.66 MB, `gm-hub` 8.27 MB, `gm-bot` 4.92 MB, `gm-tools` 4.96 MB. Browser builds: WebGPU
+  **1,005,086 bytes** (335,607 packed; 1 MiB budget, **43 KB left**), WebGL2 2,993,885 (908,530 packed).
+- Known limits (ITEMS.md 8): no tavern or trade screen and no parties of people (proposed Phase 12), no
+  sound (13); gear has no look, companions fight in nothing, a replay does not say what its bodies wore;
+  crafting, the ground, buy orders and the town board have requests and no screens; the fight lock looks
+  back only (a robe put on while the bolt is in the air); buy orders are still filled from anywhere; the
+  buyer's coin in the acceptance is an operator's grant, not earned; the items gate has not run on CI's
+  machines yet.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -1140,5 +1226,13 @@ rules for names and what counts as one name, sliding sessions and their bounds, 
 `Q` no longer quits, that a browser logs in on the page's form), and two things are open: **combat
 logging** (Leave and Quit are instant and free, so a body about to die can be taken out of the world by
 its player) and **how many of an account's characters may play at once** (nothing limits it today).
-Phases 11 to 13 in 11.8 are proposals, in the order a playable slice needs them.
+The items' numbers are **proposed** in `docs/ITEMS.md` 9 (two places and a place for half of its item's
+edge, what each layer of a craft is for, that the pulses of a status take no gear, 120 units of reach at a
+stall, ten seconds without a fight before gear changes, one change a second, five economy requests a
+second per account), and it lists what is open: **what the 25% is** (a character's whole edge, as built:
+23% over nothing and 18% over iron and oak; or each item's, which is 49% and 38%), whether frame, shard
+and gem become what 5.3 names them and gear gets the penalties of 3.4 (both touch what a client
+predicts), that a caster's edge is smaller than a fighter's, whether the armour class moves from the
+build to the armour, whether a hired avatar wears its owner's gear, where the storage is reached from.
+Phases 12 and 13 in 11.8 are proposals, in the order a playable slice needs them.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

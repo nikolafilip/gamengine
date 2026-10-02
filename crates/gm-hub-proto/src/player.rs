@@ -14,13 +14,14 @@ use bitcode::{Decode, Encode};
 use gm_core::build::ContentPack;
 
 use crate::protocol::{
-    BuildChoice, CharacterId, CharacterSummary, HubError, HubRequest, HubResponse, ModelId,
-    SessionId, ZoneId, ZoneSummary, ZoneTicket,
+    BuildChoice, CharacterId, CharacterSummary, EconOp, EconReply, HubError, HubRequest,
+    HubResponse, ItemId, ItemSummary, ListingSummary, ModelId, SessionId, ZoneId, ZoneSummary,
+    ZoneTicket,
 };
 
 /// The version of the players' messages; any change to them, or to a type they carry, is
 /// a new one.
-pub const PLAYER_VERSION: u8 = 1;
+pub const PLAYER_VERSION: u8 = 2;
 
 /// What a stream that speaks the players' messages begins with: the empty frame, then
 /// the version in a frame of its own.
@@ -75,6 +76,91 @@ pub enum PlayerRequest {
         session: SessionId,
         model: ModelId,
     },
+    /// About what one of the session's characters owns (ITEMS.md 4).
+    Econ {
+        session: SessionId,
+        character: CharacterId,
+        op: PlayerEcon,
+    },
+}
+
+/// The economy requests that have a screen (ITEMS.md 6): a few of `EconOp`, and the same
+/// requests to the hub. Buying at a stall and wearing are not among them: those are said
+/// to the zone, which knows where the body stands and whether it is in a fight.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum PlayerEcon {
+    Inventory,
+    /// The account's storage, and an item into it or out of it.
+    Storage,
+    StorageDeposit {
+        item: ItemId,
+    },
+    StorageWithdraw {
+        item: ItemId,
+    },
+    StallView {
+        stall: i64,
+    },
+    /// Into the character's own open stall, at a price in copper; and out of it again.
+    StallList {
+        item: ItemId,
+        price: i64,
+    },
+    StallUnlist {
+        listing: i64,
+    },
+}
+
+/// The answers to them: the few of `EconReply` those requests have.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum PlayerEconReply {
+    Done,
+    Id(i64),
+    Holder {
+        coin: i64,
+        items: Vec<ItemSummary>,
+    },
+    Listings {
+        owner: String,
+        mine: bool,
+        listings: Vec<ListingSummary>,
+    },
+}
+
+impl From<PlayerEcon> for EconOp {
+    fn from(op: PlayerEcon) -> EconOp {
+        match op {
+            PlayerEcon::Inventory => EconOp::Inventory,
+            PlayerEcon::Storage => EconOp::Storage,
+            PlayerEcon::StorageDeposit { item } => EconOp::StorageDeposit { item },
+            PlayerEcon::StorageWithdraw { item } => EconOp::StorageWithdraw { item },
+            PlayerEcon::StallView { stall } => EconOp::StallView { stall },
+            PlayerEcon::StallList { item, price } => EconOp::StallList { item, price },
+            PlayerEcon::StallUnlist { listing } => EconOp::StallUnlist { listing },
+        }
+    }
+}
+
+impl TryFrom<EconReply> for PlayerEconReply {
+    type Error = ();
+
+    fn try_from(reply: EconReply) -> Result<PlayerEconReply, ()> {
+        Ok(match reply {
+            EconReply::Done => PlayerEconReply::Done,
+            EconReply::Id(id) => PlayerEconReply::Id(id),
+            EconReply::Holder { coin, items } => PlayerEconReply::Holder { coin, items },
+            EconReply::Listings {
+                owner,
+                mine,
+                listings,
+            } => PlayerEconReply::Listings {
+                owner,
+                mine,
+                listings,
+            },
+            _ => return Err(()),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -97,6 +183,7 @@ pub enum PlayerResponse {
     Blob {
         len: u32,
     },
+    Econ(PlayerEconReply),
 }
 
 impl From<PlayerRequest> for HubRequest {
@@ -127,6 +214,15 @@ impl From<PlayerRequest> for HubRequest {
             },
             PlayerRequest::Logout { session } => HubRequest::Logout { session },
             PlayerRequest::ModelGet { session, model } => HubRequest::ModelGet { session, model },
+            PlayerRequest::Econ {
+                session,
+                character,
+                op,
+            } => HubRequest::Econ {
+                session,
+                character,
+                op: op.into(),
+            },
         }
     }
 }
@@ -148,6 +244,7 @@ impl TryFrom<HubResponse> for PlayerResponse {
             HubResponse::Content { pack, blurbs } => PlayerResponse::Content { pack, blurbs },
             HubResponse::Ticket(t) => PlayerResponse::Ticket(t),
             HubResponse::Blob { len } => PlayerResponse::Blob { len },
+            HubResponse::Econ(reply) => PlayerResponse::Econ(reply.try_into()?),
             _ => return Err(()),
         })
     }
@@ -197,6 +294,28 @@ mod tests {
         // What only a zone or a moderator is ever told has no place here.
         assert_eq!(
             PlayerResponse::try_from(HubResponse::ReplayStored { id: 1 }),
+            Err(())
+        );
+        // The economy requests with a screen are the hub's own; an answer none of them has
+        // (a zone's, a tavern's) is not a player's.
+        assert_eq!(
+            HubRequest::from(PlayerRequest::Econ {
+                session,
+                character: 9,
+                op: PlayerEcon::StorageDeposit { item: 4 },
+            }),
+            HubRequest::Econ {
+                session,
+                character: 9,
+                op: EconOp::StorageDeposit { item: 4 },
+            }
+        );
+        assert_eq!(
+            PlayerResponse::try_from(HubResponse::Econ(EconReply::Id(3))),
+            Ok(PlayerResponse::Econ(PlayerEconReply::Id(3)))
+        );
+        assert_eq!(
+            PlayerResponse::try_from(HubResponse::Econ(EconReply::Stalls(Vec::new()))),
             Err(())
         );
     }

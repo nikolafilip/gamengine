@@ -13,11 +13,12 @@ anti-cheat, and the phased implementation plan with acceptance criteria.
 ```
 Cargo.toml          workspace (crates/*)
 crates/gm-core      shared simulation: entity vocabulary, matrix, builds, statuses, movement, fixed tick. No I/O.
-crates/gm-content   content loader: abilities, builds, creatures and trials in TOML, compiled and validated into gm-core packs.
+crates/gm-content   content loader: abilities, builds, creatures, trials and items in TOML, compiled and validated into gm-core
+                    packs; what a made item does, in numbers and in words.
 crates/gm-bsp       Quake BSP loader: geometry, lightmaps, PVS, hull tracing.
 crates/gm-net       wire protocol: bit packing, delta snapshots, inputs, quinn transport, client prediction.
 crates/gm-client    wgpu forward renderer, skinned characters, model cache, Quake movement, zone connection,
-                    the screens (login, characters, menu, chat) on a toolkit of its own;
+                    the screens (login, characters, menu, chat, inventory, storage, a stall) on a toolkit of its own;
                     the same crate is the browser client (wasm, WebGPU or WebGL2, WebTransport).
 crates/gm-server    authoritative tokio zone server: tick loop, sessions, PVS snapshots, lag compensation.
 crates/gm-hub       accounts, characters, zone registry, handoff, the economy, avatar models and their moderation.
@@ -34,7 +35,7 @@ assets/textures     generated palette and WAD (gm-tools wad make)
 assets/content      abilities, preset builds, creatures, trials and items (TOML), the v1 content
 web/                the browser client's page and loader (index.html, boot.js)
 docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md, WEB.md,
-                    ANTICHEAT.md, CLIENT.md, BUILDING.md
+                    ANTICHEAT.md, CLIENT.md, ITEMS.md, BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces
@@ -137,6 +138,14 @@ it is the same screens with nobody clicking.
 cargo run --release -p gm-client -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der    # or name the hub in the settings once
 ```
 
+Possessions (Phase 11): `I` opens the inventory and `E` the stall the body stands at. A
+character wears a weapon and an armour; what is worn moves the zone's damage, each item for
+its own kinds and a place for half of what its edge says (the best of both wins an exchange
+by 23% over nothing). A stall is looked at from anywhere and bought from standing at it;
+what is worn changes through the zone, at once, and not in a fight
+([`docs/ITEMS.md`](docs/ITEMS.md)). An operator hands out coin and items and audits the
+books with `gm-hub --grant-coin`, `--grant-item`, `--place`, `--audit`.
+
 ## CI gates
 
 `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then:
@@ -187,6 +196,14 @@ cargo run --release -p gm-client -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der
   the menu, two zones both ways, rounds of Play and Leave) and then by real keys and clicks
   (the password pasted, Enter, a click on Play, Escape, a click on Quit); with `--browser`
   both builds in headless Chromium, the page's form filled by the browser's own input.
+- `scripts/check-items.sh` — possessions: the gear term in the pipeline and in a simulated
+  fight, the item content and its words, the inventory and stall screens at five window
+  sizes; with a database the hub (worn items refused by everything that moves or destroys,
+  a storm of transactions with wearing in it) and a zone with clients driven by hand (the
+  counter, the fight lock, the zone's hits before and after); with `--desktop` a bot keeps a
+  stall and a new character, given coin and stood at the counter by an operator, buys a
+  sword and wears it through the windowed client, by UI script and then by real keys; with
+  `--browser` the same purchase in both browser builds.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

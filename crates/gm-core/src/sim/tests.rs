@@ -7,7 +7,7 @@ use crate::matrix::{ArmourClass, Aspects, Attributes, Element};
 use crate::sim::test_content::{self, phase2_build};
 use crate::tick::TickRate;
 use crate::trace::Hull;
-use crate::vocab::{ArchetypeFrame, EntityId, Status};
+use crate::vocab::{ArchetypeFrame, DamageType, EntityId, Status};
 
 const REST_Z: f32 = 24.0;
 const RATE: TickRate = TickRate::COMBAT;
@@ -1237,5 +1237,440 @@ fn a_spot_near_somebody_is_free_and_on_the_ground() {
     for _ in 0..4 {
         let spot = zone.spot_near(&world, at, Hull::Player);
         assert!(spot.x < 30.0 - 16.0 + 0.1, "{spot:?}");
+    }
+}
+
+/// ITEMS.md 3: what a body wears moves the damage it deals and takes, type by type, from
+/// the moment the zone is told; a bolt keeps the edge it was loosed with; the pulses of a
+/// status take none; a body in nothing is hit as before.
+#[test]
+fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
+    use crate::matrix::Gear;
+    let swing = |attacker: Gear, defender: Gear| {
+        let (world, mut zone, ids) = arena(&[
+            (Vec3::new(0.0, 0.0, REST_Z), 0.0),
+            (Vec3::new(48.0, 0.0, REST_Z), 180.0),
+        ]);
+        let (a, b) = (ids[0], ids[1]);
+        zone.set_gear(a, attacker);
+        zone.set_gear(b, defender);
+        assert!(!zone.player(a).unwrap().fought_within(zone.tick, 640));
+        run(
+            &mut zone,
+            &world,
+            &[
+                (a, input(0.0, 0.0, buttons::PRIMARY)),
+                (b, input(180.0, 0.0, 0)),
+            ],
+            13,
+        );
+        // Both are in a fight now, and not for ever.
+        for id in [a, b] {
+            let p = zone.player(id).unwrap();
+            assert!(p.fought_within(zone.tick, 640));
+            assert!(!p.fought_within(zone.tick.wrapping_add(641), 640));
+        }
+        110 - zone.player(b).unwrap().health
+    };
+    let slash = DamageType::Slash as usize;
+    let mut sword = Gear::NONE;
+    sword.dealt[slash] = 220;
+    let mut cuirass = Gear::NONE;
+    cuirass.taken[slash] = 220;
+    // 35 slash x 1.25 (cloth) x 0.85 (armour) = 37.19 in nothing (the test above); a place
+    // counts for half its item's edge, so 220 per mille is a factor of 1.11.
+    assert_eq!(swing(Gear::NONE, Gear::NONE), 37);
+    assert_eq!(swing(sword, Gear::NONE), 41, "37.19 x 1.11");
+    assert_eq!(swing(Gear::NONE, cuirass), 34, "37.19 / 1.11");
+    assert_eq!(swing(sword, cuirass), 37, "a wash");
+    // An edge on another type is no edge on this one.
+    let mut frost = Gear::NONE;
+    frost.dealt[DamageType::Frost as usize] = 250;
+    frost.taken[DamageType::Frost as usize] = 250;
+    assert_eq!(swing(frost, frost), 37);
+    // What a zone is told is kept within the cap.
+    let mut wild = Gear::NONE;
+    wild.dealt[slash] = 60_000;
+    assert_eq!(swing(wild, Gear::NONE), 42, "37.19 x 1.125, not x 31");
+
+    // A bolt in flight keeps the edge it was loosed with: the weapon is taken off while it
+    // flies, and it lands as it left.
+    let bolt = |edge: u16, take_off: bool| {
+        let (world, mut zone, ids) = arena(&[
+            (Vec3::new(0.0, 0.0, REST_Z), 0.0),
+            (Vec3::new(600.0, 0.0, REST_Z), 180.0),
+        ]);
+        let (a, b) = (ids[0], ids[1]);
+        let mut crossbow = Gear::NONE;
+        crossbow.dealt[DamageType::Pierce as usize] = edge;
+        zone.set_gear(a, crossbow);
+        let idle = input(180.0, 0.0, 0);
+        for _ in 0..40 {
+            tick(
+                &mut zone,
+                &world,
+                &[(a, input(0.0, 0.0, buttons::SECONDARY)), (b, idle)],
+                0,
+            );
+            if !zone.projectiles().is_empty() {
+                break;
+            }
+        }
+        assert!(!zone.projectiles().is_empty(), "the bolt is in the air");
+        if take_off {
+            zone.set_gear(a, Gear::NONE);
+        }
+        run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 40);
+        assert_eq!(hits(&zone, HitKind::Projectile), 1);
+        110 - zone.player(b).unwrap().health
+    };
+    assert_eq!(bolt(250, true), bolt(250, false));
+    assert!(bolt(250, false) > bolt(0, false));
+
+    // The pulses of a status take no gear on either side: a pulse is a point or two, and
+    // a factor on that would be a step of a third, not an edge of an eighth. The bolt of
+    // flame that set the burn is moved; the burn is the same, with the best of everything
+    // or with nothing. (At the content's burn a pulse is 3 points whatever is done to it;
+    // the test below this one burns hard enough to tell.)
+    let burn = |attacker: Gear, defender: Gear| {
+        let (world, mut zone, ids) = arena_builds(&[
+            ("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+            ("shade", Vec3::new(200.0, 0.0, REST_Z), 180.0),
+        ]);
+        let (a, b) = (ids[0], ids[1]);
+        zone.set_gear(a, attacker);
+        zone.set_gear(b, defender);
+        let idle = input(180.0, 0.0, 0);
+        tick(
+            &mut zone,
+            &world,
+            &[(a, input(0.0, 0.0, buttons::SECONDARY)), (b, idle)],
+            0,
+        );
+        run(
+            &mut zone,
+            &world,
+            &[(a, input(0.0, 0.0, 0)), (b, idle)],
+            160,
+        );
+        let sum = |kind: HitKind| -> i32 {
+            zone.events
+                .iter()
+                .filter_map(|e| match e {
+                    ZoneEvent::Hit {
+                        kind: k, amount, ..
+                    } if *k == kind => Some(*amount),
+                    _ => None,
+                })
+                .sum()
+        };
+        (sum(HitKind::Projectile), sum(HitKind::Dot))
+    };
+    let mut flame = Gear::NONE;
+    flame.dealt[DamageType::Flame as usize] = 250;
+    let mut ward = Gear::NONE;
+    ward.taken[DamageType::Flame as usize] = 250;
+    let (bolt_plain, burn_plain) = burn(Gear::NONE, Gear::NONE);
+    let (bolt_armed, burn_armed) = burn(flame, Gear::NONE);
+    let (bolt_warded, burn_warded) = burn(Gear::NONE, ward);
+    assert!(burn_plain > 0 && bolt_plain > 0);
+    assert!(bolt_armed > bolt_plain && bolt_warded < bolt_plain);
+    assert_eq!((burn_armed, burn_warded), (burn_plain, burn_plain));
+
+    // What is worn stays through a death, a respawn and a change of build.
+    let (world, mut zone, ids) = arena(&[
+        (Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        (Vec3::new(48.0, 0.0, REST_Z), 180.0),
+    ]);
+    let (a, b) = (ids[0], ids[1]);
+    zone.set_gear(b, cuirass);
+    zone.request_respec(b, zone.content.build("blade").unwrap().clone())
+        .unwrap();
+    zone.player_mut(b).unwrap().health = 1;
+    let wait = zone.rate.ms_to_ticks(RESPAWN_MS) as usize + 40;
+    run(
+        &mut zone,
+        &world,
+        &[
+            (a, input(0.0, 0.0, buttons::PRIMARY)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        13,
+    );
+    assert!(!zone.player(b).unwrap().alive);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        wait,
+    );
+    let p = zone.player(b).unwrap();
+    assert!(p.alive && p.gear == cuirass, "{:?}", p.gear);
+}
+
+/// ITEMS.md 3.1 and 5, where a blow is made of several moments: the edge is taken when the
+/// blow is made, by the body that makes it; a status burns the same whatever is worn; and
+/// a fight is dealing or taking damage, nothing else.
+#[test]
+fn gear_is_taken_when_a_blow_is_made_and_a_fight_is_damage() {
+    use crate::matrix::Gear;
+    use crate::vocab::{ApplyStatus, StackRule, StatusTarget};
+    let slash = DamageType::Slash as usize;
+    let mut sword = Gear::NONE;
+    sword.dealt[slash] = 220;
+
+    // A swing: the sword that was on when the arm went back is the sword that lands,
+    // whatever happens to it in the windup; and one put on in the windup lands as nothing.
+    let swing = |before: Gear, during: Gear| {
+        let (world, mut zone, ids) = arena(&[
+            (Vec3::new(0.0, 0.0, REST_Z), 0.0),
+            (Vec3::new(48.0, 0.0, REST_Z), 180.0),
+        ]);
+        let (a, b) = (ids[0], ids[1]);
+        zone.set_gear(a, before);
+        let idle = input(180.0, 0.0, 0);
+        tick(
+            &mut zone,
+            &world,
+            &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle)],
+            0,
+        );
+        tick(
+            &mut zone,
+            &world,
+            &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle)],
+            0,
+        );
+        assert_eq!(hits(&zone, HitKind::Melee), 0, "still in the windup");
+        zone.set_gear(a, during);
+        run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 12);
+        110 - zone.player(b).unwrap().health
+    };
+    assert_eq!(swing(sword, Gear::NONE), 41, "taken off in the windup");
+    assert_eq!(swing(Gear::NONE, sword), 37, "put on in the windup");
+
+    // An area: the caster's edge on the area's kind, the edge of whoever stands in it.
+    let stomp = |caster: Gear, target: Gear| {
+        let (world, mut zone, ids) = arena_builds(&[
+            ("ironclad", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+            ("blade", Vec3::new(100.0, 0.0, REST_Z), 180.0),
+        ]);
+        let (a, b) = (ids[0], ids[1]);
+        zone.set_gear(a, caster);
+        zone.set_gear(b, target);
+        let idle = input(180.0, 0.0, 0);
+        tick(&mut zone, &world, &[(a, active(0.0, 0.0, 1)), (b, idle)], 0);
+        run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 20);
+        let pb = zone.player(b).unwrap();
+        pb.max_health() - pb.health
+    };
+    let stone = DamageType::Stone as usize;
+    let (mut hammer, mut robe) = (Gear::NONE, Gear::NONE);
+    hammer.dealt[stone] = 250;
+    robe.taken[stone] = 250;
+    // 59.3 unrounded (the stomp test above).
+    assert_eq!(stomp(Gear::NONE, Gear::NONE), 59);
+    assert_eq!(stomp(hammer, Gear::NONE), 67, "59.3 x 1.125");
+    assert_eq!(stomp(Gear::NONE, robe), 53, "59.3 / 1.125");
+    assert_eq!(
+        stomp(sword, Gear::NONE),
+        59,
+        "a sword's edge is not a stomp's"
+    );
+
+    // A riposte is the parrier's blow: the parrier's sword counts, the attacker's does not.
+    let riposte = |attacker: Gear, parrier: Gear| {
+        let (world, mut zone, ids) = arena_builds(&[
+            ("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+            ("blade", Vec3::new(50.0, 0.0, REST_Z), 180.0),
+        ]);
+        let (a, b) = (ids[0], ids[1]);
+        zone.set_gear(a, attacker);
+        zone.set_gear(b, parrier);
+        let (rest_a, rest_b) = (input(0.0, 0.0, 0), input(180.0, 0.0, 0));
+        tick(
+            &mut zone,
+            &world,
+            &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, rest_b)],
+            0,
+        );
+        run(&mut zone, &world, &[(a, rest_a), (b, rest_b)], 2);
+        tick(
+            &mut zone,
+            &world,
+            &[(a, rest_a), (b, input(180.0, 0.0, buttons::GUARD))],
+            0,
+        );
+        // The blow was parried: nobody was hurt, and nobody is in a fight for it.
+        run(&mut zone, &world, &[(a, rest_a), (b, rest_b)], 3);
+        if zone
+            .events
+            .iter()
+            .any(|e| matches!(e, ZoneEvent::Parried { .. }))
+            && hits(&zone, HitKind::Melee) == 0
+        {
+            for id in [a, b] {
+                assert!(!zone.player(id).unwrap().fought_within(zone.tick, 640));
+            }
+        }
+        run(&mut zone, &world, &[(a, rest_a), (b, rest_b)], 12);
+        assert!(
+            zone.events
+                .iter()
+                .any(|e| matches!(e, ZoneEvent::Parried { .. }))
+        );
+        let pa = zone.player(a).unwrap();
+        pa.max_health() - pa.health
+    };
+    let plain = riposte(Gear::NONE, Gear::NONE);
+    assert!(plain > 10, "{plain}");
+    assert_eq!(
+        riposte(sword, Gear::NONE),
+        plain,
+        "the attacker's own sword"
+    );
+    let armed = riposte(Gear::NONE, sword);
+    assert!(
+        armed > plain && armed as f32 <= plain as f32 * 1.11 + 1.0,
+        "{plain} then {armed}"
+    );
+
+    // A status burns the same with the best of everything and with nothing: a burn hard
+    // enough that an eighth more or less would show in its first pulse.
+    let burn = |attacker: Gear, defender: Gear| {
+        let (world, mut zone, ids) = arena_builds(&[
+            ("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+            ("shade", Vec3::new(200.0, 0.0, REST_Z), 180.0),
+        ]);
+        let (a, b) = (ids[0], ids[1]);
+        zone.set_gear(a, attacker);
+        zone.set_gear(b, defender);
+        let hard = ApplyStatus {
+            status: Status::Burn,
+            duration: zone.rate.ms_to_ticks(3000),
+            magnitude: 160.0,
+            max_stacks: 1,
+            stacking: StackRule::Refresh,
+            target: StatusTarget::Hit,
+            dispellable: false,
+        };
+        zone.apply_status(b, a, &hard);
+        let idle = input(180.0, 0.0, 0);
+        run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 40);
+        // The burn's pulses are the fight: both are in it, though no blow was struck.
+        for id in [a, b] {
+            assert!(zone.player(id).unwrap().fought_within(zone.tick, 640));
+        }
+        zone.events
+            .iter()
+            .find_map(|e| match e {
+                ZoneEvent::Hit {
+                    kind: HitKind::Dot,
+                    amount,
+                    ..
+                } => Some(*amount),
+                _ => None,
+            })
+            .expect("a pulse")
+    };
+    let flame = DamageType::Flame as usize;
+    let (mut staff, mut ward) = (Gear::NONE, Gear::NONE);
+    staff.dealt[flame] = 250;
+    ward.taken[flame] = 250;
+    let pulse = burn(Gear::NONE, Gear::NONE);
+    assert!(pulse >= 12, "a pulse an eighth would move: {pulse}");
+    assert_eq!(burn(staff, Gear::NONE), pulse);
+    assert_eq!(burn(Gear::NONE, ward), pulse);
+    assert_eq!(burn(staff, ward), pulse);
+
+    // The fight lock's edges: in a fight for exactly as many ticks as it is long, across
+    // the counter's wrap, and never before the first blow.
+    let (_, mut zone, ids) = arena(&[(Vec3::new(0.0, 0.0, REST_Z), 0.0)]);
+    let a = ids[0];
+    assert!(!zone.player(a).unwrap().fought_within(0, u32::MAX));
+    zone.player_mut(a).unwrap().fought_at = Some(1000);
+    let p = zone.player(a).unwrap();
+    assert!(p.fought_within(1000, 640) && p.fought_within(1639, 640));
+    assert!(!p.fought_within(1640, 640));
+    zone.player_mut(a).unwrap().fought_at = Some(u32::MAX - 2);
+    let p = zone.player(a).unwrap();
+    assert!(p.fought_within(5, 640) && !p.fought_within(640, 640));
+
+    // Healing is not a fight: a mend dart marks neither the mender nor the mended.
+    let (world, mut zone, ids) = arena_builds(&[
+        ("mender", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        ("ironclad", Vec3::new(200.0, 0.0, REST_Z), 180.0),
+    ]);
+    let (healer, tank) = (ids[0], ids[1]);
+    zone.player_mut(tank).unwrap().health -= 60;
+    let idle = input(180.0, 0.0, 0);
+    tick(
+        &mut zone,
+        &world,
+        &[(healer, input(0.0, 0.0, buttons::SECONDARY)), (tank, idle)],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(healer, input(0.0, 0.0, 0)), (tank, idle)],
+        80,
+    );
+    assert!(
+        zone.player(tank).unwrap().health > 140 - 60 - 1,
+        "it healed"
+    );
+    for id in [healer, tank] {
+        assert!(!zone.player(id).unwrap().fought_within(zone.tick, 640));
+    }
+}
+
+/// A status pulses four times a second at any tick rate: a burn of 20 a second does 20 in
+/// a second at 64 Hz and at 20 Hz alike (it did 6 at 20 Hz while the interval was a count
+/// of 64 Hz ticks).
+#[test]
+fn a_status_pulses_four_times_a_second_at_any_rate() {
+    use crate::vocab::{ApplyStatus, StackRule, StatusTarget};
+    for hz in [64u32, 20] {
+        let rate = TickRate::new(hz);
+        let world = BoxWorld::floor();
+        let spawns = [(0.0f32, 0.0f32), (200.0, 180.0)]
+            .iter()
+            .map(|&(x, yaw)| Spawn {
+                origin: Vec3::new(x, 0.0, REST_Z),
+                yaw,
+                team: 0,
+            })
+            .collect();
+        let mut zone = Zone::new(rate, 7, spawns, test_content::pack(rate));
+        let build = zone.content.build("blade").unwrap().clone();
+        let a = zone.add_player_at(build.clone(), 0, Vec3::new(0.0, 0.0, REST_Z), 0.0);
+        let b = zone.add_player_at(build, 0, Vec3::new(200.0, 0.0, REST_Z), 180.0);
+        let burn = ApplyStatus {
+            status: Status::Burn,
+            duration: rate.ms_to_ticks(10_000),
+            magnitude: 40.0,
+            max_stacks: 1,
+            stacking: StackRule::Refresh,
+            target: StatusTarget::Hit,
+            dispellable: false,
+        };
+        zone.apply_status(b, a, &burn);
+        let before = zone.player(b).unwrap().health;
+        let idle = [(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))];
+        run(&mut zone, &world, &idle, 2 * hz as usize);
+        let pulses = hits(&zone, HitKind::Dot);
+        assert!(
+            (7..=9).contains(&pulses),
+            "{hz} Hz: {pulses} pulses in two seconds"
+        );
+        let lost = before - zone.player(b).unwrap().health;
+        // The same burn does the same in two seconds at either rate, to a pulse.
+        let per_pulse = lost as f32 / pulses as f32;
+        assert!(
+            (lost as f32 - 8.0 * per_pulse).abs() <= per_pulse + 0.5,
+            "{hz} Hz: {lost} in {pulses} pulses"
+        );
+        assert!(lost >= 20, "{hz} Hz: {lost}");
     }
 }

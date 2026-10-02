@@ -397,6 +397,48 @@ impl Derived {
     }
 }
 
+/// What worn gear does to damage (ITEMS.md 3): the edge of the worn weapon and of the worn
+/// armour, per mille, one number per damage type in `DamageType`'s order. `dealt` raises
+/// what the body deals of that type, `taken` lowers what it takes. A body in nothing has
+/// all sixteen at 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub struct Gear {
+    pub dealt: [u16; 8],
+    pub taken: [u16; 8],
+}
+
+impl Gear {
+    pub const NONE: Gear = Gear {
+        dealt: [0; 8],
+        taken: [0; 8],
+    };
+    /// The most any one of the sixteen may be: the cap on an item's whole edge (PLAN.md 0).
+    pub const MAX: u16 = 250;
+    /// What an edge is counted against (ITEMS.md 3.1). A character has two places and one
+    /// edge of at most a quarter, so a place counts for half of what its item's edge says:
+    /// an edge of `e` per mille is a factor of `(SCALE + e) / SCALE`.
+    pub const SCALE: u32 = 2000;
+
+    /// The same within the cap, whatever it was told.
+    pub fn clamped(self) -> Gear {
+        Gear {
+            dealt: self.dealt.map(|e| e.min(Gear::MAX)),
+            taken: self.taken.map(|e| e.min(Gear::MAX)),
+        }
+    }
+}
+
+/// MATRIX.md 7's `gear` term: what the attacker's weapon adds to this type over what the
+/// defender's armour takes off it. Between 1/1.125 and 1.125, and exactly 1 for two bodies
+/// in nothing; a body in the best of both against one in nothing has 1.125 each way, an
+/// exchange of 1.27 at the very most.
+pub fn gear_factor(dealt: &[u16; 8], taken: &[u16; 8], dtype: DamageType) -> f32 {
+    let t = dtype as usize;
+    let side = |edge: u16| (Gear::SCALE + edge.min(Gear::MAX) as u32) as f32;
+    side(dealt[t]) / side(taken[t])
+}
+
 /// The attacker's side of the pipeline, captured when the packet is created so a dead or
 /// departed owner (area pulses, projectiles in flight) still resolves consistently.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -406,6 +448,8 @@ pub struct AttackerStats {
     pub knockback_dealt: f32,
     /// `Weaken` magnitude, 0 when absent.
     pub weaken: f32,
+    /// The edge of its worn weapon, per mille per damage type (`Gear::dealt`).
+    pub gear: [u16; 8],
 }
 
 impl AttackerStats {
@@ -414,14 +458,16 @@ impl AttackerStats {
         elemental_mult: 1.0,
         knockback_dealt: 1.0,
         weaken: 0.0,
+        gear: [0; 8],
     };
 
-    pub fn from_derived(d: &Derived, weaken: f32) -> AttackerStats {
+    pub fn from_derived(d: &Derived, weaken: f32, gear: &Gear) -> AttackerStats {
         AttackerStats {
             physical_mult: d.physical_mult,
             elemental_mult: d.elemental_mult,
             knockback_dealt: d.knockback_dealt,
             weaken,
+            gear: gear.dealt,
         }
     }
 }
@@ -442,9 +488,12 @@ pub struct DefenderStats {
     /// Block mitigation when the defender guards toward the attacker and the guard applies
     /// to this packet (melee, or a projectile against a shield), else `None`.
     pub block: Option<f32>,
+    /// The edge of its worn armour, per mille per damage type (`Gear::taken`).
+    pub gear: [u16; 8],
 }
 
-/// MATRIX.md 7 without the gear factor (Phase 5). Never returns less than 1.
+/// MATRIX.md 7, the gear factor included (ITEMS.md 3.1): the factor multiplies before the
+/// rounding, so its bounds are on the unrounded number. Never returns less than 1.
 pub fn resolve_damage(packet: &DamagePacket, a: &AttackerStats, d: &DefenderStats) -> i32 {
     let bypass = if d.exposed {
         packet.bypass.union(Bypass::ARMOR)
@@ -479,6 +528,7 @@ pub fn resolve_damage(packet: &DamagePacket, a: &AttackerStats, d: &DefenderStat
     if let Some(m) = d.block {
         x *= 1.0 - m;
     }
+    x *= gear_factor(&a.gear, &d.gear, packet.dtype);
     (x + 0.5).floor().max(1.0) as i32
 }
 
@@ -622,7 +672,108 @@ mod tests {
             evading: false,
             exposed: false,
             block: None,
+            gear: [0; 8],
         }
+    }
+
+    #[test]
+    fn gear_moves_each_type_by_its_own_edge_and_never_past_an_eighth_a_side() {
+        let d = defender(ArmourClass::Leather, Aspects::one(Element::Storm));
+        let bare = AttackerStats {
+            physical_mult: 1.0,
+            elemental_mult: 1.0,
+            ..AttackerStats::NEUTRAL
+        };
+        // The best sword the content allows, with an ember catalyst (ITEMS.md 3.2):
+        // Slash 220, Flame 190, nothing else.
+        let mut sword = [0u16; 8];
+        sword[DamageType::Slash as usize] = 220;
+        sword[DamageType::Flame as usize] = 190;
+        let armed = AttackerStats {
+            gear: sword,
+            ..bare
+        };
+        // The best cuirass: the three physical kinds 220, and an edge on one element.
+        let mut cuirass = [0u16; 8];
+        for kind in [DamageType::Slash, DamageType::Pierce, DamageType::Blunt] {
+            cuirass[kind as usize] = 220;
+        }
+        cuirass[DamageType::Flame as usize] = 250;
+        let clad = DefenderStats { gear: cuirass, ..d };
+        for dtype in DamageType::ALL {
+            let p = packet(1000, dtype, Bypass::NONE);
+            let plain = resolve_damage(&p, &bare, &d) as f32;
+            let t = dtype as usize;
+            // Each side alone, and both: the plain number times the factor, to the unit.
+            for (a, dd, factor) in [
+                (&armed, &d, (2000 + sword[t]) as f32 / 2000.0),
+                (&bare, &clad, 2000.0 / (2000 + cuirass[t]) as f32),
+                (
+                    &armed,
+                    &clad,
+                    (2000 + sword[t]) as f32 / (2000 + cuirass[t]) as f32,
+                ),
+            ] {
+                let got = resolve_damage(&p, a, dd) as f32;
+                assert!(
+                    (got - plain * factor).abs() <= 1.0,
+                    "{dtype:?}: {got} against {plain} x {factor}"
+                );
+            }
+            // The term itself, whatever a zone was told: never past an eighth a side.
+            for dealt in [0u16, 1, 40, 220, 250, 251, 9000, u16::MAX] {
+                for taken in [0u16, 1, 40, 220, 250, 251, 9000, u16::MAX] {
+                    let f = gear_factor(&[dealt; 8], &[taken; 8], dtype);
+                    assert!((1.0 / 1.125..=1.125).contains(&f), "{dealt} {taken}: {f}");
+                }
+            }
+        }
+        // A sword's own kind against the same in armour is a wash; nothing worn is 1.
+        assert_eq!(gear_factor(&sword, &cuirass, DamageType::Slash), 1.0);
+        assert_eq!(gear_factor(&[0; 8], &[0; 8], DamageType::Frost), 1.0);
+        // Whatever a zone is told, no number counts for more than the cap.
+        let wild = Gear {
+            dealt: [9000; 8],
+            taken: [0, 251, 250, 3, 0, 0, 0, 65535],
+        };
+        assert_eq!(wild.clamped().dealt, [250; 8]);
+        assert_eq!(wild.clamped().taken, [0, 250, 250, 3, 0, 0, 0, 250]);
+        assert_eq!(gear_factor(&wild.dealt, &[0; 8], DamageType::Stone), 1.125);
+        assert_eq!(
+            gear_factor(&[0; 8], &wild.taken, DamageType::Stone),
+            1.0 / 1.125
+        );
+        // What PLAN.md 0 bounds is a character's edge: the best of both places against a
+        // body in nothing wins an exchange of its own kind by 23%, against iron and oak
+        // (an edge of 40) by 18%, and by 27% at the very cap.
+        let exchange = |mine: u16, theirs: u16| {
+            let (a, b) = ([mine; 8], [theirs; 8]);
+            gear_factor(&a, &b, DamageType::Slash) / gear_factor(&b, &a, DamageType::Slash)
+        };
+        assert!(
+            (exchange(220, 0) - 1.2321).abs() < 1e-3,
+            "{}",
+            exchange(220, 0)
+        );
+        assert!(
+            (exchange(220, 40) - 1.1843).abs() < 1e-3,
+            "{}",
+            exchange(220, 40)
+        );
+        assert!(
+            (exchange(250, 0) - 1.2656).abs() < 1e-3,
+            "{}",
+            exchange(250, 0)
+        );
+        // The smallest hit stays a hit.
+        let weak = AttackerStats {
+            weaken: 0.99,
+            ..bare
+        };
+        assert_eq!(
+            resolve_damage(&packet(1, DamageType::Slash, Bypass::NONE), &weak, &clad),
+            1
+        );
     }
 
     #[test]
@@ -632,6 +783,7 @@ mod tests {
             elemental_mult: 1.2,
             knockback_dealt: 1.0,
             weaken: 0.0,
+            gear: [0; 8],
         };
         // Slash into plate: 100 * 1.1 * 0.5 * (1 - 0.2) = 44.
         let d = defender(ArmourClass::Plate, Aspects::one(Element::Stone));

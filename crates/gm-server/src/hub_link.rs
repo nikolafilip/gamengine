@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gm_hub_proto::protocol::{
-    CharacterId, CharacterState, EconReply, HiredAvatar, HubNotice, HubRequest, HubResponse,
-    ModelRef, SessionToken, StallSummary, TokenPayload, ZoneEconOp, ZoneId, ZoneTicket, now_secs,
+    CharacterId, CharacterState, EconReply, GearReading, HiredAvatar, HubError, HubNotice,
+    HubRequest, HubResponse, ModelRef, SessionToken, StallSummary, TokenPayload, ZoneEconOp,
+    ZoneId, ZoneTicket, now_secs,
 };
 use gm_hub_proto::{HubClient, HubClientError, TokenError, TokenVerifier};
 use tokio::sync::mpsc;
@@ -57,6 +58,8 @@ pub struct Claimed {
     pub model: Option<ModelRef>,
     /// The character's active hires (COMPANIONS.md 3.3).
     pub squad: Vec<HiredAvatar>,
+    /// What its worn items do to damage (ITEMS.md 3.3).
+    pub gear: GearReading,
 }
 
 /// How long a stopping zone waits for the hub to take one last thing.
@@ -114,6 +117,7 @@ impl HubLink {
                 team,
                 model,
                 squad,
+                gear,
             }) => Ok(Claimed {
                 character,
                 name,
@@ -121,6 +125,7 @@ impl HubLink {
                 team,
                 model,
                 squad,
+                gear,
             }),
             Ok(other) => Err(format!("unexpected hub answer {other:?}")),
             Err(HubClientError::Refused(e)) => Err(e.to_string()),
@@ -217,6 +222,75 @@ impl HubLink {
         self.econ(ZoneEconOp::StallClose { character })
             .await
             .map(|_| ())
+    }
+
+    /// Buy a listing for a character the zone saw standing at that stall, at the price it
+    /// was shown (ITEMS.md 5). The words of a refusal are for the buyer.
+    pub async fn stall_buy(
+        &self,
+        character: CharacterId,
+        stall: i64,
+        listing: i64,
+        price: i64,
+    ) -> Result<(), String> {
+        let op = ZoneEconOp::StallBuy {
+            character,
+            stall,
+            listing,
+            price,
+        };
+        match self.client.request(&HubRequest::ZoneEcon(op)).await {
+            Ok(HubResponse::Econ(EconReply::Done)) => Ok(()),
+            Err(HubClientError::Refused(e)) => Err(match e {
+                HubError::NotFound => "it is no longer for sale here".to_string(),
+                HubError::Insufficient => "not enough coin".to_string(),
+                HubError::Full => "the inventory is full".to_string(),
+                HubError::Invalid(why) => why,
+                other => Self::words(&other, "buy"),
+            }),
+            other => Err(Self::trouble("buy", &format!("{other:?}"))),
+        }
+    }
+
+    /// What a player is told when the hub refused for a reason that is not about the
+    /// thing asked for; the reason itself goes to the zone's log, not to the player.
+    fn words(e: &HubError, what: &str) -> String {
+        match e {
+            // The hub does not have the character in this zone: it is on its way
+            // somewhere, or its ghost has only just come back.
+            HubError::Unauthorized => "you are between zones: try again in a moment".to_string(),
+            HubError::Busy => "the hub is busy: try again".to_string(),
+            other => Self::trouble(what, &other.to_string()),
+        }
+    }
+
+    fn trouble(what: &str, detail: &str) -> String {
+        warn!("the hub on a {what}: {detail}");
+        "the hub could not be asked: try again".to_string()
+    }
+
+    /// Put an item on (`on`) or take it off for a character playing here (ITEMS.md 2):
+    /// what its worn items do from now on. The words of a refusal are for the player.
+    pub async fn wear(
+        &self,
+        character: CharacterId,
+        item: i64,
+        on: bool,
+    ) -> Result<GearReading, String> {
+        let op = if on {
+            ZoneEconOp::Wear { character, item }
+        } else {
+            ZoneEconOp::TakeOff { character, item }
+        };
+        match self.client.request(&HubRequest::ZoneEcon(op)).await {
+            Ok(HubResponse::Econ(EconReply::Gear(reading))) => Ok(reading),
+            Err(HubClientError::Refused(e)) => Err(match e {
+                HubError::NotFound => "there is no such item".to_string(),
+                HubError::Invalid(why) => why,
+                other => Self::words(&other, "wear"),
+            }),
+            other => Err(Self::trouble("wear", &format!("{other:?}"))),
+        }
     }
 
     /// Everything one kill gives, once (ECONOMY.md 9): the report is repeated until the

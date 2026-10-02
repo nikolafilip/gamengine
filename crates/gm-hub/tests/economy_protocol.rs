@@ -9,7 +9,7 @@ use gm_core::tick::TickRate;
 use gm_hub::economy::Economy;
 use gm_hub::protocol::{
     BuildChoice, CharacterId, ContractOutcome, EconOp, EconReply, HubError, HubRequest,
-    HubResponse, SessionId, ZoneEconOp,
+    HubResponse, PLACE_WEAPON, SessionId, ZoneEconOp,
 };
 use gm_hub::{Db, HubClient, HubClientError, HubConfig, HubKey};
 use gm_net::transport::{Identity, hub_server_config};
@@ -148,7 +148,8 @@ async fn the_economy_over_the_wire() {
             key: HubKey::generate(),
             session_secs: 3600,
             auth_per_minute: 100.0,
-            templates: items.template_ids(),
+            econ_per_second: 1000.0,
+            items: items.clone(),
             max_coin_grant: 10_000,
             models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
             ingest: gm_hub::IngestMode::InProcess,
@@ -474,32 +475,55 @@ async fn the_economy_over_the_wire() {
     .unwrap() else {
         panic!("list")
     };
+    // What the stall shows, from anywhere: the keeper, the sword, its price, and what the
+    // sword does (iron 30 and oak 10, both on Slash: ITEMS.md 3.2).
+    let EconReply::Listings {
+        owner,
+        mine,
+        listings,
+    } = econ(
+        &smith_conn,
+        smith_s,
+        smith,
+        EconOp::StallView { stall: stall.id },
+    )
+    .await
+    .unwrap()
+    else {
+        panic!("view")
+    };
+    assert_eq!((owner.as_str(), mine, listings.len()), ("Buyer", false, 1));
     assert_eq!(
-        econ(
-            &smith_conn,
-            smith_s,
-            smith,
-            EconOp::StallBuy {
-                listing,
-                price: 650
-            }
-        )
-        .await,
-        Ok(EconReply::Done)
+        (listings[0].id, listings[0].item.id, listings[0].price),
+        (listing, sword, 650)
+    );
+    assert_eq!(listings[0].item.place, PLACE_WEAPON);
+    assert_eq!(listings[0].item.edge, [40, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(listings[0].item.does, ["slash +2.0%"]);
+    // Buying is done standing at the stall (ITEMS.md 5): the zone the buyer plays in asks,
+    // and names the stall it saw the buyer at.
+    let buy = |zone: &HubClient, stall: i64| {
+        let op = ZoneEconOp::StallBuy {
+            character: smith,
+            stall,
+            listing,
+            price: 650,
+        };
+        let zone = zone.clone();
+        async move { zone_econ(&zone, op).await }
+    };
+    assert_eq!(
+        buy(&other_zone, stall.id).await,
+        Err(HubError::Unauthorized),
+        "a zone speaks only for the characters playing in it"
     );
     assert_eq!(
-        econ(
-            &smith_conn,
-            smith_s,
-            smith,
-            EconOp::StallBuy {
-                listing,
-                price: 650
-            }
-        )
-        .await,
-        Err(HubError::NotFound)
+        buy(&town, stall.id + 1).await,
+        Err(HubError::NotFound),
+        "not a listing of the stall the buyer stands at"
     );
+    assert_eq!(buy(&town, stall.id).await, Ok(EconReply::Done));
+    assert_eq!(buy(&town, stall.id).await, Err(HubError::NotFound));
 
     // The owner closes the stall from its own session; the tile is free again.
     assert_eq!(

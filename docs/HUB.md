@@ -1,6 +1,6 @@
 # Hub: accounts, characters, zones, handoff
 
-Status: v1.6 (Phase 10: what the client's screens lean on, section 3.8; Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
+Status: v1.7 (Phase 11: what is worn, buying through a zone, the limit on the economy's requests and the operator's hand, section 3.9 and ITEMS.md; Phase 10: what the client's screens lean on, section 3.8; Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
 saved position's zone of Phase 6; squads, trials and gated zones of Phase 7, section 3.5). This document is the contract between `gm-hub`, `gm-server` and the
 clients for everything that outlives a zone process: accounts, characters, where a character is,
 and how it moves between zones. PLAN.md 2.1 (Postgres via sqlx, in-memory session state), 11.3
@@ -50,7 +50,7 @@ clients and zones trust exactly that file. Every request is one bidirectional st
 requester writes one framed `HubRequest` and finishes; the hub writes one framed `HubResponse`
 and finishes. Framing is PROTOCOL.md 8 (big-endian u16 length + `bitcode`). Messages over
 65,535 bytes are protocol errors. Since v1.6 a stream **begins with the version** of these
-messages in a frame of one byte (`HUB_VERSION`, 6), and the hub answers with its own in the
+messages in a frame of one byte (`HUB_VERSION`, 7 since Phase 11), and the hub answers with its own in the
 same way before anything else, going on to the response only when the two are equal: a
 zone, a tool or a bot of another build is told so ("the hub speaks version N") instead of
 failing to decode. A stream that begins with an empty frame speaks the players' messages
@@ -120,11 +120,12 @@ enum HubResponse {
     Content { pack: ContentPack, blurbs: Vec<String> },   // 3.8
     Ticket(ZoneTicket),            // addr, cert_der, token
     Claimed { character: CharacterId, name: String, state: CharacterState, team: u8,
-              model: Option<ModelRef>,    // what the character wears, while it is active
-              squad: Vec<HiredAvatar> },  // its active hires (3.5)
+              model: Option<ModelRef>,    // the avatar model it wears, while it is active
+              squad: Vec<HiredAvatar>,    // its active hires (3.5)
+              gear: GearReading },        // what its worn items do to damage, numbered (3.9)
     Registered { public_key: [u8; 32] },  // the hub's token verification key
     Econ(EconReply),               // Done, Id, Ids, Holder, TradeView, Trade, Decided, Tavern,
-                                   // Squad, Stall, Stalls
+                                   // Squad, Stall, Stalls, Listings, Gear
     Models(Vec<ModelSummary>),
     ModelAccepted { model: ModelId, status: ModelStatus },
     Blob { len: u32 },             // + len bytes
@@ -143,7 +144,8 @@ blocking pool behind a semaphore of 8 permits; a ninth concurrent `Register`/`Lo
 
 `EconOp` and `ZoneEconOp` are listed in `gm-hub-proto::protocol` and specified by ECONOMY.md:
 every op is one database transaction. `Econ` is refused with `NotFound` unless the character
-belongs to the session's account. `ZoneEcon` is refused with `Unauthorized` on any connection
+belongs to the session's account, and with `Busy` past five requests a second for one account
+(3.9). `ZoneEcon` is refused with `Unauthorized` on any connection
 that has not said `ZoneHello`; a zone grants only to characters playing in it and decides only
 contracts whose instance it is.
 
@@ -289,20 +291,21 @@ advisory for the zone's bookkeeping; the database is already updated when they a
 
 ### 3.8 What the client's screens lean on (CLIENT.md 7)
 
-- **The players' messages** (`gm_hub_proto::player`). `PlayerRequest` is the nine requests a
+- **The players' messages** (`gm_hub_proto::player`). `PlayerRequest` is the requests a
   player's client makes (`Register`, `Login`, `Characters`, `CreateCharacter`, `ListZones`,
-  `Content`, `Enter`, `Logout`, `ModelGet`) and `PlayerResponse` their answers (`Ok`, `Err`,
-  `Session`, `Characters`, `Character`, `Zones`, `Content`, `Ticket`, `Blob`), as enums of
+  `Content`, `Enter`, `Logout`, `ModelGet`, and since Phase 11 `Econ` with the few economy
+  requests that have a screen, 3.9) and `PlayerResponse` their answers (`Ok`, `Err`,
+  `Session`, `Characters`, `Character`, `Zones`, `Content`, `Ticket`, `Blob`, `Econ`), as enums of
   their own: the same requests, handled by the same code, in an encoding that does not carry
   what zones, moderators and the economy say. (A browser client that spoke `HubRequest` paid
   89 KB of its megabyte for codecs it never uses.) On the wire a stream that speaks them
   begins with an **empty frame** (`00 00`: no `HubRequest` encodes to nothing) and a frame
-  of one byte, the **version** of the players' messages (`PLAYER_VERSION`, 1); the hub
+  of one byte, the **version** of the players' messages (`PLAYER_VERSION`, 2 since Phase 11); the hub
   answers with its own version in a frame of one byte, and then, if the two are the same,
   with the framed `PlayerResponse`. A client of another version is told so in words it can
   show, whatever else changed between the builds. The two versions are apart on purpose:
   the hub's messages change with every phase, and a player's installed client need not
-  care unless the nine it speaks did.
+  care unless the ones it speaks did.
 - `Content` answers the content pack the hub loaded and one line or two of plain words for
   each of its preset builds (`blurb` in `assets/content/builds.toml`, at most 160
   characters, required), in the pack's order. The blurbs are not part of the pack.
@@ -355,6 +358,47 @@ advisory for the zone's bookkeeping; the database is already updated when they a
   refused with the rule it broke, in words (`Invalid`). A password is 8 characters or
   more and 256 bytes at most.
 
+### 3.9 Possessions (ITEMS.md)
+
+- **What is worn changes through a zone.** `ZoneEconOp::Wear { character, item }` and
+  `TakeOff { character, item }` are answered `EconReply::Gear(GearReading { seq, gear })`:
+  a reading of what the character's worn items do, made after the change was committed.
+  The transaction holds the character's row (shared) against a change of where it is, and
+  refuses (`Unauthorized`) a character that does not play in the asking zone: offline, in
+  transit, or another zone's. A claim, a handoff and a save take that row whole, so a
+  claim either reads the change or comes first. `Claimed.gear` is a reading too, made
+  after the character became the claiming zone's. Readings are numbered from one sequence,
+  the number drawn before the rows are read: of two readings a zone has for a character,
+  the one with the larger number is true (ITEMS.md 3.3). No session request and no notice
+  touches what is worn.
+- **Buying is a zone's request.** `ZoneEconOp::StallBuy { character, stall, listing, price }`:
+  the zone saw the character standing at that stall; the hub checks everything else (the
+  character plays in that zone, the stall stands in it, the listing is that stall's, the
+  price, not the keeper, coin, room). `EconOp::StallBuy` is gone.
+- **Looking, listing, taking back.** `EconOp::StallView { stall }` from anywhere answers
+  `Listings { owner, mine, listings }`. `StallList` and the new `StallUnlist { listing }`
+  need the keeper to be playing in the stall's zone.
+- **An item says itself.** `ItemSummary` carries `place` (0 none, 1 weapon, 2 armour), `edge`
+  (per mille per damage type), `worn`, and the words `what` and `does`, composed by
+  `gm-content` from the hub's item content: a client shows them and works nothing out.
+- **The players' economy.** `PlayerEcon`: `Inventory`, `Storage`, `StorageDeposit`,
+  `StorageWithdraw`, `StallView`, `StallList`, `StallUnlist`; `PlayerEconReply`: `Done`,
+  `Id`, `Holder`, `Listings`. The same requests as their `EconOp`s; an answer none of them
+  has is the hub's mistake.
+- **A craft** names at most six parts (an item has no more places); more is refused before
+  the hub looks at any of them.
+- **A limit.** A session is all it takes to ask the economy something, every answer is a
+  transaction, and some read a row per item: one **account** (whatever its sessions and
+  connections) may make five `Econ` requests a second with twenty in hand
+  (`--econ-per-second`); past that the answer is `Busy`, before the database is asked
+  anything. A zone's own requests are not counted: a zone gates its players itself
+  (PROTOCOL.md 8).
+- **An operator's hand** (`gm-hub --database-url URL ...`, then exit; the hub may be
+  running): `--grant-coin CHARACTER COPPER`, `--grant-item CHARACTER TEMPLATE
+  MATERIAL,...` (ledger reason `grant`), `--place CHARACTER ZONE X,Y,Z YAW` (an offline
+  character's saved position), `--audit` (the books in one line; exit status 1 when they
+  are not sound).
+
 ## 4. Database (PLAN.md 11.4)
 
 ```
@@ -377,7 +421,9 @@ ledger arrive in Phase 5 as separate tables (ECONOMY.md); Phase 6 adds `models`,
 and `characters.pos_zone` (section 3.2); Phase 7 adds `hires.ended`, `trials (character_id,
 trial, zone, secs, passed_at)` and `kills (zone, ref)` (migration 0005); Phase 10 adds
 `characters.name_key`, unique (migration 0007, section 3.8) and an index for a zone's
-room count (0008). Migrations are embedded in the binary and run at
+room count (0008); Phase 11 adds `worn (character_id, slot, item_id)`, the trigger that
+keeps a worn item with its wearer and the sequence its readings are numbered from (0009,
+ITEMS.md 2 and 3.3). Migrations are embedded in the binary and run at
 start in order; the hub refuses to start on an unknown newer schema.
 
 Passwords: argon2id with the crate defaults (19 MiB, 2 iterations, parallelism 1), one hash per

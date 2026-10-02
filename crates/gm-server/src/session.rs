@@ -166,6 +166,7 @@ pub struct Session {
     pub last_udp_tx: u64,
     pub last_udp_rx: u64,
     stall_gate: RequestGate,
+    gear_gate: RequestGate,
     travel_gate: RequestGate,
     report_gate: RequestGate,
     /// Squad entries last told to this client, so an unchanged squad is not sent again.
@@ -203,6 +204,8 @@ pub const REPORT_GAP: Duration = Duration::from_secs(30);
 pub struct RequestGate {
     busy: bool,
     last: Option<Instant>,
+    /// What `last` was before the request that holds the gate.
+    before: Option<Instant>,
 }
 
 impl RequestGate {
@@ -212,13 +215,24 @@ impl RequestGate {
             return false;
         }
         self.busy = true;
+        self.before = self.last;
         self.last = Some(now);
         true
     }
 
-    /// The answer is in (or the request was never sent).
-    pub fn end(&mut self) {
-        self.busy = false;
+    /// The answer is in. `false`: nothing was being waited for (it was answered already).
+    pub fn end(&mut self) -> bool {
+        std::mem::take(&mut self.busy)
+    }
+
+    /// The zone refused the request itself and the hub was never asked: it does not count
+    /// against the next one (a person told to walk up to the stall may buy as soon as
+    /// they have).
+    pub fn cancel(&mut self) {
+        if self.busy {
+            self.busy = false;
+            self.last = self.before;
+        }
     }
 }
 
@@ -246,6 +260,7 @@ impl Session {
             last_udp_tx: 0,
             last_udp_rx: 0,
             stall_gate: RequestGate::default(),
+            gear_gate: RequestGate::default(),
             travel_gate: RequestGate::default(),
             report_gate: RequestGate::default(),
             squad_told: Vec::new(),
@@ -282,8 +297,26 @@ impl Session {
         self.stall_gate.begin(Instant::now(), STALL_REQUEST_GAP)
     }
 
-    pub fn end_stall_request(&mut self) {
-        self.stall_gate.end();
+    pub fn end_stall_request(&mut self) -> bool {
+        self.stall_gate.end()
+    }
+
+    pub fn cancel_stall_request(&mut self) {
+        self.stall_gate.cancel();
+    }
+
+    /// The same for putting an item on or taking it off: a gate of its own, so that a
+    /// buy and what follows it do not wait for each other.
+    pub fn begin_gear_request(&mut self) -> bool {
+        self.gear_gate.begin(Instant::now(), STALL_REQUEST_GAP)
+    }
+
+    pub fn end_gear_request(&mut self) -> bool {
+        self.gear_gate.end()
+    }
+
+    pub fn cancel_gear_request(&mut self) {
+        self.gear_gate.cancel();
     }
 
     /// May this player report somebody now (one report in `REPORT_GAP`)?
@@ -666,6 +699,30 @@ pub fn projectile_state(pr: &Projectile) -> EntityState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_the_zone_refused_itself_does_not_cost_the_second() {
+        let gap = Duration::from_secs(1);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut gate = RequestGate::default();
+        // Told to walk up to the stall: the hub was never asked, and the next request
+        // (a moment later, at the counter) passes.
+        assert!(gate.begin(t0, gap));
+        gate.cancel();
+        assert!(gate.begin(at(100), gap));
+        // That one went to the hub: its second counts, whatever is cancelled after it.
+        assert!(gate.end());
+        assert!(!gate.begin(at(600), gap));
+        gate.cancel();
+        assert!(!gate.begin(at(900), gap));
+        assert!(gate.begin(at(1100), gap));
+        // Cancelled after one that counted: the earlier second still stands.
+        gate.cancel();
+        assert!(!gate.begin(at(1099), gap));
+        // An answer nobody is waiting for any more is known as such.
+        assert!(!gate.end());
+    }
 
     #[test]
     fn a_flood_of_requests_reaches_the_hub_once_per_gap() {

@@ -107,6 +107,20 @@ pub struct StallEntry {
     pub model: Option<[u8; 32]>,
 }
 
+/// How near a body must stand to a stall to buy at it (ITEMS.md 5): this far from the
+/// centre of its tile along the ground (a tile is 128 wide, and a body in front of the
+/// counter is about 80 from its middle; the next stall's middle is 160 away), its feet no
+/// further above or below the tile than `STALL_REACH_UP`.
+pub const STALL_REACH: f32 = 120.0;
+pub const STALL_REACH_UP: f32 = 96.0;
+
+/// May a body whose feet are at `feet` buy at the stall whose tile's centre is `stall`?
+/// The zone decides with this, and a client offers the stall with the same.
+pub fn stall_in_reach(stall: [f32; 3], feet: [f32; 3]) -> bool {
+    let (dx, dy, dz) = (feet[0] - stall[0], feet[1] - stall[1], feet[2] - stall[2]);
+    dx * dx + dy * dy <= STALL_REACH * STALL_REACH && dz.abs() <= STALL_REACH_UP
+}
+
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub enum Control {
     // client → server
@@ -227,6 +241,36 @@ pub enum Control {
         passed: bool,
         detail: String,
         secs: u32,
+    },
+    // What a version adds goes at the end, whichever way it travels: the variants before
+    // it keep their numbers, so a client and a zone of different versions can still read
+    // each other's `Hello`, `Reject` and `Kick` and say what is wrong.
+    /// Client → zone: buy a listing of the stall the player stands at, at the price it was
+    /// shown (ITEMS.md 5); answered by `BuyResult`, always.
+    StallBuy {
+        stall: i64,
+        listing: i64,
+        price: i64,
+    },
+    /// Client → zone: put an item of the inventory on, or take one off (ITEMS.md 2);
+    /// answered by `WearResult`, always. The zone is asked, because gear takes effect in
+    /// the zone and only the zone knows whether the body is in a fight.
+    Wear {
+        item: i64,
+    },
+    TakeOff {
+        item: i64,
+    },
+    /// The answer to `StallBuy`, naming the listing it was about; a refusal is in words
+    /// for the buyer.
+    BuyResult {
+        listing: i64,
+        result: Result<(), String>,
+    },
+    /// The answer to `Wear` or `TakeOff`, naming the item it was about.
+    WearResult {
+        item: i64,
+        result: Result<(), String>,
     },
 }
 
@@ -385,6 +429,73 @@ mod tests {
     use super::*;
     use gm_core::sim::test_content;
     use gm_core::tick::TickRate;
+
+    /// A client and a zone of different versions must still be able to say so: what a
+    /// version adds to `Control` goes at its end, and the messages of the handshake keep
+    /// the bytes they had in v5 (taken from that build).
+    #[test]
+    fn the_handshake_s_messages_keep_their_bytes_across_versions() {
+        let hex = |m: &Control| -> String {
+            bitcode::encode(m)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        assert_eq!(
+            hex(&Control::Reject("protocol version mismatch".into())),
+            "0e1970726f746f636f6c2076657273696f6e206d69736d61746368"
+        );
+        assert_eq!(hex(&Control::Kick("bye".into())), "1903627965");
+        assert_eq!(
+            hex(&Control::Hello {
+                version: 5,
+                name: "a".into(),
+                token: vec![1, 2],
+                build: None,
+                team: 0
+            }),
+            "00050001610201020000"
+        );
+        assert_eq!(hex(&Control::Bye), "07");
+        // The last of v5; what v6 added comes after it.
+        let trial = Control::Trial {
+            key: "k".into(),
+            name: "n".into(),
+            passed: true,
+            detail: "d".into(),
+            secs: 3,
+        };
+        assert_eq!(hex(&trial), "20016b016e0101640403");
+        let buy = Control::StallBuy {
+            stall: 1,
+            listing: 2,
+            price: 3,
+        };
+        assert_eq!(bitcode::encode(&buy)[0], 0x21);
+    }
+
+    #[test]
+    fn a_stall_is_in_reach_along_the_ground_and_not_from_a_roof() {
+        let stall = [272.0, -320.0, 0.0];
+        let at = |dx: f32, dy: f32, dz: f32| stall_in_reach(stall, [272.0 + dx, -320.0 + dy, dz]);
+        // In front of the counter, at the edge of reach, and a step past it.
+        assert!(at(-72.0, 0.0, 0.0) && at(0.0, 0.0, 0.0));
+        assert!(at(STALL_REACH, 0.0, 0.0) && at(0.0, -STALL_REACH, 0.0));
+        assert!(!at(STALL_REACH + 0.5, 0.0, 0.0));
+        assert!(
+            at(84.0, 84.0, 0.0) && !at(86.0, 86.0, 0.0),
+            "a circle, not a square"
+        );
+        // The middle of the next stall is 160 away: standing on it is not standing here.
+        assert!(!at(160.0, 0.0, 0.0));
+        // Above and below: a floor up is out, a step up is in.
+        assert!(at(0.0, 0.0, STALL_REACH_UP) && at(0.0, 0.0, -STALL_REACH_UP));
+        assert!(!at(0.0, 0.0, STALL_REACH_UP + 0.5) && !at(0.0, 0.0, -STALL_REACH_UP - 0.5));
+        assert!(
+            !at(f32::NAN, 0.0, 0.0),
+            "a place that is no number is nowhere"
+        );
+    }
 
     #[test]
     fn framing_round_trips_and_handles_partials() {

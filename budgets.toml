@@ -65,10 +65,10 @@ round_trip_ms = 2000
 # symmetric: on WebGPU wgpu is a thin binding, for WebGL2 it links its GLES backend and the
 # shader translator. Sizes are of the .wasm after wasm-opt; "packed" is brotli -q 11 (what a
 # static host serves), gzip -9 where brotli is not installed.
-max_webgpu_wasm_bytes = 1048576         # measured 967,052 (with the screens of Phase 10)
-max_webgpu_packed_bytes = 393216        # measured 324,017
-max_webgl_wasm_bytes = 3407872          # measured 2,956,609
-max_webgl_packed_bytes = 1048576        # measured 896,912
+max_webgpu_wasm_bytes = 1048576         # measured 1,005,086 (with the inventory and the stall of Phase 11; 967,052 in Phase 10)
+max_webgpu_packed_bytes = 393216        # measured 335,607
+max_webgl_wasm_bytes = 3407872          # measured 2,993,885
+max_webgl_packed_bytes = 1048576        # measured 908,530
 max_js_bytes = 180224                   # wasm-bindgen glue + loader + page, per build; measured 170,358 (webgl)
 max_wasm_memory_bytes = 67108864        # linear memory in the 8v8 arena; measured 3.3 MiB
 min_snapshots_per_s = 55                # of the zone's 64, as the browser client counts them
@@ -95,3 +95,9 @@ max_secs_to_town = 20                 # from the program's start: account, chara
 max_round_ms = 3000                   # one Play and one Leave, mean; measured 121-154 (577 loaded)
 max_rounds_rss_growth_bytes = 16777216   # what the rounds may leave behind in the client; measured 2.9 MB for 20, 60 and 150
 max_rounds_threads_added = 2          # a connection's thread that outlived its connection would add one a round
+
+[items]
+# ITEMS.md 7 (scripts/check-items.sh): a stall bought from and a sword worn through the
+# client's screens, on the software GPU of a display of its own. A bound on a run that
+# works: a screen that wedges never gets there at all.
+max_secs_stall_to_worn = 20           # from E at the stall to the sword being worn, by script; measured 0.5-0.6

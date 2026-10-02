@@ -115,7 +115,8 @@ async fn statistics_replays_reports_reputation_and_bans() {
             key: HubKey::generate(),
             session_secs: 3600,
             auth_per_minute: 1000.0,
-            templates: Vec::new(),
+            econ_per_second: 1000.0,
+            items: Default::default(),
             max_coin_grant: 10_000,
             models_dir: scratch.join("models"),
             ingest: gm_hub::IngestMode::InProcess,
@@ -234,6 +235,7 @@ async fn statistics_replays_reports_reputation_and_bans() {
             },
             play: Duration::from_secs(PLAY_SECS),
             list_for_hire: None,
+            sell_at: None,
             hire: 0,
         })));
     }

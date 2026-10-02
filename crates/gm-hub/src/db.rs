@@ -133,7 +133,7 @@ impl Db {
 
     /// Drop every row (tests).
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        sqlx::query("truncate mod_log, bans, reputation, reports, flags, aim_reports, aim_weeks, replay_participants, replays, kills, trials, model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
+        sqlx::query("truncate worn, mod_log, bans, reputation, reports, flags, aim_reports, aim_weeks, replay_participants, replays, kills, trials, model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
             .execute(&self.pool)
             .await?;
         // The cascade empties `holders` too; the two singletons come back at zero.
@@ -247,6 +247,42 @@ impl Db {
         .await
         .map_err(internal)?;
         row.as_ref().map(row_to_character).transpose()
+    }
+
+    /// A character by its name exactly as written (an operator's commands).
+    pub async fn character_by_name(&self, name: &str) -> Result<Option<CharacterId>, HubError> {
+        let row = sqlx::query("select id from characters where name = $1")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(internal)?;
+        row.map(|r| r.try_get("id").map_err(internal)).transpose()
+    }
+
+    /// Where an offline character stands when it next enters (an operator's command): its
+    /// saved position, in `zone`. `false`: it is not offline, and nothing was changed.
+    pub async fn place(
+        &self,
+        id: CharacterId,
+        zone: &str,
+        at: [f32; 3],
+        yaw: f32,
+    ) -> Result<bool, HubError> {
+        let n = sqlx::query(
+            "update characters set pos_zone = $2, pos_x = $3, pos_y = $4, pos_z = $5, yaw = $6, \
+             updated = now() where id = $1 and location_kind = 'offline'",
+        )
+        .bind(id)
+        .bind(zone)
+        .bind(at[0])
+        .bind(at[1])
+        .bind(at[2])
+        .bind(yaw)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?
+        .rows_affected();
+        Ok(n == 1)
     }
 
     /// `name_key` is the name's skeleton (`gm_hub_proto::names`): unique, so that no two
