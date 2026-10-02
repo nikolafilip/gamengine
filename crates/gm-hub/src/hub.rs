@@ -21,18 +21,21 @@ use tracing::{debug, info, warn};
 
 use crate::db::Db;
 use gm_hub_proto::protocol::{
-    AccountId, BuildChoice, CLOCK_SKEW_SECS, CharacterId, ContractOutcome, EconOp, EconReply,
-    GearReading, HASH_PERMITS, HUB_PREAMBLE, HUB_VERSION, HiredAvatar, HubError, HubNotice,
-    HubRequest, HubResponse, ItemSummary, ListingSummary, LocationSummary, MAX_REPLAY_BYTES,
-    MAX_SESSIONS_PER_ACCOUNT, ModOp, ModelRef, PLACE_ARMOUR, PLACE_NONE, PLACE_WEAPON,
-    SESSION_LIFETIMES, SessionId, StallSummary, TOKEN_VALID_SECS, TavernEntry, TradeOffer,
-    ZoneEconOp, ZoneId, ZoneSummary, ZoneTicket, now_secs,
+    AccountId, BuildChoice, CHANNEL_PARTY, CHANNEL_WHISPER, CLOCK_SKEW_SECS, CharacterId,
+    ContractOutcome, EconOp, EconReply, GearReading, HASH_PERMITS, HUB_PREAMBLE, HUB_VERSION,
+    HiredAvatar, HubError, HubNotice, HubRequest, HubResponse, ItemSummary, ListingSummary,
+    LocationSummary, MAX_REPLAY_BYTES, MAX_SESSIONS_PER_ACCOUNT, ModOp, ModelRef, PLACE_ARMOUR,
+    PLACE_NONE, PLACE_WEAPON, PartyNews, PartyReply, SESSION_LIFETIMES, SayTo, SessionId,
+    StallSummary, TOKEN_VALID_SECS, TavernEntry, TradeOffer, ZoneEconOp, ZoneId, ZonePartyOp,
+    ZoneSummary, ZoneTicket, now_secs,
 };
 
 use crate::conduct::Conduct;
-use crate::economy::{EconError, Economy, Outcome, TradeStatus};
+use crate::economy::{EconError, Economy, Outcome, TradeState, TradeStatus};
 use crate::models::{IngestMode, Models};
+use crate::party::{Answered, Parties};
 use gm_content::items::{ItemContent, Place};
+use gm_hub_proto::protocol::{TRADE_CANCELLED, TRADE_COMMITTED, TRADE_OPEN};
 
 /// The body of an upload must arrive within ten seconds plus its length at 64 KiB/s
 /// (MODELS.md 6.2): 15 s for 300 KB, 138 s for the 8 MiB limit. A slow sender holds one of
@@ -43,6 +46,8 @@ fn upload_body_timeout(len: u32) -> Duration {
 
 /// A zone whose last heartbeat is older than this gets no new players (HUB.md 2).
 const ZONE_STALE: Duration = Duration::from_secs(15);
+/// A notice that is sent without waiting for it is given up after this.
+const NOTICE_PATIENCE: Duration = Duration::from_secs(5);
 use gm_hub_proto::player::{self, PlayerRequest, PlayerResponse};
 use gm_hub_proto::token::{HubKey, TokenVerifier};
 
@@ -57,6 +62,11 @@ pub struct HubConfig {
     /// Economy requests one account may make a second, with four seconds' worth in hand
     /// (ITEMS.md 4): each is a transaction, and a session is all it takes to ask.
     pub econ_per_second: f64,
+    /// How often the hub looks at parties whose members left the game, and how long such
+    /// a member is still of its party (PARTY.md 2; `party::SWEEP` and `party::AWAY`
+    /// outside tests).
+    pub party_sweep: Duration,
+    pub party_away: Duration,
     /// The item content (`assets/content/items.toml`): the templates a craft may name
     /// (none listed: any), and what a worn item does (ITEMS.md 3.2).
     pub items: gm_content::items::ItemContent,
@@ -157,6 +167,7 @@ struct Hub {
     cfg: HubConfig,
     db: Db,
     econ: Economy,
+    parties: Parties,
     models: Models,
     conduct: Conduct,
     state: Mutex<State>,
@@ -208,6 +219,8 @@ pub async fn run_with_web(
             .map(|h: PasswordHash| h.to_string())
             .map_err(|e| anyhow::anyhow!("hashing: {e}"))?
     };
+    let mut parties = Parties::new(db.pool().clone());
+    parties.away = cfg.party_away;
     let hub = Arc::new(Hub {
         conduct,
         decoy_hash,
@@ -216,10 +229,30 @@ pub async fn run_with_web(
         models,
         cfg,
         econ: Economy::new(db.pool().clone()),
+        parties,
         db,
         state: Mutex::new(State::default()),
     });
     info!(listen = %endpoint.local_addr()?, "hub listening");
+    // A character that went offline leaves its party (PARTY.md 2), whichever way it went.
+    let party_sweeper = {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(hub.cfg.party_sweep);
+            loop {
+                every.tick().await;
+                match hub.parties.sweep().await {
+                    Ok(changes) => {
+                        for news in changes {
+                            info!(party = news.party.id, leader = news.party.leader, left = ?news.left, "the sweep changed a party");
+                            hub.tell_party(&news).await;
+                        }
+                    }
+                    Err(e) => warn!("party sweep: {e}"),
+                }
+            }
+        })
+    };
     // Stalls past their 48 h close and stalled contracts refund, once a minute.
     let sweeper = {
         let hub = hub.clone();
@@ -242,6 +275,12 @@ pub async fn run_with_web(
                 }
                 if let Err(e) = hub.econ.contracts_expire().await {
                     warn!("contract sweep: {e}");
+                }
+                // A trade nobody touches is called off (PARTY.md 6).
+                match hub.econ.trades_expire().await {
+                    Ok(0) => {}
+                    Ok(n) => info!(trades = n, "trades nobody touched were called off"),
+                    Err(e) => warn!("trade sweep: {e}"),
                 }
                 // A ticket nobody used: its character is offline again (HUB.md 3.8).
                 match hub
@@ -306,6 +345,7 @@ pub async fn run_with_web(
         _ = shutdown => {}
     }
     sweeper.abort();
+    party_sweeper.abort();
     endpoint.close(0u32.into(), b"hub stopped");
     info!("hub stopped");
     Ok(())
@@ -756,13 +796,15 @@ impl Hub {
             let Ok(build) = serde_json::from_value::<Build>(h.build) else {
                 continue;
             };
-            if build.validate(&self.cfg.content).is_err() {
+            let Some((what, role)) = build_words(&self.cfg.content, &build) else {
                 continue;
-            }
+            };
             out.push(HiredAvatar {
                 hire: h.id,
                 character: h.avatar,
                 name: h.name,
+                what,
+                role,
                 model: self
                     .models
                     .worn(h.avatar)
@@ -815,6 +857,64 @@ impl Hub {
         let zones: Vec<ZoneId> = self.state.lock().unwrap().zones.keys().cloned().collect();
         for zone in zones {
             self.notify(&zone, notice.clone()).await;
+        }
+    }
+
+    /// Send a notice to a zone, if it is connected, without waiting for it: what a zone
+    /// that is slow to take notices costs is that zone's own (a line of chat, the news of
+    /// a party), not the request that caused the notice.
+    fn notify_later(&self, zone: &ZoneId, notice: HubNotice) {
+        let conn = self
+            .state
+            .lock()
+            .unwrap()
+            .zones
+            .get(zone)
+            .map(|z| z.conn.clone());
+        if let Some(conn) = conn {
+            tokio::spawn(async move {
+                let send = async {
+                    if let Ok(mut uni) = conn.open_uni().await {
+                        let _ = control::send_any(&mut uni, &notice).await;
+                        let _ = uni.finish();
+                    }
+                };
+                let _ = tokio::time::timeout(NOTICE_PATIENCE, send).await;
+            });
+        }
+    }
+
+    /// Tell every zone where a party's change concerns somebody (PARTY.md 3.2): where
+    /// its members and those who left by it are now, the change being committed. The
+    /// zone that asked is told too: its answer may be late or lost, and the notice is
+    /// the same news with the same number.
+    async fn tell_party(&self, news: &PartyNews) {
+        let concerned: Vec<CharacterId> = news
+            .party
+            .members
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(news.left.iter().copied())
+            .collect();
+        match self.parties.zones_of(&concerned).await {
+            Ok(zones) => {
+                for zone in &zones {
+                    self.notify_later(zone, HubNotice::Party(news.clone()));
+                }
+            }
+            Err(e) => warn!(
+                party = news.party.id,
+                "nobody was told of a party's change: {e}"
+            ),
+        }
+    }
+
+    /// Tell the zones a character is in (or between) something.
+    async fn tell_character(&self, character: CharacterId, notice: HubNotice) {
+        if let Ok(zones) = self.parties.zones_of(&[character]).await {
+            for zone in &zones {
+                self.notify_later(zone, notice.clone());
+            }
         }
     }
 
@@ -1242,6 +1342,9 @@ async fn handle(
             // What follows can fail after the character has been moved here; the zone would
             // hear "claim failed" and have nothing to give back, so the hub does.
             let rest = async {
+                // It is somewhere else now: whatever trade it had open is called off
+                // (PARTY.md 6): a trade is between two that stand together.
+                hub.econ.trades_end_of(row.id).await.map_err(econ_err)?;
                 // The owner is playing this character now: every hire of it as an avatar
                 // ends (ECONOMY.md 11), and the zones its hirers play in are told.
                 for (hire, hirer) in hub.econ.end_hires_of(row.id).await.map_err(econ_err)? {
@@ -1263,11 +1366,14 @@ async fn handle(
                     squad,
                     hub.models.worn(row.id).await?,
                     GearReading { seq, gear },
+                    // As gear: read after the character became this zone's. A change
+                    // that comes later is told to this zone, with a larger number.
+                    hub.parties.reading(row.id).await?,
                 ))
             }
             .await;
             match rest {
-                Ok((squad, model, gear)) => Ok(HubResponse::Claimed {
+                Ok((squad, model, gear, party)) => Ok(HubResponse::Claimed {
                     character: row.id,
                     name: row.name.clone(),
                     state,
@@ -1275,6 +1381,7 @@ async fn handle(
                     model,
                     squad,
                     gear,
+                    party,
                 }),
                 Err(e) => {
                     let _ = hub.db.release(row.id, &zone).await;
@@ -1302,10 +1409,17 @@ async fn handle(
             hub.db.save(character, &zone, &state, leaving).await?;
             // Play time is what makes an account established (ANTICHEAT.md 6): looked at
             // when a character leaves, whether or not it ever shot at anybody.
-            if leaving && let Some(row) = hub.db.character(character).await? {
-                hub.conduct.promote(row.account_id).await?;
+            if leaving {
+                if let Some(row) = hub.db.character(character).await? {
+                    hub.conduct.promote(row.account_id).await?;
+                }
+                return Ok(HubResponse::Ok);
             }
-            Ok(HubResponse::Ok)
+            // The number of what the hub holds of its party: a zone that missed a notice
+            // sees that it is behind, and asks (PARTY.md 3.2).
+            Ok(HubResponse::Saved {
+                party: hub.parties.seq_of(character).await?,
+            })
         }
         HubRequest::Handoff {
             character,
@@ -1362,6 +1476,10 @@ async fn handle(
         HubRequest::ZoneEcon(op) => {
             let zone = hub.zone_of_conn(auth)?;
             Ok(HubResponse::Econ(zone_econ_op(hub, &zone, op).await?))
+        }
+        HubRequest::ZoneParty(op) => {
+            let zone = hub.zone_of_conn(auth)?;
+            Ok(HubResponse::Party(zone_party_op(hub, &zone, op).await?))
         }
         // Answered on the stream itself (`handle_stream`): they carry or return raw bytes.
         HubRequest::ModelUpload { .. } | HubRequest::ModelGet { .. } => Err(HubError::Internal),
@@ -1566,6 +1684,36 @@ fn econ_err(e: EconError) -> HubError {
     }
 }
 
+/// A build as a person is told it (PARTY.md 7): the content's name for it with its frame
+/// and armour, and the role a mind plays it in (the same reading the zone's minds make).
+/// The hub says both, so that no client works them out. Nothing for a build the content
+/// no longer has (a sheet is made of it, and a sheet is made of what the content says).
+fn build_words(content: &ContentPack, build: &Build) -> Option<(String, String)> {
+    use gm_core::matrix::ArmourClass;
+    use gm_core::vocab::ArchetypeFrame;
+    build.validate(content).ok()?;
+    let name = content
+        .builds
+        .iter()
+        .find(|b| &b.build == build)
+        .map_or("its own build", |b| b.name.as_str());
+    let frame = match build.frame {
+        ArchetypeFrame::Colossus => "colossus",
+        ArchetypeFrame::Striker => "striker",
+        ArchetypeFrame::Caster => "caster",
+        ArchetypeFrame::Infiltrator => "infiltrator",
+    };
+    let armour = match build.armour {
+        ArmourClass::Cloth => "cloth",
+        ArmourClass::Leather => "leather",
+        ArmourClass::Mail => "mail",
+        ArmourClass::Plate => "plate",
+    };
+    let sheet = gm_core::build::Sheet::new(build.clone(), content, 1);
+    let role = gm_ai::Role::of(&sheet).name();
+    Some((format!("{name}: {frame} in {armour}"), role.to_string()))
+}
+
 /// An item as a person is shown it: where it is worn, what it does there and the words
 /// for both are the content's to say (ITEMS.md 3.2), so that no client works them out.
 fn item_summary(content: &ItemContent, i: crate::economy::Item) -> ItemSummary {
@@ -1668,14 +1816,6 @@ async fn econ_op(
             .await
             .map(EconReply::Ids)
             .map_err(econ_err),
-        EconOp::TradeOpen { with } => {
-            // A trade window is between two characters standing in the same zone.
-            let mine = here()?;
-            if hub.db.zone_of(with).await?.as_ref() != Some(&mine) {
-                return Err(HubError::Invalid("the other character is not here".into()));
-            }
-            id(e.trade_open(me, with).await)
-        }
         EconOp::TradeOfferItem { trade, item } => done(e.trade_offer_item(trade, me, item).await),
         EconOp::TradeRetractItem { trade, item } => {
             done(e.trade_retract_item(trade, me, item).await)
@@ -1692,10 +1832,18 @@ async fn econ_op(
         EconOp::TradeView { trade } => e
             .trade_view(trade, me)
             .await
-            .map(|(version, mine, theirs)| EconReply::TradeView {
-                version,
-                mine: trade_offer(items, mine),
-                theirs: trade_offer(items, theirs),
+            .map(|seen| EconReply::TradeView {
+                state: match seen.state {
+                    TradeState::Open => TRADE_OPEN,
+                    TradeState::Committed => TRADE_COMMITTED,
+                    TradeState::Cancelled => TRADE_CANCELLED,
+                },
+                version: seen.version,
+                wait_ms: seen.wait_ms,
+                with: seen.with,
+                together: seen.together,
+                mine: trade_offer(items, seen.mine),
+                theirs: trade_offer(items, seen.theirs),
             })
             .map_err(econ_err),
         // A stall is kept where it stands: its keeper lists and unlists while playing in
@@ -1744,8 +1892,19 @@ async fn econ_op(
         EconOp::ChestDeposit { chest, item } => done(e.chest_deposit(me, chest, item).await),
         EconOp::ChestWithdraw { chest, item } => done(e.chest_withdraw(me, chest, item).await),
         EconOp::HireList { price } => done(e.hire_list(me, price).await),
-        EconOp::Hire { avatar } => e
-            .hire(me, avatar, capacity(hub, me).await?)
+        EconOp::HireUnlist => done(e.hire_unlist(me).await),
+        EconOp::HireListed => e
+            .hire_listed(me)
+            .await
+            .map(|price| EconReply::Id(price.unwrap_or(0)))
+            .map_err(econ_err),
+        EconOp::Hire { avatar, price } => e
+            .hire(me, avatar, capacity(hub, me).await?, Some(price), |build| {
+                // What the hire buys must be playable: a listing whose build the content
+                // no longer has sells nothing.
+                serde_json::from_value::<Build>(build.clone())
+                    .is_ok_and(|b| b.validate(&hub.cfg.content).is_ok())
+            })
             .await
             .map(|(hire, _burned)| EconReply::Id(hire))
             .map_err(econ_err),
@@ -1754,14 +1913,19 @@ async fn econ_op(
                 .await
                 .map_err(econ_err)?
                 .into_iter()
-                // A listed character whose stored build no longer parses is not for hire.
+                // A listing whose build the content no longer has is not shown: a hire of
+                // it would buy nothing a zone can play, and the hub would not make it.
                 .filter_map(|t| {
+                    let build: Build = serde_json::from_value(t.build).ok()?;
+                    let (what, role) = build_words(&hub.cfg.content, &build)?;
                     Some(TavernEntry {
                         character: t.character,
                         name: t.name,
                         price: t.price,
                         hires: t.hires,
-                        build: serde_json::from_value(t.build).ok()?,
+                        what,
+                        role,
+                        build,
                     })
                 })
                 .collect(),
@@ -1789,6 +1953,83 @@ async fn capacity(hub: &Hub, character: CharacterId) -> Result<usize, HubError> 
         .ok_or(HubError::NotFound)?
         .build
         .squad_capacity(&hub.cfg.content))
+}
+
+/// What a zone asks about the parties of its characters (PARTY.md 3.2). The character a
+/// request names must play in the asking zone; every other zone the answer concerns is
+/// told by notice.
+async fn zone_party_op(hub: &Hub, zone: &ZoneId, op: ZonePartyOp) -> Result<PartyReply, HubError> {
+    match op {
+        ZonePartyOp::Invite { from, to } => {
+            let invitation = hub.parties.invite(from, zone, &to).await?;
+            let notice = HubNotice::Invited {
+                to: invitation.to,
+                from: invitation.from_name,
+            };
+            hub.tell_character(invitation.to, notice).await;
+            Ok(PartyReply::Invited {
+                name: invitation.to_name,
+            })
+        }
+        ZonePartyOp::Answer {
+            character,
+            from,
+            join,
+        } => match hub.parties.answer(character, zone, &from, join).await? {
+            Answered::Joined(news) => {
+                hub.tell_party(&news).await;
+                Ok(PartyReply::News(news))
+            }
+            Answered::Declined(inviter, by) => {
+                let notice = HubNotice::Declined { to: inviter, by };
+                hub.tell_character(inviter, notice).await;
+                Ok(PartyReply::Declined)
+            }
+        },
+        ZonePartyOp::Leave { character } => {
+            let news = hub.parties.leave(character, zone).await?;
+            hub.tell_party(&news).await;
+            Ok(PartyReply::News(news))
+        }
+        ZonePartyOp::Remove { leader, name } => {
+            let news = hub.parties.remove(leader, zone, &name).await?;
+            hub.tell_party(&news).await;
+            Ok(PartyReply::News(news))
+        }
+        ZonePartyOp::Read { character } => Ok(PartyReply::Reading(
+            hub.parties.read(character, zone).await?,
+        )),
+        ZonePartyOp::Say { from, to, text } => {
+            // The zone checked the line and the speaker's bucket (PARTY.md 5); that it is
+            // a line at all is checked again, because it is cheap.
+            let Some(text) = control::valid_chat(&text) else {
+                return Err(HubError::Invalid("that is not a line".into()));
+            };
+            let line = hub.parties.line(from, zone, &to).await?;
+            let channel = match to {
+                SayTo::Party => CHANNEL_PARTY,
+                SayTo::Whisper(_) => CHANNEL_WHISPER,
+            };
+            // One notice a zone, naming everybody there who hears it.
+            let mut by_zone: std::collections::BTreeMap<&ZoneId, Vec<CharacterId>> =
+                std::collections::BTreeMap::new();
+            for hearer in &line.hearers {
+                for z in &hearer.zones {
+                    by_zone.entry(z).or_default().push(hearer.character);
+                }
+            }
+            for (z, to) in by_zone {
+                let notice = HubNotice::Heard {
+                    to,
+                    channel,
+                    from: line.from_name.clone(),
+                    text: text.clone(),
+                };
+                hub.notify_later(z, notice);
+            }
+            Ok(PartyReply::Said { to: line.to_name })
+        }
+    }
 }
 
 /// What a zone reports. A zone speaks only for itself: it grants to characters playing in
@@ -1921,6 +2162,13 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
             .take_off(character, zone, item, &hub.cfg.items)
             .await
             .map(|(seq, gear)| EconReply::Gear(GearReading { seq, gear }))
+            .map_err(econ_err),
+        // The zone saw the two stand together and both ask (PARTY.md 6); that both play in
+        // it is checked again here, under their rows.
+        ZoneEconOp::TradeOpen { a, b } => e
+            .trade_open_in(a, b, zone)
+            .await
+            .map(EconReply::Id)
             .map_err(econ_err),
         ZoneEconOp::Drop { character, item } | ZoneEconOp::Pickup { character, item }
             if hub.db.zone_of(character).await?.as_ref() != Some(zone) =>

@@ -18,8 +18,8 @@ pub use mover::{
     command_exit_ticks, melee_hit_point, step_mover, view_dir,
 };
 pub use zone::{
-    Area, DOT_INTERVAL_TICKS, Driver, History, HitKind, MAX_CLAIMED_VIEW_LAG, Player, Projectile,
-    Spawn, Swing, Zone, ZoneEvent,
+    Area, DOT_INTERVAL_TICKS, Driver, History, HitKind, MAX_CLAIMED_VIEW_LAG, MAX_ENTITY_ID,
+    Player, Projectile, Spawn, Swing, Zone, ZoneEvent,
 };
 
 use crate::tick::Tick;

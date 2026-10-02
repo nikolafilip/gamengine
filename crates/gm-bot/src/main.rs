@@ -57,6 +57,15 @@ struct Args {
     hire: usize,
     /// Keepers of a stall put what they carry up for sale at this price.
     sell_at: Option<i64>,
+    /// The first bot invites the character of this name into a party, and asks again
+    /// until it is in one with it (PARTY.md 9).
+    invite: Option<String>,
+    /// Join whoever invites, trade with whoever asks, answer a party's line and a
+    /// whisper.
+    sociable: bool,
+    /// In a trade: offer one thing it carries and accept when the other offers at least
+    /// this much coin.
+    trade_for: Option<i64>,
 }
 
 const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:PORT [--web-cert SHA256HEX]) [--map PATH] [--bots N] [--secs N] \
@@ -66,7 +75,9 @@ const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:POR
 [--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall] \
 [--list-for-hire COPPER: list the character in the tavern; with --secs 0 it then stays offline] \
 [--hire N: hire up to N avatars from the tavern before entering] \
-[--sell-at COPPER: a bot that keeps a stall lists whatever it carries that can be worn, at this price]";
+[--sell-at COPPER: a bot that keeps a stall lists whatever it carries that can be worn, at this price] \
+[--invite NAME: the first bot asks that character into a party] [--sociable: join whoever invites, trade with whoever asks, answer lines] \
+[--trade-for COPPER: in a trade, offer one thing carried and accept for that much coin]";
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
@@ -100,6 +111,9 @@ fn parse_args() -> Result<Args, String> {
         list_for_hire: None,
         hire: 0,
         sell_at: None,
+        invite: None,
+        sociable: false,
+        trade_for: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -207,6 +221,15 @@ fn parse_args() -> Result<Args, String> {
                     return Err("--sell-at: a price is more than nothing".into());
                 }
                 a.sell_at = Some(price);
+            }
+            "--invite" => a.invite = Some(value("--invite")?),
+            "--sociable" => a.sociable = true,
+            "--trade-for" => {
+                a.trade_for = Some(
+                    value("--trade-for")?
+                        .parse()
+                        .map_err(|e| format!("--trade-for: {e}"))?,
+                )
             }
             "--teams" => {
                 a.teams = value("--teams")?
@@ -322,10 +345,16 @@ async fn main() -> anyhow::Result<()> {
                         0
                     },
                     say: say_of(&args, i),
+                    social: gm_bot::bot::Social {
+                        invite: args.invite.clone().filter(|_| i == 0),
+                        sociable: args.sociable,
+                        trades: None,
+                    },
                 },
                 play: Duration::from_secs(args.secs),
                 list_for_hire: args.list_for_hire,
                 sell_at: args.sell_at,
+                trade_for: args.trade_for,
                 hire: args.hire,
             };
             set.spawn(async move {
@@ -472,6 +501,7 @@ async fn main() -> anyhow::Result<()> {
                 0
             },
             say: say_of(&args, i),
+            social: Default::default(),
         };
         let secs = args.secs;
         let web = web.clone();

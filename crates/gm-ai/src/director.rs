@@ -414,6 +414,30 @@ impl Director {
         self.events.push(DirectorEvent::Squad { commander });
     }
 
+    /// A human's party changes (PARTY.md 2): the number its body carries, and its
+    /// companions' with it. Whoever calls sees to it that the body is in no engaged
+    /// encounter ([`Director::engaged`]): a ledger never sees a body change sides.
+    pub fn set_party(&mut self, zone: &mut Zone, human: EntityId, party: u32) {
+        zone.set_party(human, party);
+        for m in self.squads.get(&human).into_iter().flatten() {
+            zone.set_party(m.id, party);
+        }
+    }
+
+    /// Whether a human, or any of its squad, is on the ledger of an engaged encounter.
+    pub fn engaged(&self, human: EntityId) -> bool {
+        self.in_encounter(human) || self.squad(human).iter().any(|m| self.in_encounter(m.id))
+    }
+
+    /// Whether a party is on the ledger of an engaged encounter: the roster of its fight
+    /// is closed, and nobody takes its number until the fight is over (PARTY.md 2).
+    pub fn party_engaged(&self, party: u32) -> bool {
+        self.encounters.iter().any(|e| {
+            e.phase == Phase::Engaged
+                && e.ledger.participants().any(|(_, line)| line.party == party)
+        })
+    }
+
     /// A human left the zone: its squad goes with it and nothing waits for it any more.
     pub fn human_left(&mut self, zone: &mut Zone, human: EntityId) {
         if let Some(members) = self.squads.remove(&human) {

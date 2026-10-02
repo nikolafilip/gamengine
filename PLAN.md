@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-10-02 (Phases 0–11 implemented; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-10-02 (Phases 0–12 implemented; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -497,7 +497,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account. **Done 2026-10-02** (11.10) |
 | 10 | The client's screens: login, characters, a new character from the archetypes, the game menu, chat, settings; UI scripts | a person with nothing but the program gets from a cold start into the town and on to another zone, on the desktop and in a browser, by clicking; no refusal ends the program. **Done 2026-10-02** (11.10) |
 | 11 | Possessions: the inventory, the storage and what is worn; gear's edge in the simulation (3.4); a stall looked at, bought from and sold at | a character buys a weapon at another's stall, wears it, and the zone's hits show the edge; the purchase by clicking, on the desktop and in a browser. **Done 2026-10-02** (11.10; the tavern and trade screens moved to 12, the buyer's coin is an operator's grant) |
-| 12 | *(proposed)* Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans; the tavern and a trade between two players as screens | two people clear the tutorial dungeon together and split what it drops, and one sells the other what it got |
+| 12 | Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans; the tavern and a trade between two players as screens | two people clear the tutorial dungeon together and split what it drops, and one sells the other what it got. **Done 2026-10-02** (11.10) |
 | 13 | *(proposed)* Sound | steps, hits and the town are heard, inside the size budgets of both targets |
 | ∞ | Content, balance, ops, community | permanent |
 
@@ -1195,6 +1195,105 @@ ranges are the spread over repeated runs). Possessions: the second of the phases
   buyer's coin in the acceptance is an operator's grant, not earned; the items gate has not run on CI's
   machines yet.
 
+**2026-10-02, Phase 12 done** (same machine; all numbers measured with the final build, none estimated;
+ranges are the spread over repeated runs). People together: the third of the phases a playable slice needs:
+- `docs/PARTY.md` v1 is the contract. **A party is the hub's**: two to five characters, the one who invited
+  first leads, anybody leaves, a party of one is dissolved; it holds from one zone to the next, and every
+  zone gives the same answer about it. A member that left the game stays of it for **two minutes** (`away`
+  on the page, from `offline_since`, which only going offline sets), then the hub's sweep (every ten
+  seconds) lets go of it. **One writer** makes every change (a lock in the hub, an advisory lock in the
+  database, rows in ascending order): **291–336 changes a second** with four parties made and unmade at
+  once, nothing deadlocked, nothing answered Busy. Every change is **numbered** from one sequence and the
+  number stamped on the party's row and on whoever joined or left: a zone keeps the largest number it has
+  per character and holds what the hub holds in whatever order claims, answers and notices reach it (the
+  hub test hears 24 rounds of a claim racing two leaves in the worst order, every other round ending in a
+  party of two). The asking zone is told the news as a notice too; a periodic save's answer carries the
+  number of the character's reading, and a zone that is behind asks (the repair, within 30 s).
+- **Rules are immutable in combat**: a body's party number changes only when it is on no engaged ledger
+  and the party it would join is on none either (**a fight's roster is closed**: whoever joins a party in a
+  fight fights as itself until it is over); somebody removed in the middle of a boss fight is paid as a
+  member of the party it fought in; and **nobody who left a fight comes back into it** while it is engaged
+  (a new body would be alive where the old one was dead and held; a second connection for a body in a fight
+  is turned away the same way). Among parties a kill is still split by damage; **within a party a member's
+  contribution is its work** (damage dealt, healing credited, blows taken, of it and its companions), so
+  that a tank and a mender are paid (proposed, section 12). Trials are for one player and a squad: a party
+  of people is told so at the pull.
+- **Channels**: `/p`, `/w NAME`, `/r` (which becomes `/w NAME ` as it is typed), `/invite`, `/leave`; all
+  chat, with chat's limits, relayed through the hub to wherever the hearers play, shown `[party] Ana: text`,
+  `[whisper] Ana: text`, `[to Bojan] text` (no name can begin with a bracket). `/ignore` holds for all of it.
+- **A trade is asked for standing together** (160 units, both asking within 30 s; the zone vouches, the
+  hub opens; one open trade per character), and **the window is the hub's**, seen by asking once a second.
+  What the person has **not agreed to** is marked (`new`; `taken back`, struck) until they accept again,
+  and what differs from the offer as it was **when Accept last armed** is `changed` (the quick swap is told
+  apart from an offer that grew). **Accept arms** only when the hub's three seconds are over *and* this
+  version has been on this screen for three *and* the view is under two seconds old. The coin is a row of
+  the offer, marked like any item. A trade ends when either is claimed by a zone, when an accept finds the
+  two apart, after ten idle minutes, or by either hand.
+- **The tavern** as a page: the list in the hub's words (`ironclad: colossus in plate`, `tank`), a hire
+  that **names the price it was shown** and **buys the build that was listed** (a listing keeps its build;
+  a listing whose build the content no longer has is neither shown nor sold), the character's hires,
+  listing and withdrawing. Owners are paid 70%, 30% burns, nothing is refunded (ECONOMY.md 11; the page
+  says so first).
+- **Protocol v7**: the control stream's two directions are two enums, `FromClient` and `FromZone` (`Hello`
+  0, `Reject` 14, `Kick` 25 keep their bytes); **the split saved 62,834 bytes** of the browser build and
+  dropping whole-message `{:?}` formats **27,741** more, which is the room this phase's screens were built
+  in. A health that is no longer sent is unsaid by writing the record whole (nothing had stopped sending one
+  before). Hub v1.8 (`ZoneParty`, four notices, `Saved`, `ZoneEconOp::TradeOpen`, `Hire { avatar, price }`,
+  `--party-away`), the players' messages v3, migration 0010.
+- **Screens**: the people (`P`; the rows keep their places while the page is up), the trade window (opened
+  by the zone's word over whatever was up), the tavern; the party under the squad on the HUD (health when
+  the wire carries it, the name alone when the body is here and it does not, `away` when it is not). A
+  frame with a page up on the integrated GPU at 1280×720, uncapped, in the town (three runs): the game
+  alone **0.36–0.37 ms**, the people **0.44–0.45**, the trade window **0.46–0.47**, the tavern
+  **0.45–0.46**: under a tenth of a millisecond for a page.
+- **Acceptance** (`scripts/check-party.sh --desktop --browser`): the simulation (two people at the Warden
+  as one party and as two; a tank and a mender over the member floor; a stranger in the cleave earning
+  nothing of another party's kill); the hub with a database (invitations and their limits, the readings
+  in order whatever races, the sweep, lines to where they are heard, the storm); two zones with clients
+  driven by hand (a party across zones, chat's limit over three kinds of line, a trade from across the
+  square refused and standing together opened, a trade ended by a claim, a fight whose roster is closed with
+  a joiner and a removal in its middle, nobody back into a fight they left); and by somebody who is not a
+  person: two bots form a party in the town, leave, meet again in the dungeon of the party and clear it
+  together in **120–149 s** (each with the zone's recruits), the hub splits the Warden's three
+  components and thirty copper between them, one of them goes back to the town, the hub lets go of the
+  one who stays away; then a character made at a real client, by UI script, asks the one in the town into
+  a party by the page, says a party's line and a whisper and reads the answers, buys the component the
+  other looted for three silver through the trade window (**6.2–6.3 s** from being in the party to the
+  trade being done, software GPU), hires an avatar in the tavern and leaves the party, on the desktop and
+  in both browser builds; the audit sound to the copper after all of it.
+- Reviews (PARTY.md 12). **Google AI Studio still answered HTTP 402**, so the design review and the code
+  review were done by independent agents. Design: 18 findings (3 High), all but two accepted, and they
+  changed the design before most of it was written: a fight's roster is closed and nobody comes back into
+  a fight they left (a member who died and was held could come back alive under the party's number); the
+  marks of the trade window stay until the person accepts again and Accept arms on time *shown* (they
+  used to drop at the moment Accept armed, and a swap had two seconds of red); the member's contribution
+  is work. Code, three reviewers: 36 findings (1 High, 9 Medium), 33 acted on. The High: **the tavern's
+  page made words of a listed build without validating it, and the hub is built with `panic = "abort"`:
+  a stale build in one listing and any player opening the page restarts the hub, again and again**. Also:
+  a hire pinned the price it was shown and not the build (the listing keeps its build now); work as a
+  party's contribution let a stranger standing in the boss's cleave take a `top`-list drop (among parties
+  by damage, as before); the offer lists cut names at eight characters and the gate's own trade was shown
+  cut and passed (the offers are one above the other, as wide as the panel, and the sizes test uses the
+  content's longest words); a stale "the coin is set" stood over "changed the offer" for ever; `/r` found
+  its target when Enter was pressed. Gemini should be run over PARTY.md and the diff once the account has
+  credit.
+- Tests: the workspace suite green (**344 tests**, 329 before); every earlier gate green on the
+  final build: netcode, matrix, swarm 5.1–5.7 ms mean / 8.6 ms p99 with 200 bots, perf 2,270 fps (peak RSS
+  124 MB), 100 avatars at 704 fps offline and 60 through the hub (vsync), dungeon (online, 33 checks),
+  anti-cheat (online and swarm: 66 µs for the recorder), web (both builds and through the hub: 60 fps, 166
+  and 274 ms to the first frame), screens (0.5 s to the town, 125 ms a round), items (0.6 s from `E` to
+  worn), people (43 checks).
+- Binaries (release, LTO): `gm-client` **9,483,040 bytes (9.04 MiB)**, 64,128 less than Phase 11's
+  9,547,168 (the split of the control enum); baseline updated.
+  Browser builds: WebGPU **977,242 bytes** (332,973 packed; 1 MiB budget, **71 KB left**, with the screens
+  of this phase in it: 28 KB *smaller* than Phase 11's), WebGL2 2,972,499 (906,803 packed).
+- Known limits (PARTY.md 10): no friends, no party finder, no loot rules beyond the split, no handing the
+  lead over, no trading at a distance, no place for the tavern in the town and no pages in its list; the
+  list of people not heard is the client's; chat's limit is per zone; whether somebody is in the game can
+  be asked by whispering; two lines of one speaker may swap; an owner can take a hired character back the
+  moment it was paid for; whether whispers reach somebody in a fight, and whether strangers may whisper at
+  all, is open; the people gate has not run on CI's machines yet.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -1234,5 +1333,13 @@ second per account), and it lists what is open: **what the 25% is** (a character
 and gem become what 5.3 names them and gear gets the penalties of 3.4 (both touch what a client
 predicts), that a caster's edge is smaller than a fighter's, whether the armour class moves from the
 build to the armour, whether a hired avatar wears its owner's gear, where the storage is reached from.
-Phases 12 and 13 in 11.8 are proposals, in the order a playable slice needs them.
+The people's numbers are **proposed** in `docs/PARTY.md` 11 (five to a party, a minute for an invitation,
+five waiting, two minutes away, the sweep, 30 s for a request to trade, 160 units of reach, ten idle
+minutes), and it lists what is open: **what a member's contribution is** (work, as built, within a party;
+damage alone before), **whether a party of people passes trials** (none, as built), **who invites** (the
+leader), **how long an absent member stays** (two minutes), **whether somebody who left a fight may come
+back into it** (not while it is engaged), **whether a party of five may bring five squads** to a boss tuned
+for one, **the tavern as a place** and **paying an owner by the time served**, and **whether whispers
+reach somebody in a fight or come from strangers at all**.
+Phase 13 in 11.8 is a proposal.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

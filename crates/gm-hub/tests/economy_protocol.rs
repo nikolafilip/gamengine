@@ -149,6 +149,8 @@ async fn the_economy_over_the_wire() {
             session_secs: 3600,
             auth_per_minute: 100.0,
             econ_per_second: 1000.0,
+            party_sweep: std::time::Duration::from_millis(300),
+            party_away: std::time::Duration::from_secs(2),
             items: items.clone(),
             max_coin_grant: 10_000,
             models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
@@ -264,15 +266,14 @@ async fn the_economy_over_the_wire() {
         panic!("craft")
     };
 
-    // The trade window, with the real 3 s cooldown.
-    let EconReply::Id(trade) = econ(
-        &smith_conn,
-        smith_s,
-        smith,
-        EconOp::TradeOpen { with: buyer },
-    )
-    .await
-    .unwrap() else {
+    // The trade window, with the real 3 s cooldown. It is opened by the zone both play
+    // in (PARTY.md 6): no other zone can, and nobody can for somebody elsewhere.
+    let open = ZoneEconOp::TradeOpen { a: smith, b: buyer };
+    assert_eq!(
+        zone_econ(&other_zone, open.clone()).await,
+        Err(HubError::Unauthorized)
+    );
+    let EconReply::Id(trade) = zone_econ(&town, open).await.unwrap() else {
         panic!("trade")
     };
     econ(
@@ -295,6 +296,7 @@ async fn the_economy_over_the_wire() {
         version,
         mine,
         theirs,
+        ..
     } = econ(&buyer_conn, buyer_s, buyer, EconOp::TradeView { trade })
         .await
         .unwrap()

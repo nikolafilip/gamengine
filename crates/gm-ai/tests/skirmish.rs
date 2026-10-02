@@ -55,6 +55,7 @@ fn run(squad: &[&str], commander: &str, fights: bool, seed: u64) -> Outcome {
         tune: None,
         split: true,
         verbose: std::env::var("GM_VERBOSE").is_ok(),
+        ally: None,
     })
 }
 

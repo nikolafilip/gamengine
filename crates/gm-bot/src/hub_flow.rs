@@ -47,6 +47,9 @@ pub struct HubFlowConfig {
     /// Keep the stall: whatever the character carries that can be worn and is not, is put
     /// up for sale at this price as it comes to hand (ITEMS.md 7).
     pub sell_at: Option<i64>,
+    /// In a trade the zone opened: offer one thing the character carries, and accept when
+    /// the other side offers this much coin or more (PARTY.md 9).
+    pub trade_for: Option<i64>,
 }
 
 /// A task that ends when this is dropped.
@@ -208,6 +211,7 @@ pub async fn run_hub_flow(cfg: HubFlowConfig) -> anyhow::Result<HubFlowReport> {
             match hub
                 .request(&econ(EconOp::Hire {
                     avatar: entry.character,
+                    price: entry.price,
                 }))
                 .await
             {
@@ -290,10 +294,75 @@ pub async fn run_hub_flow(cfg: HubFlowConfig) -> anyhow::Result<HubFlowReport> {
             }
         }))
     });
+    // A trader sells in the window the zone opens: one thing it carries, for the coin it
+    // wants. It looks at the trade twice a second, as a person's window does once.
+    let (trades_tx, mut trades_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+    let _trader = cfg.trade_for.map(|want| {
+        let hub = hub.clone();
+        Keeper(tokio::spawn(async move {
+            let ask = |op: EconOp| HubRequest::Econ {
+                session,
+                character,
+                op,
+            };
+            while let Some(trade) = trades_rx.recv().await {
+                let mut offered = false;
+                for _ in 0..240 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let Ok(HubResponse::Econ(EconReply::TradeView {
+                        state,
+                        version,
+                        wait_ms,
+                        mine,
+                        theirs,
+                        ..
+                    })) = hub.request(&ask(EconOp::TradeView { trade })).await
+                    else {
+                        continue;
+                    };
+                    if state != gm_hub_proto::protocol::TRADE_OPEN {
+                        let how = if state == gm_hub_proto::protocol::TRADE_COMMITTED {
+                            "committed"
+                        } else {
+                            "called off"
+                        };
+                        info!(trade, how, "trade over");
+                        break;
+                    }
+                    if !offered {
+                        // The newest thing it carries (whoever runs the bot knows which
+                        // that is); until the hub has taken the offer, nothing is
+                        // accepted, and a bot with nothing to offer accepts nothing.
+                        if let Ok(HubResponse::Econ(EconReply::Holder { items, .. })) =
+                            hub.request(&ask(EconOp::Inventory)).await
+                            && let Some(item) =
+                                items.iter().filter(|i| !i.worn).max_by_key(|i| i.id)
+                        {
+                            let offer = EconOp::TradeOfferItem {
+                                trade,
+                                item: item.id,
+                            };
+                            offered = hub.request(&ask(offer)).await.is_ok();
+                            info!(trade, item = item.id, template = %item.template, done = offered, "offered");
+                        } else {
+                            info!(trade, "nothing to offer");
+                        }
+                        continue;
+                    }
+                    if theirs.coin >= want && wait_ms == 0 && !mine.accepted && !mine.items.is_empty() {
+                        let accept = EconOp::TradeAccept { trade, version };
+                        let answer = hub.request(&ask(accept)).await;
+                        info!(trade, coin = theirs.coin, "accepted: {answer:?}");
+                    }
+                }
+            }
+        }))
+    });
     let name = cfg.character.clone();
     let mut remaining = cfg.play;
     let first_run = cfg.travel_after.unwrap_or(cfg.play).min(cfg.play);
     let mut bot_cfg = cfg.clone();
+    bot_cfg.bot.social.trades = Some(trades_tx);
     bot_cfg.bot.travel_to = cfg.travel_to.clone();
     bot_cfg.bot.travel_after_ticks = cfg
         .travel_after
@@ -318,6 +387,7 @@ pub async fn run_hub_flow(cfg: HubFlowConfig) -> anyhow::Result<HubFlowReport> {
         out.reports.push(report);
     }
     drop(_keeper);
+    drop(_trader);
     // What the trip left the character with.
     if let HubResponse::Econ(EconReply::Holder { coin, items }) =
         hub.request(&econ(EconOp::Inventory)).await?

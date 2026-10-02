@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use gm_hub_proto::protocol::{
     CharacterId, CharacterState, EconReply, GearReading, HiredAvatar, HubError, HubNotice,
-    HubRequest, HubResponse, ModelRef, SessionToken, StallSummary, TokenPayload, ZoneEconOp,
-    ZoneId, ZoneTicket, now_secs,
+    HubRequest, HubResponse, ModelRef, PartyReading, PartyReply, SessionToken, StallSummary,
+    TokenPayload, ZoneEconOp, ZoneId, ZonePartyOp, ZoneTicket, now_secs,
 };
 use gm_hub_proto::{HubClient, HubClientError, TokenError, TokenVerifier};
 use tokio::sync::mpsc;
@@ -60,6 +60,8 @@ pub struct Claimed {
     pub squad: Vec<HiredAvatar>,
     /// What its worn items do to damage (ITEMS.md 3.3).
     pub gear: GearReading,
+    /// The party it is in (PARTY.md 3).
+    pub party: PartyReading,
 }
 
 /// How long a stopping zone waits for the hub to take one last thing.
@@ -118,6 +120,7 @@ impl HubLink {
                 model,
                 squad,
                 gear,
+                party,
             }) => Ok(Claimed {
                 character,
                 name,
@@ -126,6 +129,7 @@ impl HubLink {
                 model,
                 squad,
                 gear,
+                party,
             }),
             Ok(other) => Err(format!("unexpected hub answer {other:?}")),
             Err(HubClientError::Refused(e)) => Err(e.to_string()),
@@ -133,25 +137,30 @@ impl HubLink {
         }
     }
 
-    /// Save a character. `false`: the hub says the character is not this zone's to save
-    /// (it was taken out of here, or never arrived as far as the hub knows).
-    pub async fn save(&self, character: CharacterId, state: CharacterState, leaving: bool) -> bool {
-        match self
-            .client
-            .ok(&HubRequest::Save {
-                character,
-                state,
-                leaving,
-            })
-            .await
-        {
-            Ok(()) => true,
+    /// Save a character. `Err`: the hub says the character is not this zone's to save
+    /// (it was taken out of here, or never arrived as far as the hub knows). `Ok`: the
+    /// number of the hub's present reading of its party (PARTY.md 3.2), 0 when the hub
+    /// did not say (a last save, a hub that could not be asked).
+    pub async fn save(
+        &self,
+        character: CharacterId,
+        state: CharacterState,
+        leaving: bool,
+    ) -> Result<u64, ()> {
+        let req = HubRequest::Save {
+            character,
+            state,
+            leaving,
+        };
+        match self.client.request(&req).await {
+            Ok(HubResponse::Saved { party }) => Ok(party),
+            Ok(_) => Ok(0),
             Err(e) => {
                 warn!(character, leaving, "save refused: {e}");
-                !matches!(
-                    e,
-                    HubClientError::Refused(gm_hub_proto::protocol::HubError::NotFound)
-                )
+                match e {
+                    HubClientError::Refused(HubError::NotFound) => Err(()),
+                    _ => Ok(0),
+                }
             }
         }
     }
@@ -290,6 +299,33 @@ impl HubLink {
                 other => Self::words(&other, "wear"),
             }),
             other => Err(Self::trouble("wear", &format!("{other:?}"))),
+        }
+    }
+
+    /// Something about the party of a character playing here (PARTY.md 3.2). The words
+    /// of a refusal are for the player.
+    pub async fn party(&self, op: ZonePartyOp) -> Result<PartyReply, String> {
+        match self.client.request(&HubRequest::ZoneParty(op)).await {
+            Ok(HubResponse::Party(reply)) => Ok(reply),
+            Err(HubClientError::Refused(e)) => Err(match e {
+                HubError::Invalid(why) => why,
+                other => Self::words(&other, "party"),
+            }),
+            other => Err(Self::trouble("party", &format!("{other:?}"))),
+        }
+    }
+
+    /// Open a trade between two characters the zone saw stand together and both ask
+    /// (PARTY.md 6): the hub's id of it.
+    pub async fn trade_open(&self, a: CharacterId, b: CharacterId) -> Result<i64, String> {
+        let op = ZoneEconOp::TradeOpen { a, b };
+        match self.client.request(&HubRequest::ZoneEcon(op)).await {
+            Ok(HubResponse::Econ(EconReply::Id(trade))) => Ok(trade),
+            Err(HubClientError::Refused(e)) => Err(match e {
+                HubError::Invalid(why) => why,
+                other => Self::words(&other, "trade"),
+            }),
+            other => Err(Self::trouble("trade", &format!("{other:?}"))),
         }
     }
 
@@ -531,6 +567,20 @@ impl HubLink {
                     HubNotice::HireEnded { hirer, hire } => {
                         ClientEvent::HubHireEnded { hirer, hire }
                     }
+                    HubNotice::Party(news) => ClientEvent::HubParty(news),
+                    HubNotice::Invited { to, from } => ClientEvent::HubInvited { to, from },
+                    HubNotice::Declined { to, by } => ClientEvent::HubDeclined { to, by },
+                    HubNotice::Heard {
+                        to,
+                        channel,
+                        from,
+                        text,
+                    } => ClientEvent::HubHeard {
+                        to,
+                        channel,
+                        from,
+                        text,
+                    },
                 };
                 if tx.send(ev).await.is_err() {
                     break;

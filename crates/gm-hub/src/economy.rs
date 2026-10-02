@@ -163,6 +163,42 @@ pub enum TradeStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TradeState {
+    Open,
+    Committed,
+    Cancelled,
+}
+
+/// One side of a trade: its coin, whether it accepted, what it offers.
+pub type TradeSide = (i64, bool, Vec<Item>);
+
+/// A trade as one of its two sees it (`Economy::trade_view`).
+#[derive(Clone, Debug)]
+pub struct TradeSeen {
+    pub state: TradeState,
+    /// The version an accept must name.
+    pub version: i32,
+    /// Milliseconds until an accept is taken (the mutation lock, ECONOMY.md 6).
+    pub wait_ms: u32,
+    /// The other's name.
+    pub with: String,
+    /// Both play in one zone.
+    pub together: bool,
+    pub mine: TradeSide,
+    pub theirs: TradeSide,
+}
+
+/// A trade nobody has touched for this long is called off.
+pub const TRADE_IDLE_MINUTES: i32 = 10;
+/// What a hirer is told when the price is no longer the one it was shown.
+pub const PRICE_CHANGED: &str = "the price changed: look again";
+/// The listing's build cannot be played any more (PARTY.md 7).
+pub const NOT_FOR_HIRE: &str = "that character is not for hire now: its owner must list it again";
+
+/// What somebody is told who accepts a trade whose other side has gone elsewhere.
+pub const NOT_HERE: &str = "the other is not here any more: the trade is called off";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Supply {
     /// Coin in the world: every holder except the source and the sink.
     pub circulating: i64,
@@ -177,6 +213,9 @@ pub struct Economy {
     pool: PgPool,
     /// The trade window's accept cooldown (ECONOMY.md 6); 3 s in production.
     pub trade_cooldown: Duration,
+    /// An accept is taken only while both characters play in one zone (ECONOMY.md 6);
+    /// off in the tests of the window itself, whose characters are rows and play nowhere.
+    pub trades_need_a_zone: bool,
 }
 
 /// The layer a material belongs to: materials are named `layer/name` (`core/iron`).
@@ -667,6 +706,7 @@ impl Economy {
         Economy {
             pool,
             trade_cooldown: Duration::from_secs(3),
+            trades_need_a_zone: true,
         }
     }
 
@@ -1364,6 +1404,59 @@ impl Economy {
 
     // ---------- trade window (ECONOMY.md 6) ----------
 
+    /// Two characters that play in `zone` open a trade (PARTY.md 6): the zone saw them
+    /// stand together and both ask. A character has one open trade: whatever either
+    /// still had open is called off.
+    pub async fn trade_open_in(&self, a: i64, b: i64, zone: &str) -> Result<i64, EconError> {
+        if a == b {
+            return Err(EconError::Invalid("a trade needs two characters".into()));
+        }
+        let mut tx = self.begin().await?;
+        // Characters first, ascending, as everywhere; whole, so that two openings for one
+        // character come one after the other and each calls the other's off.
+        let here: Vec<i64> = sqlx::query(
+            "select id from characters where id in ($1, $2) and location_kind = 'zone' \
+             and location_zone = $3 order by id for update",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(zone)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(internal)?
+        .iter()
+        .map(|r| r.try_get("id").map_err(internal))
+        .collect::<Result<_, _>>()?;
+        if here.len() != 2 {
+            return Err(EconError::Forbidden);
+        }
+        character_holder(&mut tx, a).await?;
+        character_holder(&mut tx, b).await?;
+        sqlx::query(
+            "update trades set state = 'cancelled' where state = 'open' \
+             and (a_character in ($1, $2) or b_character in ($1, $2))",
+        )
+        .bind(a)
+        .bind(b)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+        let id: i64 = sqlx::query(
+            "insert into trades (a_character, b_character) values ($1, $2) returning id",
+        )
+        .bind(a)
+        .bind(b)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal)?
+        .try_get("id")
+        .map_err(internal)?;
+        tx.commit().await.map_err(internal)?;
+        Ok(id)
+    }
+
+    /// A trade between two characters wherever they are (tests of the window itself; a
+    /// player's trade is opened by its zone, `trade_open_in`).
     pub async fn trade_open(&self, a: i64, b: i64) -> Result<i64, EconError> {
         if a == b {
             return Err(EconError::Invalid("a trade needs two characters".into()));
@@ -1512,20 +1605,23 @@ impl Economy {
         tx.commit().await.map_err(internal)
     }
 
-    /// What a participant sees: the version to accept, then their own side and the other
-    /// side as `(coin, accepted, items)`.
-    #[allow(clippy::type_complexity)]
-    pub async fn trade_view(
-        &self,
-        trade: i64,
-        character: i64,
-    ) -> Result<(i32, (i64, bool, Vec<Item>), (i64, bool, Vec<Item>)), EconError> {
-        let mut tx = self.begin().await?;
+    /// What a participant sees of a trade, whatever its state (PARTY.md 6).
+    pub async fn trade_view(&self, trade: i64, character: i64) -> Result<TradeSeen, EconError> {
+        // Three statements and no transaction: a window asks for this once a second
+        // (PARTY.md 6), and read committed would give a transaction no one view anyway. An
+        // offer that changes between the statements is seen with a version the accept of
+        // which is refused ("the offer changed").
         let r = sqlx::query(
-            "select a_character, b_character, a_coin, b_coin, a_accepted, b_accepted, version from trades where id = $1",
+            "select t.a_character, t.b_character, t.a_coin, t.b_coin, t.a_accepted, t.b_accepted, \
+             t.version, t.state, extract(epoch from (now() - t.changed_at))::float8 as age, \
+             ca.name as a_name, cb.name as b_name, \
+             (ca.location_kind = 'zone' and cb.location_kind = 'zone' \
+              and ca.location_zone = cb.location_zone) as together \
+             from trades t join characters ca on ca.id = t.a_character \
+             join characters cb on cb.id = t.b_character where t.id = $1",
         )
         .bind(trade)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&self.pool)
         .await
         .map_err(internal)?
         .ok_or(EconError::NotFound)?;
@@ -1534,28 +1630,53 @@ impl Economy {
         if character != a && character != b {
             return Err(EconError::Forbidden);
         }
-        let mut sides = Vec::new();
-        for side in ["a", "b"] {
-            let rows = sqlx::query(
-                "select i.id, i.template from trade_items t join items i on i.id = t.item_id \
-                 where t.trade_id = $1 and t.side = $2 order by i.id",
-            )
-            .bind(trade)
-            .bind(side)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(internal)?;
-            let mut items = Vec::with_capacity(rows.len());
-            for row in rows {
-                let id: i64 = row.try_get("id").map_err(internal)?;
-                items.push(Item {
-                    id,
+        // Both offers' items, then every component of all of them, in one statement each.
+        let rows = sqlx::query(
+            "select t.side, i.id, i.template from trade_items t join items i on i.id = t.item_id \
+             where t.trade_id = $1 order by t.side, i.id",
+        )
+        .bind(trade)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        let mut offered: Vec<(String, Item)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            offered.push((
+                row.try_get("side").map_err(internal)?,
+                Item {
+                    id: row.try_get("id").map_err(internal)?,
                     template: row.try_get("template").map_err(internal)?,
-                    components: components_of(&mut tx, id).await?,
+                    components: Vec::new(),
                     // A worn item is in no offer: wearing it took it out of every one.
                     worn: false,
+                },
+            ));
+        }
+        let ids: Vec<i64> = offered.iter().map(|(_, i)| i.id).collect();
+        let parts = sqlx::query(
+            "select item_id, layer, material from item_components where item_id = any($1) \
+             order by item_id, array_position(array['shard','core','catalyst','frame','gem'], layer), position",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        for part in parts {
+            let item: i64 = part.try_get("item_id").map_err(internal)?;
+            if let Some((_, i)) = offered.iter_mut().find(|(_, i)| i.id == item) {
+                i.components.push(Component {
+                    layer: part.try_get("layer").map_err(internal)?,
+                    material: part.try_get("material").map_err(internal)?,
                 });
             }
+        }
+        let mut sides = Vec::new();
+        for side in ["a", "b"] {
+            let items: Vec<Item> = offered
+                .iter()
+                .filter(|(s, _)| s == side)
+                .map(|(_, i)| i.clone())
+                .collect();
             let coin: i64 = r
                 .try_get(format!("{side}_coin").as_str())
                 .map_err(internal)?;
@@ -1564,15 +1685,62 @@ impl Economy {
                 .map_err(internal)?;
             sides.push((coin, accepted, items));
         }
-        let version: i32 = r.try_get("version").map_err(internal)?;
+        let age: f64 = r.try_get("age").map_err(internal)?;
+        let wait = (self.trade_cooldown.as_secs_f64() - age).max(0.0);
+        let state: String = r.try_get("state").map_err(internal)?;
+        let together: Option<bool> = r.try_get("together").map_err(internal)?;
+        let (a_name, b_name): (String, String) = (
+            r.try_get("a_name").map_err(internal)?,
+            r.try_get("b_name").map_err(internal)?,
+        );
         let theirs = sides.pop().unwrap();
         let mine = sides.pop().unwrap();
-        tx.commit().await.map_err(internal)?;
-        Ok(if character == a {
-            (version, mine, theirs)
+        let (mine, theirs, with) = if character == a {
+            (mine, theirs, b_name)
         } else {
-            (version, theirs, mine)
+            (theirs, mine, a_name)
+        };
+        Ok(TradeSeen {
+            state: match state.as_str() {
+                "open" => TradeState::Open,
+                "committed" => TradeState::Committed,
+                _ => TradeState::Cancelled,
+            },
+            version: r.try_get("version").map_err(internal)?,
+            wait_ms: (wait * 1000.0).ceil() as u32,
+            with,
+            together: together.unwrap_or(false),
+            mine,
+            theirs,
         })
+    }
+
+    /// A character is somewhere else now (a zone claimed it): whatever trade it had open
+    /// is called off (PARTY.md 6). Returns how many.
+    pub async fn trades_end_of(&self, character: i64) -> Result<u64, EconError> {
+        Ok(sqlx::query(
+            "update trades set state = 'cancelled' where state = 'open' \
+             and (a_character = $1 or b_character = $1)",
+        )
+        .bind(character)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?
+        .rows_affected())
+    }
+
+    /// Trades nobody has touched for `TRADE_IDLE_MINUTES` are called off: none waits,
+    /// accepted on one side, for a day when its two meet again. Returns how many.
+    pub async fn trades_expire(&self) -> Result<u64, EconError> {
+        Ok(sqlx::query(
+            "update trades set state = 'cancelled' where state = 'open' \
+             and changed_at < now() - make_interval(mins => $1)",
+        )
+        .bind(TRADE_IDLE_MINUTES)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?
+        .rows_affected())
     }
 
     /// The offer version to show and to accept.
@@ -1611,17 +1779,54 @@ impl Economy {
         version: i32,
     ) -> Result<TradeStatus, EconError> {
         let mut tx = self.begin().await?;
-        // One lock order everywhere: holders, then the trade row, then items.
-        let who = sqlx::query("select a_character, b_character from trades where id = $1")
+        // One lock order everywhere: the characters, their holders, the trade row, items.
+        // (Read without a lock here: whose it is and whether it is open; a stranger is
+        // told nothing more than Forbidden, and changes nothing.)
+        let who = sqlx::query("select a_character, b_character, state from trades where id = $1")
             .bind(trade)
             .fetch_optional(&mut *tx)
             .await
             .map_err(internal)?
             .ok_or(EconError::NotFound)?;
-        let early_a =
-            character_holder(&mut tx, who.try_get("a_character").map_err(internal)?).await?;
-        let early_b =
-            character_holder(&mut tx, who.try_get("b_character").map_err(internal)?).await?;
+        let (first, second): (i64, i64) = (
+            who.try_get("a_character").map_err(internal)?,
+            who.try_get("b_character").map_err(internal)?,
+        );
+        if character != first && character != second {
+            return Err(EconError::Forbidden);
+        }
+        let state: String = who.try_get("state").map_err(internal)?;
+        if state != "open" {
+            return Err(EconError::State(state));
+        }
+        // A trade is between two characters in one zone (ECONOMY.md 6): held against a
+        // change of where either is until this is decided.
+        let places = sqlx::query(
+            "select location_kind, location_zone from characters where id in ($1, $2) \
+             order by id for share",
+        )
+        .bind(first)
+        .bind(second)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(internal)?;
+        let place = |i: usize| -> Result<Option<String>, EconError> {
+            let kind: String = places[i].try_get("location_kind").map_err(internal)?;
+            let zone: Option<String> = places[i].try_get("location_zone").map_err(internal)?;
+            Ok(zone.filter(|_| kind == "zone"))
+        };
+        let together = places.len() == 2 && place(0)?.is_some() && place(0)? == place(1)?;
+        if self.trades_need_a_zone && !together {
+            sqlx::query("update trades set state = 'cancelled' where id = $1 and state = 'open'")
+                .bind(trade)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?;
+            tx.commit().await.map_err(internal)?;
+            return Err(EconError::State(NOT_HERE.into()));
+        }
+        let early_a = character_holder(&mut tx, first).await?;
+        let early_b = character_holder(&mut tx, second).await?;
         lock_holders(&mut tx, &[early_a, early_b]).await?;
         let (side, a, b) = Self::trade_side(&mut tx, trade, character).await?;
         let r = sqlx::query(
@@ -2501,11 +2706,40 @@ impl Economy {
 
     // ---------- tavern hires (ECONOMY.md 11) ----------
 
+    /// List a character in the tavern at a price. The listing keeps the build the
+    /// character has now (PARTY.md 7): that is what the tavern shows and what a hire
+    /// buys, whatever its owner makes of the character afterwards. Listing again lists
+    /// the build of that moment.
     pub async fn hire_list(&self, character: i64, price: i64) -> Result<(), EconError> {
         check_price(price)?;
-        sqlx::query("insert into hire_listings (character_id, price) values ($1, $2) on conflict (character_id) do update set price = excluded.price")
+        sqlx::query(
+            "insert into hire_listings (character_id, price, build) \
+             select $1, $2, c.build from characters c where c.id = $1 \
+             on conflict (character_id) do update set price = excluded.price, build = excluded.build",
+        )
+        .bind(character)
+        .bind(price)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?;
+        Ok(())
+    }
+
+    /// The price a character is listed for hire at, if it is.
+    pub async fn hire_listed(&self, character: i64) -> Result<Option<i64>, EconError> {
+        sqlx::query("select price from hire_listings where character_id = $1")
             .bind(character)
-            .bind(price)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(internal)?
+            .map(|r| r.try_get("price").map_err(internal))
+            .transpose()
+    }
+
+    /// Take a character off the tavern's list. Hires of it that run are not ended.
+    pub async fn hire_unlist(&self, character: i64) -> Result<(), EconError> {
+        sqlx::query("delete from hire_listings where character_id = $1")
+            .bind(character)
             .execute(&self.pool)
             .await
             .map_err(internal)?;
@@ -2518,15 +2752,22 @@ impl Economy {
     /// squad capacity (COMPANIONS.md 3.3): a hire beyond it, or a second copy of an avatar
     /// already in the squad, is refused before any coin moves. Returns the hire's id and the
     /// amount burned.
+    ///
+    /// `shown`: the price the hirer was shown (PARTY.md 7); when the listing's is another
+    /// now, nothing is hired. `None`: whatever it costs (the hub's own callers).
+    /// `fit`: whether the listed build (what the hire buys) can be played at all; one that
+    /// cannot (the content changed under it) is not hired, and nothing is paid.
     pub async fn hire(
         &self,
         hirer: i64,
         avatar: i64,
         capacity: usize,
+        shown: Option<i64>,
+        fit: impl Fn(&serde_json::Value) -> bool,
     ) -> Result<(i64, i64), EconError> {
         let mut tx = self.begin().await?;
         let r = sqlx::query(
-            "select l.price, c.account_id, c.location_kind from hire_listings l join characters c on c.id = l.character_id \
+            "select l.price, l.build, c.account_id, c.location_kind from hire_listings l join characters c on c.id = l.character_id \
              where l.character_id = $1 for update of l, c",
         )
         .bind(avatar)
@@ -2535,6 +2776,13 @@ impl Economy {
         .map_err(internal)?
         .ok_or(EconError::NotFound)?;
         let price: i64 = r.try_get("price").map_err(internal)?;
+        if shown.is_some_and(|shown| shown != price) {
+            return Err(EconError::State(PRICE_CHANGED.into()));
+        }
+        let build: Option<serde_json::Value> = r.try_get("build").map_err(internal)?;
+        if !build.as_ref().is_some_and(&fit) {
+            return Err(EconError::State(NOT_FOR_HIRE.into()));
+        }
         let avatar_account: i64 = r.try_get("account_id").map_err(internal)?;
         let location: String = r.try_get("location_kind").map_err(internal)?;
         if location != "offline" {
@@ -2571,16 +2819,21 @@ impl Economy {
         if squad.len() >= capacity {
             return Err(EconError::State("your squad is full".into()));
         }
-        let hire_id: i64 = sqlx::query("insert into hires (avatar_character, hirer_character, price, burned) values ($1, $2, $3, $4) returning id")
-            .bind(avatar)
-            .bind(hirer)
-            .bind(price)
-            .bind(burn)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(internal)?
-            .try_get("id")
-            .map_err(internal)?;
+        // What is hired is what was listed: the hire keeps the listing's build.
+        let hire_id: i64 = sqlx::query(
+            "insert into hires (avatar_character, hirer_character, price, burned, build) \
+             values ($1, $2, $3, $4, $5) returning id",
+        )
+        .bind(avatar)
+        .bind(hirer)
+        .bind(price)
+        .bind(burn)
+        .bind(build)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal)?
+        .try_get("id")
+        .map_err(internal)?;
         move_coin(&mut tx, hirer_h, sink, burn, "hire_burn", hire_id).await?;
         move_coin(&mut tx, hirer_h, avatar_h, price - burn, "hire", hire_id).await?;
         tx.commit().await.map_err(internal)?;
@@ -2590,7 +2843,7 @@ impl Economy {
     /// The active hires of `hirer`, oldest first (COMPANIONS.md 3.3).
     pub async fn squad(&self, hirer: i64) -> Result<Vec<ActiveHire>, EconError> {
         let rows = sqlx::query(
-            "select h.id, h.avatar_character, c.name, c.build, \
+            "select h.id, h.avatar_character, c.name, coalesce(h.build, c.build) as build, \
              extract(epoch from h.at + make_interval(hours => $2))::bigint as expires \
              from hires h join characters c on c.id = h.avatar_character \
              where h.hirer_character = $1 and h.ended is null and h.at > now() - make_interval(hours => $2) \
@@ -2657,11 +2910,14 @@ impl Economy {
 
     /// The tavern list, avatars hired three or more times in the last 12 h sorted last
     /// (diminishing priority).
+    /// The tavern's list: every listed character whose owner is offline, with the build
+    /// its listing was made with (a listing made before builds were kept with them is
+    /// not served: its owner lists again).
     pub async fn tavern(&self) -> Result<Vec<TavernRow>, EconError> {
         let rows = sqlx::query(
-            "select l.character_id, c.name, c.build, l.price, (select count(*) from hires h where h.avatar_character = l.character_id \
+            "select l.character_id, c.name, l.build, l.price, (select count(*) from hires h where h.avatar_character = l.character_id \
              and h.at > now() - make_interval(hours => $1)) as recent from hire_listings l \
-             join characters c on c.id = l.character_id where c.location_kind = 'offline' \
+             join characters c on c.id = l.character_id where c.location_kind = 'offline' and l.build is not null \
              order by (select count(*) from hires h where h.avatar_character = l.character_id \
              and h.at > now() - make_interval(hours => $1)) >= $2, l.price, l.character_id limit 200",
         )

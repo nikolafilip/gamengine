@@ -253,6 +253,7 @@ pub fn play(m: Match) -> Outcome {
                 aim: Default::default(),
                 report_after_ticks: 0,
                 say: None,
+                social: Default::default(),
             };
             let report = run_bot(
                 &endpoint,

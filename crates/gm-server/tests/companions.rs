@@ -119,10 +119,12 @@ fn flow(
             aim: Default::default(),
             report_after_ticks: 0,
             say: None,
+            social: Default::default(),
         },
         play: Duration::ZERO,
         list_for_hire: None,
         sell_at: None,
+        trade_for: None,
         hire: 0,
     }
 }
@@ -156,6 +158,8 @@ async fn a_solo_player_clears_the_dungeon_with_three_hired_avatars() {
             session_secs: 3600,
             auth_per_minute: 100.0,
             econ_per_second: 1000.0,
+            party_sweep: std::time::Duration::from_millis(300),
+            party_away: std::time::Duration::from_secs(2),
             items: Default::default(),
             max_coin_grant: 10_000,
             models_dir: std::env::temp_dir()

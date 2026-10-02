@@ -23,7 +23,7 @@ use gm_hub::protocol::{
 use gm_hub::{Db, HubClient, HubConfig, HubKey, IngestMode};
 use gm_net::PROTOCOL_VERSION;
 use gm_net::client::ClientState;
-use gm_net::control::{self, Control, StallEntry};
+use gm_net::control::{self, FromClient, FromZone, StallEntry};
 use gm_net::transport::{Identity, SERVER_NAME, client_config, hub_server_config, server_config};
 use gm_server::{HubLink, HubLinkConfig, ZoneConfig, ZoneWorld};
 use quinn::rustls::pki_types::CertificateDer;
@@ -46,11 +46,11 @@ const GATE: &str = "one thing at a time: try again in a moment";
 struct Shared {
     yaw: f32,
     buttons: u16,
-    say: Vec<Control>,
+    say: Vec<FromClient>,
     health: i32,
     alive: bool,
     synced: bool,
-    heard: Vec<Control>,
+    heard: Vec<FromZone>,
     stalls: Vec<StallEntry>,
 }
 
@@ -75,7 +75,7 @@ impl Hand {
         let (mut send, mut recv) = conn.open_bi().await.unwrap();
         control::send(
             &mut send,
-            &Control::Hello {
+            &FromClient::Hello {
                 version: PROTOCOL_VERSION as u16,
                 name: name.to_string(),
                 token: bitcode::encode(&ticket.token),
@@ -86,11 +86,11 @@ impl Hand {
         .await
         .unwrap();
         let (entity, hz) = match control::recv(&mut recv).await.unwrap() {
-            Some(Control::Welcome { entity, hz, .. }) => (entity, hz),
+            Some(FromZone::Welcome { entity, hz, .. }) => (entity, hz),
             other => panic!("{name}: no welcome: {other:?}"),
         };
         let (pack, own, team) = match control::recv(&mut recv).await.unwrap() {
-            Some(Control::Content { pack, own, team }) => (pack, own, team),
+            Some(FromZone::Content { pack, own, team }) => (pack, own, team),
             other => panic!("{name}: no content: {other:?}"),
         };
         let rate = TickRate::new(hz as u32);
@@ -144,9 +144,9 @@ impl Hand {
                         Ok(Some(msg)) => {
                             let mut s = seen.lock().unwrap();
                             match &msg {
-                                Control::Stalls(list) => s.stalls = list.clone(),
-                                Control::StallOpened(stall) => s.stalls.push(stall.clone()),
-                                Control::StallClosed(id) => s.stalls.retain(|x| x.id != *id),
+                                FromZone::Stalls(list) => s.stalls = list.clone(),
+                                FromZone::StallOpened(stall) => s.stalls.push(stall.clone()),
+                                FromZone::StallClosed(id) => s.stalls.retain(|x| x.id != *id),
                                 _ => {}
                             }
                             s.heard.push(msg);
@@ -182,13 +182,13 @@ impl Hand {
     }
 
     /// Say something to the zone and wait for its answer to it.
-    async fn ask(&self, msg: Control) -> Result<(), String> {
+    async fn ask(&self, msg: FromClient) -> Result<(), String> {
         self.ask_all(vec![msg]).await.remove(0)
     }
 
     /// Say several things at once (they reach the zone within one of its ticks) and wait
     /// for an answer to each, in the order the zone gave them.
-    async fn ask_all(&self, msgs: Vec<Control>) -> Vec<Result<(), String>> {
+    async fn ask_all(&self, msgs: Vec<FromClient>) -> Vec<Result<(), String>> {
         let n = msgs.len();
         {
             let mut s = self.shared.lock().unwrap();
@@ -200,9 +200,9 @@ impl Hand {
                 .heard
                 .iter()
                 .filter_map(|m| match m {
-                    Control::BuyResult { result, .. }
-                    | Control::WearResult { result, .. }
-                    | Control::StallResult(result) => Some(result.clone()),
+                    FromZone::BuyResult { result, .. }
+                    | FromZone::WearResult { result, .. }
+                    | FromZone::StallResult(result) => Some(result.clone()),
                     _ => None,
                 })
                 .collect();
@@ -215,7 +215,7 @@ impl Hand {
     /// Ask until the zone no longer says "in a fight" (or that it is busy with the last
     /// asking): what a person does who is told to wait a moment. `Err`: it said something
     /// else.
-    async fn ask_when_calm(&self, msg: Control) -> Result<(), String> {
+    async fn ask_when_calm(&self, msg: FromClient) -> Result<(), String> {
         let started = Instant::now();
         loop {
             match self.ask(msg.clone()).await {
@@ -387,6 +387,8 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
             session_secs: 3600,
             auth_per_minute: 1000.0,
             econ_per_second: 1000.0,
+            party_sweep: std::time::Duration::from_millis(300),
+            party_away: std::time::Duration::from_secs(2),
             items: items.clone(),
             max_coin_grant: 10_000,
             models_dir: std::env::temp_dir()
@@ -499,7 +501,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
 
     // The keeper opens its stall where it stands and puts two swords up; it keeps a
     // cuirass. The buyer is given what the dearer sword costs, and a little.
-    assert_eq!(smith_hand.ask(Control::StallOpen).await, Ok(()));
+    assert_eq!(smith_hand.ask(FromClient::StallOpen).await, Ok(()));
     let stall = buyer_hand
         .until("the stall", |s| {
             s.stalls.iter().find(|x| x.owner == "Smith").map(|x| x.id)
@@ -558,7 +560,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
     let EconReply::Id(dear) = list(plain, 90_000).await else {
         panic!("list")
     };
-    let buy = |listing: i64, price: i64| Control::StallBuy {
+    let buy = |listing: i64, price: i64| FromClient::StallBuy {
         stall,
         listing,
         price,
@@ -600,7 +602,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
         smith_hand.ask_when_calm(buy(dear, 90_000)).await,
         Err("that is your own stall".into())
     );
-    let nowhere = Control::StallBuy {
+    let nowhere = FromClient::StallBuy {
         stall: stall + 7,
         listing: dear,
         price: 90_000,
@@ -646,11 +648,11 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
     // What a body wears does not change in a fight: the buyer has just dealt damage and
     // the keeper has just taken it.
     assert_eq!(
-        buyer_hand.ask(Control::Wear { item: sword }).await,
+        buyer_hand.ask(FromClient::Wear { item: sword }).await,
         Err(FIGHT.into())
     );
     assert_eq!(
-        smith_hand.ask(Control::Wear { item: cuirass }).await,
+        smith_hand.ask(FromClient::Wear { item: cuirass }).await,
         Err(FIGHT.into())
     );
     // A moment later it does (asked again until the zone has stopped saying so), at once:
@@ -658,7 +660,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
     // eleven per cent more.
     assert_eq!(
         buyer_hand
-            .ask_when_calm(Control::Wear { item: sword })
+            .ask_when_calm(FromClient::Wear { item: sword })
             .await,
         Ok(())
     );
@@ -671,19 +673,21 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
     // requests at once the gate stops one and answers both.
     assert_eq!(
         buyer_hand
-            .ask_when_calm(Control::Wear { item: cuirass })
+            .ask_when_calm(FromClient::Wear { item: cuirass })
             .await,
         Err("that is not in the inventory".into())
     );
     assert_eq!(
-        buyer_hand.ask_when_calm(Control::Wear { item: gem }).await,
+        buyer_hand
+            .ask_when_calm(FromClient::Wear { item: gem })
+            .await,
         Err("that cannot be worn".into())
     );
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let mut two = buyer_hand
         .ask_all(vec![
-            Control::Wear { item: gem },
-            Control::Wear { item: gem },
+            FromClient::Wear { item: gem },
+            FromClient::Wear { item: gem },
         ])
         .await;
     two.sort();
@@ -697,7 +701,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
     // The keeper's cuirass takes the same eleven per cent off again: a wash.
     assert_eq!(
         smith_hand
-            .ask_when_calm(Control::Wear { item: cuirass })
+            .ask_when_calm(FromClient::Wear { item: cuirass })
             .await,
         Ok(())
     );
@@ -720,7 +724,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
     // Taken off, the cuirass alone is left: eleven per cent less than in nothing.
     assert_eq!(
         buyer_hand
-            .ask_when_calm(Control::TakeOff { item: sword })
+            .ask_when_calm(FromClient::TakeOff { item: sword })
             .await,
         Ok(())
     );

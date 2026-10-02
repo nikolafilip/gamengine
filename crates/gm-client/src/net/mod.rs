@@ -2,7 +2,7 @@
 //! quinn; in the browser the page's event loop drives a `WebTransport` session (WEB.md 3.3).
 //! Either way the frame talks to it through queues and never blocks on the network.
 
-use gm_net::control::{Control, WebAddr};
+use gm_net::control::{FromZone, WebAddr};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -19,7 +19,7 @@ pub enum NetEvent {
         map_hash: u64,
     },
     Snapshot(Vec<u8>),
-    Control(Control),
+    Control(FromZone),
     Disconnected(String),
 }
 

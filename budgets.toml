@@ -65,10 +65,10 @@ round_trip_ms = 2000
 # symmetric: on WebGPU wgpu is a thin binding, for WebGL2 it links its GLES backend and the
 # shader translator. Sizes are of the .wasm after wasm-opt; "packed" is brotli -q 11 (what a
 # static host serves), gzip -9 where brotli is not installed.
-max_webgpu_wasm_bytes = 1048576         # measured 1,005,086 (with the inventory and the stall of Phase 11; 967,052 in Phase 10)
-max_webgpu_packed_bytes = 393216        # measured 335,607
-max_webgl_wasm_bytes = 3407872          # measured 2,993,885
-max_webgl_packed_bytes = 1048576        # measured 908,530
+max_webgpu_wasm_bytes = 1048576         # measured 977,242 (with the people, trade and tavern screens of Phase 12; 1,005,086 in Phase 11, 967,052 in Phase 10)
+max_webgpu_packed_bytes = 393216        # measured 332,973
+max_webgl_wasm_bytes = 3407872          # measured 2,972,499
+max_webgl_packed_bytes = 1048576        # measured 906,803
 max_js_bytes = 180224                   # wasm-bindgen glue + loader + page, per build; measured 170,358 (webgl)
 max_wasm_memory_bytes = 67108864        # linear memory in the 8v8 arena; measured 3.3 MiB
 min_snapshots_per_s = 55                # of the zone's 64, as the browser client counts them
@@ -101,3 +101,8 @@ max_rounds_threads_added = 2          # a connection's thread that outlived its 
 # client's screens, on the software GPU of a display of its own. A bound on a run that
 # works: a screen that wedges never gets there at all.
 max_secs_stall_to_worn = 20           # from E at the stall to the sword being worn, by script; measured 0.5-0.6
+
+# People together (docs/PARTY.md 9; scripts/check-party.sh).
+[party]
+max_secs_dungeon_together = 420       # two bots as people, each with three recruits, the gate and the Warden; measured 149-165
+max_secs_party_to_traded = 60         # from being in a party to the trade being done, by script (two chat lines and a 3 s lock are in it); measured 6.2-6.3

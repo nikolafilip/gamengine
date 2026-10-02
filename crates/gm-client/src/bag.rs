@@ -233,13 +233,47 @@ pub fn coin_row(copper: i64, room: usize) -> String {
     format!("{}+", parts[0])
 }
 
+/// What three fields of gold, silver and copper say, in copper (an empty field is none
+/// of that unit); `None` when it is no amount the hub would take.
+pub(crate) fn copper_of(fields: &[String; 3]) -> Option<i64> {
+    let part = |text: &str| -> Option<i64> {
+        if text.is_empty() {
+            Some(0)
+        } else {
+            text.parse().ok()
+        }
+    };
+    let total = part(&fields[0])?
+        .checked_mul(10_000)?
+        .checked_add(part(&fields[1])? * 100)?
+        .checked_add(part(&fields[2])?)?;
+    (0..=MAX_PRICE).contains(&total).then_some(total)
+}
+
+/// The three fields a price is named in (gold, silver, copper: digits only), across `r`.
+pub(crate) fn coin_fields<C: Canvas>(
+    ui: &mut Ui<'_, C>,
+    r: Rect,
+    gap: f32,
+    fields: &mut [String; 3],
+) {
+    let w = (r.w - 2.0 * gap) / 3.0;
+    for (i, (label, digits)) in [("gold", 8), ("silver", 2), ("copper", 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let at = Rect::new(r.x + i as f32 * (w + gap), r.y, w, r.h);
+        ui.text_field(at, label, &mut fields[i], Field::number(digits));
+    }
+}
+
 /// A material without its layer, as a word: `shard/boss_scale` is `boss scale`.
 fn material(id: &str) -> String {
     id.rsplit('/').next().unwrap_or(id).replace('_', " ")
 }
 
 /// What a row calls the item: its template, or for a part what it is made of.
-fn name(item: &ItemSummary) -> String {
+pub(crate) fn name(item: &ItemSummary) -> String {
     match (item.place, item.components.first()) {
         (PLACE_NONE, Some((_, m))) => material(m),
         _ => item.template.clone(),
@@ -247,7 +281,7 @@ fn name(item: &ItemSummary) -> String {
 }
 
 /// The row's word for it: the strongest thing it does, or what it is.
-fn headline(item: &ItemSummary) -> &str {
+pub(crate) fn headline(item: &ItemSummary) -> &str {
     item.does.first().unwrap_or(&item.what)
 }
 
@@ -258,7 +292,7 @@ fn made_of(item: &ItemSummary) -> String {
 
 /// The same thing stays picked when a list is filled again; when it is not in the list
 /// any more, nothing is.
-fn keep<T>(list: &[T], picked: &mut usize, was: Option<i64>, id: impl Fn(&T) -> i64) {
+pub(crate) fn keep<T>(list: &[T], picked: &mut usize, was: Option<i64>, id: impl Fn(&T) -> i64) {
     if let Some(was) = was {
         *picked = list.iter().position(|x| id(x) == was).unwrap_or(NONE);
     }
@@ -822,19 +856,7 @@ impl Bag {
 
     /// The price named so far, in copper; `None` while it is not one.
     fn price(&self) -> Option<i64> {
-        let part = |text: &str| -> Option<i64> {
-            if text.is_empty() {
-                Some(0)
-            } else {
-                text.parse().ok()
-            }
-        };
-        let gold = part(&self.price[0])?;
-        let total = gold
-            .checked_mul(10_000)?
-            .checked_add(part(&self.price[1])? * 100)?
-            .checked_add(part(&self.price[2])?)?;
-        (total > 0 && total <= MAX_PRICE).then_some(total)
+        copper_of(&self.price).filter(|total| *total > 0)
     }
 
     fn price_page<C: Canvas>(&mut self, ui: &mut Ui<'_, C>, hub: &dyn HubApi) -> BagAction {
@@ -856,15 +878,8 @@ impl Bag {
         // Gold, silver and copper apart, and the whole said back in words before it is
         // sent: a price is never a row of digits to miscount.
         let fields = col.take(ui.field_height());
-        let w = (fields.w - 2.0 * gap) / 3.0;
         ui.focus_default("field", "gold");
-        for (i, (label, digits)) in [("gold", 8), ("silver", 2), ("copper", 2)]
-            .into_iter()
-            .enumerate()
-        {
-            let r = Rect::new(fields.x + i as f32 * (w + gap), fields.y, w, fields.h);
-            ui.text_field(r, label, &mut self.price[i], Field::number(digits));
-        }
+        coin_fields(ui, fields, gap, &mut self.price);
         let price = self.price();
         let shown = col.take(line);
         match price {
@@ -1122,6 +1137,7 @@ mod tests {
                         None => Err(HubError::NotFound),
                     }
                 }
+                (None, other) => panic!("not what these screens ask: {other:?}"),
             };
             let answer = reply.map(PlayerResponse::Econ).map_err(RpcError::Refused);
             if shop.hold {

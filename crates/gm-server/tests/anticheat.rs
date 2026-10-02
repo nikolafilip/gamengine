@@ -116,6 +116,8 @@ async fn statistics_replays_reports_reputation_and_bans() {
             session_secs: 3600,
             auth_per_minute: 1000.0,
             econ_per_second: 1000.0,
+            party_sweep: std::time::Duration::from_millis(300),
+            party_away: std::time::Duration::from_secs(2),
             items: Default::default(),
             max_coin_grant: 10_000,
             models_dir: scratch.join("models"),
@@ -232,10 +234,12 @@ async fn statistics_replays_reports_reputation_and_bans() {
                 aim,
                 report_after_ticks: report_after,
                 say: None,
+                social: Default::default(),
             },
             play: Duration::from_secs(PLAY_SECS),
             list_for_hire: None,
             sell_at: None,
+            trade_for: None,
             hire: 0,
         })));
     }

@@ -242,8 +242,8 @@ become, not what they do.
 
 | Message | | Answer |
 |---|---|---|
-| `Control::StallBuy { stall, listing, price }` | client → zone | `BuyResult { listing, result }`, always |
-| `Control::Wear { item }`, `TakeOff { item }` | client → zone | `WearResult { item, result }`, always |
+| `FromClient::StallBuy { stall, listing, price }` | client → zone | `BuyResult { listing, result }`, always |
+| `FromClient::Wear { item }`, `TakeOff { item }` | client → zone | `WearResult { item, result }`, always |
 
 - **Buying.** The zone checks that the buyer is alive and in person (not a ghost), that the
   stall is one of its open stalls, and that the buyer stands at it: its feet within
@@ -268,7 +268,8 @@ become, not what they do.
   in the end is still applied when it comes.
 - An answer names what it is about (the listing, the item): a screen takes only the answer
   it is waiting for.
-- The five messages are appended to `Control`: the ones before them keep their numbers, so
+- The five messages are appended (to the one enum, `Control`, that both directions were
+  until protocol v7; PARTY.md 4): the ones before them keep their numbers, so
   a client and a zone of different versions can still read each other's `Hello`, `Reject`
   and `Kick` (the first build of this phase put them in the middle, and a v5 client could
   not read why a v6 zone turned it away).

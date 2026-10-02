@@ -5,6 +5,7 @@
 
 pub mod hub_link;
 pub mod net;
+pub mod party;
 pub mod recorder;
 pub mod session;
 pub mod sight;

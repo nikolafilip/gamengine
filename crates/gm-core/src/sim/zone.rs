@@ -307,6 +307,11 @@ pub enum ZoneEvent {
     },
 }
 
+/// The largest id a body, a projectile or an area gets: ids above it are the numbers a
+/// zone gives parties of people (gm-server's `PARTY_BASE`), and a party is told apart
+/// from a body by it.
+pub const MAX_ENTITY_ID: EntityId = 0x7FFF_FFFF;
+
 /// The authoritative simulation of one zone.
 pub struct Zone {
     pub rate: TickRate,
@@ -388,7 +393,8 @@ impl Zone {
 
     fn alloc_id(&mut self) -> EntityId {
         let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).expect("entity ids exhausted");
+        assert!(id <= MAX_ENTITY_ID, "entity ids exhausted");
+        self.next_id += 1;
         id
     }
 

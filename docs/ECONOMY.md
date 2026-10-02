@@ -112,6 +112,15 @@ A trade is between two characters in the same zone. State: `open → committed |
 - Both characters must be in the same zone when the window opens.
 - The hub is the only writer; clients send intents (`offer`, `retract`, `accept`, `cancel`) and
   read the offers back with `TradeView`.
+- **Since Phase 12 (PARTY.md 6)** a trade is opened by the zone the two play in, when both
+  asked for it standing together (`ZoneEconOp::TradeOpen { a, b }`; a session can no longer
+  open one). A character has one open trade: opening another cancels the one before. A
+  trade ends at a claim of either character (it went to another zone, or came back from a
+  dropped connection), at an accept that finds the two in different zones, and after ten
+  minutes in which nothing changed. `TradeView` also says the other's name, whether both
+  are still in one zone, and how long until an accept is taken; it is read in three
+  statements without a transaction. An accept checks that the caller is one of the two
+  and that the trade is open before anything else.
 
 ## 7. Stalls (PLAN.md 5.5)
 
@@ -123,20 +132,20 @@ stall per character. No listing fee, no tax.
 rectangles of square tiles on the ground (the town's market is 6 × 5 tiles of 128 u, 160 u
 apart, facing the square; at most 512 tiles per map, tile numbers unique across a map's grids).
 A stall is opened **through the zone**, because only the zone knows where a body stands:
-the player sends `Control::StallOpen` (PROTOCOL.md 8), the zone checks that the player is
+the player sends `FromClient::StallOpen` (PROTOCOL.md 8), the zone checks that the player is
 alive on a tile and that the tile is free, and asks the hub (`ZoneEconOp::StallOpen {
 character, tile_x, tile_y }`), which checks that the character is playing in that zone and
 lets the unique constraint settle two players racing for one tile (`Taken`). The session-level
 `EconOp::StallOpen` of Phase 5, which let a client name any tile from anywhere, is gone.
-Closing is the owner's `Control::StallClose` (or `EconOp::StallClose` from anywhere, or the
+Closing is the owner's `FromClient::StallClose` (or `EconOp::StallClose` from anywhere, or the
 48 h). The zone loads its stalls from the hub when it starts (`ZoneEconOp::Stalls`), tells
-every joiner (`Control::Stalls`) and everyone present when one opens or closes; the hub tells
+every joiner (`FromZone::Stalls`) and everyone present when one opens or closes; the hub tells
 the zone when a stall closes for any reason (`HubNotice::StallClosed`). A stall is drawn as a
 counter on its tile with its **keeper**: the owner's frame, armour class and avatar model as a
 body that stands there whether the owner is online or not, replaced by the owner in person
 while the owner stands behind the counter. Since Phase 11 a stall has a screen (ITEMS.md 6):
 what it sells is looked at from anywhere (`EconOp::StallView`) and **bought standing at it**,
-through the zone (`Control::StallBuy`, `ZoneEconOp::StallBuy`: the session-level
+through the zone (`FromClient::StallBuy`, `ZoneEconOp::StallBuy`: the session-level
 `EconOp::StallBuy`, which let a program buy from anywhere, is gone as `StallOpen` went). Its
 keeper lists and unlists (`StallList`, `StallUnlist`) while playing in the stall's zone. The
 town board has no screen yet.
@@ -188,14 +197,17 @@ A boss kill yields **N components**, always (deterministic drops). The zone comp
 with `gm_core::loot::split` and asks the hub to create the items (source → character holders):
 
 1. Eligible parties: at least one living member in the arena at kill time **and** contribution
-   (share of damage dealt to the boss) at or above the **floor**: 10% of what the parties still
+   (the damage the party dealt to the boss) at or above the **floor**: 10% of what the parties still
    standing dealt (a wiped party's damage must not turn everyone else into taggers).
 2. Wiped parties get nothing. No last-hit bonus exists.
 3. Shares are proportional to contribution among eligible parties, by largest remainder, with a
    **minimum of one** component per eligible party as far as the components go: with more
    eligible parties than components, the top contributors get one each and the rest none.
 4. Inside a party the components go round-robin by contribution rank; a member below **40%** of
-   the party's average contribution is skipped (the leech floor).
+   the party's average contribution is skipped (the leech floor). Since Phase 12 a member's
+   contribution here is its **work**: the damage it and its companions dealt, the healing
+   they are credited with and the blows the creatures aimed at them, in points of health
+   (PARTY.md 2); between parties, step 1, damage alone counts.
 5. Coin drops are tiny and go the same way (source → holders), scaled by the zone to its active
    population (PLAN.md 5.4); the hub refuses a single grant above 1 gold.
 6. A zone grants only to characters playing in it. A component for a full inventory lands on
@@ -225,6 +237,13 @@ with `gm_core::loot::split` and asks the hub to create the items (source → cha
 
 ## 11. Tavern hires and guild halls (PLAN.md 5.6, 5.7)
 
+- Since Phase 12 (PARTY.md 7): a hire **names the price** it was shown and is refused when
+  the listing's is another now; a listing **keeps the build** the character had when it
+  was listed (`hire_listings.build`), the tavern shows that build, and a hire buys and
+  keeps it (`hires.build`), whatever the owner makes of the character afterwards; a
+  listing can be withdrawn (`HireUnlist`) and looked at (`HireListed`); the list says what
+  each avatar is and the role a mind plays it in, in words; a listing whose build the
+  content no longer has is not served.
 - A character whose owner is offline can be listed for hire at a flat price. `hire` moves the
   price from the hirer: **30% to the sink** (`hire_burn`), 70% to the avatar's owner, and records
   the hire for a **12 h** window. Hired avatars receive flat coin only, never loot. After **3**
@@ -257,6 +276,10 @@ Also proposed: stacking of materials is **not** in v1 (every component is a row 
 the 120 min contract timeout; the 1 gold cap on a single coin grant; no self-hire; one copy
 of an avatar per squad; a recipient who left the zone before its kill is reported forfeits
 (Phase 7).
+
+**Phase 12 (2026-10-02, PARTY.md)** made trades something two people ask for standing
+together, gave them ends, changed what a member's contribution to a kill is (work, not
+damage alone: proposed, PARTY.md 11) and made a hire name its price and keep its build.
 
 **Phase 11 (2026-10-02, ITEMS.md)** added what is worn and moved buying to the zone; its
 proposed numbers and open decisions are ITEMS.md 9 (among them: the storage is reached from

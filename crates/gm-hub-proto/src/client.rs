@@ -229,10 +229,17 @@ impl HubClient {
         }
     }
 
-    /// The next hub notice (zones only); `None` when the connection is gone.
+    /// The next hub notice (zones only); `None` when the connection is gone. A stream
+    /// that ends early, or carries what this build cannot read, is skipped: one bad
+    /// notice does not make a zone deaf to the rest (a party's news and a line of chat
+    /// travel this way, PARTY.md 3.2).
     pub async fn notice(&self) -> Option<HubNotice> {
-        let mut recv = self.conn.accept_uni().await.ok()?;
-        control::recv_any(&mut recv).await.ok().flatten()
+        loop {
+            let mut recv = self.conn.accept_uni().await.ok()?;
+            if let Ok(Some(notice)) = control::recv_any(&mut recv).await {
+                return Some(notice);
+            }
+        }
     }
 
     pub fn close(&self) {

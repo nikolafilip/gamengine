@@ -13,7 +13,7 @@ use gm_core::matrix::ArmourClass;
 use gm_core::sim::Input;
 use gm_core::vocab::{ArchetypeFrame, EntityId, Verb};
 use gm_net::client::{ClientState, RenderEntity};
-use gm_net::control::{BodyKind, Control, Order, SquadEntry};
+use gm_net::control::{BodyKind, FromClient, Order, SquadEntry};
 use gm_net::snapshot::SpawnInfo;
 
 pub struct Raid {
@@ -86,7 +86,7 @@ impl Raid {
         world: &Bsp,
         pack: &ContentPack,
         team: u8,
-    ) -> (Input, Option<Control>) {
+    ) -> (Input, Option<FromClient>) {
         let me = client.my_id;
         if !client.own_alive || client.newest_tick == 0 {
             // The dead wait (COMPANIONS.md 9); and before the first snapshot the body is
@@ -234,7 +234,7 @@ impl Raid {
                 raider.describe()
             );
         }
-        let control = request.map(|Request::Order { slots, order }| Control::Order {
+        let control = request.map(|Request::Order { slots, order }| FromClient::Order {
             slots,
             order: match order {
                 gm_ai::Order::Follow => Order::Follow,

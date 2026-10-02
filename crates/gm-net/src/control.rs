@@ -114,6 +114,25 @@ pub struct StallEntry {
 pub const STALL_REACH: f32 = 120.0;
 pub const STALL_REACH_UP: f32 = 96.0;
 
+/// How near two bodies must stand for one to ask the other for a trade (PARTY.md 6):
+/// this far apart along the ground, and no further above or below than
+/// `TRADE_REACH_UP`. A request lapses after `TRADE_ASK_SECS`.
+pub const TRADE_REACH: f32 = 160.0;
+pub const TRADE_REACH_UP: f32 = 96.0;
+pub const TRADE_ASK_SECS: u64 = 30;
+
+/// May two bodies whose feet are at `a` and `b` ask each other for a trade? The zone
+/// decides with this, and a client offers the button with the same.
+pub fn trade_in_reach(a: [f32; 3], b: [f32; 3]) -> bool {
+    let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+    dx * dx + dy * dy <= TRADE_REACH * TRADE_REACH && dz.abs() <= TRADE_REACH_UP
+}
+
+/// The channels of `Heard`.
+pub const CHANNEL_PARTY: u8 = 1;
+pub const CHANNEL_WHISPER: u8 = 2;
+pub const CHANNEL_WHISPERED: u8 = 3;
+
 /// May a body whose feet are at `feet` buy at the stall whose tile's centre is `stall`?
 /// The zone decides with this, and a client offers the stall with the same.
 pub fn stall_in_reach(stall: [f32; 3], feet: [f32; 3]) -> bool {
@@ -121,9 +140,17 @@ pub fn stall_in_reach(stall: [f32; 3], feet: [f32; 3]) -> bool {
     dx * dx + dy * dy <= STALL_REACH * STALL_REACH && dz.abs() <= STALL_REACH_UP
 }
 
+/// What a client says to its zone (PROTOCOL.md 8).
+///
+/// The two directions of the control stream are two types: each side carries the code to
+/// write the one and to read the other (the browser build is a megabyte, and the code for
+/// one enum of everything was a twelfth of it), and neither can send what is not its to
+/// send. A client and a zone of different versions must still be able to say so, so three
+/// messages keep the bytes they had when both directions were one enum (to v6): `Hello`
+/// is number 0 here, and `Reject` and `Kick` are numbers 14 and 25 of [`FromZone`]. What a
+/// version adds goes at the end of its enum.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
-pub enum Control {
-    // client → server
+pub enum FromClient {
     Hello {
         version: u16,
         name: String,
@@ -150,7 +177,100 @@ pub enum Control {
         order: Order,
     },
     Bye,
-    // server → client
+    /// Report the body `target` (ANTICHEAT.md 5): one the client is being sent, or one
+    /// that left within the last two minutes.
+    Report {
+        target: u32,
+        reason: ReportReason,
+    },
+    /// Buy a listing of the stall the player stands at, at the price it was shown
+    /// (ITEMS.md 5); answered by `BuyResult`, always.
+    StallBuy {
+        stall: i64,
+        listing: i64,
+        price: i64,
+    },
+    /// Put an item of the inventory on, or take one off (ITEMS.md 2); answered by
+    /// `WearResult`, always. The zone is asked, because gear takes effect in the zone and
+    /// only the zone knows whether the body is in a fight.
+    Wear {
+        item: i64,
+    },
+    TakeOff {
+        item: i64,
+    },
+    // v7 (PARTY.md 4). The answers to these are lines of the zone (`ChatFrom` from
+    // nobody) and, when the party changed, `Party`.
+    /// Invite the character of that name, wherever in the game it is.
+    PartyInvite {
+        name: String,
+    },
+    /// Answer the invitation of the character of that name.
+    PartyAnswer {
+        from: String,
+        join: bool,
+    },
+    PartyLeave,
+    /// The leader takes a member out.
+    PartyRemove {
+        name: String,
+    },
+    /// A line to the party, and a line to one character anywhere in the game: chat, with
+    /// chat's limits (PARTY.md 5).
+    PartySay(String),
+    Whisper {
+        to: String,
+        text: String,
+    },
+    /// Ask the body `with` for a trade, or answer its asking with one's own: when both
+    /// have asked within half a minute, standing together, the zone has the hub open the
+    /// trade and says `TradeOpened` to both (PARTY.md 6).
+    TradeAsk {
+        with: u32,
+    },
+}
+
+/// What a zone says to a client (PROTOCOL.md 8). `Reject` is number 14 and `Kick` number
+/// 25, as they were to v6 (see [`FromClient`]): the eight messages before `Welcome` stand
+/// where the client's eight stood then.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum FromZone {
+    /// To a commander: its squad, in slot order, whenever a member or an order changes.
+    Squad(Vec<SquadEntry>),
+    OrderRefused(String),
+    /// An encounter the client takes part in, or stands near, changed state.
+    Encounter {
+        name: String,
+        state: EncounterState,
+    },
+    /// What a boss kill gave this client (COMPANIONS.md 10).
+    Loot {
+        encounter: String,
+        items: Vec<String>,
+        coin: u32,
+    },
+    /// The answer to `Report`: the report was taken and the fight around it is kept, or
+    /// why not.
+    ReportResult(Result<(), String>),
+    /// A trial's verdict on this client (COMPANIONS.md 11): passed, or why not.
+    Trial {
+        key: String,
+        name: String,
+        passed: bool,
+        detail: String,
+        secs: u32,
+    },
+    /// The answer to `StallBuy`, naming the listing it was about; a refusal is in words
+    /// for the buyer.
+    BuyResult {
+        listing: i64,
+        result: Result<(), String>,
+    },
+    /// The answer to `Wear` or `TakeOff`, naming the item it was about.
+    WearResult {
+        item: i64,
+        result: Result<(), String>,
+    },
     Welcome {
         entity: u32,
         server_tick: u32,
@@ -181,6 +301,7 @@ pub enum Control {
     },
     /// The travel request failed.
     TravelRefused(String),
+    /// Number 14, whatever the version.
     Reject(String),
     /// To a joiner: everyone already in the zone, itself included, in one message.
     Roster(Vec<PlayerEntry>),
@@ -211,66 +332,33 @@ pub enum Control {
         from: u32,
         text: String,
     },
+    /// Number 25, whatever the version.
     Kick(String),
-    /// To a commander: its squad, in slot order, whenever a member or an order changes.
-    Squad(Vec<SquadEntry>),
-    OrderRefused(String),
-    /// An encounter the client takes part in, or stands near, changed state.
-    Encounter {
-        name: String,
-        state: EncounterState,
+    // v7 (PARTY.md 4).
+    /// The hub's word on the client's party: its members by name, the leader first
+    /// (nobody: the client is in none).
+    Party(Vec<String>),
+    /// Somebody invites the client to a party.
+    Invited {
+        from: String,
     },
-    /// What a boss kill gave this client (COMPANIONS.md 10).
-    Loot {
-        encounter: String,
-        items: Vec<String>,
-        coin: u32,
+    /// A line that came through the hub: `channel` 1, a line of the party's; 2, a
+    /// whisper to the client; 3, the client's own whisper as it went out (`from` is the
+    /// name of whom it went to).
+    Heard {
+        channel: u8,
+        from: String,
+        text: String,
     },
-    /// Client → zone: report the body `target` (ANTICHEAT.md 5): one the client is being
-    /// sent, or one that left within the last two minutes.
-    Report {
-        target: u32,
-        reason: ReportReason,
+    /// The body `from` asks for a trade.
+    TradeAsked {
+        from: u32,
     },
-    /// The zone's answer: the report was taken and the fight around it is kept, or why not.
-    ReportResult(Result<(), String>),
-    /// A trial's verdict on this client (COMPANIONS.md 11): passed, or why not.
-    Trial {
-        key: String,
-        name: String,
-        passed: bool,
-        detail: String,
-        secs: u32,
-    },
-    // What a version adds goes at the end, whichever way it travels: the variants before
-    // it keep their numbers, so a client and a zone of different versions can still read
-    // each other's `Hello`, `Reject` and `Kick` and say what is wrong.
-    /// Client → zone: buy a listing of the stall the player stands at, at the price it was
-    /// shown (ITEMS.md 5); answered by `BuyResult`, always.
-    StallBuy {
-        stall: i64,
-        listing: i64,
-        price: i64,
-    },
-    /// Client → zone: put an item of the inventory on, or take one off (ITEMS.md 2);
-    /// answered by `WearResult`, always. The zone is asked, because gear takes effect in
-    /// the zone and only the zone knows whether the body is in a fight.
-    Wear {
-        item: i64,
-    },
-    TakeOff {
-        item: i64,
-    },
-    /// The answer to `StallBuy`, naming the listing it was about; a refusal is in words
-    /// for the buyer.
-    BuyResult {
-        listing: i64,
-        result: Result<(), String>,
-    },
-    /// The answer to `Wear` or `TakeOff`, naming the item it was about.
-    WearResult {
-        item: i64,
-        result: Result<(), String>,
+    /// The hub opened a trade between the client and the character of that name: the
+    /// window is the hub's from here (ECONOMY.md 6).
+    TradeOpened {
+        trade: i64,
+        with: String,
     },
 }
 
@@ -307,7 +395,7 @@ pub fn encode_framed_any<T: Encode>(msg: &T) -> Result<Vec<u8>, ControlError> {
 }
 
 /// Length-prefixed bytes for one message.
-pub fn encode_framed(msg: &Control) -> Result<Vec<u8>, ControlError> {
+pub fn encode_framed<T: Encode>(msg: &T) -> Result<Vec<u8>, ControlError> {
     encode_framed_any(msg)
 }
 
@@ -350,7 +438,9 @@ pub async fn recv_frame(stream: &mut quinn::RecvStream) -> Result<Option<Vec<u8>
 
 /// Decode one framed message from `buf`, returning it and the bytes consumed; `None` when the
 /// buffer does not yet hold a whole message.
-pub fn decode_framed(buf: &[u8]) -> Result<Option<(Control, usize)>, ControlError> {
+pub fn decode_framed<T: for<'a> Decode<'a>>(
+    buf: &[u8],
+) -> Result<Option<(T, usize)>, ControlError> {
     if buf.len() < 2 {
         return Ok(None);
     }
@@ -358,19 +448,21 @@ pub fn decode_framed(buf: &[u8]) -> Result<Option<(Control, usize)>, ControlErro
     if buf.len() < 2 + len {
         return Ok(None);
     }
-    let msg: Control = bitcode::decode(&buf[2..2 + len])?;
+    let msg: T = bitcode::decode(&buf[2..2 + len])?;
     Ok(Some((msg, 2 + len)))
 }
 
 /// Write one message to a QUIC stream.
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn send(stream: &mut quinn::SendStream, msg: &Control) -> Result<(), ControlError> {
+pub async fn send<T: Encode>(stream: &mut quinn::SendStream, msg: &T) -> Result<(), ControlError> {
     send_any(stream, msg).await
 }
 
 /// Read one message from a QUIC stream; `Ok(None)` on a clean end of stream.
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn recv(stream: &mut quinn::RecvStream) -> Result<Option<Control>, ControlError> {
+pub async fn recv<T: for<'a> Decode<'a>>(
+    stream: &mut quinn::RecvStream,
+) -> Result<Option<T>, ControlError> {
     recv_any(stream).await
 }
 
@@ -430,48 +522,66 @@ mod tests {
     use gm_core::sim::test_content;
     use gm_core::tick::TickRate;
 
-    /// A client and a zone of different versions must still be able to say so: what a
-    /// version adds to `Control` goes at its end, and the messages of the handshake keep
-    /// the bytes they had in v5 (taken from that build).
+    /// A client and a zone of different versions must still be able to say so: the
+    /// messages of the handshake keep the bytes they had in v5 (taken from that build),
+    /// when both directions were one enum, and what a version adds goes at the end of
+    /// its enum.
     #[test]
     fn the_handshake_s_messages_keep_their_bytes_across_versions() {
-        let hex = |m: &Control| -> String {
+        fn hex<T: Encode>(m: &T) -> String {
             bitcode::encode(m)
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect()
+        }
+        let unhex = |h: &str| -> Vec<u8> {
+            (0..h.len() / 2)
+                .map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap())
+                .collect()
         };
+        let reject = FromZone::Reject("protocol version mismatch".into());
+        let kick = FromZone::Kick("bye".into());
+        let hello = FromClient::Hello {
+            version: 5,
+            name: "a".into(),
+            token: vec![1, 2],
+            build: None,
+            team: 0,
+        };
+        for (now, then) in [
+            (
+                hex(&reject),
+                "0e1970726f746f636f6c2076657273696f6e206d69736d61746368",
+            ),
+            (hex(&kick), "1903627965"),
+            (hex(&hello), "00050001610201020000"),
+        ] {
+            assert_eq!(now, then);
+        }
+        // And read back from those bytes, as a newer build reads an older one's.
         assert_eq!(
-            hex(&Control::Reject("protocol version mismatch".into())),
-            "0e1970726f746f636f6c2076657273696f6e206d69736d61746368"
+            bitcode::decode::<FromZone>(&unhex("1903627965")).unwrap(),
+            kick
         );
-        assert_eq!(hex(&Control::Kick("bye".into())), "1903627965");
         assert_eq!(
-            hex(&Control::Hello {
-                version: 5,
-                name: "a".into(),
-                token: vec![1, 2],
-                build: None,
-                team: 0
-            }),
-            "00050001610201020000"
+            bitcode::decode::<FromClient>(&unhex("00050001610201020000")).unwrap(),
+            hello
         );
-        assert_eq!(hex(&Control::Bye), "07");
-        // The last of v5; what v6 added comes after it.
-        let trial = Control::Trial {
-            key: "k".into(),
-            name: "n".into(),
-            passed: true,
-            detail: "d".into(),
-            secs: 3,
+        // Both enums have more than sixteen messages, as the one enum had: `bitcode`
+        // then writes a message's number as a plain byte (with sixteen or fewer it packs
+        // it), which is what the bytes above are.
+        let last_of_the_client = FromClient::TradeAsk { with: 1 };
+        assert!(bitcode::encode(&last_of_the_client)[0] > 16);
+        // What the other side cannot say is not read as something else: a zone's
+        // `Welcome` is no message of a client's.
+        let welcome = FromZone::Welcome {
+            entity: 7,
+            server_tick: 1,
+            hz: 64,
+            map: "m".into(),
+            map_hash: 1,
         };
-        assert_eq!(hex(&trial), "20016b016e0101640403");
-        let buy = Control::StallBuy {
-            stall: 1,
-            listing: 2,
-            price: 3,
-        };
-        assert_eq!(bitcode::encode(&buy)[0], 0x21);
+        assert!(bitcode::decode::<FromClient>(&bitcode::encode(&welcome)).is_err());
     }
 
     #[test]
@@ -491,6 +601,14 @@ mod tests {
         // Above and below: a floor up is out, a step up is in.
         assert!(at(0.0, 0.0, STALL_REACH_UP) && at(0.0, 0.0, -STALL_REACH_UP));
         assert!(!at(0.0, 0.0, STALL_REACH_UP + 0.5) && !at(0.0, 0.0, -STALL_REACH_UP - 0.5));
+        // Two bodies and a trade: a little further than a stall's reach, and a circle too.
+        let near = |dx: f32, dy: f32, dz: f32| {
+            trade_in_reach([10.0, 20.0, 0.0], [10.0 + dx, 20.0 + dy, dz])
+        };
+        assert!(near(TRADE_REACH, 0.0, 0.0) && !near(TRADE_REACH + 0.5, 0.0, 0.0));
+        assert!(near(113.0, 113.0, 0.0) && !near(114.0, 114.0, 0.0));
+        assert!(near(0.0, 0.0, -TRADE_REACH_UP) && !near(0.0, 0.0, TRADE_REACH_UP + 0.5));
+        assert!(!near(f32::NAN, 0.0, 0.0));
         assert!(
             !at(f32::NAN, 0.0, 0.0),
             "a place that is no number is nowhere"
@@ -500,27 +618,34 @@ mod tests {
     #[test]
     fn framing_round_trips_and_handles_partials() {
         let pack = test_content::pack(TickRate::COMBAT);
+        let hello = FromClient::Hello {
+            version: 2,
+            name: "pezo".into(),
+            token: vec![1, 2, 3],
+            build: Some(BuildChoice::Preset("blade".into())),
+            team: 0,
+        };
+        let framed = encode_framed(&hello).unwrap();
+        assert!(decode_framed::<FromClient>(&framed[..1]).unwrap().is_none());
+        assert!(decode_framed::<FromClient>(&framed[..5]).unwrap().is_none());
+        assert_eq!(
+            decode_framed::<FromClient>(&framed).unwrap(),
+            Some((hello, framed.len()))
+        );
         let msgs = [
-            Control::Hello {
-                version: 2,
-                name: "pezo".into(),
-                token: vec![1, 2, 3],
-                build: Some(BuildChoice::Preset("blade".into())),
-                team: 0,
-            },
-            Control::Welcome {
+            FromZone::Welcome {
                 entity: 7,
                 server_tick: 1000,
                 hz: 64,
                 map: "test_room".into(),
                 map_hash: 0xdead_beef,
             },
-            Control::Content {
+            FromZone::Content {
                 own: pack.build("blade").unwrap().clone(),
                 team: 1,
                 pack: pack.clone(),
             },
-            Control::Killed {
+            FromZone::Killed {
                 victim: 3,
                 killer: 0,
             },
@@ -529,18 +654,18 @@ mod tests {
         for m in &msgs {
             buf.extend(encode_framed(m).unwrap());
         }
-        assert!(decode_framed(&buf[..1]).unwrap().is_none());
-        assert!(decode_framed(&buf[..5]).unwrap().is_none());
+        assert!(decode_framed::<FromZone>(&buf[..1]).unwrap().is_none());
+        assert!(decode_framed::<FromZone>(&buf[..5]).unwrap().is_none());
         let mut pos = 0;
         let mut out = Vec::new();
-        while let Some((m, n)) = decode_framed(&buf[pos..]).unwrap() {
+        while let Some((m, n)) = decode_framed::<FromZone>(&buf[pos..]).unwrap() {
             out.push(m);
             pos += n;
         }
         assert_eq!(out, msgs);
         assert_eq!(pos, buf.len());
         // The whole content pack fits one message with room to spare.
-        let content = encode_framed(&msgs[2]).unwrap();
+        let content = encode_framed(&msgs[1]).unwrap();
         assert!(
             content.len() < 16 * 1024,
             "content is {} bytes",
@@ -553,7 +678,7 @@ mod tests {
     fn a_full_market_fits_one_message() {
         // gm_bsp::stalls::MAX_STALL_TILES stalls, every keeper with the longest name and a
         // model.
-        let market = Control::Stalls(
+        let market = FromZone::Stalls(
             (0..512)
                 .map(|i| StallEntry {
                     id: i64::MAX - i,
@@ -573,7 +698,7 @@ mod tests {
 
     #[test]
     fn a_roster_of_a_full_town_fits_one_message() {
-        let roster = Control::Roster(
+        let roster = FromZone::Roster(
             (0..400)
                 .map(|i| PlayerEntry {
                     id: 1000 + i,
@@ -586,14 +711,14 @@ mod tests {
         );
         let bytes = encode_framed(&roster).unwrap();
         assert!(bytes.len() < MAX_MESSAGE_BYTES, "{} bytes", bytes.len());
-        let (back, n) = decode_framed(&bytes).unwrap().unwrap();
+        let (back, n) = decode_framed::<FromZone>(&bytes).unwrap().unwrap();
         assert_eq!(n, bytes.len());
         assert_eq!(back, roster);
     }
 
     #[test]
     fn oversized_messages_are_refused() {
-        let msg = Control::Chat("x".repeat(70_000));
+        let msg = FromClient::Chat("x".repeat(70_000));
         assert!(matches!(encode_framed(&msg), Err(ControlError::TooLarge)));
     }
 

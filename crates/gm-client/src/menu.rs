@@ -39,6 +39,8 @@ pub enum MenuAction {
     Resume,
     /// Close the menu and open the inventory (ITEMS.md 6).
     Inventory,
+    /// Close the menu and open the page of people (PARTY.md 8).
+    People,
     Travel(String),
     /// Say goodbye to the zone and show the characters.
     Leave,
@@ -52,6 +54,7 @@ pub enum MenuAction {
 #[derive(Clone, Copy, Debug)]
 pub struct Offers {
     pub inventory: bool,
+    pub people: bool,
     pub travel: bool,
     pub leave: bool,
     pub fullscreen: bool,
@@ -107,7 +110,7 @@ impl GameMenu {
         let s = ui.scale;
         let gap = 5.0 * s;
         let h = ui.button_height();
-        let inner = 7.0 * (h + gap) + 2.0 * ui.line();
+        let inner = 8.0 * (h + gap) + 2.0 * ui.line();
         let panel = Rect::centred(ui.size(), 160.0 * s, ui.panel_height(inner, true));
         let inner = ui.panel(panel, "menu");
         let mut col = Column::new(inner, gap);
@@ -116,6 +119,9 @@ impl GameMenu {
         }
         if ui.button_if(col.take(h), "Inventory", offers.inventory) {
             return MenuAction::Inventory;
+        }
+        if ui.button_if(col.take(h), "People", offers.people) {
+            return MenuAction::People;
         }
         if ui.button_if(col.take(h), "Travel", offers.travel && hub.is_some())
             && let Some((hub, session)) = hub
@@ -160,6 +166,7 @@ impl GameMenu {
             ("Enter", "say something"),
             ("F9", "report the player you look at"),
             ("I", "the inventory"),
+            ("P", "people, the party, a trade"),
             ("E", "look at the stall you stand at"),
             ("B and N", "open, close a stall on a tile"),
             ("Escape", "this menu"),
@@ -193,7 +200,9 @@ impl GameMenu {
                     self.zones = zones;
                     self.picked = self.zones.iter().position(|z| z.id != here).unwrap_or(0);
                 }
-                Ok(other) => self.notice = format!("the hub answered something else: {other:?}"),
+                // (Not printed whole: the words for every answer of the hub's would be
+                // carried by every browser for this one line.)
+                Ok(_) => self.notice = "the hub answered something else".into(),
                 Err(e) => self.notice = e.to_string(),
             }
         }
@@ -374,34 +383,119 @@ const CHAT_KEPT: usize = 60;
 /// Rows one message may take on the screen.
 const CHAT_ROWS: usize = 4;
 
+/// Where a line of the log came from (PARTY.md 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Voice {
+    /// The zone itself: a refusal, a notice.
+    Zone,
+    /// Somebody, to everybody in the zone.
+    Say,
+    /// A member of the party, to the party.
+    Party,
+    /// Somebody, to this player alone.
+    Whisper,
+    /// This player's own whisper, as it went out (the name is whom it went to).
+    Whispered,
+}
+
+/// A colour for the party's lines and one for whispers.
+const PARTY_INK: [f32; 4] = [0.55, 0.85, 0.60, 1.0];
+const WHISPER_INK: [f32; 4] = [0.80, 0.65, 0.95, 1.0];
+
+/// What the line that was typed asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Said {
+    /// To everybody in the zone.
+    Say(String),
+    Party(String),
+    Whisper {
+        to: String,
+        text: String,
+    },
+    Invite(String),
+    Leave,
+}
+
 /// The chat: what was said, and the line being typed.
 #[derive(Default)]
 pub struct Chat {
     pub open: bool,
     line: String,
-    /// When, who (nobody: the zone itself), what.
-    log: VecDeque<(Instant, Option<String>, String)>,
+    /// When, whose voice, who (for the zone's own lines nobody), what.
+    log: VecDeque<(Instant, Voice, String, String)>,
+    /// Who whispered last: whom `/r` answers.
+    reply_to: Option<String>,
+    /// The line was written by a page or a rewrite, not typed: the caret goes to its end.
+    written: bool,
+}
+
+fn ignores(ignored: &[String], who: &str) -> bool {
+    use gm_hub_proto::names::skeleton;
+    ignored.iter().any(|i| skeleton(i) == skeleton(who))
 }
 
 impl Chat {
-    /// A line arrived. Lines of players on the `ignored` list are not kept.
-    pub fn heard(&mut self, who: Option<String>, text: String, ignored: &[String]) {
-        use gm_hub_proto::names::skeleton;
-        if let Some(who) = &who
-            && ignored.iter().any(|i| skeleton(i) == skeleton(who))
-        {
-            return;
-        }
-        self.log.push_back((Instant::now(), who, text));
+    fn keep(&mut self, voice: Voice, who: String, text: String) {
+        self.log.push_back((Instant::now(), voice, who, text));
         while self.log.len() > CHAT_KEPT {
             self.log.pop_front();
         }
     }
 
+    /// A line arrived. Lines of players on the `ignored` list are not kept.
+    pub fn heard(&mut self, who: Option<String>, text: String, ignored: &[String]) {
+        match who {
+            Some(who) if ignores(ignored, &who) => {}
+            Some(who) => self.keep(Voice::Say, who, text),
+            None => self.keep(Voice::Zone, String::new(), text),
+        }
+    }
+
+    /// A line that came through the hub (PARTY.md 5): the party's, a whisper, or this
+    /// player's own whisper as it went out. Somebody who is not heard is not heard here.
+    pub fn heard_on(&mut self, channel: u8, from: String, text: String, ignored: &[String]) {
+        use gm_net::control::{CHANNEL_PARTY, CHANNEL_WHISPER, CHANNEL_WHISPERED};
+        let voice = match channel {
+            CHANNEL_PARTY => Voice::Party,
+            CHANNEL_WHISPER => Voice::Whisper,
+            CHANNEL_WHISPERED => Voice::Whispered,
+            _ => return,
+        };
+        if voice != Voice::Whispered && ignores(ignored, &from) {
+            return;
+        }
+        if voice == Voice::Whisper {
+            self.reply_to = Some(from.clone());
+        }
+        self.keep(voice, from, text);
+    }
+
+    /// The zone's own last line, when it is not older than `within`: a page whose button
+    /// the line answers shows it too (the page may lie over the log).
+    pub fn zone_said(&self, within: std::time::Duration) -> Option<&str> {
+        self.log
+            .iter()
+            .rev()
+            .find(|l| l.1 == Voice::Zone)
+            .filter(|l| l.0.elapsed() < within)
+            .map(|l| l.3.as_str())
+    }
+
+    /// Open the line with something already on it (a whisper to somebody picked on a
+    /// page).
+    pub fn open_with(&mut self, line: String) {
+        self.open = true;
+        self.line = line;
+        self.written = true;
+    }
+
+    /// Everything of this character's (a leave, another character): nothing of it is
+    /// kept for the next.
     pub fn clear(&mut self) {
         self.open = false;
         self.line.clear();
         self.log.clear();
+        self.reply_to = None;
     }
 
     /// Close the line without sending it (what Escape does).
@@ -410,48 +504,67 @@ impl Chat {
         self.line.clear();
     }
 
-    /// What the line says to the client itself: `/ignore NAME` and `/unignore NAME` (speech
-    /// cannot be reported, ANTICHEAT.md 5: not hearing somebody is what there is).
-    /// `true`: the line was a command and is not sent.
-    fn command(&mut self, line: &str, ignored: &mut Vec<String>) -> bool {
-        use gm_hub_proto::names::skeleton;
-        let Some(rest) = line.strip_prefix('/') else {
-            return false;
-        };
-        let (word, name) = rest.split_once(' ').unwrap_or((rest, ""));
-        let name = name.trim();
-        let said = match (word, name.is_empty()) {
-            // (Only what a player can be called: the list is kept as names.)
-            ("ignore" | "unignore", false)
-                if gm_hub_proto::names::character_name(name).is_err() =>
-            {
-                format!("nobody is called {name}")
-            }
-            ("ignore", false) => {
-                if !ignored.iter().any(|i| skeleton(i) == skeleton(name)) {
-                    ignored.push(name.to_string());
+    /// What a line that begins with `/` asks for. `/ignore NAME` and `/unignore NAME` are
+    /// the client's own (speech cannot be reported, ANTICHEAT.md 5: not hearing somebody
+    /// is what there is); the rest are said to the zone (PARTY.md 5). A name after `/w`
+    /// is one word: a name with a space in it is written without.
+    fn command(&mut self, rest: &str, ignored: &mut Vec<String>) -> Option<Said> {
+        use gm_hub_proto::names::{character_name, skeleton};
+        let (word, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+        let rest = rest.trim();
+        let line = |text: &str| gm_net::control::valid_chat(text);
+        let said = match (word, rest.is_empty()) {
+            ("p", false) => return line(rest).map(Said::Party),
+            ("w", false) => {
+                let (to, text) = rest.split_once(' ').unwrap_or((rest, ""));
+                match (character_name(to), line(text)) {
+                    (Ok(to), Some(text)) => return Some(Said::Whisper { to, text }),
+                    (Err(_), _) => format!("nobody is called {to}"),
+                    (_, None) => "a whisper is /w NAME and what to say".to_string(),
                 }
-                format!("not hearing {name} any more")
+            }
+            ("r", false) => match (&self.reply_to, line(rest)) {
+                (Some(to), Some(text)) => {
+                    // (Names are told apart without what is between their letters.)
+                    let to = to.replace(' ', "");
+                    return Some(Said::Whisper { to, text });
+                }
+                (None, _) => "nobody has whispered to you".to_string(),
+                (_, None) => return None,
+            },
+            ("leave", true) => return Some(Said::Leave),
+            ("invite" | "ignore" | "unignore", false) if character_name(rest).is_err() => {
+                format!("nobody is called {rest}")
+            }
+            ("invite", false) => return Some(Said::Invite(rest.to_string())),
+            ("ignore", false) => {
+                if !ignores(ignored, rest) {
+                    ignored.push(rest.to_string());
+                }
+                format!("not hearing {rest} any more")
             }
             ("unignore", false) => {
-                ignored.retain(|i| skeleton(i) != skeleton(name));
-                format!("hearing {name} again")
+                ignored.retain(|i| skeleton(i) != skeleton(rest));
+                format!("hearing {rest} again")
             }
             ("ignore", true) if ignored.is_empty() => "nobody is ignored".to_string(),
             ("ignore", true) => format!("ignored: {}", ignored.join(", ")),
-            _ => "the commands are /ignore NAME and /unignore NAME".to_string(),
+            _ => {
+                "/p TEXT, /w NAME TEXT, /r TEXT, /invite NAME, /leave, /ignore NAME, /unignore NAME"
+                    .to_string()
+            }
         };
-        self.log.push_back((Instant::now(), None, said));
-        true
+        self.keep(Voice::Zone, String::new(), said);
+        None
     }
 
     /// One frame of the chat, bottom left above the own bars: the log, and the line when it
-    /// is open. Returns a line to send.
+    /// is open. Returns what the line that was sent asks for.
     pub fn frame<C: Canvas>(
         &mut self,
         ui: &mut Ui<'_, C>,
         ignored: &mut Vec<String>,
-    ) -> Option<String> {
+    ) -> Option<Said> {
         let s = ui.scale;
         let (w, h) = ui.size();
         let line = ui.line();
@@ -465,15 +578,19 @@ impl Chat {
         };
         let fit = ui.fit(width).max(8);
         let mut lines: Vec<(String, [f32; 4])> = Vec::new();
-        for (at, who, text) in self.log.iter().rev() {
+        for (at, voice, who, text) in self.log.iter().rev() {
             if !self.open && at.elapsed().as_secs_f32() > CHAT_SECS {
                 break;
             }
-            // The zone's own lines are marked with what no name can begin with, and drawn
-            // in their own colour.
-            let (said, ink) = match who {
-                Some(who) => (format!("{who}: {text}"), ui::TEXT),
-                None => (format!("* {text}"), ui::WARN),
+            // The zone's own lines, the party's and the whispers are marked with what no
+            // name can begin with (a star, a bracket), and drawn in colours of their own:
+            // nothing somebody says aloud can look like one of them.
+            let (said, ink) = match voice {
+                Voice::Zone => (format!("* {text}"), ui::WARN),
+                Voice::Say => (format!("{who}: {text}"), ui::TEXT),
+                Voice::Party => (format!("[party] {who}: {text}"), PARTY_INK),
+                Voice::Whisper => (format!("[whisper] {who}: {text}"), WHISPER_INK),
+                Voice::Whispered => (format!("[to {who}] {text}"), WHISPER_INK),
             };
             // A long line wraps (runs of spaces are one space): at most `CHAT_ROWS` rows,
             // and every row after the first is indented, so that nothing a person types
@@ -529,12 +646,23 @@ impl Chat {
             ui::PLATE,
         );
         ui.focus("field", "");
+        if std::mem::take(&mut self.written) {
+            ui.caret_to_end("");
+        }
         ui.text_field(
             field,
             "",
             &mut self.line,
             Field::text(gm_net::control::MAX_CHAT_CHARS),
         );
+        // `/r ` becomes `/w NAME ` as it is typed: whom the answer goes to is on the
+        // screen before it is sent, whatever whisper arrives meanwhile.
+        if self.line == "/r "
+            && let Some(to) = &self.reply_to
+        {
+            self.line = format!("/w {} ", to.replace(' ', ""));
+            self.written = true;
+        }
         if ui.key(Key::Escape) {
             self.drop_line();
             return None;
@@ -542,10 +670,10 @@ impl Chat {
         if ui.key(Key::Enter) {
             self.open = false;
             let said = std::mem::take(&mut self.line);
-            if self.command(said.trim(), ignored) {
-                return None;
-            }
-            return gm_net::control::valid_chat(&said);
+            return match said.trim().strip_prefix('/') {
+                Some(rest) => self.command(rest, ignored),
+                None => gm_net::control::valid_chat(&said).map(Said::Say),
+            };
         }
         None
     }
@@ -587,6 +715,7 @@ mod tests {
     const S: SessionId = SessionId([9; 16]);
     const ALL: Offers = Offers {
         inventory: true,
+        people: true,
         travel: true,
         leave: true,
         fullscreen: true,
@@ -702,29 +831,35 @@ mod tests {
             (GameMenu::default(), UiState::default(), Settings::default());
         let idle = UiInput::default();
         frame(&mut menu, &mut st, &idle, Some(&hub), ALL, &mut set);
-        // Two clicks in quick succession where the Travel button is: the first opens the
-        // page, and the list that is under the pointer by then gets the second.
+        // Two clicks in quick succession on the Travel button: the first opens the page,
+        // and whatever is under the pointer by then gets the second. Where the button
+        // was, or on any row of the list that came up (a row is activated by two presses
+        // on that row, not by one on a button and one on the row): nothing travels.
         let at = st.find("Travel").unwrap().rect.centre();
         click(&mut menu, &mut st, "Travel", Some(&hub), ALL, &mut set);
         assert_eq!(menu.page, Page::Travel);
         frame(&mut menu, &mut st, &idle, Some(&hub), ALL, &mut set);
-        let under = st.seen.iter().find(|s| s.rect.contains(at)).map(|s| s.kind);
-        assert_eq!(
-            under,
-            Some(crate::ui::SeenKind::Row),
-            "the list is under where the button was"
-        );
-        let second = UiInput {
-            cursor: at,
-            pressed: true,
-            down: true,
-            double: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            frame(&mut menu, &mut st, &second, Some(&hub), ALL, &mut set),
-            MenuAction::None
-        );
+        let rows: Vec<(f32, f32)> = st
+            .seen
+            .iter()
+            .filter(|s| s.kind == crate::ui::SeenKind::Row)
+            .map(|s| s.rect.centre())
+            .collect();
+        assert!(!rows.is_empty(), "the page came up with its list");
+        for at in std::iter::once(at).chain(rows.into_iter().take(1)) {
+            let second = UiInput {
+                cursor: at,
+                pressed: true,
+                down: true,
+                double: true,
+                ..Default::default()
+            };
+            assert_eq!(
+                frame(&mut menu, &mut st, &second, Some(&hub), ALL, &mut set),
+                MenuAction::None
+            );
+            assert_eq!(menu.page, Page::Travel);
+        }
         // With the keyboard on Back, Enter goes back and nowhere else.
         let tab = UiInput {
             keys: vec![Key::Tab],
@@ -754,6 +889,7 @@ mod tests {
             (GameMenu::default(), UiState::default(), Settings::default());
         let none = Offers {
             inventory: false,
+            people: false,
             travel: false,
             leave: false,
             fullscreen: false,
@@ -868,17 +1004,25 @@ mod tests {
         let mut chat = Chat::default();
         let mut st = UiState::default();
         let mut ignored: Vec<String> = Vec::new();
-        let mut run = |chat: &mut Chat, st: &mut UiState, input: &UiInput| {
+        fn run(
+            chat: &mut Chat,
+            st: &mut UiState,
+            ignored: &mut Vec<String>,
+            input: &UiInput,
+        ) -> Option<Said> {
             let mut canvas = Recorder::new(1280.0, 720.0);
             let name = if chat.open { "chat" } else { "game" };
             let mut ui = Ui::begin(&mut canvas, st, input, name, 240.0);
-            let sent = chat.frame(&mut ui, &mut ignored);
+            let sent = chat.frame(&mut ui, ignored);
             ui.end();
             sent
-        };
+        }
         chat.heard(Some("Brena".into()), "anyone for the warden?".into(), &[]);
         chat.heard(None, "too many lines; wait a moment".into(), &[]);
-        assert_eq!(run(&mut chat, &mut st, &UiInput::default()), None);
+        assert_eq!(
+            run(&mut chat, &mut st, &mut ignored, &UiInput::default()),
+            None
+        );
         assert!(st.shows("Brena: anyone for the warden?"));
         assert!(st.shows("* too many lines; wait a moment"));
         // A long line padded to put words at the start of a row: every row after the
@@ -889,7 +1033,7 @@ mod tests {
             "x ".repeat(95)
         );
         chat.heard(Some("Mallory".into()), padded, &[]);
-        run(&mut chat, &mut st, &UiInput::default());
+        run(&mut chat, &mut st, &mut ignored, &UiInput::default());
         let rows: Vec<&str> = st
             .seen
             .iter()
@@ -910,30 +1054,33 @@ mod tests {
         assert!(rows.iter().any(|r| r.ends_with("...")), "{rows:?}");
         assert!(!st.typing(), "closed: the keys are the game's");
         chat.open = true;
-        run(&mut chat, &mut st, &UiInput::default());
+        run(&mut chat, &mut st, &mut ignored, &UiInput::default());
         assert!(st.typing());
         let typed = UiInput {
             text: "  count me in  ".into(),
             ..Default::default()
         };
-        assert_eq!(run(&mut chat, &mut st, &typed), None);
+        assert_eq!(run(&mut chat, &mut st, &mut ignored, &typed), None);
         let enter = UiInput {
             keys: vec![Key::Enter],
             ..Default::default()
         };
-        assert_eq!(run(&mut chat, &mut st, &enter), Some("count me in".into()));
+        assert_eq!(
+            run(&mut chat, &mut st, &mut ignored, &enter),
+            Some(Said::Say("count me in".into()))
+        );
         assert!(!chat.open);
         // Escape drops the line; an empty line sends nothing.
         chat.open = true;
-        run(&mut chat, &mut st, &typed);
+        run(&mut chat, &mut st, &mut ignored, &typed);
         let escape = UiInput {
             keys: vec![Key::Escape],
             ..Default::default()
         };
-        assert_eq!(run(&mut chat, &mut st, &escape), None);
+        assert_eq!(run(&mut chat, &mut st, &mut ignored, &escape), None);
         chat.open = true;
         assert_eq!(
-            run(&mut chat, &mut st, &enter),
+            run(&mut chat, &mut st, &mut ignored, &enter),
             None,
             "nothing typed, nothing sent"
         );
@@ -941,23 +1088,138 @@ mod tests {
         for (line, says) in [
             ("/ignore Mallory", "* not hearing Mallory any more"),
             ("/ignore", "* ignored: Mallory"),
-            ("/dance", "* the commands are /ignore NAME and"),
+            ("/dance", "* /p TEXT, /w NAME TEXT, /r TEXT"),
+            ("/r hello", "* nobody has whispered to you"),
+            ("/w x hello", "* nobody is called x"),
+            ("/w Brena", "* a whisper is /w NAME and what to say"),
+            ("/invite 9", "* nobody is called 9"),
         ] {
             chat.open = true;
             let typed = UiInput {
                 text: line.into(),
                 ..Default::default()
             };
-            run(&mut chat, &mut st, &typed);
-            assert_eq!(run(&mut chat, &mut st, &enter), None);
-            run(&mut chat, &mut st, &UiInput::default());
+            run(&mut chat, &mut st, &mut ignored, &typed);
+            assert_eq!(run(&mut chat, &mut st, &mut ignored, &enter), None);
+            run(&mut chat, &mut st, &mut ignored, &UiInput::default());
             assert!(st.shows(says), "{says:?} not shown");
         }
         assert_eq!(ignored, ["Mallory"]);
         // Somebody ignored is not heard, however the name is dressed up.
         chat.heard(Some("MaIIory".into()), "buy gold".into(), &ignored);
         chat.heard(Some("Brena".into()), "still here".into(), &ignored);
-        let said: Vec<&str> = chat.log.iter().map(|l| l.2.as_str()).collect();
+        let said: Vec<&str> = chat.log.iter().map(|l| l.3.as_str()).collect();
         assert!(said.contains(&"still here") && !said.contains(&"buy gold"));
+        // --- Channels (PARTY.md 5). What is typed after a command goes where it says.
+        for (line, sent) in [
+            ("/p  ready? ", Said::Party("ready?".into())),
+            (
+                "/w Brena are you there",
+                Said::Whisper {
+                    to: "Brena".into(),
+                    text: "are you there".into(),
+                },
+            ),
+            ("/invite De Vil", Said::Invite("De Vil".into())),
+            ("/leave", Said::Leave),
+        ] {
+            chat.open = true;
+            let typed = UiInput {
+                text: line.into(),
+                ..Default::default()
+            };
+            run(&mut chat, &mut st, &mut ignored, &typed);
+            assert_eq!(
+                run(&mut chat, &mut st, &mut ignored, &enter),
+                Some(sent),
+                "{line}"
+            );
+        }
+        // A party's line, a whisper and one's own whisper are each marked with what no
+        // name can begin with: somebody called "Brena whispers" says nothing that looks
+        // like a whisper of Brena's.
+        use gm_net::control::{CHANNEL_PARTY, CHANNEL_WHISPER, CHANNEL_WHISPERED};
+        chat.heard_on(CHANNEL_PARTY, "Brena".into(), "pull".into(), &ignored);
+        chat.heard_on(CHANNEL_WHISPER, "De Vil".into(), "psst".into(), &ignored);
+        chat.heard_on(CHANNEL_WHISPERED, "Brena".into(), "soon".into(), &ignored);
+        chat.heard_on(
+            CHANNEL_WHISPER,
+            "Mallory".into(),
+            "buy gold".into(),
+            &ignored,
+        );
+        chat.heard_on(CHANNEL_PARTY, "MaIIory".into(), "buy gold".into(), &ignored);
+        chat.heard(Some("Brena whispers".into()), "psst".into(), &ignored);
+        chat.open = true;
+        run(&mut chat, &mut st, &mut ignored, &UiInput::default());
+        for says in [
+            "[party] Brena: pull",
+            "[whisper] De Vil: psst",
+            "[to Brena] soon",
+            "Brena whispers: psst",
+        ] {
+            assert!(st.shows(says), "{says:?} not shown");
+        }
+        assert!(
+            !st.shows("buy gold"),
+            "not heard is not heard on any channel"
+        );
+        // `/r` answers whoever whispered last and is heard; a name with a space in it is
+        // written without (names are told apart by their letters).
+        let typed = UiInput {
+            text: "/r on my way".into(),
+            ..Default::default()
+        };
+        run(&mut chat, &mut st, &mut ignored, &typed);
+        assert_eq!(
+            run(&mut chat, &mut st, &mut ignored, &enter),
+            Some(Said::Whisper {
+                to: "DeVil".into(),
+                text: "on my way".into()
+            })
+        );
+        // Typed a key at a time, `/r ` becomes `/w DeVil ` on the screen as soon as it is
+        // complete: a whisper that arrives meanwhile does not turn the answer elsewhere.
+        chat.open_with(String::new());
+        for c in ["/", "r", " "] {
+            let typed = UiInput {
+                text: c.into(),
+                ..Default::default()
+            };
+            run(&mut chat, &mut st, &mut ignored, &typed);
+        }
+        assert_eq!(chat.line, "/w DeVil ");
+        chat.heard_on(2, "Mallory".into(), "hey".into(), &ignored);
+        let typed = UiInput {
+            text: "no".into(),
+            ..Default::default()
+        };
+        run(&mut chat, &mut st, &mut ignored, &typed);
+        assert_eq!(
+            run(&mut chat, &mut st, &mut ignored, &enter),
+            Some(Said::Whisper {
+                to: "DeVil".into(),
+                text: "no".into()
+            })
+        );
+        // Whoever whispered last is this character's business, not the next one's.
+        chat.clear();
+        chat.open_with("/r ".into());
+        run(&mut chat, &mut st, &mut ignored, &UiInput::default());
+        assert_eq!(chat.line, "/r ");
+        // A page opens the line with a whisper begun.
+        chat.open_with("/w Brena ".into());
+        let typed = UiInput {
+            text: "hello".into(),
+            ..Default::default()
+        };
+        run(&mut chat, &mut st, &mut ignored, &typed);
+        assert_eq!(
+            run(&mut chat, &mut st, &mut ignored, &enter),
+            Some(Said::Whisper {
+                to: "Brena".into(),
+                text: "hello".into()
+            })
+        );
     }
 }

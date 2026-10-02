@@ -343,6 +343,8 @@ fn record_differs(e: &EntityState, b: &EntityState) -> bool {
         || (e.vel.is_some() && e.vel != b.vel)
         || e.anim != b.anim
         || (e.health.is_some() && e.health != b.health)
+        // No longer sent (the body left the viewer's party): see `write_entity`.
+        || (e.health.is_none() && b.health.is_some())
         || e.flags != b.flags
         || e.status != b.status
 }
@@ -364,6 +366,11 @@ fn read_i32x3(r: &mut BitReader<'_>, base: Option<[i32; 3]>) -> Result<[i32; 3],
 }
 
 fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) {
+    // A health that is no longer sent cannot be unsaid by a delta: a reader carries
+    // forward what the baseline had. Such a record is written whole, as a new one is, and
+    // a whole record without a health is read without one (PARTY.md 2: the body left the
+    // viewer's party; before parties changed, nothing ever stopped sending a health).
+    let base = base.filter(|b| e.health.is_some() || b.health.is_none());
     w.write_uvar(e.id as u64);
     let mut m = 0u16;
     match base {
@@ -655,6 +662,37 @@ mod tests {
         assert!(bytes.len() <= 19 + 7, "{}", bytes.len());
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, moved);
+    }
+
+    /// A body's health stops being sent when it leaves the viewer's party: the reader
+    /// must not go on showing the last one it was told.
+    #[test]
+    fn a_health_that_is_no_longer_sent_is_no_longer_held() {
+        let mut base = scene(10, 0);
+        base.entities[4].health = Some(77);
+        let mut next = base.clone();
+        next.server_tick = 11;
+        next.baseline_tick = 10;
+        next.entities[4].health = None;
+        let bytes = next.encode(Some(&base));
+        let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
+        assert_eq!(back.entities[4].health, None);
+        assert_eq!(back, next);
+        // It costs one whole record, once: the next snapshot against this one is as
+        // small as any in which nothing changed.
+        let mut after = next.clone();
+        after.server_tick = 12;
+        after.baseline_tick = 11;
+        let quiet = after.encode(Some(&next)).len();
+        assert!(
+            bytes.len() > quiet && bytes.len() <= quiet + 20,
+            "{} {quiet}",
+            bytes.len()
+        );
+        // And a health that is sent again is a delta as before.
+        after.entities[4].health = Some(60);
+        let back = Snapshot::decode(&after.encode(Some(&next)), |t| (t == 11).then_some(&next));
+        assert_eq!(back.unwrap().entities[4].health, Some(60));
     }
 
     #[test]

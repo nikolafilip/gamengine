@@ -31,6 +31,8 @@ struct Args {
     audit: bool,
     auth_per_minute: f64,
     econ_per_second: f64,
+    /// Seconds a character that left the game is still of its party (PARTY.md 2).
+    party_away: u64,
     /// A WebTransport listener for browsers beside the QUIC one (WEB.md 2).
     web_listen: Option<SocketAddr>,
     web_cert: Option<PathBuf>,
@@ -41,7 +43,7 @@ struct Args {
 }
 
 const USAGE: &str = "gm-hub --database-url URL [--listen ADDR] [--cert-out PATH] [--key PATH] [--content DIR] \
-[--zone-secret S] [--models-dir DIR] [--start-zone ID] [--auth-per-minute N] [--econ-per-second N] [--migrate-only] [--wipe] \
+[--zone-secret S] [--models-dir DIR] [--start-zone ID] [--auth-per-minute N] [--econ-per-second N] [--party-away SECS] [--migrate-only] [--wipe] \
 [--web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url https://HOST:PORT] [--web-origin ORIGIN]... [--web-info-out PATH]]   \
 (env: DATABASE_URL, GM_ZONE_SECRET)\n\
        gm-hub --database-url URL --grant-moderator EMAIL     make an existing account a moderator, then exit\n\
@@ -70,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
         audit: false,
         auth_per_minute: 10.0,
         econ_per_second: 5.0,
+        party_away: gm_hub::party::AWAY.as_secs(),
         web_listen: None,
         web_cert: None,
         web_key: None,
@@ -135,6 +138,11 @@ fn parse_args() -> Result<Args, String> {
                 a.auth_per_minute = value("--auth-per-minute")?
                     .parse()
                     .map_err(|e| format!("--auth-per-minute: {e}"))?
+            }
+            "--party-away" => {
+                a.party_away = value("--party-away")?
+                    .parse()
+                    .map_err(|e| format!("--party-away: {e}"))?
             }
             "--econ-per-second" => {
                 a.econ_per_second = value("--econ-per-second")?
@@ -364,6 +372,8 @@ async fn run() -> anyhow::Result<()> {
         session_secs: gm_hub::protocol::SESSION_SECS,
         auth_per_minute: args.auth_per_minute,
         econ_per_second: args.econ_per_second,
+        party_sweep: gm_hub::party::SWEEP,
+        party_away: std::time::Duration::from_secs(args.party_away),
         items: gm_content::items::load_items(&args.content)?,
         max_coin_grant: 10_000,
         models_dir: args.models_dir,

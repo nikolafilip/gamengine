@@ -133,7 +133,7 @@ impl Db {
 
     /// Drop every row (tests).
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        sqlx::query("truncate worn, mod_log, bans, reputation, reports, flags, aim_reports, aim_weeks, replay_participants, replays, kills, trials, model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
+        sqlx::query("truncate party_invites, party_members, parties, worn, mod_log, bans, reputation, reports, flags, aim_reports, aim_weeks, replay_participants, replays, kills, trials, model_events, model_holders, models, item_moves, coin_ledger, trade_items, trades, listings, buy_orders, stalls, contract_sellers, contracts, guild_members, guilds, hires, hire_listings, item_components, items, holders, characters, accounts, zones_log restart identity cascade")
             .execute(&self.pool)
             .await?;
         // The cascade empties `holders` too; the two singletons come back at zero.
@@ -547,9 +547,13 @@ impl Db {
 
     /// Everyone in `zone` goes offline (the zone stopped or crashed and reconnected).
     pub async fn offline_zone(&self, zone: &ZoneId) -> Result<u64, HubError> {
+        // The rows in ascending order, as every lock on several characters' rows takes
+        // them (a trade's accept, a party's change): a zone that goes down in the middle
+        // of one does not deadlock with it.
         Ok(sqlx::query(
             "update characters set location_kind = 'offline', location_zone = null, transit_to = null, \
-             transit_since = null, updated = now() where location_kind = 'zone' and location_zone = $1",
+             transit_since = null, updated = now() where id in (select id from characters \
+             where location_kind = 'zone' and location_zone = $1 order by id for update)",
         )
         .bind(zone)
         .execute(&self.pool)

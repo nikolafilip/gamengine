@@ -84,6 +84,15 @@ jobs:
           name: items-desktop
           path: ${{ runner.temp }}/items
           if-no-files-found: ignore
+      - name: People gate (parties at the hub and in two zones; two bots through the dungeon as one party; a party, its lines, a trade and a hire through the desktop client)
+        run: KEEP="$RUNNER_TEMP/party" scripts/check-party.sh --desktop
+      - name: The people gate's logs, when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: party-desktop
+          path: ${{ runner.temp }}/party
+          if-no-files-found: ignore
 
   gates:
     name: binary size, RAM, software render
@@ -162,6 +171,15 @@ jobs:
         with:
           name: items-browser
           path: ${{ runner.temp }}/items
+          if-no-files-found: ignore
+      - name: People gate in the browser (a party, its lines, a trade and a hire in both builds)
+        run: CHROME=google-chrome SKIP_TESTS=1 KEEP="$RUNNER_TEMP/party" scripts/check-party.sh --browser --software
+      - name: The people gate's logs, when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: party-browser
+          path: ${{ runner.temp }}/party
           if-no-files-found: ignore
 
   # Frame time on a real integrated GPU (PLAN.md 2.7). Enabled once a self-hosted runner exists.

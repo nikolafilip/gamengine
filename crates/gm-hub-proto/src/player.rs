@@ -15,13 +15,13 @@ use gm_core::build::ContentPack;
 
 use crate::protocol::{
     BuildChoice, CharacterId, CharacterSummary, EconOp, EconReply, HubError, HubRequest,
-    HubResponse, ItemId, ItemSummary, ListingSummary, ModelId, SessionId, ZoneId, ZoneSummary,
-    ZoneTicket,
+    HubResponse, ItemId, ItemSummary, ListingSummary, ModelId, SessionId, TradeOffer, ZoneId,
+    ZoneSummary, ZoneTicket,
 };
 
 /// The version of the players' messages; any change to them, or to a type they carry, is
 /// a new one.
-pub const PLAYER_VERSION: u8 = 2;
+pub const PLAYER_VERSION: u8 = 3;
 
 /// What a stream that speaks the players' messages begins with: the empty frame, then
 /// the version in a frame of its own.
@@ -109,6 +109,69 @@ pub enum PlayerEcon {
     StallUnlist {
         listing: i64,
     },
+    /// A trade the zone opened (PARTY.md 6): what it looks like, and the window's
+    /// requests (ECONOMY.md 6). An accept names the version it saw.
+    TradeView {
+        trade: i64,
+    },
+    TradeOffer {
+        trade: i64,
+        item: ItemId,
+    },
+    TradeRetract {
+        trade: i64,
+        item: ItemId,
+    },
+    TradeCoin {
+        trade: i64,
+        coin: i64,
+    },
+    TradeAccept {
+        trade: i64,
+        version: i32,
+    },
+    TradeCancel {
+        trade: i64,
+    },
+    /// The tavern (PARTY.md 7): who is for hire, the character's own hires and its own
+    /// listing; hiring at the price shown, sending a hire away, listing and unlisting.
+    Tavern,
+    Hires,
+    HireListed,
+    Hire {
+        avatar: CharacterId,
+        price: i64,
+    },
+    Dismiss {
+        hire: i64,
+    },
+    HireList {
+        price: i64,
+    },
+    HireUnlist,
+}
+
+/// Somebody for hire, as the tavern page shows it: in the hub's words.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct TavernRow {
+    pub character: CharacterId,
+    pub name: String,
+    /// What it is (`ironclad: colossus in plate`), and the role a mind plays it in.
+    pub what: String,
+    pub role: String,
+    pub price: i64,
+    /// Hires in the last 12 h.
+    pub hires: i64,
+}
+
+/// One of the character's hires: until when it runs, in unix seconds.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct HireRow {
+    pub hire: i64,
+    pub name: String,
+    pub what: String,
+    pub role: String,
+    pub ends_at: u64,
 }
 
 /// The answers to them: the few of `EconReply` those requests have.
@@ -125,6 +188,22 @@ pub enum PlayerEconReply {
         mine: bool,
         listings: Vec<ListingSummary>,
     },
+    /// As `EconReply::TradeView`.
+    TradeView {
+        state: u8,
+        version: i32,
+        wait_ms: u32,
+        with: String,
+        together: bool,
+        mine: TradeOffer,
+        theirs: TradeOffer,
+    },
+    /// An accept was taken; `committed`: the other had accepted too, and it is done.
+    Trade {
+        committed: bool,
+    },
+    Tavern(Vec<TavernRow>),
+    Hires(Vec<HireRow>),
 }
 
 impl From<PlayerEcon> for EconOp {
@@ -137,6 +216,19 @@ impl From<PlayerEcon> for EconOp {
             PlayerEcon::StallView { stall } => EconOp::StallView { stall },
             PlayerEcon::StallList { item, price } => EconOp::StallList { item, price },
             PlayerEcon::StallUnlist { listing } => EconOp::StallUnlist { listing },
+            PlayerEcon::TradeView { trade } => EconOp::TradeView { trade },
+            PlayerEcon::TradeOffer { trade, item } => EconOp::TradeOfferItem { trade, item },
+            PlayerEcon::TradeRetract { trade, item } => EconOp::TradeRetractItem { trade, item },
+            PlayerEcon::TradeCoin { trade, coin } => EconOp::TradeSetCoin { trade, coin },
+            PlayerEcon::TradeAccept { trade, version } => EconOp::TradeAccept { trade, version },
+            PlayerEcon::TradeCancel { trade } => EconOp::TradeCancel { trade },
+            PlayerEcon::Tavern => EconOp::Tavern,
+            PlayerEcon::Hires => EconOp::Squad,
+            PlayerEcon::HireListed => EconOp::HireListed,
+            PlayerEcon::Hire { avatar, price } => EconOp::Hire { avatar, price },
+            PlayerEcon::Dismiss { hire } => EconOp::Dismiss { hire },
+            PlayerEcon::HireList { price } => EconOp::HireList { price },
+            PlayerEcon::HireUnlist => EconOp::HireUnlist,
         }
     }
 }
@@ -158,6 +250,49 @@ impl TryFrom<EconReply> for PlayerEconReply {
                 mine,
                 listings,
             },
+            EconReply::TradeView {
+                state,
+                version,
+                wait_ms,
+                with,
+                together,
+                mine,
+                theirs,
+            } => PlayerEconReply::TradeView {
+                state,
+                version,
+                wait_ms,
+                with,
+                together,
+                mine,
+                theirs,
+            },
+            EconReply::Trade { committed } => PlayerEconReply::Trade { committed },
+            // What a screen shows of somebody for hire is the hub's words: the build
+            // itself is the zone's to have.
+            EconReply::Tavern(list) => PlayerEconReply::Tavern(
+                list.into_iter()
+                    .map(|t| TavernRow {
+                        character: t.character,
+                        name: t.name,
+                        what: t.what,
+                        role: t.role,
+                        price: t.price,
+                        hires: t.hires,
+                    })
+                    .collect(),
+            ),
+            EconReply::Squad(list) => PlayerEconReply::Hires(
+                list.into_iter()
+                    .map(|h| HireRow {
+                        hire: h.hire,
+                        name: h.name,
+                        what: h.what,
+                        role: h.role,
+                        ends_at: h.expires_at,
+                    })
+                    .collect(),
+            ),
             _ => return Err(()),
         })
     }
@@ -318,5 +453,28 @@ mod tests {
             PlayerResponse::try_from(HubResponse::Econ(EconReply::Stalls(Vec::new()))),
             Err(())
         );
+        // The tavern's and the trade window's requests are the hub's own, and a hire's
+        // price goes with it.
+        assert_eq!(
+            EconOp::from(PlayerEcon::Hire {
+                avatar: 5,
+                price: 120
+            }),
+            EconOp::Hire {
+                avatar: 5,
+                price: 120
+            }
+        );
+        assert_eq!(
+            EconOp::from(PlayerEcon::TradeAccept {
+                trade: 3,
+                version: 9
+            }),
+            EconOp::TradeAccept {
+                trade: 3,
+                version: 9
+            }
+        );
+        assert_eq!(EconOp::from(PlayerEcon::Hires), EconOp::Squad);
     }
 }

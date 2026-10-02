@@ -8,8 +8,8 @@ use std::time::Duration;
 use gm_core::loot;
 use gm_hub::Db;
 use gm_hub::economy::{
-    EconError, Economy, HIRE_BURN_PER_CENT, INVENTORY_SLOTS, Outcome, STALL_SLOTS, STORAGE_SLOTS,
-    TradeStatus, salvage_indices,
+    EconError, Economy, HIRE_BURN_PER_CENT, INVENTORY_SLOTS, NOT_FOR_HIRE, NOT_HERE, Outcome,
+    PRICE_CHANGED, STALL_SLOTS, STORAGE_SLOTS, TradeState, TradeStatus, salvage_indices,
 };
 use sqlx::Row;
 
@@ -33,6 +33,9 @@ async fn setup() -> Option<Economy> {
     let db = Db::connect(&url).await.expect("database");
     let mut econ = Economy::new(db.pool().clone());
     econ.trade_cooldown = Duration::from_millis(250);
+    // The characters of these tests are rows: they play in no zone (the rule that a
+    // trade is between two in one zone is tested over the protocol, tests/party.rs).
+    econ.trades_need_a_zone = false;
     Some(econ)
 }
 
@@ -652,6 +655,7 @@ async fn boss_drops_follow_the_corrected_split() {
     let m = |i: usize, contribution: u64| loot::Member {
         id: ids[i] as u64,
         contribution,
+        damage: contribution,
     };
     let parties = [
         loot::Party {
@@ -923,7 +927,7 @@ async fn tavern_hires_burn_thirty_per_cent() {
     econ.hire_list(avatar, 1_000).await.unwrap();
 
     let before = econ.supply().await.unwrap();
-    let (hire, burned) = econ.hire(hirer, avatar, 3).await.unwrap();
+    let (hire, burned) = econ.hire(hirer, avatar, 3, None, |_| true).await.unwrap();
     assert_eq!(burned, 1_000 * HIRE_BURN_PER_CENT / 100);
     assert_eq!(coin(&econ, hirer).await, 9_000);
     assert_eq!(coin(&econ, avatar).await, 700, "flat coin only");
@@ -938,7 +942,7 @@ async fn tavern_hires_burn_thirty_per_cent() {
 
     // Hiring your own character and hiring an avatar its owner is playing are refused.
     assert!(matches!(
-        econ.hire(own_alt, avatar, 3).await,
+        econ.hire(own_alt, avatar, 3, None, |_| true).await,
         Err(EconError::Invalid(_))
     ));
     sqlx::query("update characters set location_kind = 'zone', location_zone = 'z' where id = $1")
@@ -948,7 +952,7 @@ async fn tavern_hires_burn_thirty_per_cent() {
         .unwrap();
     let second = player(&econ, 10_000).await;
     assert!(matches!(
-        econ.hire(second, avatar, 3).await,
+        econ.hire(second, avatar, 3, None, |_| true).await,
         Err(EconError::State(_))
     ));
     assert!(
@@ -972,8 +976,8 @@ async fn tavern_hires_burn_thirty_per_cent() {
     let (_, fresh) = account_with_character(&econ).await;
     econ.hire_list(fresh, 5_000).await.unwrap();
     let third = player(&econ, 10_000).await;
-    econ.hire(second, avatar, 3).await.unwrap();
-    econ.hire(third, avatar, 3).await.unwrap();
+    econ.hire(second, avatar, 3, None, |_| true).await.unwrap();
+    econ.hire(third, avatar, 3, None, |_| true).await.unwrap();
     let list = econ.tavern().await.unwrap();
     let pos = |c: i64| list.iter().position(|t| t.character == c).unwrap();
     assert!(pos(fresh) < pos(avatar));
@@ -982,7 +986,7 @@ async fn tavern_hires_burn_thirty_per_cent() {
     // A hirer without the coin hires nobody.
     let poor = player(&econ, 10).await;
     assert_eq!(
-        econ.hire(poor, fresh, 3).await,
+        econ.hire(poor, fresh, 3, None, |_| true).await,
         Err(EconError::Insufficient)
     );
     assert_eq!(coin(&econ, poor).await, 10);
@@ -995,12 +999,12 @@ async fn tavern_hires_burn_thirty_per_cent() {
     assert_eq!((squad[0].id, squad[0].avatar), (hire, avatar));
     assert_eq!(econ.squad(second).await.unwrap().len(), 1);
     assert!(matches!(
-        econ.hire(hirer, avatar, 3).await,
+        econ.hire(hirer, avatar, 3, None, |_| true).await,
         Err(EconError::State(_))
     ));
     // A full squad refuses before any coin moves.
     assert!(matches!(
-        econ.hire(hirer, fresh, 1).await,
+        econ.hire(hirer, fresh, 1, None, |_| true).await,
         Err(EconError::State(_))
     ));
     assert_eq!(coin(&econ, hirer).await, 9_000);
@@ -1010,7 +1014,7 @@ async fn tavern_hires_burn_thirty_per_cent() {
     assert_eq!(econ.dismiss(hirer, hire).await, Err(EconError::NotFound));
     assert!(econ.squad(hirer).await.unwrap().is_empty());
     assert_eq!(coin(&econ, hirer).await, 9_000);
-    econ.hire(hirer, fresh, 1).await.unwrap();
+    econ.hire(hirer, fresh, 1, None, |_| true).await.unwrap();
     assert_eq!(coin(&econ, hirer).await, 4_000);
     // The owner takes the avatar back: every active hire of it ends, nobody is refunded.
     let mut ended = econ.end_hires_of(avatar).await.unwrap();
@@ -1029,7 +1033,179 @@ async fn tavern_hires_burn_thirty_per_cent() {
         .await
         .unwrap();
     assert!(econ.squad(hirer).await.unwrap().is_empty());
-    econ.hire(third, fresh, 1).await.unwrap();
+    econ.hire(third, fresh, 1, None, |_| true).await.unwrap();
+    sound(&econ).await;
+}
+
+/// What Phase 12 ruled of hires and trades (PARTY.md 6, 7): a hire names the price it was
+/// shown and buys the build that was listed; a listing is withdrawn; a trade is between
+/// two in one zone, is called off when one is claimed elsewhere or after ten idle
+/// minutes, and a stranger neither accepts nor cancels it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hire_buys_what_was_listed_and_a_trade_ends_when_its_two_part() {
+    let Some(econ) = setup().await else { return };
+    let hirer = player(&econ, 10_000).await;
+    let (_, avatar) = account_with_character(&econ).await;
+    let listed_build: serde_json::Value =
+        sqlx::query_scalar("select build from characters where id = $1")
+            .bind(avatar)
+            .fetch_one(econ.pool())
+            .await
+            .unwrap();
+    econ.hire_list(avatar, 1_000).await.unwrap();
+    assert_eq!(econ.hire_listed(avatar).await.unwrap(), Some(1_000));
+    // The price shown was another: nothing is hired, nothing moves.
+    assert_eq!(
+        econ.hire(hirer, avatar, 3, Some(900), |_| true).await,
+        Err(EconError::State(PRICE_CHANGED.into()))
+    );
+    assert_eq!(coin(&econ, hirer).await, 10_000);
+    // The owner makes something else of the character after listing it: the listing,
+    // the tavern and the hire keep the build that was listed.
+    let other_build = serde_json::json!({"not": "what was listed"});
+    sqlx::query("update characters set build = $2 where id = $1")
+        .bind(avatar)
+        .bind(&other_build)
+        .execute(econ.pool())
+        .await
+        .unwrap();
+    let row = econ
+        .tavern()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.character == avatar)
+        .unwrap();
+    assert_eq!(row.build, listed_build);
+    // A listing whose build cannot be played sells nothing, and nothing is paid.
+    assert_eq!(
+        econ.hire(hirer, avatar, 3, Some(1_000), |_| false).await,
+        Err(EconError::State(NOT_FOR_HIRE.into()))
+    );
+    assert_eq!(coin(&econ, hirer).await, 10_000);
+    let (hire, _) = econ
+        .hire(hirer, avatar, 3, Some(1_000), |b| *b == listed_build)
+        .await
+        .unwrap();
+    let squad = econ.squad(hirer).await.unwrap();
+    assert_eq!((squad.len(), squad[0].id), (1, hire));
+    assert_eq!(
+        squad[0].build, listed_build,
+        "the hire keeps the listed build"
+    );
+    // Withdrawn: not in the tavern, not for hire, and the hire that runs is not ended.
+    econ.hire_unlist(avatar).await.unwrap();
+    assert_eq!(econ.hire_listed(avatar).await.unwrap(), None);
+    assert!(
+        !econ
+            .tavern()
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.character == avatar)
+    );
+    assert_eq!(
+        econ.hire(hirer, avatar, 3, Some(1_000), |_| true).await,
+        Err(EconError::NotFound)
+    );
+    assert_eq!(econ.squad(hirer).await.unwrap().len(), 1);
+    // A listing made before builds were kept with listings (none) is not served.
+    econ.hire_list(avatar, 1_000).await.unwrap();
+    sqlx::query("update hire_listings set build = null where character_id = $1")
+        .bind(avatar)
+        .execute(econ.pool())
+        .await
+        .unwrap();
+    assert!(
+        !econ
+            .tavern()
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.character == avatar)
+    );
+    let second = player(&econ, 10_000).await;
+    assert_eq!(
+        econ.hire(second, avatar, 3, Some(1_000), |_| true).await,
+        Err(EconError::State(NOT_FOR_HIRE.into()))
+    );
+
+    // Trades. Two in one zone, a stranger, and the ends a trade comes to.
+    let mut strict = econ.clone();
+    strict.trades_need_a_zone = true;
+    let (a, b, stranger) = (
+        player(&econ, 1_000).await,
+        player(&econ, 0).await,
+        player(&econ, 0).await,
+    );
+    let in_zone = |who: i64, zone: Option<&'static str>| {
+        let pool = econ.pool().clone();
+        async move {
+            match zone {
+                Some(z) => sqlx::query("update characters set location_kind = 'zone', location_zone = $2 where id = $1")
+                    .bind(who)
+                    .bind(z)
+                    .execute(&pool)
+                    .await
+                    .unwrap(),
+                None => sqlx::query("update characters set location_kind = 'offline', location_zone = null where id = $1")
+                    .bind(who)
+                    .execute(&pool)
+                    .await
+                    .unwrap(),
+            };
+        }
+    };
+    in_zone(a, Some("square")).await;
+    in_zone(b, Some("square")).await;
+    let t = strict.trade_open_in(a, b, "square").await.unwrap();
+    strict.trade_set_coin(t, a, 100).await.unwrap();
+    cooldown(&strict).await;
+    let v = strict.trade_version(t).await.unwrap();
+    // A stranger accepts nothing and changes nothing.
+    assert_eq!(
+        strict.trade_accept(t, stranger, v).await,
+        Err(EconError::Forbidden)
+    );
+    assert_eq!(
+        strict.trade_view(t, a).await.unwrap().state,
+        TradeState::Open
+    );
+    // One of the two is elsewhere: the view says so, and an accept calls it off.
+    in_zone(b, None).await;
+    assert!(!strict.trade_view(t, a).await.unwrap().together);
+    assert_eq!(
+        strict.trade_accept(t, a, v).await,
+        Err(EconError::State(NOT_HERE.into()))
+    );
+    assert_eq!(
+        strict.trade_view(t, a).await.unwrap().state,
+        TradeState::Cancelled
+    );
+    assert_eq!(coin(&econ, a).await, 1_000);
+    // A trade nobody touches for ten minutes is called off by the sweep; one whose
+    // character a zone claims is called off at the claim.
+    in_zone(b, Some("square")).await;
+    let idle = strict.trade_open_in(a, b, "square").await.unwrap();
+    sqlx::query("update trades set changed_at = now() - interval '11 minutes' where id = $1")
+        .bind(idle)
+        .execute(econ.pool())
+        .await
+        .unwrap();
+    assert_eq!(strict.trades_expire().await.unwrap(), 1);
+    assert_eq!(
+        strict.trade_view(idle, b).await.unwrap().state,
+        TradeState::Cancelled
+    );
+    let claimed = strict.trade_open_in(a, b, "square").await.unwrap();
+    assert_eq!(strict.trades_end_of(b).await.unwrap(), 1);
+    assert_eq!(
+        strict.trade_view(claimed, a).await.unwrap().state,
+        TradeState::Cancelled
+    );
+    assert_eq!(strict.trades_end_of(b).await.unwrap(), 0);
+    in_zone(a, None).await;
+    in_zone(b, None).await;
     sound(&econ).await;
 }
 
@@ -1182,7 +1358,7 @@ async fn a_storm_of_mixed_movements_never_deadlocks() {
                     Ok(()) | Err(EconError::State(_)) => {}
                     Err(other) => return Err(other),
                 }
-                let (_, mine, _) = e.trade_view(t, a).await?;
+                let mine = e.trade_view(t, a).await?.mine;
                 if !mine.2.is_empty() {
                     return Err(EconError::Invalid(format!(
                         "round {round}: a worn sword is on offer"

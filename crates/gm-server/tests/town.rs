@@ -74,10 +74,12 @@ fn flow(
             aim: Default::default(),
             report_after_ticks: 0,
             say: None,
+            social: Default::default(),
         },
         play: Duration::from_secs(secs),
         list_for_hire: None,
         sell_at: None,
+        trade_for: None,
         hire: 0,
     }
 }
@@ -119,6 +121,8 @@ async fn avatars_and_stalls_in_the_town() {
             session_secs: 3600,
             auth_per_minute: 1000.0,
             econ_per_second: 1000.0,
+            party_sweep: std::time::Duration::from_millis(300),
+            party_away: std::time::Duration::from_secs(2),
             items: Default::default(),
             max_coin_grant: 10_000,
             models_dir: models_dir.clone(),

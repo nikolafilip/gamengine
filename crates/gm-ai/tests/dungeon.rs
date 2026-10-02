@@ -65,6 +65,7 @@ fn run_tuned(
         tune,
         split,
         verbose: std::env::var("GM_VERBOSE").is_ok(),
+        ally: None,
     })
 }
 

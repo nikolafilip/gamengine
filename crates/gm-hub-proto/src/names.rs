@@ -33,6 +33,11 @@ const RESERVED: &[&str] = &[
 /// at most, beginning with a letter, made of letters, digits and single spaces, hyphens
 /// and apostrophes between them. The error says what is wrong, for the screen that asked.
 pub fn character_name(name: &str) -> Result<String, &'static str> {
+    // (The bytes first: what a client sends may be as long as a frame, and this is asked
+    // on a zone's tick thread.)
+    if name.len() > 24 + 64 {
+        return Err("a name is 24 letters at most (a marked letter counts for two)");
+    }
     let name = name.trim();
     if name.chars().count() < 2 {
         return Err("a name is two letters or more");

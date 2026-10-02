@@ -1,11 +1,18 @@
 //! The corrected boss loot split (PLAN.md 5.2, ECONOMY.md 9). Pure: the zone feeds it the
 //! contribution ledger at kill time and hands the result to the hub.
 
-/// One member's share of the damage dealt to the boss.
+/// One member's part in the kill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Member {
     pub id: u64,
+    /// What it did (PARTY.md 2): the damage it and its companions dealt, the healing
+    /// they are credited with and the blows the creatures aimed at them. Its rank among
+    /// its party, and the member floor, are by this.
     pub contribution: u64,
+    /// The damage it and its companions dealt to the creatures. A party's eligibility and
+    /// its share among the parties are by this alone: standing in a boss's cleave, or
+    /// mending somebody who does, earns a party nothing of another party's kill.
+    pub damage: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,13 +24,19 @@ pub struct Party {
 }
 
 impl Party {
+    /// What the party did, for the member floor.
     pub fn contribution(&self) -> u64 {
         self.members.iter().map(|m| m.contribution).sum()
     }
+
+    /// The damage the party dealt, for its standing among the parties.
+    pub fn damage(&self) -> u64 {
+        self.members.iter().map(|m| m.damage).sum()
+    }
 }
 
-/// A party must have dealt at least this share of the surviving parties' total to be
-/// eligible (per mille).
+/// A party must have dealt at least this share of the surviving parties' total damage to
+/// be eligible (per mille).
 pub const PARTY_FLOOR_PER_MILLE: u64 = 100;
 /// A member below this share of the party's average contribution is skipped (per cent).
 pub const MEMBER_FLOOR_PER_CENT: u64 = 40;
@@ -37,7 +50,7 @@ pub fn split_parties(components: u32, parties: &[Party]) -> Vec<(u64, u32)> {
     let total: u64 = parties
         .iter()
         .filter(|p| p.living_member_present)
-        .map(|p| p.contribution())
+        .map(|p| p.damage())
         .sum();
     if components == 0 || total == 0 {
         return Vec::new();
@@ -45,7 +58,7 @@ pub fn split_parties(components: u32, parties: &[Party]) -> Vec<(u64, u32)> {
     let mut eligible: Vec<(u64, u64)> = parties
         .iter()
         .filter(|p| p.living_member_present)
-        .map(|p| (p.id, p.contribution()))
+        .map(|p| (p.id, p.damage()))
         .filter(|&(_, c)| c > 0 && c * 1000 >= total * PARTY_FLOOR_PER_MILLE)
         .collect();
     if eligible.is_empty() {
@@ -132,7 +145,11 @@ mod tests {
             living_member_present: alive,
             members: members
                 .iter()
-                .map(|&(id, contribution)| Member { id, contribution })
+                .map(|&(id, contribution)| Member {
+                    id,
+                    contribution,
+                    damage: contribution,
+                })
                 .collect(),
         }
     }

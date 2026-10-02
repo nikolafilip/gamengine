@@ -19,6 +19,7 @@ mod hub;
 mod hud;
 mod menu;
 mod net;
+mod people;
 #[cfg(not(target_arch = "wasm32"))]
 mod playback;
 mod render;

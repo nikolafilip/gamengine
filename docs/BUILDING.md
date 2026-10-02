@@ -412,6 +412,31 @@ cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --
 In a UI script the two keys are `key I` and `key E`, and the pages are called `inventory`,
 `storage`, `price` and `stall`.
 
+## People together: parties, channels, a trade, the tavern (Phase 12)
+
+`docs/PARTY.md` is the contract. `P` (or the menu) opens the people: whoever is in the zone,
+the party and who asked what; **Invite**, **Join**, **Decline**, **Remove**, **Leave**,
+**Trade** (standing within 160 units of the other, who asks back), **Whisper**, **Tavern**.
+The chat line knows `/p TEXT`, `/w NAME TEXT`, `/r TEXT`, `/invite NAME` and `/leave`. A
+party is the hub's and holds from zone to zone; a member that left the game is let go of
+after two minutes (`gm-hub --party-away SECS` for a shorter wait in a test). In a fight a
+body's party does not change, and nobody who left a fight comes back into it.
+
+A bot can be the other person:
+
+```sh
+cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --user ana@bots.test \
+    --password ana-password --register --character Ana --zone town --behaviour hold --invite Bojan --secs 60
+cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --user bojan@bots.test \
+    --password bojan-password --register --character Bojan --zone town --behaviour hold --sociable \
+    --trade-for 300 --secs 900
+# --sociable: joins whoever invites, answers a party's line with "aye" and a whisper with
+# "psst yourself"; --trade-for COPPER: offers the newest thing it carries and accepts when
+# that much coin is on the other side
+```
+
+In a UI script the key is `key P`, and the pages are called `people`, `trade` and `tavern`.
+
 ## CI gates locally
 
 ```sh
@@ -440,6 +465,10 @@ scripts/check-screens.sh --browser    # also both browser builds: the page's for
 scripts/check-items.sh                # the gear term, the item content, the inventory and stall screens; with a database the hub and a zone with clients by hand
 scripts/check-items.sh --desktop      # also a bot that keeps a stall, and a buyer through the windowed client: looks, buys, wears; then E and I from a real keyboard
 scripts/check-items.sh --browser      # the same purchase in both browser builds
+scripts/check-party.sh                # the split with people in it, the wire's two types, the people, trade and tavern screens; with a database the hub's parties and two zones with clients by hand
+scripts/check-party.sh --online       # also two bots: a party in the town, the dungeon cleared together, the loot split by the hub
+scripts/check-party.sh --desktop      # also the windowed client: a party by the page, its line and a whisper, a trade for what the other looted, a hire
+scripts/check-party.sh --browser      # the same in both browser builds
 ```
 
 `check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and

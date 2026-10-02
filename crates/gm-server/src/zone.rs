@@ -1,6 +1,6 @@
 //! The zone process: tick loop over `gm_core::sim::Zone`, sessions, snapshots and reports.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,8 @@ use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Contents, Hull};
 use gm_core::vocab::EntityId;
 use gm_net::control::{
-    self, BodyKind, BuildChoice, Control, PlayerEntry, SquadEntry, StallEntry, stall_in_reach,
+    self, BodyKind, BuildChoice, FromZone, PlayerEntry, SquadEntry, StallEntry, stall_in_reach,
+    trade_in_reach,
 };
 use rayon::prelude::*;
 use tokio::sync::{mpsc, watch};
@@ -22,11 +23,13 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crate::hub_link::HubLink;
-use crate::net::{ClientEvent, EVENT_CHANNEL, JoinInfo, NetConfig, accept_loop};
+use crate::net::{ClientEvent, EVENT_CHANNEL, JoinInfo, NetConfig, PartyAsk, accept_loop};
+use crate::party::ZoneParties;
 use crate::recorder::{Recorder, RecorderConfig, Written};
 use crate::session::{PvsCache, Session, TickTable};
 use gm_hub_proto::protocol::{
-    CharacterId, CharacterState, GearReading, ModelId, ModelRef, StallSummary, now_secs,
+    CharacterId, CharacterState, GearReading, ModelId, ModelRef, PartyNews, PartyReply, SayTo,
+    StallSummary, ZonePartyOp, now_secs,
 };
 use gm_replay::RosterEntry;
 
@@ -275,6 +278,10 @@ struct HubSlot {
     gear_seq: u64,
 }
 
+/// An invitation for a character that has no body here yet is kept this long (the
+/// invitation's own life, PARTY.md 3.2).
+const INVITE_KEPT: Duration = Duration::from_secs(gm_hub_proto::protocol::INVITE_SECS);
+
 /// A reading of gear for a character that has no body here at the moment is kept this
 /// long: an answer to the body it had, arriving while it joins again.
 const GEAR_KEPT: Duration = Duration::from_secs(120);
@@ -287,6 +294,58 @@ const HUB_PATIENCE: Duration = Duration::from_secs(10);
 pub const GEAR_AFTER_FIGHT: Duration = Duration::from_secs(10);
 /// What a player is told when the hub did not answer in `HUB_PATIENCE`.
 const HUB_SILENT: &str = "the hub did not answer: try again";
+
+/// A line of the zone itself to one client (a refusal, a notice): it is not lost.
+fn zone_line(session: &Session, text: impl Into<String>) {
+    session.send_control(FromZone::ChatFrom {
+        from: 0,
+        text: text.into(),
+    });
+}
+
+/// The session of the body a character has here.
+fn session_of<'a>(
+    hub_slots: &BTreeMap<EntityId, HubSlot>,
+    sessions: &'a BTreeMap<EntityId, Session>,
+    character: CharacterId,
+) -> Option<&'a Session> {
+    let (id, _) = hub_slots.iter().find(|(_, s)| s.character == character)?;
+    sessions.get(id)
+}
+
+/// The hub's news of a party (PARTY.md 3.2), from an answer or a notice: every character
+/// here that it changes something for is told what its party is now, and, when it is in
+/// one or out of one by this, in a line. (The number its body fights under follows when
+/// the body is in no fight.)
+fn party_news(
+    parties: &mut ZoneParties,
+    news: &PartyNews,
+    hub_slots: &BTreeMap<EntityId, HubSlot>,
+    sessions: &BTreeMap<EntityId, Session>,
+) {
+    let was: Vec<(CharacterId, bool)> = news
+        .party
+        .members
+        .iter()
+        .map(|(c, _)| *c)
+        .chain(news.left.iter().copied())
+        .map(|c| (c, parties.of(c).is_some()))
+        .collect();
+    for character in parties.news(news, Instant::now()) {
+        let Some(s) = session_of(hub_slots, sessions, character) else {
+            continue;
+        };
+        let names = parties.names(character);
+        let before = was.iter().any(|(c, in_one)| *c == character && *in_one);
+        match (before, names.is_empty()) {
+            (false, false) => zone_line(s, format!("you are in a party: {}", names.join(", "))),
+            (true, true) if news.party.members.is_empty() => zone_line(s, "the party is no more"),
+            (true, true) => zone_line(s, "you are out of the party"),
+            _ => {}
+        }
+        s.send_control(FromZone::Party(names));
+    }
+}
 
 /// A stall as clients see it: the tile's centre, the keeper's looks. `None` when the tile is
 /// not on this map (a stall left over from another build of it).
@@ -450,6 +509,19 @@ pub async fn run_with_web(
     let mut stalls: BTreeMap<i64, StallSummary> = BTreeMap::new();
     // Readings of gear for characters that have no body here at the moment.
     let mut gear_kept: HashMap<CharacterId, (GearReading, Instant)> = HashMap::new();
+    // The hub's parties as this zone has them (PARTY.md 2), the humans whose body does
+    // not carry its party's number yet because it is in a fight, and the requests to
+    // trade that wait for the other's: who asked whom, and when.
+    let mut parties = ZoneParties::default();
+    let mut party_waits: HashSet<EntityId> = HashSet::new();
+    let mut trade_asks: HashMap<EntityId, (EntityId, Instant)> = HashMap::new();
+    // Whom a request to trade was told to, and when: once per pair in the time it waits.
+    let mut trade_told: HashMap<(EntityId, EntityId), Instant> = HashMap::new();
+    // Invitations for characters that are on their way here: told when the body is.
+    let mut invites_kept: Vec<(CharacterId, String, Instant)> = Vec::new();
+    // Characters whose body left while it was in a fight, and that body: nobody who left
+    // a fight comes back into it (PARTY.md 2).
+    let mut left_fights: HashMap<CharacterId, EntityId> = HashMap::new();
     if let Some(link) = cfg.hub.clone().filter(|_| !world.stall_grids.is_empty()) {
         let tx = event_tx.clone();
         tokio::spawn(async move {
@@ -611,12 +683,22 @@ pub async fn run_with_web(
                 } => {
                     // The same character again (a reconnect the hub allowed): drop the old
                     // body first, so that it does not count against the room it frees.
+                    // Not while that body is in a fight (PARTY.md 2): a new body would be
+                    // alive where it is dead and held, so the fight goes on with the body
+                    // it has (its own connection, or nobody's until it is kicked), and
+                    // the newcomer is turned away.
                     if let Some(h) = &hub
                         && let Some(old) = hub_slots
                             .iter()
                             .find(|(_, s)| s.character == h.character)
                             .map(|(id, _)| *id)
                     {
+                        if director.engaged(old) {
+                            let why =
+                                "your body here is still in a fight: come back when it is over";
+                            let _ = reply.send(Err(why.into()));
+                            continue;
+                        }
                         // What the old body wore, by the hub's own numbering, is kept for
                         // the new one: the claim's reading may be the older of the two.
                         if let (Some(slot), Some(p)) = (hub_slots.get(&old), zone.player(old)) {
@@ -626,14 +708,19 @@ pub async fn run_with_web(
                             };
                             gear_kept.insert(h.character, (reading, Instant::now()));
                         }
+                        // (Its party's reading is kept the same way, by `parties`.)
+                        parties.left(h.character, Instant::now());
+                        director.human_left(&mut zone, old);
                         zone.remove_player(old);
                         if let Some(s) = sessions.remove(&old) {
                             s.conn.close(4, b"character joined again");
                         }
                         hub_slots.remove(&old);
+                        party_waits.remove(&old);
+                        trade_asks.retain(|asker, (asked, _)| *asker != old && *asked != old);
                         // (The old session's own leave finds nothing left to announce.)
                         for s in sessions.values() {
-                            s.send_control(Control::PlayerLeft(old));
+                            s.send_control(FromZone::PlayerLeft(old));
                         }
                         depart(
                             &mut recorder,
@@ -642,6 +729,16 @@ pub async fn run_with_web(
                             old,
                             Some(h.character),
                         );
+                    }
+                    // Nobody who left a fight comes back into it (PARTY.md 2): a new body
+                    // would be alive where the old one was dead and held.
+                    left_fights.retain(|_, old| director.in_encounter(*old));
+                    if let Some(h) = &hub
+                        && left_fights.contains_key(&h.character)
+                    {
+                        let why = "the fight you left here is not over: come back when it is";
+                        let _ = reply.send(Err(why.into()));
+                        continue;
                     }
                     if sessions.len() >= cfg.max_players {
                         let _ = reply.send(Err("zone full".into()));
@@ -702,6 +799,11 @@ pub async fn run_with_web(
                             reading = kept;
                         }
                         zone.set_gear(id, reading.gear);
+                        // Its party (PARTY.md 4): the claim's reading, or a newer one the
+                        // zone was told of before the body was here. The number its body
+                        // carries follows before this tick is simulated, unless its
+                        // party is in a fight here: that roster is closed.
+                        parties.joined(h.character, h.party);
                         hub_slots.insert(
                             id,
                             HubSlot {
@@ -730,7 +832,7 @@ pub async fn run_with_web(
                     session.model = model;
                     session.announced = zone.player(id).and_then(|p| session.wears(p.frame()));
                     for s in sessions.values() {
-                        s.send_control(Control::PlayerInfo {
+                        s.send_control(FromZone::PlayerInfo {
                             id,
                             name: name.clone(),
                             team,
@@ -794,9 +896,25 @@ pub async fn run_with_web(
                             kind: wire_kind(kind),
                         }
                     }));
-                    sessions[&id].send_control(Control::Roster(roster));
+                    sessions[&id].send_control(FromZone::Roster(roster));
+                    if let Some(slot) = hub_slots.get(&id) {
+                        if parties.of(slot.character).is_some() {
+                            let names = parties.names(slot.character);
+                            sessions[&id].send_control(FromZone::Party(names));
+                        }
+                        // Whoever invited it while it was on its way.
+                        let character = slot.character;
+                        invites_kept.retain(|(to, from, at)| {
+                            let waits = at.elapsed() < INVITE_KEPT;
+                            if waits && *to == character {
+                                sessions[&id]
+                                    .send_control(FromZone::Invited { from: from.clone() });
+                            }
+                            waits && *to != character
+                        });
+                    }
                     if !stalls.is_empty() {
-                        sessions[&id].send_control(Control::Stalls(
+                        sessions[&id].send_control(FromZone::Stalls(
                             stalls
                                 .values()
                                 .filter_map(|s| stall_entry(&world, s, &revoked))
@@ -814,7 +932,7 @@ pub async fn run_with_web(
                         Ok(()) => report.orders += 1,
                         Err(why) => {
                             report.orders_refused += 1;
-                            session.send_control(Control::OrderRefused(why));
+                            session.send_control(FromZone::OrderRefused(why));
                         }
                     }
                 }
@@ -836,13 +954,13 @@ pub async fn run_with_web(
                     let result = resolve(&zone, Some(&build))
                         .and_then(|b| zone.request_respec(id, b).map_err(|e| e.to_string()));
                     if let Some(s) = sessions.get(&id) {
-                        s.send_control(Control::RespecResult(result));
+                        s.send_control(FromZone::RespecResult(result));
                     }
                 }
                 ClientEvent::Travel { id, zone: to_zone } => {
                     let Some(link) = cfg.hub.clone() else {
                         if let Some(s) = sessions.get(&id) {
-                            s.send_control(Control::TravelRefused("no hub".into()));
+                            s.send_control(FromZone::TravelRefused("no hub".into()));
                         }
                         continue;
                     };
@@ -878,7 +996,7 @@ pub async fn run_with_web(
                     s.end_travel_request();
                     match result {
                         Ok(ticket) => {
-                            s.send_control(Control::TravelTicket {
+                            s.send_control(FromZone::TravelTicket {
                                 zone: ticket.zone,
                                 addr: ticket.addr.to_string(),
                                 cert_der: ticket.cert_der,
@@ -892,7 +1010,7 @@ pub async fn run_with_web(
                             }
                         }
                         Err(e) => {
-                            s.send_control(Control::TravelRefused(e));
+                            s.send_control(FromZone::TravelRefused(e));
                         }
                     }
                 }
@@ -905,13 +1023,19 @@ pub async fn run_with_web(
                         if let Some(slot) = hub_slots.get_mut(&id) {
                             slot.claimed_elsewhere = true;
                         }
+                        if director.engaged(id) {
+                            left_fights.insert(character, id);
+                        }
                         director.human_left(&mut zone, id);
                         zone.remove_player(id);
                         if let Some(s) = sessions.remove(&id) {
-                            s.send_control(Control::Kick("claimed by another zone".into()));
+                            s.send_control(FromZone::Kick("claimed by another zone".into()));
                             s.conn.close(0, b"travelled");
                         }
                         hub_slots.remove(&id);
+                        parties.left(character, Instant::now());
+                        party_waits.remove(&id);
+                        trade_asks.retain(|asker, (asked, _)| *asker != id && *asked != id);
                         depart(
                             &mut recorder,
                             cfg.hub.as_ref(),
@@ -922,7 +1046,7 @@ pub async fn run_with_web(
                         // The body leaves here: said once, counted once (the `Leave` that
                         // follows the closed connection finds nothing left to announce).
                         for s in sessions.values() {
-                            s.send_control(Control::PlayerLeft(id));
+                            s.send_control(FromZone::PlayerLeft(id));
                         }
                         report.leaves += 1;
                     }
@@ -990,7 +1114,7 @@ pub async fn run_with_web(
                     }
                     // Everyone forgets it, whoever wore it.
                     for s in sessions.values() {
-                        s.send_control(Control::ModelRevoked(model));
+                        s.send_control(FromZone::ModelRevoked(model));
                     }
                 }
                 ClientEvent::StallsLoaded(list) => {
@@ -1001,7 +1125,7 @@ pub async fn run_with_web(
                         .collect();
                     info!(stalls = entries.len(), "market loaded");
                     for s in sessions.values() {
-                        s.send_control(Control::Stalls(entries.clone()));
+                        s.send_control(FromZone::Stalls(entries.clone()));
                     }
                 }
                 ClientEvent::StallOpen { id } => {
@@ -1040,7 +1164,7 @@ pub async fn run_with_web(
                         }
                         Err(why) => {
                             session.end_stall_request();
-                            session.send_control(Control::StallResult(Err(why.to_string())));
+                            session.send_control(FromZone::StallResult(Err(why.to_string())));
                         }
                     }
                 }
@@ -1049,7 +1173,7 @@ pub async fn run_with_web(
                         Ok(stall) => {
                             if let Some(entry) = stall_entry(&world, &stall, &revoked) {
                                 for s in sessions.values() {
-                                    s.send_control(Control::StallOpened(entry.clone()));
+                                    s.send_control(FromZone::StallOpened(entry.clone()));
                                 }
                             }
                             stalls.insert(stall.id, stall);
@@ -1059,7 +1183,7 @@ pub async fn run_with_web(
                     };
                     if let Some(s) = sessions.get_mut(&id) {
                         s.end_stall_request();
-                        s.send_control(Control::StallResult(answer));
+                        s.send_control(FromZone::StallResult(answer));
                     }
                 }
                 ClientEvent::StallClose { id } => {
@@ -1080,7 +1204,7 @@ pub async fn run_with_web(
                         }
                         _ => {
                             session.end_stall_request();
-                            session.send_control(Control::StallResult(Err(
+                            session.send_control(FromZone::StallResult(Err(
                                 "this zone has no market".into(),
                             )));
                         }
@@ -1090,13 +1214,13 @@ pub async fn run_with_web(
                     // The stall itself goes when the hub's notice arrives.
                     if let Some(s) = sessions.get_mut(&id) {
                         s.end_stall_request();
-                        s.send_control(Control::StallResult(result));
+                        s.send_control(FromZone::StallResult(result));
                     }
                 }
                 ClientEvent::HubStallClosed { stall } => {
                     if stalls.remove(&stall).is_some() {
                         for s in sessions.values() {
-                            s.send_control(Control::StallClosed(stall));
+                            s.send_control(FromZone::StallClosed(stall));
                         }
                     }
                 }
@@ -1111,7 +1235,7 @@ pub async fn run_with_web(
                     };
                     // A buy is always answered: somebody is looking at a screen.
                     let refuse = |session: &Session, why: &str| {
-                        session.send_control(Control::BuyResult {
+                        session.send_control(FromZone::BuyResult {
                             listing,
                             result: Err(why.to_string()),
                         });
@@ -1175,7 +1299,7 @@ pub async fn run_with_web(
                     if let Some(s) = sessions.get_mut(&id)
                         && s.end_stall_request()
                     {
-                        s.send_control(Control::BuyResult { listing, result });
+                        s.send_control(FromZone::BuyResult { listing, result });
                     }
                 }
                 ClientEvent::Wear { id, item, on } => {
@@ -1183,7 +1307,7 @@ pub async fn run_with_web(
                         continue;
                     };
                     let refuse = |session: &Session, why: &str| {
-                        session.send_control(Control::WearResult {
+                        session.send_control(FromZone::WearResult {
                             item,
                             result: Err(why.to_string()),
                         });
@@ -1291,10 +1415,377 @@ pub async fn run_with_web(
                         && let Some(s) = sessions.get_mut(&id)
                         && s.end_gear_request()
                     {
-                        s.send_control(Control::WearResult {
+                        s.send_control(FromZone::WearResult {
                             item,
                             result: result.map(|_| ()),
                         });
+                    }
+                }
+                ClientEvent::Party { id, ask } => {
+                    let Some(session) = sessions.get_mut(&id) else {
+                        continue;
+                    };
+                    if !session.begin_party_request() {
+                        zone_line(session, "one thing at a time: try again in a moment");
+                        continue;
+                    }
+                    // The zone's own part (PARTY.md 4): the asker is a body in person,
+                    // and a name is one a character can have. The rest is the hub's.
+                    let named = |name: &str| gm_hub_proto::names::character_name(name).is_ok();
+                    let request = (|| {
+                        let link = cfg.hub.clone().ok_or("this zone has no parties")?;
+                        let character = hub_slots
+                            .get(&id)
+                            .ok_or("this zone has no parties")?
+                            .character;
+                        if zone.player(id).is_none_or(|p| p.ghost) {
+                            return Err("not now");
+                        }
+                        let op = match &ask {
+                            PartyAsk::Invite(name) | PartyAsk::Remove(name) if !named(name) => {
+                                return Err("nobody can be called that");
+                            }
+                            PartyAsk::Answer { from, .. } if !named(from) => {
+                                return Err("nobody can be called that");
+                            }
+                            PartyAsk::Invite(name) => ZonePartyOp::Invite {
+                                from: character,
+                                to: name.clone(),
+                            },
+                            PartyAsk::Answer { from, join } => ZonePartyOp::Answer {
+                                character,
+                                from: from.clone(),
+                                join: *join,
+                            },
+                            PartyAsk::Leave => ZonePartyOp::Leave { character },
+                            PartyAsk::Remove(name) => ZonePartyOp::Remove {
+                                leader: character,
+                                name: name.clone(),
+                            },
+                        };
+                        Ok((link, op))
+                    })();
+                    match request {
+                        Ok((link, op)) => {
+                            let tx = event_tx.clone();
+                            tokio::spawn(async move {
+                                let answered = |result, tell| ClientEvent::PartyAnswered {
+                                    id,
+                                    ask: ask.clone(),
+                                    result,
+                                    tell,
+                                };
+                                let asked = link.party(op);
+                                tokio::pin!(asked);
+                                match tokio::time::timeout(HUB_PATIENCE, &mut asked).await {
+                                    Ok(result) => {
+                                        let _ = tx.send(answered(result, true)).await;
+                                    }
+                                    Err(_) => {
+                                        // As with gear: the player is told and may ask
+                                        // again, and what the hub did in the end is
+                                        // still what the party is (this zone is not
+                                        // told of its own change in any other way).
+                                        let silent = Err(HUB_SILENT.to_string());
+                                        let _ = tx.send(answered(silent, true)).await;
+                                        let late = asked.await;
+                                        if late.is_ok() {
+                                            let _ = tx.send(answered(late, false)).await;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        Err(why) => {
+                            session.cancel_party_request();
+                            zone_line(session, why);
+                        }
+                    }
+                }
+                ClientEvent::PartyAnswered {
+                    id,
+                    ask,
+                    result,
+                    tell,
+                } => {
+                    if let Ok(PartyReply::News(news)) = &result {
+                        party_news(&mut parties, news, &hub_slots, &sessions);
+                    }
+                    if tell
+                        && let Some(s) = sessions.get_mut(&id)
+                        && s.end_party_request()
+                    {
+                        let line = match (ask, result) {
+                            (_, Err(why)) => why,
+                            (_, Ok(PartyReply::Invited { name })) => {
+                                format!("{name} was asked to join")
+                            }
+                            (_, Ok(PartyReply::Declined)) => "declined".to_string(),
+                            (PartyAsk::Remove(name), Ok(_)) => {
+                                format!("{name} is out of the party")
+                            }
+                            // The news said the rest to everybody it concerns.
+                            (_, Ok(_)) => continue,
+                        };
+                        zone_line(s, line);
+                    }
+                }
+                ClientEvent::HubParty(news) => {
+                    party_news(&mut parties, &news, &hub_slots, &sessions);
+                }
+                ClientEvent::PartySeq { character, seq } => {
+                    // A save's answer: the zone is behind (a notice was lost) when the
+                    // hub's number is larger than its own. It asks, once.
+                    let Some(link) = cfg.hub.clone() else {
+                        continue;
+                    };
+                    if parties.behind(character, seq) {
+                        let tx = event_tx.clone();
+                        tokio::spawn(async move {
+                            let op = ZonePartyOp::Read { character };
+                            if let Ok(PartyReply::Reading(reading)) = link.party(op).await {
+                                let _ =
+                                    tx.send(ClientEvent::PartyRead { character, reading }).await;
+                            }
+                        });
+                    }
+                }
+                ClientEvent::PartyRead { character, reading } => {
+                    if parties.read(character, reading)
+                        && let Some(s) = session_of(&hub_slots, &sessions, character)
+                    {
+                        warn!(character, "a party's news had been missed: mended");
+                        s.send_control(FromZone::Party(parties.names(character)));
+                    }
+                }
+                ClientEvent::HubInvited { to, from } => {
+                    match session_of(&hub_slots, &sessions, to) {
+                        Some(s) => {
+                            s.send_control(FromZone::Invited { from });
+                        }
+                        // On its way here: kept for the body (a minute, as the
+                        // invitation itself; a few hundred at most).
+                        None => {
+                            invites_kept.retain(|(_, _, at)| at.elapsed() < INVITE_KEPT);
+                            if invites_kept.len() < 512 {
+                                invites_kept.push((to, from, Instant::now()));
+                            }
+                        }
+                    }
+                }
+                ClientEvent::HubDeclined { to, by } => {
+                    if let Some(s) = session_of(&hub_slots, &sessions, to) {
+                        zone_line(s, format!("{by} declined"));
+                    }
+                }
+                ClientEvent::HubHeard {
+                    to,
+                    channel,
+                    from,
+                    text,
+                } => {
+                    for character in to {
+                        if let Some(s) = session_of(&hub_slots, &sessions, character) {
+                            // A line may be lost; nobody is disconnected over one.
+                            s.send_droppable(FromZone::Heard {
+                                channel,
+                                from: from.clone(),
+                                text: text.clone(),
+                            });
+                        }
+                    }
+                }
+                ClientEvent::Say { id, to, text } => {
+                    // The connection checked the line and its sender's rate (`net.rs`).
+                    // A party's line and a whisper go through the hub, whoever hears
+                    // them (PARTY.md 5).
+                    let Some(session) = sessions.get(&id) else {
+                        continue;
+                    };
+                    let (Some(link), Some(slot)) = (cfg.hub.clone(), hub_slots.get(&id)) else {
+                        session.send_droppable(FromZone::ChatFrom {
+                            from: 0,
+                            text: "this zone has no parties".into(),
+                        });
+                        continue;
+                    };
+                    let (tx, from) = (event_tx.clone(), slot.character);
+                    tokio::spawn(async move {
+                        let whisper = matches!(to, SayTo::Whisper(_));
+                        let op = ZonePartyOp::Say {
+                            from,
+                            to,
+                            text: text.clone(),
+                        };
+                        let result = match tokio::time::timeout(HUB_PATIENCE, link.party(op)).await
+                        {
+                            Ok(Ok(PartyReply::Said { to })) => Ok(to),
+                            Ok(Ok(_)) => Err("the hub could not be asked: try again".to_string()),
+                            Ok(Err(why)) => Err(why),
+                            Err(_) => Err(HUB_SILENT.to_string()),
+                        };
+                        let said = ClientEvent::Said {
+                            id,
+                            whisper,
+                            text,
+                            result,
+                        };
+                        let _ = tx.send(said).await;
+                    });
+                }
+                ClientEvent::Said {
+                    id,
+                    whisper,
+                    text,
+                    result,
+                } => {
+                    let Some(s) = sessions.get(&id) else {
+                        continue;
+                    };
+                    match result {
+                        // A whisper is answered to the whisperer as it went out; a
+                        // party's line comes back with everybody else's.
+                        Ok(to) if whisper => {
+                            report.chat_lines += 1;
+                            s.send_droppable(FromZone::Heard {
+                                channel: control::CHANNEL_WHISPERED,
+                                from: to,
+                                text,
+                            });
+                        }
+                        Ok(_) => report.chat_lines += 1,
+                        Err(why) => {
+                            s.send_droppable(FromZone::ChatFrom { from: 0, text: why });
+                        }
+                    }
+                }
+                ClientEvent::TradeAsk { id, with } => {
+                    let other_here = sessions.contains_key(&with);
+                    let Some(session) = sessions.get_mut(&id) else {
+                        continue;
+                    };
+                    if !session.begin_party_request() {
+                        zone_line(session, "one thing at a time: try again in a moment");
+                        continue;
+                    }
+                    let now = Instant::now();
+                    let lapse = Duration::from_secs(control::TRADE_ASK_SECS);
+                    trade_asks.retain(|_, (_, at)| now.duration_since(*at) < lapse);
+                    // Only the zone knows that two bodies stand together, alive and in
+                    // person (PARTY.md 6). The rest is the hub's to check.
+                    let request = (|| {
+                        let link = cfg.hub.clone().ok_or("this zone has no market")?;
+                        let mine = hub_slots
+                            .get(&id)
+                            .ok_or("this zone has no market")?
+                            .character;
+                        if with == id {
+                            return Err("that is you");
+                        }
+                        let theirs = hub_slots
+                            .get(&with)
+                            .filter(|_| other_here)
+                            .ok_or("there is nobody there to trade with")?
+                            .character;
+                        let feet = |body: EntityId| {
+                            zone.player(body)
+                                .filter(|p| p.alive && !p.ghost)
+                                .map(|p| p.mover.mv.origin + Vec3::Z * Hull::Player.mins().z)
+                        };
+                        let (Some(a), Some(b)) = (feet(id), feet(with)) else {
+                            return Err("not now");
+                        };
+                        if !trade_in_reach(a.into(), b.into()) {
+                            return Err("walk up to them to trade");
+                        }
+                        Ok((link, mine, theirs))
+                    })();
+                    let (link, mine, theirs) = match request {
+                        Ok(r) => r,
+                        Err(why) => {
+                            session.cancel_party_request();
+                            zone_line(session, why);
+                            continue;
+                        }
+                    };
+                    if trade_asks.get(&with).is_some_and(|(whom, _)| *whom == id) {
+                        // Both asked: the hub opens the trade.
+                        trade_asks.remove(&with);
+                        trade_asks.remove(&id);
+                        // (The pair may ask each other again once this is open.)
+                        trade_told.remove(&(id, with));
+                        trade_told.remove(&(with, id));
+                        let tx = event_tx.clone();
+                        tokio::spawn(async move {
+                            let opened = |result, tell| ClientEvent::TradeOpened {
+                                a: with,
+                                b: id,
+                                result,
+                                tell,
+                            };
+                            let asked = link.trade_open(theirs, mine);
+                            tokio::pin!(asked);
+                            match tokio::time::timeout(HUB_PATIENCE, &mut asked).await {
+                                Ok(result) => {
+                                    let _ = tx.send(opened(result, true)).await;
+                                }
+                                Err(_) => {
+                                    // Told, and a trade the hub opened in the end is
+                                    // still theirs: its window comes up late (and the
+                                    // asker's gate, freed by the first answer, is not
+                                    // freed again by the second).
+                                    let silent = Err(HUB_SILENT.to_string());
+                                    let _ = tx.send(opened(silent, true)).await;
+                                    if let Ok(trade) = asked.await {
+                                        let _ = tx.send(opened(Ok(trade), false)).await;
+                                    }
+                                }
+                            }
+                        });
+                        continue;
+                    }
+                    // The first to ask: the other is told, once for as long as the
+                    // request waits. (The gate keeps its second: this reached somebody.)
+                    session.end_party_request();
+                    let name = |body: EntityId| {
+                        sessions
+                            .get(&body)
+                            .map_or_else(String::new, |s| s.name.clone())
+                    };
+                    trade_asks.insert(id, (with, now));
+                    if let Some(s) = sessions.get(&id) {
+                        zone_line(s, format!("you asked {} to trade", name(with)));
+                    }
+                    // The other is told once per pair in the time a request waits:
+                    // asking A, then B, then A again tells nobody twice.
+                    trade_told.retain(|_, at| now.duration_since(*at) < lapse);
+                    if !trade_told.contains_key(&(id, with))
+                        && let Some(other) = sessions.get(&with)
+                    {
+                        trade_told.insert((id, with), now);
+                        other.send_control(FromZone::TradeAsked { from: id });
+                    }
+                }
+                ClientEvent::TradeOpened { a, b, result, tell } => {
+                    if tell && let Some(s) = sessions.get_mut(&b) {
+                        s.end_party_request();
+                    }
+                    let name = |body: EntityId| sessions.get(&body).map(|s| s.name.clone());
+                    match result {
+                        Ok(trade) => {
+                            for (to, other) in [(a, b), (b, a)] {
+                                if let (Some(s), Some(with)) = (sessions.get(&to), name(other)) {
+                                    s.send_control(FromZone::TradeOpened { trade, with });
+                                }
+                            }
+                        }
+                        Err(why) => {
+                            for to in [a, b] {
+                                if let Some(s) = sessions.get(&to) {
+                                    zone_line(s, format!("the trade did not open: {why}"));
+                                }
+                            }
+                        }
                     }
                 }
                 ClientEvent::Input { id, datagram } => {
@@ -1331,7 +1822,7 @@ pub async fn run_with_web(
                         report.chat_dropped += 1;
                         // Its sender is told (their own bucket bounds how often).
                         if let Some(s) = sessions.get(&id) {
-                            s.send_droppable(Control::ChatFrom {
+                            s.send_droppable(FromZone::ChatFrom {
                                 from: 0,
                                 text: "too many are talking: that line was not heard".into(),
                             });
@@ -1342,7 +1833,7 @@ pub async fn run_with_web(
                     report.chat_lines += 1;
                     for s in sessions.values() {
                         // A chat line may be lost; nobody is disconnected over one.
-                        s.send_droppable(Control::ChatFrom {
+                        s.send_droppable(FromZone::ChatFrom {
                             from: id,
                             text: text.clone(),
                         });
@@ -1353,7 +1844,7 @@ pub async fn run_with_web(
                         continue;
                     };
                     let refuse = |s: &Session, why: &str| {
-                        s.send_control(Control::ReportResult(Err(why.to_string())));
+                        s.send_control(FromZone::ReportResult(Err(why.to_string())));
                     };
                     let Some(rec) = &mut recorder else {
                         refuse(s, "this zone keeps no replays");
@@ -1387,7 +1878,7 @@ pub async fn run_with_web(
                         (None, Some(_), _) => {
                             rec.report(zone.tick, None);
                             info!(reporter = id, target, reason = reason.name(), "report");
-                            s.send_control(Control::ReportResult(Ok(())));
+                            s.send_control(FromZone::ReportResult(Ok(())));
                         }
                         // The hub opens the report first (its limits are the hub's); the
                         // replay is written when it has.
@@ -1413,7 +1904,7 @@ pub async fn run_with_web(
                         (Err(why), _) => Err(why),
                     };
                     if let Some(s) = sessions.get(&id) {
-                        s.send_control(Control::ReportResult(answer));
+                        s.send_control(FromZone::ReportResult(answer));
                     }
                 }
                 ClientEvent::Leave { id } => {
@@ -1436,10 +1927,18 @@ pub async fn run_with_web(
                         let character = slot.character;
                         leaving_saves.insert(character);
                         tokio::spawn(async move {
-                            link.save(character, state, true).await;
+                            let _ = link.save(character, state, true).await;
                             let _ = tx.send(ClientEvent::LeftSaved { character }).await;
                         });
                     }
+                    if let Some(character) = leaving_character {
+                        parties.left(character, Instant::now());
+                        if director.engaged(id) {
+                            left_fights.insert(character, id);
+                        }
+                    }
+                    party_waits.remove(&id);
+                    trade_asks.retain(|asker, (asked, _)| *asker != id && *asked != id);
                     director.human_left(&mut zone, id);
                     let body = zone.remove_player(id);
                     if body.is_some() {
@@ -1489,9 +1988,55 @@ pub async fn run_with_web(
                         continue;
                     }
                     for s in sessions.values() {
-                        s.send_control(Control::PlayerLeft(id));
+                        s.send_control(FromZone::PlayerLeft(id));
                     }
                     report.leaves += 1;
+                }
+            }
+        }
+
+        // The party a body fights under (PARTY.md 2): made what the hub says it is, but
+        // never while the body is on the ledger of an engaged encounter. Rules are
+        // immutable in combat: somebody removed in the middle of a boss fight is paid as
+        // a member of the party it fought in, and no ledger sees a body change sides.
+        // And a fight's roster is closed: nobody takes the number of a party that is in
+        // one, alive in the place of its dead or as one more than it had.
+        for (&id, slot) in &hub_slots {
+            let want = parties.number(slot.character, id);
+            if zone.player(id).is_none_or(|p| p.party == want) {
+                party_waits.remove(&id);
+                continue;
+            }
+            let wait = if director.engaged(id) {
+                Some("the party changes for you when this fight is over")
+            } else if want != id && director.party_engaged(want) {
+                Some("your party is in a fight: you are of it when the fight is over")
+            } else {
+                None
+            };
+            match wait {
+                Some(why) => {
+                    if party_waits.insert(id)
+                        && let Some(s) = sessions.get(&id)
+                    {
+                        zone_line(s, why);
+                    }
+                }
+                None => {
+                    director.set_party(&mut zone, id, want);
+                    // Somebody who was told to wait is told when the wait is over.
+                    if party_waits.remove(&id)
+                        && let Some(s) = sessions.get(&id)
+                    {
+                        zone_line(
+                            s,
+                            if want == id {
+                                "the fight is over: you are on your own now"
+                            } else {
+                                "the fight is over: you are of the party now"
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -1535,7 +2080,7 @@ pub async fn run_with_web(
                             // up to half a minute.
                             slot.last_save = now - SAVE_EVERY;
                             zone.set_ghost(id, false);
-                            s.send_control(Control::TravelRefused(
+                            s.send_control(FromZone::TravelRefused(
                                 "the other zone never claimed you".into(),
                             ));
                         }
@@ -1553,14 +2098,26 @@ pub async fn run_with_web(
                     let character = slot.character;
                     let tx = event_tx.clone();
                     tokio::spawn(async move {
-                        if !link.save(character, state, false).await {
-                            let _ = tx.send(ClientEvent::SaveRefused { character }).await;
-                        }
+                        let said = match link.save(character, state, false).await {
+                            // What the hub holds of its party, by number: the zone looks
+                            // whether it is behind (PARTY.md 3.2).
+                            Ok(seq) => ClientEvent::PartySeq { character, seq },
+                            Err(()) => ClientEvent::SaveRefused { character },
+                        };
+                        let _ = tx.send(said).await;
                     });
                 }
             }
             for id in expired_ghosts {
                 let slot = hub_slots.remove(&id);
+                if let Some(slot) = &slot {
+                    parties.left(slot.character, Instant::now());
+                    if director.engaged(id) {
+                        left_fights.insert(slot.character, id);
+                    }
+                }
+                party_waits.remove(&id);
+                trade_asks.retain(|asker, (asked, _)| *asker != id && *asked != id);
                 depart(
                     &mut recorder,
                     Some(link),
@@ -1575,14 +2132,14 @@ pub async fn run_with_web(
                     let character = slot.character;
                     leaving_saves.insert(character);
                     tokio::spawn(async move {
-                        link.save(character, state, true).await;
+                        let _ = link.save(character, state, true).await;
                         let _ = tx.send(ClientEvent::LeftSaved { character }).await;
                     });
                 }
                 director.human_left(&mut zone, id);
                 zone.remove_player(id);
                 for s in sessions.values() {
-                    s.send_control(Control::PlayerLeft(id));
+                    s.send_control(FromZone::PlayerLeft(id));
                 }
                 report.leaves += 1;
             }
@@ -1635,7 +2192,7 @@ pub async fn run_with_web(
                     let team = zone.player(id).map_or(0, |p| p.team());
                     let model = companion_models.get(&id).map(|m| m.id);
                     for s in sessions.values() {
-                        s.send_control(Control::PlayerInfo {
+                        s.send_control(FromZone::PlayerInfo {
                             id,
                             name: name.clone(),
                             team,
@@ -1648,7 +2205,7 @@ pub async fn run_with_web(
                     companion_models.remove(&id);
                     hire_expiry.remove(&id);
                     for s in sessions.values() {
-                        s.send_control(Control::PlayerLeft(id));
+                        s.send_control(FromZone::PlayerLeft(id));
                     }
                 }
                 DirectorEvent::Squad { commander } => {
@@ -1673,12 +2230,27 @@ pub async fn run_with_web(
                         }
                     };
                     info!(encounter = %name, ?state, "encounter");
+                    // A fight that has trials: they are for one player and a squad, and a
+                    // party of people is told so when it begins, not after the kill.
+                    let trials = state == EncounterState::Engaged
+                        && zone.content.trials.iter().any(|t| {
+                            t.map == world.name && t.encounter == name && t.max_humans == 1
+                        });
                     for id in tell {
                         if let Some(s) = sessions.get(&id) {
-                            s.send_control(Control::Encounter {
+                            s.send_control(FromZone::Encounter {
                                 name: name.clone(),
                                 state: wire,
                             });
+                            let of_a_party = hub_slots
+                                .get(&id)
+                                .is_some_and(|slot| parties.of(slot.character).is_some());
+                            if trials && of_a_party {
+                                zone_line(
+                                    s,
+                                    "a party of people passes no trial: those are for one player and a squad",
+                                );
+                            }
                         }
                     }
                 }
@@ -1695,7 +2267,7 @@ pub async fn run_with_web(
                         report.loot_items += g.items.len() as u64;
                         info!(encounter = %encounter, human = g.human, items = ?g.items, coin = g.coin, "loot");
                         if let Some(s) = sessions.get(&g.human) {
-                            s.send_control(Control::Loot {
+                            s.send_control(FromZone::Loot {
                                 encounter: encounter.clone(),
                                 items: g.items.clone(),
                                 coin: g.coin,
@@ -1736,7 +2308,7 @@ pub async fn run_with_web(
                         report.trials_passed += 1;
                     }
                     if let Some(s) = sessions.get(&human) {
-                        s.send_control(Control::Trial {
+                        s.send_control(FromZone::Trial {
                             key: key.clone(),
                             name,
                             passed,
@@ -1767,7 +2339,7 @@ pub async fn run_with_web(
                 && s.squad_told != entries
             {
                 s.squad_told = entries.clone();
-                s.send_control(Control::Squad(entries));
+                s.send_control(FromZone::Squad(entries));
             }
         }
         for ev in events {
@@ -1801,14 +2373,14 @@ pub async fn run_with_web(
                     let team = zone.player(killer).map_or(0, |p| p.team()) as usize;
                     report.team_kills[team.min(2)] += 1;
                     for s in sessions.values() {
-                        s.send_control(Control::Killed { victim, killer });
+                        s.send_control(FromZone::Killed { victim, killer });
                     }
                 }
                 ZoneEvent::Respawned(id) => {
                     // The client's prediction switches to whatever build the respawn applied.
                     let mut wears = None;
                     if let (Some(s), Some(p)) = (sessions.get_mut(&id), zone.player(id)) {
-                        s.send_control(Control::BuildApplied(p.sheet.build.clone()));
+                        s.send_control(FromZone::BuildApplied(p.sheet.build.clone()));
                         // A respec to another frame shows the mannequin; back, the model.
                         let now = s.wears(p.frame());
                         if now != s.announced {
@@ -1818,7 +2390,7 @@ pub async fn run_with_web(
                     }
                     if let Some((name, team, model)) = wears {
                         for s in sessions.values() {
-                            s.send_control(Control::PlayerInfo {
+                            s.send_control(FromZone::PlayerInfo {
                                 id,
                                 name: name.clone(),
                                 team,
@@ -2039,7 +2611,7 @@ pub async fn run_with_web(
             if !slot.claimed_elsewhere
                 && let Some(state) = character_state(&zone, link, id, slot)
             {
-                link.save(slot.character, state, true).await;
+                let _ = link.save(slot.character, state, true).await;
             }
         }
     }
@@ -2093,7 +2665,7 @@ pub async fn run_with_web(
         }
     }
     for s in sessions.values() {
-        s.send_control(Control::Kick("zone stopped".into()));
+        s.send_control(FromZone::Kick("zone stopped".into()));
         s.conn.close(0, b"zone stopped");
     }
     // Fold the live sessions' counters into the totals.

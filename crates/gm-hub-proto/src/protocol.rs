@@ -59,6 +59,10 @@ pub struct HiredAvatar {
     pub hire: i64,
     pub character: CharacterId,
     pub name: String,
+    /// What it is, in the hub's words: its build's name, frame and armour
+    /// (`ironclad: colossus in plate`), and the role a mind plays it in (`tank`).
+    pub what: String,
+    pub role: String,
     pub build: Build,
     pub model: Option<ModelRef>,
     /// Unix seconds.
@@ -73,7 +77,10 @@ pub struct TavernEntry {
     pub price: i64,
     /// Hires in the last 12 h (three or more sort last).
     pub hires: i64,
-    /// What it brings: the hirer reads the role from it.
+    /// What it brings, in the hub's words (as `HiredAvatar::what` and `role`), and as a
+    /// build.
+    pub what: String,
+    pub role: String,
     pub build: Build,
 }
 
@@ -512,6 +519,8 @@ pub enum HubRequest {
     },
     // a registered zone connection (ECONOMY.md 8, 9)
     ZoneEcon(ZoneEconOp),
+    // a registered zone connection, about the parties of its characters (PARTY.md 3.2)
+    ZoneParty(ZonePartyOp),
     // models (MODELS.md 6.2). `ModelUpload` is followed on the same stream by `len` raw bytes.
     ModelUpload {
         session: SessionId,
@@ -592,9 +601,6 @@ pub enum EconOp {
     Decompose {
         item: ItemId,
     },
-    TradeOpen {
-        with: CharacterId,
-    },
     TradeOfferItem {
         trade: i64,
         item: ItemId,
@@ -665,9 +671,15 @@ pub enum EconOp {
     HireList {
         price: i64,
     },
+    /// `price`: the price the hirer was shown; the hub refuses when it is another now.
     Hire {
         avatar: CharacterId,
+        price: i64,
     },
+    /// Take the character off the tavern's list.
+    HireUnlist,
+    /// The price the character is listed at; answered `Id` (0: it is not listed).
+    HireListed,
     Tavern,
     /// The character's active hires (COMPANIONS.md 3.3).
     Squad,
@@ -752,6 +764,10 @@ pub enum ZoneEconOp {
         character: CharacterId,
         item: ItemId,
     },
+    /// Two characters playing in this zone, standing together, both asked to trade with
+    /// each other (PARTY.md 6): the zone vouches for that, and the hub opens the trade
+    /// (calling off any trade either still had open). Answered `Id`.
+    TradeOpen { a: CharacterId, b: CharacterId },
 }
 
 /// An open stall as its zone shows it: where it is and who keeps it.
@@ -808,6 +824,102 @@ pub struct GearReading {
     pub gear: Gear,
 }
 
+/// The states of a trade in `EconReply::TradeView`.
+pub const TRADE_OPEN: u8 = 0;
+pub const TRADE_COMMITTED: u8 = 1;
+pub const TRADE_CANCELLED: u8 = 2;
+
+/// The most characters in a party of people (PARTY.md 2).
+pub const PARTY_MAX: usize = 5;
+/// How long an invitation waits for its answer, seconds, and how many may wait for one
+/// character at once.
+pub const INVITE_SECS: u64 = 60;
+pub const INVITES_WAITING: i64 = 5;
+
+/// A party of people as the hub holds it (PARTY.md 3): its members in the order they
+/// joined, the leader among them.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PartyState {
+    pub id: i64,
+    pub leader: CharacterId,
+    pub members: Vec<(CharacterId, String)>,
+}
+
+/// What the hub says of one character's party, numbered: of two readings a zone has for a
+/// character, the one with the larger number is true, whichever arrived first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct PartyReading {
+    pub seq: u64,
+    pub party: Option<PartyState>,
+}
+
+/// A change of a party: the party after it (no members: it was dissolved) and who is out
+/// of it by this change. For each character it names, it is that character's reading
+/// with the number `seq`.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct PartyNews {
+    pub seq: u64,
+    pub party: PartyState,
+    pub left: Vec<CharacterId>,
+}
+
+/// Whom a line that goes through the hub is for (PARTY.md 5).
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum SayTo {
+    Party,
+    /// One character, by name, wherever in the game it is.
+    Whisper(String),
+}
+
+/// The channels of `HubNotice::Heard` and of the zone's `Heard` (PROTOCOL.md 19).
+pub const CHANNEL_PARTY: u8 = 1;
+pub const CHANNEL_WHISPER: u8 = 2;
+pub const CHANNEL_WHISPERED: u8 = 3;
+
+/// What a zone asks about the parties of the characters that play in it (PARTY.md 3.2):
+/// only a registered zone connection may send these, and the character each names must
+/// be playing in that zone.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum ZonePartyOp {
+    /// Answered `Invited`.
+    Invite { from: CharacterId, to: String },
+    /// Answered `News` when it joined, `Declined` when it did not.
+    Answer {
+        character: CharacterId,
+        from: String,
+        join: bool,
+    },
+    /// Answered `News`.
+    Leave { character: CharacterId },
+    /// Answered `News`.
+    Remove { leader: CharacterId, name: String },
+    /// Answered `Said`.
+    Say {
+        from: CharacterId,
+        to: SayTo,
+        text: String,
+    },
+    /// What the hub holds of a character's party now: asked by a zone whose own reading
+    /// is behind the number a save was answered with. Answered `Reading`.
+    Read { character: CharacterId },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum PartyReply {
+    /// The invitation waits; the name as the hub has it.
+    Invited {
+        name: String,
+    },
+    Declined,
+    News(PartyNews),
+    /// The line was passed on; for a whisper, the name of whom it went to as the hub
+    /// has it.
+    Said {
+        to: String,
+    },
+    Reading(PartyReading),
+}
+
 /// One thing a stall has for sale.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct ListingSummary {
@@ -833,8 +945,16 @@ pub enum EconReply {
         coin: i64,
         items: Vec<ItemSummary>,
     },
+    /// A trade as one of its two sees it (PARTY.md 6): whether it is still open
+    /// (`TRADE_*`), the version an accept must name, the milliseconds until an accept
+    /// is taken, who the other is and whether both still play in one zone, and the two
+    /// offers.
     TradeView {
+        state: u8,
         version: i32,
+        wait_ms: u32,
+        with: String,
+        together: bool,
         mine: TradeOffer,
         theirs: TradeOffer,
     },
@@ -951,11 +1071,20 @@ pub enum HubResponse {
         /// What its worn items do to damage (ITEMS.md 3), read after the character
         /// became this zone's.
         gear: GearReading,
+        /// The party it is in (PARTY.md 3), read after the character became this zone's.
+        party: PartyReading,
     },
     Registered {
         public_key: [u8; 32],
     },
+    /// A save that was not the character's last was taken; `party`: the number of the
+    /// hub's present reading of its party (PARTY.md 3.2). A zone that holds a smaller
+    /// one asks for the reading.
+    Saved {
+        party: u64,
+    },
     Econ(EconReply),
+    Party(PartyReply),
     Models(Vec<ModelSummary>),
     /// The upload was ingested (or already known): its id and where it stands.
     ModelAccepted {
@@ -993,6 +1122,27 @@ pub enum HubNotice {
         hirer: CharacterId,
         hire: i64,
     },
+    /// A party changed, and a character that plays in this zone, or is on its way to
+    /// it, is in it or left it by this change (PARTY.md 3.2).
+    Party(PartyNews),
+    /// Somebody invites a character of this zone to a party.
+    Invited {
+        to: CharacterId,
+        from: String,
+    },
+    /// An invitation a character of this zone made was refused.
+    Declined {
+        to: CharacterId,
+        by: String,
+    },
+    /// A line for characters of this zone (`channel`: `CHANNEL_*`). `from` is the
+    /// speaker's name; on `CHANNEL_WHISPERED`, the name of whom the line went to.
+    Heard {
+        to: Vec<CharacterId>,
+        channel: u8,
+        from: String,
+        text: String,
+    },
 }
 
 /// The largest replay the hub stores (ANTICHEAT.md 3.3).
@@ -1016,7 +1166,7 @@ pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 /// carry); any change to them is a new one. A stream that speaks them begins with it, in
 /// a frame of one byte, and the hub answers with its own before anything else: zones,
 /// tools and bots of another build are told so instead of being garbled at.
-pub const HUB_VERSION: u8 = 7;
+pub const HUB_VERSION: u8 = 8;
 pub const HUB_PREAMBLE: [u8; 3] = [0, 1, HUB_VERSION];
 pub const HUB_BIDI_STREAMS: u32 = 1024;
 /// Password hashes running at once; more answer `Busy`.

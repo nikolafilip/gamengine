@@ -556,9 +556,9 @@ impl Front {
                     ticket: Box::new(ticket),
                 }
             }
-            (step, Ok(other)) => self.refused(
+            (step, Ok(_)) => self.refused(
                 step,
-                RpcError::Other(format!("the hub answered something else: {other:?}")),
+                RpcError::Other("the hub answered something else".into()),
             ),
             (step, Err(e)) => self.refused(step, e),
         }

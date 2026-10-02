@@ -1,15 +1,15 @@
 # Wire Protocol
 
-Status: v6 (Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+Status: v7 (Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
 and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
 document disagree, the document wins and the code is wrong; changes to either go in one commit.
 
-Protocol version byte: **6**. Any change to sections 2–5 or to the layout of a `Control`
-message bumps it. Section 11 lists what v2 changed over v1, section 14 what v3 changed over
+Protocol version byte: **7**. Any change to sections 2–5 or to the layout of a message of
+the control stream (`FromClient`, `FromZone`; one enum, `Control`, before v7) bumps it. Section 11 lists what v2 changed over v1, section 14 what v3 changed over
 v2, section 15 what v4 changed over v3, section 16 what v5 changed over v4, section 18 what
-v6 changed over v5.
+v6 changed over v5, section 19 what v7 changed over v6.
 
 Section 10 records the independent design review this version went through and what changed.
 
@@ -25,8 +25,8 @@ Section 10 records the independent design review this version went through and w
   fit drops the farthest entities' updates for that tick (they are still tracked and catch up on
   the next tick); the server counts the event.
 - **Reliable stream**: one bidirectional control stream opened by the client right after the
-  handshake. Messages are `bitcode`-encoded `Control` values (section 8), each prefixed by a
-  big-endian **u16 length**. A message longer than 65,535 bytes is a protocol error.
+  handshake. Messages are `bitcode`-encoded values of `FromClient` one way and `FromZone`
+  the other (section 8), each prefixed by a big-endian **u16 length**. A message longer than 65,535 bytes is a protocol error.
 - **Congestion control**: a fixed window (64 KiB, `FixedWindow`) that never shrinks. The traffic
   is a small application-limited rate; a loss-based controller would throttle 64 Hz datagrams
   under the random loss we must survive (3% loss halves NewReno's window every few seconds) and
@@ -346,12 +346,17 @@ capsules.
 
 ## 8. Reliable messages
 
+The control stream's two directions are two types (since v7, section 19): what a client
+says and what a zone says. Each has its own numbering; three numbers are the same in every
+version, so that a client and a zone of different versions can read each other's
+handshake: `Hello` is 0 of `FromClient`, `Reject` is 14 and `Kick` is 25 of `FromZone`.
+What a version adds goes at the end of its enum.
+
 ```
 enum BuildChoice { Preset(String), Custom(Build) }
 
-enum Control {
-    // client → server
-    Hello { version: u16, name: String, token: Vec<u8>, build: Option<BuildChoice>, team: u8 },
+enum FromClient {
+    Hello { version: u16, name: String, token: Vec<u8>, build: Option<BuildChoice>, team: u8 },   // 0
     Chat(String),
     Respec(BuildChoice),                       // applied at the next respawn (MATRIX.md 9)
     Travel(String),                            // to another zone (HUB.md 3.3)
@@ -359,36 +364,53 @@ enum Control {
     StallClose,                                // the own stall
     Order { slots: u8, order: Order },         // to the own squad, from the stance (COMPANIONS.md 5.3)
     Bye,
-    // server → client
+    Report { target: u32, reason: ReportReason },             // ANTICHEAT.md 5
+    StallBuy { stall: i64, listing: i64, price: i64 },        // at the stall the player stands at (ITEMS.md 5)
+    Wear { item: i64 },                        // an item of the inventory (ITEMS.md 2)
+    TakeOff { item: i64 },
+    // v7 (PARTY.md 4)
+    PartyInvite { name: String },              // a character anywhere in the game, by name
+    PartyAnswer { from: String, join: bool },  // the invitation of that character
+    PartyLeave,
+    PartyRemove { name: String },              // the leader takes a member out
+    PartySay(String),                          // a line to the party: chat, with chat's limits
+    Whisper { to: String, text: String },      // a line to one character anywhere in the game
+    TradeAsk { with: u32 },                    // ask a body here for a trade, or answer its asking
+}
+
+enum FromZone {
+    Squad(Vec<SquadEntry>),                    // to a commander: its squad, in slot order
+    OrderRefused(String),
+    Encounter { name: String, state: EncounterState },
+    Loot { encounter: String, items: Vec<String>, coin: u32 },
+    ReportResult(Result<(), String>),
+    Trial { key: String, name: String, passed: bool, detail: String, secs: u32 },
+    BuyResult { listing: i64, result: Result<(), String> },   // the answer to StallBuy, always
+    WearResult { item: i64, result: Result<(), String> },     // the answer to Wear / TakeOff, always
     Welcome { entity: u32, server_tick: u32, hz: u16, map: String, map_hash: u64 },
-    Content { pack: ContentPack, own: Build, team: u8 },   // right after Welcome
+    Content { pack: ContentPack, own: Build, team: u8 },      // right after Welcome
     RespecResult(Result<(), String>),
     BuildApplied(Build),                       // the respawn switched the build
-    TravelTicket { zone: String, addr: String, cert_der: Vec<u8>, token: Vec<u8> },
+    TravelTicket { zone: String, addr: String, cert_der: Vec<u8>, token: Vec<u8>, web: Option<WebAddr> },
     TravelRefused(String),
-    Reject(String),
+    Reject(String),                            // 14, whatever the version
     Roster(Vec<PlayerEntry>),                  // to a joiner: everyone here, itself included
     PlayerInfo { id: u32, name: String, team: u8, model: Option<[u8; 32]>, kind: BodyKind },
-    PlayerLeft(u32),
     ModelRevoked([u8; 32]),                    // forget it, delete it (MODELS.md 7, 8)
     Stalls(Vec<StallEntry>),                   // to a joiner: every open stall of the zone
     StallOpened(StallEntry),
     StallClosed(i64),
     StallResult(Result<(), String>),           // the answer to StallOpen / StallClose
+    PlayerLeft(u32),
     Killed { victim: u32, killer: u32 },       // killer 0 = world
-    ChatFrom { from: u32, text: String },
-    Kick(String),
-    Squad(Vec<SquadEntry>),                    // to a commander: its squad, in slot order
-    OrderRefused(String),
-    Encounter { name: String, state: EncounterState },
-    Loot { encounter: String, items: Vec<String>, coin: u32 },
-    Trial { key: String, name: String, passed: bool, detail: String, secs: u32 },
-    // v6 (section 18), appended whichever way they travel
-    StallBuy { stall: i64, listing: i64, price: i64 },        // client → zone: at the stall the player stands at
-    Wear { item: i64 },                                       // client → zone: an item of the inventory
-    TakeOff { item: i64 },                                    // client → zone
-    BuyResult { listing: i64, result: Result<(), String> },   // the answer to StallBuy, always
-    WearResult { item: i64, result: Result<(), String> },     // the answer to Wear / TakeOff, always
+    ChatFrom { from: u32, text: String },      // from 0: a line of the zone itself
+    Kick(String),                              // 25, whatever the version
+    // v7 (PARTY.md 4)
+    Party(Vec<String>),                        // the hub's word on the client's party: names, the leader first
+    Invited { from: String },
+    Heard { channel: u8, from: String, text: String },        // 1 the party's, 2 a whisper, 3 one's own whisper as it went out
+    TradeAsked { from: u32 },                  // the body `from` asks for a trade
+    TradeOpened { trade: i64, with: String },  // the hub opened it: the window is the hub's from here
 }
 
 enum BodyKind { Human, Companion { owner: u32 }, Creature { def: u16 } }
@@ -625,7 +647,8 @@ implementation; verdicts are ours):
   item, result }`, each naming what it answers (ITEMS.md 5). The zone asks the hub for all
   three (`ZoneEconOp::StallBuy`, `Wear`, `TakeOff`): it is the zone that knows where a body
   stands and whether it is in a fight.
-- **What a version adds goes at the end of `Control`**, whichever way it travels: the
+- **What a version adds goes at the end of `Control`** (of its own enum since v7, section
+  19), whichever way it travels: the
   variants before it keep their numbers, so a client and a zone of different versions can
   still read each other's `Hello`, `Reject` and `Kick` and say what is wrong. A unit test
   pins the bytes of those messages to the ones the v5 build produced.
@@ -649,3 +672,36 @@ implementation; verdicts are ours):
 - Nothing in sections 2 to 7 changed: gear moves damage in the zone, and a client predicts
   none of it. A replay written before v6 reads as before (its frames carry no protocol
   version).
+
+## 19. Changes in v7 (Phase 12)
+
+- **Two types for the two directions.** `Control` was one enum of everything either side
+  says; a client carried the code to write a zone's messages and to read its own. It is
+  `FromClient` and `FromZone` now (section 8). The browser build lost 62,834 bytes by it.
+  The numbers of `Hello` (0), `Reject` (14) and `Kick` (25) are what they were, and both
+  enums have more than sixteen messages, as the one had, so a message's number is still
+  written as a plain byte (`bitcode` packs it when there are sixteen or fewer): the three
+  messages of the handshake have the bytes they had in v5, and a unit test holds them to
+  that. What one side cannot say is not read as something else: a zone's `Welcome` is no
+  message of a client's.
+- **People together** (PARTY.md 4): `PartyInvite`, `PartyAnswer`, `PartyLeave`,
+  `PartyRemove`, `PartySay`, `Whisper` and `TradeAsk` from a client; `Party`, `Invited`,
+  `Heard`, `TradeAsked` and `TradeOpened` from a zone. What the zone answers to a request
+  is a line of its own (`ChatFrom` from 0); what the party is is in `Party`.
+- **Gates**: the party's requests and `TradeAsk` share a gate of their own, of the size of
+  the stall's and of gear's; they pass the connection's flood limit first. `PartySay` and
+  `Whisper` are chat: checked as a line is and taken from the account's bucket in the
+  connection's own task, with `Chat`. The zone's ceiling of ten lines a second is for
+  what everybody hears; a party's line and a whisper go through the hub.
+- **A health that is no longer sent.** Section 5's delta could say a new health and could
+  not unsay one: a record whose health was sent in the baseline and is not sent now (the
+  body is no longer of the viewer's party) is written whole, with `SPAWN`, and read
+  without a health. Before parties changed nothing ever stopped sending one.
+- **Nobody who left a fight comes back into it**: a `Hello` for a character whose last
+  body left this zone while it was on the ledger of an encounter that is still engaged is
+  answered `Reject("the fight you left here is not over: come back when it is")`; one for
+  a character whose body is in such a fight here now is answered `Reject("your body here
+  is still in a fight: come back when it is over")`, and the fight goes on with that body.
+- A `Whisper` to a name no character can have is answered with a line of the zone (`nobody
+  can be called that`) and counts for nothing; a name in any request is checked by its
+  bytes before anything else.

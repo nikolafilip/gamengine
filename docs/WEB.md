@@ -125,7 +125,7 @@ Protocol v4 and hub v1.4:
 
 - `ZoneHello` gains `web: Option<WebAddr>`, `WebAddr { url: String, cert_sha256:
   Option<[u8; 32]> }` (`None` for the hash means "a publicly trusted certificate").
-- `ZoneTicket` and `Control::TravelTicket` gain `web: Option<WebAddr>`.
+- `ZoneTicket` and `FromZone::TravelTicket` (`Control::TravelTicket` then) gain `web: Option<WebAddr>`.
 - A browser client that receives a ticket without `web` says "this zone has no web listener"
   and stays where it is (a travel) or fails (an entry).
 
@@ -509,3 +509,18 @@ unchanged; `C` free as a key.
   takes the refusal as the answer it is; the next click on the canvas asks again (3.4).
   The gate through the hub clicks the canvas twenty seconds in and asks the browser who
   holds the pointer (`web-run.mjs --click-canvas`): until now no gate had.
+
+## 15. Changes in Phase 12 (people together, docs/PARTY.md)
+
+- The browser shows the people, the trade window and the tavern (PARTY.md 8) and speaks the
+  party's messages of protocol v7. **The build got smaller with three screens more**: the
+  control stream's one enum, `Control`, carried the code to write a zone's messages and to
+  read a client's own; split into `FromClient` and `FromZone` (PROTOCOL.md 19) the WebGPU
+  build lost **62,834 bytes**, and dropping the whole-message `{:?}` formats of the client's
+  logging **27,741** more. With the screens in it the WebGPU build is **977,242 bytes
+  (332,973 packed)**, 27,844 less than Phase 11's, the WebGL2 build **2,972,499 (906,803
+  packed)**. The budgets of 9 are unchanged; the megabyte has **71,334 bytes** left.
+- `twiggy top` on a build with `CARGO_PROFILE_WEB_STRIP=false CARGO_PROFILE_WEB_DEBUG=0` is how
+  the bytes were found: the one codec was 83 KB of the build.
+- A trade window polls the hub once a second through the players' messages (`TradeView`);
+  nothing else of this phase touches the page, the transport or the cache.

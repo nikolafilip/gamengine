@@ -6,7 +6,7 @@ use std::sync::mpsc as std_mpsc;
 
 use bytes::Bytes;
 use gm_net::PROTOCOL_VERSION;
-use gm_net::control::{self, BuildChoice, Control};
+use gm_net::control::{self, BuildChoice, FromClient, FromZone};
 use gm_net::transport::{SERVER_NAME, client_config};
 use quinn::rustls::pki_types::CertificateDer;
 use tokio::sync::mpsc;
@@ -17,7 +17,7 @@ use crate::Error;
 /// Outbound traffic from the render thread.
 pub enum Outbound {
     Input(Vec<u8>),
-    Control(Control),
+    Control(FromClient),
 }
 
 pub struct NetClient {
@@ -46,7 +46,7 @@ impl NetClient {
         let (event_tx, events) = std_mpsc::channel::<NetEvent>();
         let cfg = client_config(&[CertificateDer::from(cert_der)])?;
         rt.spawn(async move {
-            let hello = Control::Hello {
+            let hello = FromClient::Hello {
                 version: PROTOCOL_VERSION as u16,
                 name,
                 token,
@@ -74,7 +74,7 @@ impl NetClient {
     }
 
     /// Queue a reliable message (chat, respec).
-    pub fn send_control(&self, msg: Control) {
+    pub fn send_control(&self, msg: FromClient) {
         if let Some(tx) = &self.input_tx {
             let _ = tx.send(Outbound::Control(msg));
         }
@@ -137,7 +137,7 @@ async fn hung_up(outbound: &mut mpsc::UnboundedReceiver<Outbound>) {
 async fn session(
     addr: SocketAddr,
     cfg: quinn::ClientConfig,
-    hello: Control,
+    hello: FromClient,
     mut input_rx: mpsc::UnboundedReceiver<Outbound>,
     events: std_mpsc::Sender<NetEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -158,7 +158,7 @@ async fn session(
         let (mut send, mut recv) = conn.open_bi().await?;
         control::send(&mut send, &hello).await?;
         match control::recv(&mut recv).await? {
-            Some(Control::Welcome {
+            Some(FromZone::Welcome {
                 entity,
                 hz,
                 map,
@@ -173,7 +173,7 @@ async fn session(
                 });
                 Ok((send, recv))
             }
-            Some(Control::Reject(reason)) => Err(format!("rejected: {reason}").into()),
+            Some(FromZone::Reject(reason)) => Err(format!("rejected: {reason}").into()),
             other => Err(format!("unexpected handshake message {other:?}").into()),
         }
     };
@@ -211,7 +211,7 @@ async fn session(
             }
             msg = control::recv(&mut recv) => {
                 match msg? {
-                    Some(Control::Kick(reason)) => return Err(format!("kicked: {reason}").into()),
+                    Some(FromZone::Kick(reason)) => return Err(format!("kicked: {reason}").into()),
                     Some(msg) => {
                         let _ = events.send(NetEvent::Control(msg));
                     }
@@ -220,7 +220,7 @@ async fn session(
             }
         }
     }
-    let _ = control::send(&mut send, &Control::Bye).await;
+    let _ = control::send(&mut send, &FromClient::Bye).await;
     conn.close(0u32.into(), b"bye");
     endpoint.wait_idle().await;
     Ok(())

@@ -198,6 +198,8 @@ fn config(
         session_secs: 3600,
         auth_per_minute: 100.0,
         econ_per_second: 1000.0,
+        party_sweep: std::time::Duration::from_millis(300),
+        party_away: std::time::Duration::from_secs(2),
         items: items.clone(),
         max_coin_grant: 10_000,
         models_dir: std::env::temp_dir().join(format!("gm-hub-items-{}", std::process::id())),
@@ -401,7 +403,8 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
     let smiths = |op: EconOp| econ(&smith_conn, smith_s, smith, op);
     assert_eq!(smiths(EconOp::StorageDeposit { item: sword }).await, worn());
     assert_eq!(smiths(EconOp::Decompose { item: sword }).await, worn());
-    let EconReply::Id(trade) = smiths(EconOp::TradeOpen { with: other }).await.unwrap() else {
+    let open = ZoneEconOp::TradeOpen { a: smith, b: other };
+    let EconReply::Id(trade) = zone_econ(&town, open).await.unwrap() else {
         panic!("trade")
     };
     assert_eq!(
@@ -825,6 +828,8 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
     let _slow = tokio::spawn(gm_hub::run(
         HubConfig {
             econ_per_second: 2.0,
+            party_sweep: std::time::Duration::from_millis(300),
+            party_away: std::time::Duration::from_secs(2),
             ..config(content, &items)
         },
         db.clone(),

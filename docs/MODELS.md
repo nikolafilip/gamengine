@@ -247,9 +247,9 @@ player's current frame equals the model's (a respec to another frame shows the m
 the player respecs back):
 
 ```
-Control::Roster(Vec<PlayerEntry { id, name, team, model }>)   to a joiner: everyone here, one message
-Control::PlayerInfo { id, name, team, model: Option<[u8; 32]> }  a join, or a change of what is worn
-Control::ModelRevoked([u8; 32])                     to everyone: forget it, delete it
+FromZone::Roster(Vec<PlayerEntry { id, name, team, model }>)  to a joiner: everyone here, one message
+FromZone::PlayerInfo { id, name, team, model: Option<[u8; 32]> } a join, or a change of what is worn
+FromZone::ModelRevoked([u8; 32])                    to everyone: forget it, delete it
 ```
 
 Model ids ride on the reliable stream, never in snapshots: 32 bytes per first sight would not

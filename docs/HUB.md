@@ -1,6 +1,6 @@
 # Hub: accounts, characters, zones, handoff
 
-Status: v1.7 (Phase 11: what is worn, buying through a zone, the limit on the economy's requests and the operator's hand, section 3.9 and ITEMS.md; Phase 10: what the client's screens lean on, section 3.8; Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
+Status: v1.8 (Phase 12: parties, lines relayed between zones, a trade opened by the zone both play in, a hire that names its price, section 3.10 and PARTY.md; Phase 11: what is worn, buying through a zone, the limit on the economy's requests and the operator's hand, section 3.9 and ITEMS.md; Phase 10: what the client's screens lean on, section 3.8; Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
 saved position's zone of Phase 6; squads, trials and gated zones of Phase 7, section 3.5). This document is the contract between `gm-hub`, `gm-server` and the
 clients for everything that outlives a zone process: accounts, characters, where a character is,
 and how it moves between zones. PLAN.md 2.1 (Postgres via sqlx, in-memory session state), 11.3
@@ -50,7 +50,7 @@ clients and zones trust exactly that file. Every request is one bidirectional st
 requester writes one framed `HubRequest` and finishes; the hub writes one framed `HubResponse`
 and finishes. Framing is PROTOCOL.md 8 (big-endian u16 length + `bitcode`). Messages over
 65,535 bytes are protocol errors. Since v1.6 a stream **begins with the version** of these
-messages in a frame of one byte (`HUB_VERSION`, 7 since Phase 11), and the hub answers with its own in the
+messages in a frame of one byte (`HUB_VERSION`, 8 since Phase 12), and the hub answers with its own in the
 same way before anything else, going on to the response only when the two are equal: a
 zone, a tool or a bot of another build is told so ("the hub speaks version N") instead of
 failing to decode. A stream that begins with an empty frame speaks the players' messages
@@ -88,6 +88,8 @@ enum HubRequest {
     // the economy (ECONOMY.md): a session for one of its own characters; a zone for itself
     Econ { session: SessionId, character: CharacterId, op: EconOp },
     ZoneEcon(ZoneEconOp),
+    // parties and lines (PARTY.md 3; 3.10): a zone, for a character that plays in it
+    ZoneParty(ZonePartyOp),                      // Invite, Answer, Leave, Remove, Say, Read
     // avatar models (MODELS.md 6.2, 10)
     ModelUpload { session: SessionId, frame: u8, tos_version: u16, len: u32 },   // + len bytes
     ModelList { session: SessionId },
@@ -104,6 +106,11 @@ enum HubNotice {                   // hub → zone, unidirectional streams
     ModelRevoked { model: ModelId },            // to every zone (MODELS.md 6.3)
     StallClosed { stall: i64 },                 // to the stall's zone (ECONOMY.md 7)
     HireEnded { hirer: CharacterId, hire: i64 },// to the hirer's zone (3.5)
+    // 3.10: to the zone of each character it concerns, the asking zone among them
+    Party(PartyNews),                           // a party changed: its number, what it is now, who left
+    Invited { to: CharacterId, from: String },
+    Declined { to: CharacterId, by: String },
+    Heard { to: Vec<CharacterId>, channel: u8, from: String, text: String },  // everybody of the zone who hears it
 }
 
 enum HubResponse {
@@ -122,10 +129,14 @@ enum HubResponse {
     Claimed { character: CharacterId, name: String, state: CharacterState, team: u8,
               model: Option<ModelRef>,    // the avatar model it wears, while it is active
               squad: Vec<HiredAvatar>,    // its active hires (3.5)
-              gear: GearReading },        // what its worn items do to damage, numbered (3.9)
+              gear: GearReading,          // what its worn items do to damage, numbered (3.9)
+              party: PartyReading },      // the party it is of, numbered (3.10)
     Registered { public_key: [u8; 32] },  // the hub's token verification key
     Econ(EconReply),               // Done, Id, Ids, Holder, TradeView, Trade, Decided, Tavern,
                                    // Squad, Stall, Stalls, Listings, Gear
+    Party(PartyReply),             // Invited, Declined, News, Said, Reading (3.10)
+    Saved { party: u64 },          // to a Save that does not leave: the number of the character's
+                                   // last change of party (3.10)
     Models(Vec<ModelSummary>),
     ModelAccepted { model: ModelId, status: ModelStatus },
     Blob { len: u32 },             // + len bytes
@@ -206,16 +217,16 @@ it now also requires the bots to cover ground in both zones.
 
 ### 3.3 Handoff
 
-1. Client → zone: `Control::Travel { zone: ZoneId }` (new control message).
+1. Client → zone: `FromClient::Travel(zone)`.
 2. Zone → hub: `Handoff { character, state, to_zone }`. The hub checks the target is registered,
    marks the character `in_transit(from, to)` in one transaction, and answers `Ticket` for the
    target zone.
-3. Zone → client: `Control::Travel { ticket }`. The player's body becomes a **ghost**: it stays in
+3. Zone → client: `FromZone::TravelTicket { .. }`. The player's body becomes a **ghost**: it stays in
    the zone (visible, can be hit, cannot act) for at most **10 s**.
 4. Client: `Bye` to the origin zone, connect to the target with the ticket's token, `Hello`.
 5. Target zone: verifies, `Claim`s; the hub moves the character `in_transit → in target zone` and
-   tells the origin zone `Control`-side (`HubNotice::Claimed { character }` on the zone's hub
-   stream) to drop the ghost. If no claim arrives within 10 s the origin zone keeps the player
+   tells the origin zone (`HubNotice::Claimed { character }` on the zone's hub link) to drop
+   the ghost. If no claim arrives within 10 s the origin zone keeps the player
    where it was (the hub reverts `in_transit` to the origin zone when the origin zone saves next).
 
 A character in transit cannot `Enter` any zone except with the ticket it was issued, unless the
@@ -229,9 +240,11 @@ The hub opens a unidirectional stream to a zone for each notice: `HubNotice::Cla
 character }` (drop the ghost), `HubNotice::Kick { character, reason }` (the account logged
 out, or an operator removed it), `HubNotice::ModelRevoked { model }` (to every zone: a takedown,
 MODELS.md 6.3), `HubNotice::StallClosed { stall }` (to the stall's zone: its owner closed it
-or its 48 h ran out, ECONOMY.md 7) and `HubNotice::HireEnded { hirer, hire }` (to the zone the
-hirer plays in: the avatar's owner took it back, or the hirer dismissed it). Notices are
-advisory for the zone's bookkeeping; the database is already updated when they are sent.
+or its 48 h ran out, ECONOMY.md 7), `HubNotice::HireEnded { hirer, hire }` (to the zone the
+hirer plays in: the avatar's owner took it back, or the hirer dismissed it) and the four of
+3.10 (`Party`, `Invited`, `Declined`, `Heard`). Notices are advisory for the zone's
+bookkeeping; the database is already updated when they are sent. A zone that reads a notice
+it does not know goes on to the next: one stream, one notice.
 
 ### 3.5 Squads, trials and gated zones (COMPANIONS.md 3.3, 10, 11)
 
@@ -300,7 +313,7 @@ advisory for the zone's bookkeeping; the database is already updated when they a
   what zones, moderators and the economy say. (A browser client that spoke `HubRequest` paid
   89 KB of its megabyte for codecs it never uses.) On the wire a stream that speaks them
   begins with an **empty frame** (`00 00`: no `HubRequest` encodes to nothing) and a frame
-  of one byte, the **version** of the players' messages (`PLAYER_VERSION`, 2 since Phase 11); the hub
+  of one byte, the **version** of the players' messages (`PLAYER_VERSION`, 3 since Phase 12); the hub
   answers with its own version in a frame of one byte, and then, if the two are the same,
   with the framed `PlayerResponse`. A client of another version is told so in words it can
   show, whatever else changed between the builds. The two versions are apart on purpose:
@@ -399,6 +412,60 @@ advisory for the zone's bookkeeping; the database is already updated when they a
   character's saved position), `--audit` (the books in one line; exit status 1 when they
   are not sound).
 
+### 3.10 People together (PARTY.md)
+
+- **A party is the hub's**: `parties`, `party_members`, `party_invites` (PARTY.md 3.1). A
+  zone asks for a character that plays in it (`ZoneParty`; `Unauthorized` otherwise, as a
+  zone's economy requests are) and is answered `Party(PartyReply)` or `Err(Invalid(words))`
+  with the words the player is to read.
+- **One writer at a time.** Every change of any party is made by one writer: a lock in the
+  process and an advisory lock in the transaction (a second hub on one database, a tool).
+  Parties change at the pace people click; nothing in the path of a tick waits for this.
+- **Numbered.** Every change draws a number from the sequence `party_seq` inside its
+  transaction and stamps it on the party's row and on the row of each character that
+  joined or left by it (`characters.party_seq`); the news of it carries that number
+  (`PartyNews { seq, party, left }`), and so does a reading (`PartyReading { seq, party }`:
+  `Claimed.party`, and the answer to `Read`). Of two things a zone holds about a
+  character, the one with the larger number is true, whatever order they arrived in.
+- **Told without waiting.** After the commit the hub looks up where each concerned
+  character plays and opens a notice to each of those zones, the asking one among them (an
+  answer and a notice are then the same news, and a zone applies it once). Nothing waits
+  for a zone to read: each notice is sent by a task of its own, with five seconds of
+  patience.
+- **The repair.** A notice can be lost (a zone stalled past the patience; a character
+  claimed between the commit and the look-up). A `Save` that does not leave is answered
+  `Saved { party }`, the number of the character's last change; a zone that holds a
+  smaller one asks `Read`. A character is saved every thirty seconds: that is how long a
+  zone can be wrong.
+- **The sweep** (every ten seconds; a task of the hub's): invitations older than a minute
+  go; a party whose leader is offline is led by its longest-standing member in the game
+  (any change of a party does the same when its leader is offline); a member offline for
+  longer than `--party-away SECS` (120, from `characters.offline_since`, which a trigger
+  sets when a character goes offline) is taken out, with the party's rows locked in
+  ascending order; a party of one is no party.
+- **Lines.** `Say { from, to: Party | Whisper(name), text }`: the hub looks up who hears
+  (the party's members; the one character of that name, as names are compared, 3.8) and
+  sends `Heard` to the zone each plays in, or to both zones of one on its way. The hub
+  keeps no line. The zone has checked the text and the sender's limit (PARTY.md 5).
+- **A trade is opened by the zone both play in**: `ZoneEconOp::TradeOpen { a, b }`, refused
+  for anybody who does not play there; `EconOp::TradeOpen` is gone. A character has one
+  open trade: opening another cancels it. `TradeView` says whether both still play in one
+  zone, and how long until an accept is taken; an accept that finds them apart cancels the
+  trade. A trade also ends at a claim of either character, and after ten idle minutes (the
+  minute's sweep).
+- **A hire names its price and buys what was listed**: `EconOp::Hire { avatar, price }` is
+  refused when the listing shows another price now (`the price changed: look again`);
+  a listing keeps the build the character had when it was listed (`hire_listings.build`),
+  the tavern shows that, and the hire keeps it (`hires.build`). A listing whose build the
+  content no longer has is neither shown nor sold (`that character is not for hire now:
+  its owner must list it again`). `HireListed` answers what one's own listing is;
+  `HireUnlist` withdraws it. `TavernEntry` and `HiredAvatar` say `what` and `role` in
+  words, of a build that validates.
+- **The players' messages are v3**: `PlayerEcon` gains the trade's requests (`TradeView`,
+  `TradeOffer`, `TradeRetract`, `TradeCoin`, `TradeAccept`, `TradeCancel`) and the
+  tavern's (`Tavern`, `Hires`, `HireListed`, `Hire`, `Dismiss`, `HireList`, `HireUnlist`);
+  `PlayerEconReply` gains `TradeView`, `Trade`, `Tavern` and `Hires`.
+
 ## 4. Database (PLAN.md 11.4)
 
 ```
@@ -423,7 +490,10 @@ trial, zone, secs, passed_at)` and `kills (zone, ref)` (migration 0005); Phase 1
 `characters.name_key`, unique (migration 0007, section 3.8) and an index for a zone's
 room count (0008); Phase 11 adds `worn (character_id, slot, item_id)`, the trigger that
 keeps a worn item with its wearer and the sequence its readings are numbered from (0009,
-ITEMS.md 2 and 3.3). Migrations are embedded in the binary and run at
+ITEMS.md 2 and 3.3); Phase 12 adds `parties`, `party_members`, `party_invites`,
+`characters.party_seq`, `characters.offline_since` with its trigger, the sequence
+`party_seq`, `hires.build`, `hire_listings.build` and partial indexes on open trades
+(0010, PARTY.md 3.1). Migrations are embedded in the binary and run at
 start in order; the hub refuses to start on an unknown newer schema.
 
 Passwords: argon2id with the crate defaults (19 MiB, 2 iterations, parallelism 1), one hash per

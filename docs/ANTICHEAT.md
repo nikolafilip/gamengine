@@ -271,7 +271,7 @@ breakers first, with their rates, medians, z-scores and their five most recent r
 ## 5. Reports
 
 A client may report a client-driven body that is in the zone, or left it within the last two
-minutes: `Control::Report { target, reason }` (reasons: aim, griefing, other; there is no
+minutes: `FromClient::Report { target, reason }` (reasons: aim, griefing, other; there is no
 "speech" reason, because chat is not recorded and a report without evidence is a rumour).
 The zone first checks that there is such a body, then allows one report per client per
 30 s, and refuses when the hour's bytes for report files are spent (3.1). Under a hub the
@@ -341,7 +341,7 @@ that only look: a replay is other people's play.
 
 - `ZoneHello` gains `min_trust`. Zone requests: `ZoneAim { nonce, character, stats }`,
   `ZoneReplay { summary, len }` + bytes, `ZoneReport { reporter, target, reason }`. Client
-  to zone: `Control::Report`, answered `Control::ReportResult`. Moderator: `ModOp::{AimReport,
+  to zone: `FromClient::Report`, answered `FromZone::ReportResult`. Moderator: `ModOp::{AimReport,
   Replays, ReplayGet, Reports, ReportVerdict, Ban, Unban, Reputation, Adjust}`.
   `HubError::Banned { until, reason }`.
 - Migration 0006: `replays`, `replay_participants`, `aim_weeks`, `aim_reports`, `flags`,

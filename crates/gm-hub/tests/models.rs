@@ -65,6 +65,8 @@ async fn start_hub(db: &Db, ingest: IngestMode, timeout: Duration, tag: &str) ->
             session_secs: 3600,
             auth_per_minute: 1000.0,
             econ_per_second: 1000.0,
+            party_sweep: std::time::Duration::from_millis(300),
+            party_away: std::time::Duration::from_secs(2),
             items: Default::default(),
             max_coin_grant: 10_000,
             models_dir: dir.clone(),

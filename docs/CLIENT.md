@@ -7,8 +7,9 @@ press, the chat line, and the settings. PLAN.md 3.3 (**archetype first, math lat
 and 2.7 (budgets, gates), 2.8 (one client for the desktop and the browser) and 6 (small
 numbers, nothing a scammer can dress up) are binding. When the code and this document
 disagree, the document wins. Section 12 records the reviews and what running it found.
-The inventory, the storage and a stall (Phase 11) are ITEMS.md 6: more screens of this
-toolkit, under the rules of this document.
+The inventory, the storage and a stall (Phase 11) are ITEMS.md 6, and the people, a trade
+and the tavern (Phase 12) are PARTY.md 8: more screens of this toolkit, under the rules of
+this document.
 
 Until Phase 10 the client was started by a command line that named the account, the
 password, the character and the zone, and it ended when its connection did. That is how
@@ -90,6 +91,8 @@ focus, the scroll positions, the carets and the widget the button went down on.
   activated), which is what a screen shows when the thing that was picked is gone; a field
   for a **number** (digits only, and a paste with anything else in it is not taken:
   `12.50` is not 1250); a line in several colours (an amount of coin, a colour a unit).
+  Since Phase 12: a list whose rows are **marked** (`list_marked`: a row in the colour of
+  what is new, or struck through; the trade window's offers, PARTY.md 6).
 - **Focus.** One widget has the keyboard. `Tab` and `Shift+Tab` move it, a click moves it.
   `Enter` presses the button that has the keyboard, and only when none has it the
   screen's main one; `Escape` is the screen's way back. A key held down does not press
@@ -178,17 +181,21 @@ back with the reason.
 
 The HUD as before, and:
 
-- **Escape** opens the **menu**: Resume, Inventory, Travel, Settings, Keys, Leave, Quit. While it is
+- **Escape** opens the **menu**: Resume, Inventory, People, Travel, Settings, Keys, Leave, Quit. While it is
   up the body stands (the frames sent to the zone hold no keys) and can be hit: there is no
   pause in a shared world, and the menu says so. A replay and an offline walk have the
   menu too: it is where Quit and the settings are.
 - **Travel** lists the zones (name, map, how many play there); a zone that cannot be gone
   to says why instead (here, full, not from a browser). Go asks the zone being played to
-  travel (`Control::Travel`, as the `T` key does for the zone named on the command line).
+  travel (`FromClient::Travel`, as the `T` key does for the zone named on the command line).
 - **Keys** says what the keys do: nothing else tells a new player.
 - **Enter** opens the chat line (5).
 - **I** opens the inventory, and **E** the stall the body stands at (ITEMS.md 6): screens
   like the menu's, with the body standing while one is up.
+- **P** opens the people (PARTY.md 8): the party, who asks something, who else is here;
+  from it the trade window (which also comes up by itself when the zone opens a trade)
+  and the tavern. Under the squad the HUD shows the party's other members, with the
+  health the wire carries for those who are here.
 - Bottom right while nothing else is there: where this is and the two keys nothing else
   tells of, `town  Esc menu  Enter chat`; and above it, standing at a stall, whose it is
   and its key, `Keeper's stall  E look`.
@@ -237,7 +244,21 @@ ten seconds) end the connection ("flooding the chat"): somebody who overruns a l
 and then never gets there. The zone as a whole relays at most 10 lines a second (a burst
 of 30) and tells a sender whose line that cost; chat is the one thing a slow receiver's
 queue drops, from half full. Chat goes to everybody
-in the zone, as before; channels (party, whisper) come with parties.
+in the zone, as before.
+
+**Channels (Phase 12, PARTY.md 5).** `/p TEXT` says a line to the party, `/w NAME TEXT`
+whispers to one character anywhere in the game, `/r TEXT` answers whoever whispered last
+(`/r ` turns into `/w NAME ` on the line as it is typed, so that whom it goes to is seen
+before it is sent);
+`/invite NAME` and `/leave` are the page's buttons as words. A line that begins with `/`
+and is none of these is not sent, and the line says what there is. A party's line is shown
+`[party] Ana: text`, a whisper `[whisper] Ana: text`, one's own as it went out `[to Bojan]
+text`, each in a colour of its own; a name cannot begin with a bracket (7), so nothing
+said aloud looks like one. They are chat: the same account's five lines in ten seconds,
+the same checks, in the same task. They go through the hub to wherever the hearers play,
+and are not counted against the zone's ten lines a second. `/ignore` holds for all of it:
+an ignored name's lines and whispers are not shown, its invitation is declined by the
+client, its request to trade is not shown.
 
 ## 6. Who gets a key
 
@@ -250,8 +271,8 @@ Decided once per frame, in this order:
    were held are let go, and the frames sent to the zone hold no keys.
 3. The game, as before (`W A S D`, the mouse, `1`–`4`, `V`, `Tab` for the tactical view,
    `F9` to report, and the rest of the Keys page), plus `Enter` and `Escape`, and since
-   Phase 11 `I` and `E`, which open a screen (not in the tactical view, which has its own
-   use for the keys around it). They are keys only here: under rules 1 and 2 they are
+   Phase 11 `I` and `E`, and since Phase 12 `P`, which open a screen (not in the tactical
+   view, which has its own use for the keys around it). They are keys only here: under rules 1 and 2 they are
    letters.
 
 `Q` no longer quits (it is a letter one types, and the tactical view turns with it): Quit
@@ -340,7 +361,7 @@ wait screen characters        until that screen is up
 field email                   give the field with that label the keyboard (a click on it)
 type someone@example.com      characters, as if typed
 key Enter                     Enter | Escape | Tab | BackTab | Backspace | Delete | Left | Right | Up | Down | Home | End | PageUp | PageDown
-                              | I | E (the game's own two that open a screen)
+                              | I | E | P (the game's own three that open a screen)
 click "New character"         the button, row or box with that text
 dclick "Aldric"               the same, twice
 expect "Aldric"               some text on the screen contains it
@@ -351,8 +372,8 @@ quit                          print `ui-script: ok` and end the program
 ```
 
 Screens are named `login`, `characters`, `new character`, `entering`, `game`, `chat`,
-`menu`, `travel`, `settings`, `keys`, `title`, and `inventory`, `storage`, `price`, `stall`
-(ITEMS.md 6). A line that waits (`wait`, `expect`, `click`,
+`menu`, `travel`, `settings`, `keys`, `title`, `inventory`, `storage`, `price`, `stall`
+(ITEMS.md 6), and `people`, `trade`, `tavern` (PARTY.md 8). A line that waits (`wait`, `expect`, `click`,
 `where`) gives up after 30 seconds (longer than the screens themselves keep trying): the
 script then fails with its line and what the screen showed instead, and the client exits
 with an error. After every line the script lets two drawn frames pass, so that the next
@@ -418,9 +439,10 @@ Measured on the reference machine (Ryzen 7 4800U, Renoir iGPU):
 
 ## 11. Deliberately absent
 
-- The inventory, what is worn, the storage and a stall came in Phase 11 (ITEMS.md 6). The
-  tavern, a trade between two players, crafting; parties, invitations, whisper and party
-  chat, friends: Phase 12. Sound: Phase 13.
+- The inventory, what is worn, the storage and a stall came in Phase 11 (ITEMS.md 6); the
+  people, parties, the party's line and whispers, a trade between two players and the
+  tavern in Phase 12 (PARTY.md 8). Crafting and friends have no screen yet. Sound: Phase
+  13.
 - The point-buy editor and the model browser (PLAN.md 3.3's "Build & Model Browser"); a
   tutorial; key rebinding; a gamepad; localisation (the screens are in English).
 - Deleting or renaming a character (the hub has no such request yet).

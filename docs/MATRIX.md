@@ -240,14 +240,14 @@ Rules enforced by `gm-core::build::validate`:
 - the attribute floor and cap, the exact budget, no duplicate aspects.
 
 A rejected build never enters the zone; the zone falls back to nothing (the join is refused
-with the reason). Respec: `Control::Respec(Build)` is validated immediately and applied at
+with the reason). Respec: `FromClient::Respec(Build)` is validated immediately and applied at
 the next respawn.
 
 ## 10. Kits as data
 
 Abilities and preset builds live in `assets/content/*.toml`, loaded and validated at zone
 start against VOCABULARY.md 11 and this document. The zone sends the loaded content to every
-client after `Welcome` (`Control::Content`), so a client can never run different numbers than
+client after `Welcome` (`FromZone::Content`), so a client can never run different numbers than
 its zone and needs no content parser.
 
 Each ability carries: `slot` (primary | secondary | guard | active), `cost` (build points),
@@ -283,7 +283,7 @@ against eight, identical brains on both sides, several seeds:
 
 `scripts/check-matrix.sh` runs these (`crates/gm-bot/tests/arena.rs`, three seeds, 60 s each);
 `crates/gm-server/tests/counterpick.rs` repeats the first two legs over the real protocol at
-150 ms and 3% loss, with the blades re-speccing to frostweavers through `Control::Respec` after
+150 ms and 3% loss, with the blades re-speccing to frostweavers through `FromClient::Respec` after
 ten seconds. The ratios are recorded in PLAN.md 11.10 with the seeds. The test fails if any leg
 is not decided, which would mean the matrix is not doing its job.
 

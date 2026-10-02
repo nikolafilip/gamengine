@@ -204,6 +204,15 @@ books with `gm-hub --grant-coin`, `--grant-item`, `--place`, `--audit`.
   stall and a new character, given coin and stood at the counter by an operator, buys a
   sword and wears it through the windowed client, by UI script and then by real keys; with
   `--browser` the same purchase in both browser builds.
+- `scripts/check-party.sh` — people together: the split with people in it, the wire's two
+  directions, the people, trade and tavern screens at five window sizes; with a database
+  the hub's parties (invitations, numbered readings whatever races, the sweep) and two
+  zones with clients driven by hand (a party across zones, a trade asked standing together,
+  a fight whose roster is closed); with `--online` two bots form a party in the town and
+  clear the tutorial dungeon together, and the hub splits what it drops; with `--desktop` a
+  new character asks one of them into a party, says a party's line and a whisper, buys
+  what the other looted through the trade window and hires an avatar in the tavern, by UI
+  script; with `--browser` the same in both browser builds.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

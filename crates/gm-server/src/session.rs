@@ -14,7 +14,7 @@ use gm_core::sim::{Area, GuardState, Player, Projectile, Zone};
 use gm_core::vocab::{ArchetypeFrame, EntityId, Status};
 use gm_hub_proto::protocol::{ModelId, ModelRef};
 use gm_net::MAX_DATAGRAM_PAYLOAD;
-use gm_net::control::{BodyKind, Control};
+use gm_net::control::{BodyKind, FromZone};
 use gm_net::quant;
 use gm_net::snapshot::{EntityState, OwnState, Snapshot, SpawnInfo, StatusWire, flags};
 use tokio::sync::mpsc;
@@ -155,7 +155,7 @@ pub struct Session {
     pub announced: Option<ModelId>,
     pub conn: gm_net::link::Link,
     /// Bounded: a client that stops reading its control stream is kicked, not buffered forever.
-    pub control: mpsc::Sender<Control>,
+    pub control: mpsc::Sender<FromZone>,
     history: VecDeque<Snapshot>,
     pub acked: u32,
     pub snapshots_sent: u64,
@@ -167,6 +167,7 @@ pub struct Session {
     pub last_udp_rx: u64,
     stall_gate: RequestGate,
     gear_gate: RequestGate,
+    party_gate: RequestGate,
     travel_gate: RequestGate,
     report_gate: RequestGate,
     /// Squad entries last told to this client, so an unchanged squad is not sent again.
@@ -241,7 +242,7 @@ impl Session {
         id: EntityId,
         name: String,
         conn: gm_net::link::Link,
-        control: mpsc::Sender<Control>,
+        control: mpsc::Sender<FromZone>,
     ) -> Session {
         Session {
             id,
@@ -261,6 +262,7 @@ impl Session {
             last_udp_rx: 0,
             stall_gate: RequestGate::default(),
             gear_gate: RequestGate::default(),
+            party_gate: RequestGate::default(),
             travel_gate: RequestGate::default(),
             report_gate: RequestGate::default(),
             squad_told: Vec::new(),
@@ -276,7 +278,7 @@ impl Session {
     /// closed in the same instant can take the unread `Kick` with it (a browser discards
     /// what its stream had queued when the session errors).
     pub fn kick(&self, reason: &str, code: u32) {
-        self.send_control(Control::Kick(reason.to_string()));
+        self.send_control(FromZone::Kick(reason.to_string()));
         let conn = self.conn.clone();
         let why = reason.as_bytes().to_vec();
         tokio::spawn(async move {
@@ -319,6 +321,20 @@ impl Session {
         self.gear_gate.cancel();
     }
 
+    /// And for what a player asks about its party, and for asking somebody to trade
+    /// (PARTY.md 4): a third gate of the same size.
+    pub fn begin_party_request(&mut self) -> bool {
+        self.party_gate.begin(Instant::now(), STALL_REQUEST_GAP)
+    }
+
+    pub fn end_party_request(&mut self) -> bool {
+        self.party_gate.end()
+    }
+
+    pub fn cancel_party_request(&mut self) {
+        self.party_gate.cancel();
+    }
+
     /// May this player report somebody now (one report in `REPORT_GAP`)?
     pub fn may_report(&mut self) -> bool {
         let ok = self.report_gate.begin(Instant::now(), REPORT_GAP);
@@ -346,7 +362,7 @@ impl Session {
     /// Queue a reliable message. A client whose queue is full is not draining its stream:
     /// it is disconnected, because a reliable message is never silently lost (a missed
     /// `PlayerInfo` or `ModelRevoked` would leave it drawing the wrong thing for good).
-    pub fn send_control(&self, msg: Control) -> bool {
+    pub fn send_control(&self, msg: FromZone) -> bool {
         match self.control.try_send(msg) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -359,7 +375,7 @@ impl Session {
 
     /// Queue a message that may be lost: a chat line. A client whose queue is half full
     /// misses it and stays connected: the room that is left is for what must arrive.
-    pub fn send_droppable(&self, msg: Control) -> bool {
+    pub fn send_droppable(&self, msg: FromZone) -> bool {
         self.control.capacity() > self.control.max_capacity() / 2
             && self.control.try_send(msg).is_ok()
     }

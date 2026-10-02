@@ -84,9 +84,10 @@ block and kit, never by cheating minds.
 
 ### 3.1 Party
 
-Every body carries a `party` number. A human's party is itself until it joins another (party
-invitations between humans arrive with the HUD; the simulation and the loot split already
-take any number of members). A companion carries its commander's party. Creatures carry none
+Every body carries a `party` number. A human's party is itself until it joins another
+(since Phase 12 the hub's parties of people, PARTY.md: every member's body in a zone
+carries one number, and it changes only outside a fight). A companion carries its
+commander's party. Creatures carry none
 (0). Party is for the loot ledger, squad sight and the health bars a client is sent; **damage
 never reads it** (PLAN.md 4.4).
 
@@ -207,7 +208,7 @@ minimap and no map-wide view.
 
 ```
 enum Order { Follow, Hold, MoveTo([f32; 3]), Attack(u32) }
-Control::Order { slots: u8, order: Order }      // bit i of `slots` = squad slot i
+FromClient::Order { slots: u8, order: Order }   // bit i of `slots` = squad slot i
 ```
 
 - Accepted only while the sender is in the stance with the button held, for its own
@@ -371,9 +372,13 @@ On `cleared`, for an encounter with a boss:
 
 1. Parties are the ledger's participants grouped by `party`. A party is **present** when a
    member is alive within the boss's leash (plus 256 u) of its post at the kill.
-2. A human member's contribution is its own damage plus the damage of the companions it
-   commands. A commander who fought from the stance is not a leech: its squad's work is its
-   work. Companions are not members and receive nothing.
+2. A human member's contribution within its party is its own work plus the work of the
+   companions it commands: damage dealt, healing credited and blows the creatures aimed at
+   it (since Phase 12, PARTY.md 2: among people one holds the boss and one mends, and has
+   done its part; before, damage alone). Among the parties only damage counts, as before:
+   the floor and the shares of step 3 are by the damage each party dealt. A commander who
+   fought from the stance is not a leech: its squad's work is its work. Companions are not
+   members and receive nothing.
 3. `gm_core::loot::split(components, parties)` decides who gets how many (10% party floor
    among the present, wiped parties nothing, minimum one, 40% member floor).
 4. **The ceiling** (PLAN.md 5.6): a party that had any companion on the ledger draws from
@@ -432,7 +437,10 @@ fire does.
   character is playing in, and only for a trial of that zone's map.
 
 v1 ships four trials on the Warden (section 12), one per role; passing any of them is what
-"cleared the tutorial" means.
+"cleared the tutorial" means. All four are for one human (`max_humans = 1`): since Phase
+12 people can be in a party, and a party of people that pulls an encounter with trials is
+told so at the pull (`a party of people passes no trial: those are for one player and a
+squad`, PARTY.md 2) rather than after a fight that could not count.
 
 | Trial | Lens | Conditions |
 |---|---|---|
@@ -571,7 +579,7 @@ all green:
 
 No taunt, no threat meter on the wire, no enrage timer (PLAN.md 1.2), no boss immunity
 phases, no scripted boss choreography outside its kit, no homing heals, no resurrection, no
-party invitations yet, no instanced copies of a dungeon (a zone is a process; two parties in
+instanced copies of a dungeon (a zone is a process; two parties in
 the same dungeon contest the same Warden, and the split of section 10 settles it), no
 companion in the town, no orders outside the stance, no order that names a human, no map
 view, no creature larger than a colossus.

@@ -44,6 +44,13 @@ impl Entry {
     pub fn damage(&self) -> u64 {
         self.dealt.iter().map(|(_, d)| *d).sum()
     }
+
+    /// What this body did in the fight, in points of health: the damage it dealt, the
+    /// healing it is credited for, and the blows the creatures aimed at it (PARTY.md 2).
+    /// Somebody who heals or holds the boss deals little, and has done its part.
+    pub fn work(&self) -> u64 {
+        self.damage() + self.healing + self.blows
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,7 +170,8 @@ impl Ledger {
     }
 
     /// The loot split's input (ECONOMY.md 9): one party per ledger party, its members the
-    /// humans, each credited with its own damage and that of the companions it commands.
+    /// humans, each credited with its own work and that of the companions it commands
+    /// (`Entry::work`: damage, healing and blows taken).
     /// `present(party)`: a participant of the party is alive within the leash at the kill.
     /// `here(human)`: the human is still in the zone; one who left before the kill is no
     /// member any more, so its share goes to those who stayed instead of to nobody.
@@ -179,15 +187,13 @@ impl Ledger {
                     .entries
                     .iter()
                     .filter(|(id, e)| e.party == party && e.human && here(**id))
-                    .map(|(&id, e)| loot::Member {
-                        id: id as u64,
-                        contribution: e.damage()
-                            + self
-                                .entries
-                                .values()
-                                .filter(|c| !c.human && c.owner == id)
-                                .map(|c| c.damage())
-                                .sum::<u64>(),
+                    .map(|(&id, e)| {
+                        let squad = || self.entries.values().filter(|c| !c.human && c.owner == id);
+                        loot::Member {
+                            id: id as u64,
+                            contribution: e.work() + squad().map(|c| c.work()).sum::<u64>(),
+                            damage: e.damage() + squad().map(|c| c.damage()).sum::<u64>(),
+                        }
                     })
                     .collect();
                 loot::Party {
@@ -255,8 +261,9 @@ mod tests {
         l.dealt(&dps, BOSS, 500, true);
         l.dealt(&dps, ADD, 100, false);
         l.struck(&tank, 40, 200, true);
+        // (A rival that did a tenth of the work and a little: over the party floor.)
         let rival = human(9);
-        l.dealt(&rival, BOSS, 100, false);
+        l.dealt(&rival, BOSS, 150, false);
         let parties = l.loot_parties(|_| true, |_| true);
         assert_eq!(parties.len(), 2);
         // A human who left the zone before the kill is no member: nothing is split to it.
@@ -266,12 +273,14 @@ mod tests {
         assert_eq!(parties[0].id, 1);
         assert_eq!(
             parties[0].members,
+            // What its squad dealt, and the blows its tank took.
             vec![loot::Member {
                 id: 1,
-                contribution: 900
+                contribution: 900 + 200,
+                damage: 900,
             }]
         );
-        assert_eq!(parties[1].members[0].contribution, 100);
+        assert_eq!(parties[1].members[0].contribution, 150);
         assert!(l.has_companions(1) && !l.has_companions(9));
         // The split of three components: the squad's work is the leader's work.
         let split = loot::split(3, &parties);
@@ -284,6 +293,72 @@ mod tests {
         assert_eq!(s.tank, 0);
         // A companion is not a candidate.
         assert!(l.standing(tank.id, 90).is_none());
+    }
+
+    /// Five people and no companions (PARTY.md 2): the one who holds the boss and the one
+    /// who mends are paid with the three who cut. By damage alone both would be under the
+    /// member floor at every kill.
+    #[test]
+    fn people_who_tank_and_heal_have_done_their_part() {
+        let mut l = Ledger::new(0);
+        let member = |id| Who {
+            id,
+            party: 77,
+            owner: id,
+            human: true,
+        };
+        let (tank, mender) = (member(1), member(2));
+        l.dealt(&tank, BOSS, 300, false);
+        l.struck(&tank, 1200, 3000, true);
+        assert_eq!(l.healed(&mender, tank.id, 1100), 1100);
+        for (id, dealt) in [(3, 2400), (4, 2300), (5, 2500)] {
+            l.dealt(&member(id), BOSS, dealt, false);
+        }
+        let parties = l.loot_parties(|_| true, |_| true);
+        assert_eq!(parties.len(), 1);
+        let work: Vec<u64> = parties[0].members.iter().map(|m| m.contribution).collect();
+        assert_eq!(work, [3300, 1100, 2400, 2300, 2500]);
+        // One each of five; of three, the three who did most.
+        let mut split = loot::split(5, &parties);
+        split.sort();
+        assert_eq!(split, vec![(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]);
+        let mut three = loot::split(3, &parties);
+        three.sort();
+        assert_eq!(three, vec![(1, 1), (3, 1), (5, 1)]);
+        // By damage alone: the tank's 300 and the mender's nothing are under two fifths
+        // of the average, and neither would ever be paid.
+        let average = (300 + 2400 + 2300 + 2500) / 5;
+        assert!(300 * 100 < average * loot::MEMBER_FLOOR_PER_CENT);
+    }
+
+    #[test]
+    fn standing_in_the_cleave_earns_no_share_of_another_party_s_kill() {
+        // A party kills the boss; a stranger stands in its arc for a minute and blocks,
+        // and another mends the party's tank: work on the ledger, damage none. Among the
+        // parties only damage counts (PARTY.md 2): neither takes a component.
+        let mut l = Ledger::new(0);
+        let member = |id| Who {
+            id,
+            party: 1,
+            owner: id,
+            human: true,
+        };
+        let (tank, striker) = (member(1), member(2));
+        let (bystander, stranger_mender) = (human(8), human(9));
+        l.dealt(&tank, BOSS, 1500, false);
+        l.struck(&tank, 1600, 2000, true);
+        l.dealt(&striker, BOSS, 6000, false);
+        l.struck(&bystander, 1000, 3600, true);
+        assert_eq!(l.healed(&stranger_mender, tank.id, 1500), 1500);
+        let parties = l.loot_parties(|_| true, |_| true);
+        assert_eq!(parties.len(), 3);
+        let of = |id: u64| parties.iter().find(|p| p.id == id).unwrap();
+        assert_eq!((of(8).damage(), of(8).contribution()), (0, 3600));
+        assert_eq!((of(9).damage(), of(9).contribution()), (0, 1500));
+        let mut split = loot::split(3, &parties);
+        split.sort();
+        // (Two of a party of two: the tank's 3,100 of work is over the member floor.)
+        assert_eq!(split, vec![(1, 1), (2, 2)]);
     }
 
     #[test]

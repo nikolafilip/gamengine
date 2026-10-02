@@ -58,6 +58,7 @@ async fn zone_and_bots_over_real_udp() {
                     aim: Default::default(),
                     report_after_ticks: 0,
                     say: None,
+                    social: Default::default(),
                 },
                 bsp,
                 std::future::pending(),
@@ -146,6 +147,7 @@ async fn quic_and_webtransport_bots_share_a_zone() {
         aim: Default::default(),
         report_after_ticks: 0,
         say: None,
+        social: Default::default(),
     };
 
     let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -252,6 +254,7 @@ async fn chat_is_checked_and_limited() {
                     aim: Default::default(),
                     report_after_ticks: 0,
                     say: Some((line.to_string(), every)),
+                    social: Default::default(),
                 },
                 bsp,
                 std::future::pending(),

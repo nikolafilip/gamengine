@@ -8,6 +8,7 @@ pub mod db;
 pub mod economy;
 pub mod hub;
 pub mod models;
+pub mod party;
 
 pub use db::Db;
 pub use gm_hub_proto::{

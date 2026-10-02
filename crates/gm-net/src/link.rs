@@ -424,7 +424,7 @@ mod web {
 #[cfg(all(test, feature = "web"))]
 mod tests {
     use super::*;
-    use crate::control::{self, Control};
+    use crate::control::{self, FromClient, FromZone};
     use crate::transport::web_transport_config as transport_config;
 
     /// A WebTransport session carries what a QUIC connection carries: a control stream with
@@ -445,8 +445,8 @@ mod tests {
             assert!(link.max_datagram_size().unwrap() >= crate::MAX_DATAGRAM_PAYLOAD);
             let (mut send, mut recv) = link.accept_bi().await.unwrap();
             let msg = control::recv(&mut recv).await.unwrap();
-            assert_eq!(msg, Some(Control::Chat("hello".into())));
-            control::send(&mut send, &Control::Reject("no".into()))
+            assert_eq!(msg, Some(FromClient::Chat("hello".into())));
+            control::send(&mut send, &FromZone::Reject("no".into()))
                 .await
                 .unwrap();
             let dg = link.read_datagram().await.unwrap();
@@ -461,11 +461,11 @@ mod tests {
         };
         let (_endpoint, link) = web_connect(&addr, transport_config()).await.unwrap();
         let (mut send, mut recv) = link.open_bi().await.unwrap();
-        control::send(&mut send, &Control::Chat("hello".into()))
+        control::send(&mut send, &FromClient::Chat("hello".into()))
             .await
             .unwrap();
         let reply = control::recv(&mut recv).await.unwrap();
-        assert_eq!(reply, Some(Control::Reject("no".into())));
+        assert_eq!(reply, Some(FromZone::Reject("no".into())));
         link.send_datagram(Bytes::from_static(b"ping")).unwrap();
         let dg = link.read_datagram().await.unwrap();
         assert_eq!(&dg[..], b"pong");

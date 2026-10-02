@@ -115,7 +115,7 @@ impl RenderEntity {
 pub struct ClientState {
     pub my_id: EntityId,
     pub rate: TickRate,
-    /// The own character (kit and derived stats), from `Control::Content`.
+    /// The own character (kit and derived stats), from `FromZone::Content`.
     pub sheet: Sheet,
     /// Client input tick counter.
     pub tick: u32,

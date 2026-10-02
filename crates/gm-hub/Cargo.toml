@@ -12,6 +12,7 @@ anyhow = { workspace = true }
 argon2 = { workspace = true }
 bitcode = { workspace = true }
 bytes = { workspace = true }
+gm-ai = { workspace = true }
 gm-content = { workspace = true }
 gm-core = { workspace = true, features = ["bitcode", "serde"] }
 gm-hub-proto = { path = "../gm-hub-proto" }

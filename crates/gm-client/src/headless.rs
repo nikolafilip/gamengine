@@ -139,6 +139,7 @@ pub fn run(opts: &Options) -> Result<(), Error> {
             p.hud(&mut renderer.hud);
         } else if opts.tactical {
             let view = crate::app::HudView {
+                party: &[],
                 bars: &[],
                 squad: &[],
                 target: None,

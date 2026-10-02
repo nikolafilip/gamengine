@@ -147,6 +147,8 @@ pub enum Key {
     /// has the keyboard the same keys are letters.
     Inventory,
     Use,
+    /// And `P`: the people here and of the party (PARTY.md 8).
+    People,
 }
 
 impl Key {
@@ -169,6 +171,7 @@ impl Key {
             "PageDown" => Key::PageDown,
             "I" => Key::Inventory,
             "E" => Key::Use,
+            "P" => Key::People,
             _ => return None,
         })
     }
@@ -324,6 +327,16 @@ impl Field {
 /// end, and nothing can be activated. (What was picked is gone: nothing takes its place by
 /// standing in its row.)
 pub const NONE: usize = usize::MAX;
+
+/// How a row of a list is drawn (`Ui::list_marked`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowMark {
+    Plain,
+    /// It calls for a second look.
+    Marked,
+    /// It is gone: shown for what it was.
+    Struck,
+}
 
 /// What a list was asked to do this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -660,6 +673,13 @@ impl<'a, C: Canvas> Ui<'a, C> {
         pressed
     }
 
+    /// Put a field's caret at the end of its text (a screen that wrote the text itself).
+    pub fn caret_to_end(&mut self, label: &str) {
+        self.state
+            .carets
+            .insert(format!("field:{label}"), usize::MAX);
+    }
+
     /// One line of text to edit, with its label above it. Returns whether it changed.
     pub fn text_field(&mut self, r: Rect, label: &str, value: &mut String, how: Field) -> bool {
         let s = self.scale;
@@ -792,6 +812,22 @@ impl<'a, C: Canvas> Ui<'a, C> {
         rows: &[Vec<String>],
         selected: &mut usize,
     ) -> ListEvent {
+        self.list_marked(r, name, columns, rows, &[], selected)
+    }
+
+    /// A list some of whose rows are marked (`marks` by row; rows past its end are
+    /// plain): one that calls for a second look is drawn in the colour of a warning, one
+    /// that is gone is drawn faint with a line through it. (PARTY.md 6: what was not
+    /// agreed to, and what was taken back.)
+    pub fn list_marked(
+        &mut self,
+        r: Rect,
+        name: &str,
+        columns: &[f32],
+        rows: &[Vec<String>],
+        marks: &[RowMark],
+        selected: &mut usize,
+    ) -> ListEvent {
         let s = self.scale;
         let id = format!("list:{name}");
         let focused = self.focusable(&id);
@@ -913,8 +949,18 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 if shown.len() < cell.len() {
                     self.cut.push(cell.clone());
                 }
-                let ink = if c == 0 { TEXT } else { FAINT };
+                let mark = marks.get(i).copied().unwrap_or(RowMark::Plain);
+                let ink = match mark {
+                    RowMark::Marked => WARN,
+                    RowMark::Struck => OFF,
+                    RowMark::Plain if c == 0 => TEXT,
+                    RowMark::Plain => FAINT,
+                };
                 self.canvas.text(x, rr.y + 3.0 * s, s, ink, &shown);
+            }
+            if marks.get(i) == Some(&RowMark::Struck) {
+                let y = rr.y + rr.h * 0.5;
+                self.canvas.rect(rr.x + 3.0 * s, y, rr.w - 6.0 * s, s, OFF);
             }
             self.note(SeenKind::Row, &row.join("  "), rr);
         }

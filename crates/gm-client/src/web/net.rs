@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use gm_net::PROTOCOL_VERSION;
-use gm_net::control::{self, BuildChoice, Control};
+use gm_net::control::{self, BuildChoice, FromClient, FromZone};
 use wasm_bindgen_futures::spawn_local;
 
 use super::timeout_ms;
@@ -35,7 +35,7 @@ struct Shared {
     queued_snapshots: usize,
     live: Option<Rc<Live>>,
     /// Reliable messages queued before the session was up.
-    early: Vec<Control>,
+    early: Vec<FromClient>,
     /// The client hung up itself: what follows is not a disconnect to report.
     closing: bool,
     /// Payload bytes in and out since the start (the zone counts the UDP bytes).
@@ -78,7 +78,7 @@ impl NetClient {
         let shared = Rc::new(RefCell::new(Shared::default()));
         let task = shared.clone();
         spawn_local(async move {
-            let hello = Control::Hello {
+            let hello = FromClient::Hello {
                 version: PROTOCOL_VERSION as u16,
                 name,
                 token,
@@ -107,7 +107,7 @@ impl NetClient {
     }
 
     /// Queue a reliable message (chat, respec).
-    pub fn send_control(&self, msg: Control) {
+    pub fn send_control(&self, msg: FromClient) {
         let mut s = self.shared.borrow_mut();
         match s.live.clone() {
             Some(live) => {
@@ -163,7 +163,7 @@ impl Drop for NetClient {
     }
 }
 
-async fn read_control(reader: &mut Reader) -> Result<Option<Control>, String> {
+async fn read_control(reader: &mut Reader) -> Result<Option<FromZone>, String> {
     match reader.frame().await? {
         Some(payload) => bitcode::decode(&payload)
             .map(Some)
@@ -177,7 +177,7 @@ async fn read_control(reader: &mut Reader) -> Result<Option<Control>, String> {
 /// zone that has admitted the player would keep the body standing.
 async fn session(
     web: &gm_net::control::WebAddr,
-    hello: Control,
+    hello: FromClient,
     shared: Rc<RefCell<Shared>>,
 ) -> Result<String, String> {
     let session = match timeout_ms(HANDSHAKE_MS, Session::connect(web)).await {
@@ -209,7 +209,7 @@ async fn session(
         }
     };
     let welcome = match first {
-        Some(Control::Welcome {
+        Some(FromZone::Welcome {
             entity,
             hz,
             map,
@@ -221,13 +221,13 @@ async fn session(
             map,
             map_hash,
         },
-        Some(Control::Reject(reason)) => {
+        Some(FromZone::Reject(reason)) => {
             session.close();
             return Err(format!("rejected: {reason}"));
         }
-        other => {
+        _ => {
             session.close();
-            return Err(format!("unexpected handshake message {other:?}"));
+            return Err("the zone's first message was not a welcome".into());
         }
     };
     let datagrams = match session.datagram_reader() {
@@ -269,7 +269,7 @@ async fn session(
     let controls = async {
         loop {
             match read_control(&mut reader).await {
-                Ok(Some(Control::Kick(reason))) => return format!("kicked: {reason}"),
+                Ok(Some(FromZone::Kick(reason))) => return format!("kicked: {reason}"),
                 Ok(Some(msg)) => {
                     let mut s = shared.borrow_mut();
                     // Nobody drains the queue (a hidden tab): a zone may not fill memory
@@ -291,7 +291,7 @@ async fn session(
 
 /// Say `Bye` and close; a stream that never takes the `Bye` does not hold the close up.
 async fn hang_up(live: Rc<Live>) {
-    if let Ok(bytes) = control::encode_framed(&Control::Bye) {
+    if let Ok(bytes) = control::encode_framed(&FromClient::Bye) {
         let _ = timeout_ms(BYE_MS, live.control.write(&bytes)).await;
     }
     live.session.close();

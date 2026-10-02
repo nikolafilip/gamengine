@@ -14,7 +14,7 @@ use gm_core::vocab::EntityId;
 use gm_net::PROTOCOL_VERSION;
 use gm_net::client::{ClientState, ClientStats};
 use gm_net::control::WebAddr;
-use gm_net::control::{self, BodyKind, BuildChoice, Control, EncounterState};
+use gm_net::control::{self, BodyKind, BuildChoice, EncounterState, FromClient, FromZone};
 use gm_net::link::{Link, web_connect};
 use gm_net::transport::{SERVER_NAME, web_transport_config};
 use tokio::time::Instant;
@@ -53,6 +53,23 @@ pub struct BotConfig {
     /// Say this line in the zone's chat every so many seconds, at the zone's own tick
     /// rate (CLIENT.md 5).
     pub say: Option<(String, f32)>,
+    /// What the bot does about other people (PARTY.md 9).
+    pub social: Social,
+}
+
+/// A bot as a person among people: it can ask somebody into a party, join whoever asks
+/// it, trade with whoever asks, and answer what is said to it.
+#[derive(Clone, Debug, Default)]
+pub struct Social {
+    /// Ask the character of this name into a party, again every few seconds until the
+    /// zone says the two are in one.
+    pub invite: Option<String>,
+    /// Join whoever invites, ask back whoever asks to trade, answer a party's line with
+    /// a line and a whisper with a whisper.
+    pub sociable: bool,
+    /// Where the trades the zone says the hub opened are handed to (the bot's hub
+    /// session sits elsewhere: `hub_flow`).
+    pub trades: Option<tokio::sync::mpsc::UnboundedSender<i64>>,
 }
 
 /// Why the bot loop ended.
@@ -103,6 +120,10 @@ pub struct BotReport {
     /// zone refused, the encounters it was told were cleared (name, seconds) and reset,
     /// what a kill gave it, the trials judged on it (key, passed, why not), and whether it
     /// finished the map.
+    /// The party as the zone last said it (the hub's word), and the lines heard through
+    /// the hub: channel, from whom, what.
+    pub party: Vec<String>,
+    pub lines: Vec<(u8, String, String)>,
     pub squad_max: usize,
     pub squad_hired: usize,
     pub orders: u32,
@@ -195,7 +216,7 @@ pub async fn run_bot_on_link(
     let (mut send, mut recv) = conn.open_bi().await?;
     control::send(
         &mut send,
-        &Control::Hello {
+        &FromClient::Hello {
             version: PROTOCOL_VERSION as u16,
             name: cfg.name.clone(),
             token,
@@ -208,10 +229,10 @@ pub async fn run_bot_on_link(
         .await?
         .ok_or_else(|| anyhow::anyhow!("server closed before Welcome"))?;
     let (entity, hz, map_name) = match welcome {
-        Control::Welcome {
+        FromZone::Welcome {
             entity, hz, map, ..
         } => (entity, hz, map),
-        Control::Reject(reason) => anyhow::bail!("rejected: {reason}"),
+        FromZone::Reject(reason) => anyhow::bail!("rejected: {reason}"),
         other => anyhow::bail!("unexpected handshake message {other:?}"),
     };
     let world = load_map(&map_name)?;
@@ -220,7 +241,7 @@ pub async fn run_bot_on_link(
         .await?
         .ok_or_else(|| anyhow::anyhow!("server closed before Content"))?;
     let (pack, own, team) = match content {
-        Control::Content { pack, own, team } => (pack, own, team),
+        FromZone::Content { pack, own, team } => (pack, own, team),
         other => anyhow::bail!("expected Content, got {other:?}"),
     };
     let rate = TickRate::new(hz as u32);
@@ -343,7 +364,7 @@ pub async fn run_bot_on_link(
                 if let Some((line, every)) = &say
                     && ticks.is_multiple_of(*every)
                 {
-                    let _ = control::send(&mut send, &Control::Chat(line.clone())).await;
+                    let _ = control::send(&mut send, &FromClient::Chat(line.clone())).await;
                 }
                 if cfg.report_after_ticks > 0
                     && !reported
@@ -356,7 +377,7 @@ pub async fn run_bot_on_link(
                 {
                     reported = true;
                     info!(name = %cfg.name, target = enemy.id, "reporting");
-                    let report = Control::Report {
+                    let report = FromClient::Report {
                         target: enemy.id,
                         reason: gm_net::control::ReportReason::Aim,
                     };
@@ -367,14 +388,14 @@ pub async fn run_bot_on_link(
                     && ticks == cfg.travel_after_ticks
                 {
                     info!(name = %cfg.name, %to, "asking to travel");
-                    let _ = control::send(&mut send, &Control::Travel(to.clone())).await;
+                    let _ = control::send(&mut send, &FromClient::Travel(to.clone())).await;
                 }
                 if cfg.counter_pick && ticks >= next_pick {
                     next_pick = ticks + COUNTER_PICK_PERIOD_S * rate.hz();
                     let enemy = dominant_enemy_aspects(team, &others);
                     if let Some(name) = counter_pick(&pack, &current_build, enemy) {
                         info!(name = %cfg.name, from = %current_build, to = %name, "counter-pick");
-                        let _ = control::send(&mut send, &Control::Respec(BuildChoice::Preset(name)))
+                        let _ = control::send(&mut send, &FromClient::Respec(BuildChoice::Preset(name)))
                             .await;
                         report.respecs += 1;
                     }
@@ -396,7 +417,16 @@ pub async fn run_bot_on_link(
                 {
                     stall_asked = Some(ticks);
                     stall_answered = false;
-                    let _ = control::send(&mut send, &Control::StallOpen).await;
+                    let _ = control::send(&mut send, &FromClient::StallOpen).await;
+                }
+                // Somebody to ask into a party: asked every five seconds until the zone
+                // says the two are in one.
+                if let Some(who) = &cfg.social.invite
+                    && ticks % (5 * rate.hz()) == rate.hz()
+                    && !report.party.iter().any(|m| m == who)
+                {
+                    let ask = FromClient::PartyInvite { name: who.clone() };
+                    let _ = control::send(&mut send, &ask).await;
                 }
                 // What the zone has announced so far.
                 report.roster = report.roster.max(wearing.len());
@@ -447,7 +477,7 @@ pub async fn run_bot_on_link(
             }
             msg = control::recv(&mut recv) => {
                 match msg {
-                    Ok(Some(Control::Killed { victim, killer })) => {
+                    Ok(Some(FromZone::Killed { victim, killer })) => {
                         report.kills_seen += 1;
                         if victim == entity {
                             report.own_deaths += 1;
@@ -456,13 +486,13 @@ pub async fn run_bot_on_link(
                             report.own_kills += 1;
                         }
                     }
-                    Ok(Some(Control::BuildApplied(build))) => {
+                    Ok(Some(FromZone::BuildApplied(build))) => {
                         if build != client.sheet.build {
                             current_build = build_name(&build);
                             client.set_sheet(Sheet::new(build, &pack, team));
                         }
                     }
-                    Ok(Some(Control::TravelTicket { zone, addr, cert_der, token, web })) => {
+                    Ok(Some(FromZone::TravelTicket { zone, addr, cert_der, token, web })) => {
                         let addr: SocketAddr = match addr.parse() {
                             Ok(a) => a,
                             Err(e) => {
@@ -484,15 +514,15 @@ pub async fn run_bot_on_link(
                         }));
                         break;
                     }
-                    Ok(Some(Control::TravelRefused(reason))) => {
+                    Ok(Some(FromZone::TravelRefused(reason))) => {
                         info!(name = %cfg.name, "travel refused: {reason}");
                     }
-                    Ok(Some(Control::Kick(reason))) => {
+                    Ok(Some(FromZone::Kick(reason))) => {
                         info!(name = %cfg.name, "kicked: {reason}");
                         report.kicked = Some(reason);
                         break;
                     }
-                    Ok(Some(Control::StallResult(result))) => {
+                    Ok(Some(FromZone::StallResult(result))) => {
                         stall_answered = true;
                         match result {
                         Ok(()) => {
@@ -509,10 +539,10 @@ pub async fn run_bot_on_link(
                         }
                         }
                     }
-                    Ok(Some(Control::Stalls(list))) => {
+                    Ok(Some(FromZone::Stalls(list))) => {
                         stalls_seen = list.iter().map(|s| s.id).collect();
                     }
-                    Ok(Some(Control::StallOpened(stall))) => {
+                    Ok(Some(FromZone::StallOpened(stall))) => {
                         stalls_seen.insert(stall.id);
                         // Where the bot's own stall stands, for whoever sends it a buyer.
                         if stall.owner == cfg.name {
@@ -527,14 +557,61 @@ pub async fn run_bot_on_link(
                             );
                         }
                     }
-                    Ok(Some(Control::StallClosed(id))) => {
+                    Ok(Some(FromZone::StallClosed(id))) => {
                         stalls_seen.remove(&id);
                     }
-                    Ok(Some(Control::ReportResult(result))) => {
+                    // People together (PARTY.md 4): the party as the hub has it, and
+                    // what a sociable bot does when it is asked something.
+                    Ok(Some(FromZone::Party(names))) => {
+                        info!(name = %cfg.name, party = %names.join(","), "party");
+                        report.party = names;
+                    }
+                    Ok(Some(FromZone::Invited { from })) => {
+                        info!(name = %cfg.name, %from, "invited");
+                        if cfg.social.sociable {
+                            let join = FromClient::PartyAnswer { from, join: true };
+                            let _ = control::send(&mut send, &join).await;
+                        }
+                    }
+                    Ok(Some(FromZone::Heard { channel, from, text })) => {
+                        info!(name = %cfg.name, channel, %from, %text, "heard through the hub");
+                        let mine = from == cfg.name;
+                        if cfg.social.sociable && !mine {
+                            let answer = match channel {
+                                control::CHANNEL_PARTY => Some(FromClient::PartySay("aye".into())),
+                                control::CHANNEL_WHISPER => Some(FromClient::Whisper {
+                                    to: from.replace(' ', ""),
+                                    text: "psst yourself".into(),
+                                }),
+                                _ => None,
+                            };
+                            // (Its own "aye" comes back to it and is not answered.)
+                            if let Some(answer) = answer.filter(|_| text != "aye") {
+                                let _ = control::send(&mut send, &answer).await;
+                            }
+                        }
+                        if report.lines.len() < 64 {
+                            report.lines.push((channel, from, text));
+                        }
+                    }
+                    Ok(Some(FromZone::TradeAsked { from })) => {
+                        info!(name = %cfg.name, from, "asked to trade");
+                        if cfg.social.sociable {
+                            let back = FromClient::TradeAsk { with: from };
+                            let _ = control::send(&mut send, &back).await;
+                        }
+                    }
+                    Ok(Some(FromZone::TradeOpened { trade, with })) => {
+                        info!(name = %cfg.name, trade, %with, "trade opened");
+                        if let Some(trades) = &cfg.social.trades {
+                            let _ = trades.send(trade);
+                        }
+                    }
+                    Ok(Some(FromZone::ReportResult(result))) => {
                         info!(name = %cfg.name, ?result, "report answered");
                         report.report_accepted = result.is_ok();
                     }
-                    Ok(Some(Control::ChatFrom { from, text })) => {
+                    Ok(Some(FromZone::ChatFrom { from, text })) => {
                         if from != entity && report.heard.len() < 32 {
                             // Said as it is heard: whoever scripted the run need not
                             // wait for the bot's end to know.
@@ -542,7 +619,7 @@ pub async fn run_bot_on_link(
                             report.heard.push((from, text));
                         }
                     }
-                    Ok(Some(Control::Roster(players))) => {
+                    Ok(Some(FromZone::Roster(players))) => {
                         report.creatures_announced = players
                             .iter()
                             .filter(|p| matches!(p.kind, BodyKind::Creature { .. }))
@@ -552,7 +629,7 @@ pub async fn run_bot_on_link(
                         }
                         wearing = players.into_iter().map(|p| (p.id, p.model)).collect();
                     }
-                    Ok(Some(Control::PlayerInfo { id, model, kind, .. })) => {
+                    Ok(Some(FromZone::PlayerInfo { id, model, kind, .. })) => {
                         if matches!(kind, BodyKind::Creature { .. }) && !wearing.contains_key(&id) {
                             report.creatures_announced += 1;
                         }
@@ -561,13 +638,13 @@ pub async fn run_bot_on_link(
                         }
                         wearing.insert(id, model);
                     }
-                    Ok(Some(Control::PlayerLeft(id))) => {
+                    Ok(Some(FromZone::PlayerLeft(id))) => {
                         if let Some(raid) = raid.as_mut() {
                             raid.kinds.remove(&id);
                         }
                         wearing.remove(&id);
                     }
-                    Ok(Some(Control::Squad(entries))) => {
+                    Ok(Some(FromZone::Squad(entries))) => {
                         report.squad_max = report.squad_max.max(entries.len());
                         report.squad_hired = report
                             .squad_hired
@@ -576,11 +653,11 @@ pub async fn run_bot_on_link(
                             raid.squad = entries;
                         }
                     }
-                    Ok(Some(Control::OrderRefused(why))) => {
+                    Ok(Some(FromZone::OrderRefused(why))) => {
                         report.orders_refused += 1;
                         debug!(name = %cfg.name, "order refused: {why}");
                     }
-                    Ok(Some(Control::Encounter { name, state })) => {
+                    Ok(Some(FromZone::Encounter { name, state })) => {
                         info!(name = %cfg.name, encounter = %name, ?state, "encounter");
                         match state {
                             EncounterState::Cleared { secs } => report.cleared.push((name, secs)),
@@ -588,16 +665,16 @@ pub async fn run_bot_on_link(
                             EncounterState::Engaged => {}
                         }
                     }
-                    Ok(Some(Control::Loot { items, coin, .. })) => {
+                    Ok(Some(FromZone::Loot { items, coin, .. })) => {
                         info!(name = %cfg.name, ?items, coin, "loot");
                         report.loot.extend(items);
                         report.coin += coin;
                     }
-                    Ok(Some(Control::Trial { key, passed, detail, secs, .. })) => {
+                    Ok(Some(FromZone::Trial { key, passed, detail, secs, .. })) => {
                         info!(name = %cfg.name, trial = %key, passed, secs, %detail, "trial");
                         report.trials.push((key, passed, detail));
                     }
-                    Ok(Some(Control::ModelRevoked(model))) => {
+                    Ok(Some(FromZone::ModelRevoked(model))) => {
                         report.revocations += 1;
                         revoked.push(model);
                         for m in wearing.values_mut() {
@@ -624,7 +701,7 @@ pub async fn run_bot_on_link(
     report.final_build = current_build;
     report.stalls_seen = stalls_seen.len();
     report.own_model = own_model;
-    let _ = control::send(&mut send, &Control::Bye).await;
+    let _ = control::send(&mut send, &FromClient::Bye).await;
     conn.close(0, b"done");
     // Give the Bye a moment to leave before the endpoint is dropped.
     tokio::time::sleep(Duration::from_millis(20)).await;

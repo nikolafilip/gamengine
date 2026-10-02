@@ -1427,6 +1427,7 @@ dependencies = [
  "argon2",
  "bitcode",
  "bytes",
+ "gm-ai",
  "gm-content",
  "gm-core",
  "gm-hub-proto",

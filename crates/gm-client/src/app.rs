@@ -18,11 +18,12 @@ use gm_core::movement::{MoveInput, MoveVars, PlayerState, player_move, yaw_vecto
 use gm_core::sim::{Input as SimInput, buttons, view_dir};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Hull};
+use gm_hub_proto::names;
 use gm_hub_proto::player::PlayerRequest;
 use gm_model::ModelId;
 use gm_net::client::ClientState;
 use gm_net::control::{
-    BodyKind, BuildChoice, Control, EncounterState, Order, SquadEntry, StallEntry,
+    BodyKind, BuildChoice, EncounterState, FromClient, FromZone, Order, SquadEntry, StallEntry,
 };
 use gm_net::snapshot::{EntityKind, SpawnInfo};
 use gm_net::transport::fnv1a64;
@@ -41,8 +42,9 @@ use crate::bag::{Bag, BagAction};
 use crate::front::{Action, Auto, Front, PANEL_UNITS};
 use crate::hub::{Account, Hub, HubApi, ticket_addr};
 use crate::hud::{self, Hud};
-use crate::menu::{Chat, GameMenu, MenuAction, Offers};
+use crate::menu::{Chat, GameMenu, MenuAction, Offers, Said};
 use crate::net::{NetClient, NetEvent, ZoneAddr};
+use crate::people::{Here, People, PeopleAction, Social};
 use crate::render::{EntityDraw, Gpu, Renderer, view_proj};
 use crate::script::UiScript;
 use crate::settings::Settings;
@@ -172,6 +174,8 @@ pub(crate) struct Online {
     messages: VecDeque<(Instant, String, [f32; 4])>,
     /// The market: open stalls and their keepers (ECONOMY.md 7).
     stalls: Vec<StallEntry>,
+    /// The party as the hub has it, and who asked what (PARTY.md 4).
+    social: Social,
     kills: u32,
     deaths: u32,
     /// The hash of the map this connection plays on: the one loaded when it began, and
@@ -397,6 +401,12 @@ struct App {
     /// The inventory or a stall, when one is open (ITEMS.md 6), and the character being
     /// played: the one the hub is asked about.
     bag: Option<Bag>,
+    /// The page of people, a trade or the tavern (PARTY.md 8).
+    people: Option<People>,
+    /// The party on the HUD: each other member's name, and its health when it is here.
+    /// The party's other members: `None` when no body of that name is here, else the
+    /// health the wire carries for it, when it does.
+    party_view: Vec<(String, Option<Option<u16>>)>,
     character: Option<gm_hub_proto::protocol::CharacterId>,
     /// The toolkit's memory, and what happened since the last frame for it.
     ui: UiState,
@@ -479,6 +489,7 @@ fn online(opts: &Options, sim: &Sim, map_hash: u64, entry: Entry) -> Result<Onli
         names: HashMap::new(),
         kinds: HashMap::new(),
         squad: Vec::new(),
+        social: Social::default(),
         messages: VecDeque::new(),
         stalls: Vec::new(),
         kills: 0,
@@ -536,6 +547,8 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         menu: None,
         chat: Chat::default(),
         bag: None,
+        people: None,
+        party_view: Vec::new(),
         character: None,
         ui: UiState::default(),
         ui_input: UiInput::default(),
@@ -1152,6 +1165,9 @@ fn order_name(order: &Order) -> &'static str {
 pub(crate) struct HudView<'a> {
     pub bars: &'a [(Vec3, f32, [f32; 4])],
     pub squad: &'a [(Option<u16>, bool)],
+    /// The other members of the party: name; `None` when no body of that name is here,
+    /// else the health the wire carries for it, when it does.
+    pub party: &'a [(String, Option<Option<u16>>)],
     pub target: Option<&'a (String, u16, u16)>,
     pub scale: f32,
 }
@@ -1166,6 +1182,7 @@ pub(crate) fn build_hud(
     let HudView {
         bars,
         squad: squad_view,
+        party,
         target,
         scale: s,
     } = view;
@@ -1263,6 +1280,19 @@ pub(crate) fn build_hud(
         let frac = health.map_or(0.0, |v| v as f32 / m.max_health.max(1) as f32);
         hud.bar(16.0, y - 2.0 * s, 150.0, 3.0 * s, frac, hud::GREEN);
         y += 6.0 * s;
+    }
+    // The party, under the squad (PARTY.md 8.2): each member's health when the wire
+    // carries it (its body is here, in sight, and of the party in this fight), its name
+    // alone when its body is here and the wire does not, `away` when it is not here.
+    for (name, here) in party {
+        let (text, colour) = match here {
+            Some(Some(0)) => (format!("{name}  down"), hud::RED),
+            Some(Some(health)) => (format!("{name}  {health}"), hud::WHITE),
+            Some(None) => (name.clone(), hud::WHITE),
+            None => (format!("{name}  away"), hud::DIM),
+        };
+        hud.label(16.0, y, s, colour, &text);
+        y += line;
     }
 
     // The creature being fought, top middle; messages under it.
@@ -1416,7 +1446,11 @@ impl App {
     /// A screen has the pointer and the keys: one before the game, or the game menu
     /// (CLIENT.md 6).
     fn screen_up(&self) -> bool {
-        self.front_up || self.menu.is_some() || self.bag.is_some() || self.title.is_some()
+        self.front_up
+            || self.menu.is_some()
+            || self.bag.is_some()
+            || self.people.is_some()
+            || self.title.is_some()
     }
 
     /// The hub and the session and character it is asked about, while one is played.
@@ -1458,6 +1492,38 @@ impl App {
                 self.release_keys();
             }
             None => self.note("there is no inventory without a hub"),
+        }
+    }
+
+    /// `P`: the people here and of the party. (Without a hub there are no parties, and
+    /// the zone says so to whoever asks.)
+    fn open_people(&mut self) {
+        if !self.online.as_ref().is_some_and(|o| o.client.is_some()) {
+            return;
+        }
+        // (Without a hub the page still says who is here; it asks the hub nothing.)
+        let nobody = (gm_hub_proto::protocol::SessionId([0; 16]), 0);
+        let (session, character) = self.owner().map_or(nobody, |(_, s, c)| (s, c));
+        self.people = Some(People::here(session, character, Instant::now()));
+        self.menu = None;
+        self.bag = None;
+        self.release_keys();
+    }
+
+    /// What the page of people asked for.
+    fn people_act(&mut self, action: PeopleAction) {
+        match action {
+            PeopleAction::None => {}
+            PeopleAction::Close => self.people = None,
+            PeopleAction::Zone(say) => {
+                if let Some(o) = &mut self.online {
+                    o.net.send_control(say);
+                }
+            }
+            PeopleAction::Whisper(name) => {
+                self.people = None;
+                self.chat.open_with(format!("/w {name} "));
+            }
         }
     }
 
@@ -1540,6 +1606,7 @@ impl App {
             }
             // The tactical view has its own use for the keys around it.
             Key::Inventory if !self.tactical.active => self.open_inventory(),
+            Key::People if !self.tactical.active => self.open_people(),
             Key::Use if !self.tactical.active => self.open_stall(),
             _ => {}
         }
@@ -1602,12 +1669,14 @@ impl App {
         self.hang_up();
         self.menu = None;
         self.bag = None;
+        self.people = None;
         self.character = None;
         self.chat.clear();
         self.entities.clear();
         self.bodies.clear();
         self.bars.clear();
         self.squad_view.clear();
+        self.party_view.clear();
         self.target_view = None;
         if self.tactical.active {
             self.tactical.active = false;
@@ -1728,13 +1797,13 @@ impl App {
                 stall,
                 listing,
                 price,
-            } => Control::StallBuy {
+            } => FromClient::StallBuy {
                 stall,
                 listing,
                 price,
             },
-            BagAction::Wear { item } => Control::Wear { item },
-            BagAction::TakeOff { item } => Control::TakeOff { item },
+            BagAction::Wear { item } => FromClient::Wear { item },
+            BagAction::TakeOff { item } => FromClient::TakeOff { item },
         };
         if let Some(o) = &mut self.online {
             o.net.send_control(say);
@@ -1745,19 +1814,34 @@ impl App {
         &mut self,
         front: Action,
         menu: MenuAction,
-        said: Option<String>,
+        said: Option<Said>,
         event_loop: &ActiveEventLoop,
     ) {
-        if let (Some(line), Some(o)) = (said, &mut self.online) {
-            o.net.send_control(Control::Chat(line));
+        if let (Some(said), Some(o)) = (said, &mut self.online) {
+            // A line to the zone, to the party or to one character; and the two things
+            // the chat line can ask of the party (PARTY.md 5).
+            o.net.send_control(match said {
+                Said::Say(text) => FromClient::Chat(text),
+                Said::Party(text) => FromClient::PartySay(text),
+                Said::Whisper { to, text } => FromClient::Whisper { to, text },
+                Said::Invite(name) => {
+                    o.social.asked = Some(Instant::now());
+                    FromClient::PartyInvite { name }
+                }
+                Said::Leave => {
+                    o.social.asked = Some(Instant::now());
+                    FromClient::PartyLeave
+                }
+            });
         }
         match menu {
             MenuAction::None => {}
             MenuAction::Resume => self.menu = None,
             MenuAction::Inventory => self.open_inventory(),
+            MenuAction::People => self.open_people(),
             MenuAction::Travel(zone) => {
                 if let Some(o) = &mut self.online {
-                    o.net.send_control(Control::Travel(zone.clone()));
+                    o.net.send_control(FromClient::Travel(zone.clone()));
                     o.say(format!("travel to {zone} requested"), hud::DIM);
                 }
                 self.menu = None;
@@ -1959,7 +2043,7 @@ impl App {
             if timed {
                 self.opts.travel_after = 0.0;
             }
-            o.net.send_control(Control::Travel(target.clone()));
+            o.net.send_control(FromClient::Travel(target.clone()));
             o.respec_note = format!("travel to {target} requested");
             log::info!("{}", o.respec_note);
         }
@@ -1981,7 +2065,7 @@ impl App {
                 .max_by(|a, b| a.1.total_cmp(&b.1));
             match aimed {
                 Some((target, _)) => {
-                    o.net.send_control(Control::Report {
+                    o.net.send_control(FromClient::Report {
                         target,
                         reason: gm_net::control::ReportReason::Other,
                     });
@@ -1992,11 +2076,11 @@ impl App {
         }
         // B opens a stall on the market tile underfoot, N closes the own stall.
         if self.input.just_pressed.remove(&KeyCode::KeyB) {
-            o.net.send_control(Control::StallOpen);
+            o.net.send_control(FromClient::StallOpen);
             o.respec_note = "stall requested".into();
         }
         if self.input.just_pressed.remove(&KeyCode::KeyN) {
-            o.net.send_control(Control::StallClose);
+            o.net.send_control(FromClient::StallClose);
             o.respec_note = "closing the stall".into();
         }
         let keys = [KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4];
@@ -2005,7 +2089,7 @@ impl App {
                 && let Some(b) = pack.builds.get(i)
             {
                 o.net
-                    .send_control(Control::Respec(BuildChoice::Preset(b.name.clone())));
+                    .send_control(FromClient::Respec(BuildChoice::Preset(b.name.clone())));
                 o.respec_note = format!("respec {} requested", b.name);
             }
         }
@@ -2160,7 +2244,7 @@ impl App {
                     }
                 }
                 NetEvent::Control(msg) => match msg {
-                    Control::Content { pack, own, team } => {
+                    FromZone::Content { pack, own, team } => {
                         let Some((entity, _)) = o.welcome else {
                             log::error!("content before welcome");
                             continue;
@@ -2180,7 +2264,7 @@ impl App {
                         ));
                         o.pack = Some(pack);
                     }
-                    Control::BuildApplied(build) => {
+                    FromZone::BuildApplied(build) => {
                         let changed = o.client.as_ref().is_some_and(|c| c.sheet.build != build);
                         if changed && let Some(pack) = &o.pack {
                             let name = o.build_name_of(pack, &build);
@@ -2193,14 +2277,14 @@ impl App {
                             log::info!("build applied: {}", o.build_name);
                         }
                     }
-                    Control::RespecResult(result) => {
+                    FromZone::RespecResult(result) => {
                         o.respec_note = match result {
                             Ok(()) => "respec accepted (next respawn)".into(),
                             Err(e) => format!("respec refused: {e}"),
                         };
                         log::info!("{}", o.respec_note);
                     }
-                    Control::TravelTicket {
+                    FromZone::TravelTicket {
                         zone,
                         addr,
                         cert_der,
@@ -2228,12 +2312,12 @@ impl App {
                             o.say(format!("{zone}: bad address {addr:?}"), hud::ORANGE);
                         }
                     }
-                    Control::TravelRefused(reason) => {
+                    FromZone::TravelRefused(reason) => {
                         o.respec_note = format!("travel refused: {reason}");
                         log::info!("{}", o.respec_note);
                         o.say(o.respec_note.clone(), hud::ORANGE);
                     }
-                    Control::Roster(players) => {
+                    FromZone::Roster(players) => {
                         o.names.clear();
                         o.kinds.clear();
                         for p in players {
@@ -2241,7 +2325,7 @@ impl App {
                             o.names.insert(p.id, (p.name, p.team, p.model));
                         }
                     }
-                    Control::PlayerInfo {
+                    FromZone::PlayerInfo {
                         id,
                         name,
                         team,
@@ -2251,11 +2335,11 @@ impl App {
                         o.kinds.insert(id, kind);
                         o.names.insert(id, (name, team, model));
                     }
-                    Control::Squad(entries) => o.squad = entries,
-                    Control::OrderRefused(why) => {
+                    FromZone::Squad(entries) => o.squad = entries,
+                    FromZone::OrderRefused(why) => {
                         o.say(format!("order refused: {why}"), hud::ORANGE);
                     }
-                    Control::Encounter { name, state } => {
+                    FromZone::Encounter { name, state } => {
                         let (text, colour) = match state {
                             EncounterState::Engaged => (format!("{name}: engaged"), hud::WHITE),
                             EncounterState::Reset => (format!("{name}: reset"), hud::ORANGE),
@@ -2265,7 +2349,7 @@ impl App {
                         };
                         o.say(text, colour);
                     }
-                    Control::Loot {
+                    FromZone::Loot {
                         encounter,
                         items,
                         coin,
@@ -2279,7 +2363,7 @@ impl App {
                         }
                         o.say(format!("loot ({encounter}): {what}"), hud::YELLOW);
                     }
-                    Control::Trial {
+                    FromZone::Trial {
                         name,
                         passed,
                         detail,
@@ -2292,7 +2376,7 @@ impl App {
                             o.say(format!("trial not passed: {name}: {detail}"), hud::DIM);
                         }
                     }
-                    Control::ModelRevoked(id) => {
+                    FromZone::ModelRevoked(id) => {
                         for entry in o.names.values_mut() {
                             if entry.2 == Some(id) {
                                 entry.2 = None;
@@ -2305,14 +2389,14 @@ impl App {
                         }
                         self.revoked.push(id);
                     }
-                    Control::Stalls(stalls) => o.stalls = stalls,
-                    Control::StallOpened(stall) => {
+                    FromZone::Stalls(stalls) => o.stalls = stalls,
+                    FromZone::StallOpened(stall) => {
                         log::info!("{} opened a stall", stall.owner);
                         o.stalls.retain(|s| s.id != stall.id);
                         o.stalls.push(stall);
                     }
-                    Control::StallClosed(id) => o.stalls.retain(|s| s.id != id),
-                    Control::StallResult(result) => {
+                    FromZone::StallClosed(id) => o.stalls.retain(|s| s.id != id),
+                    FromZone::StallResult(result) => {
                         o.respec_note = match result {
                             Ok(()) => "stall: done".into(),
                             Err(e) => format!("stall refused: {e}"),
@@ -2323,7 +2407,7 @@ impl App {
                     // that no open screen is waiting for (the screen was closed, or it is
                     // the answer to an earlier request) is said where the game says
                     // things, and moves nothing on a screen.
-                    Control::BuyResult { listing, result } => {
+                    FromZone::BuyResult { listing, result } => {
                         log::info!("buy of listing {listing}: {result:?}");
                         let good = result.is_ok();
                         let elsewhere = match (&mut self.bag, &self.hub) {
@@ -2337,7 +2421,7 @@ impl App {
                             o.say(text, if good { hud::DIM } else { hud::ORANGE });
                         }
                     }
-                    Control::WearResult { item, result } => {
+                    FromZone::WearResult { item, result } => {
                         log::info!("wear of item {item}: {result:?}");
                         let good = result.is_ok();
                         let elsewhere = match (&mut self.bag, &self.hub) {
@@ -2351,11 +2435,90 @@ impl App {
                             o.say(text, if good { hud::DIM } else { hud::ORANGE });
                         }
                     }
-                    Control::PlayerLeft(id) => {
+                    FromZone::PlayerLeft(id) => {
                         o.names.remove(&id);
                         o.kinds.remove(&id);
                     }
-                    Control::Killed { victim, killer } => {
+                    // People together (PARTY.md 4). What the party is is the hub's
+                    // word, shown as it is said.
+                    FromZone::Party(names) => {
+                        log::info!("party: {}", names.join(", "));
+                        if !names.is_empty() {
+                            // In a party: whatever invitations waited are moot.
+                            o.social.asks.retain(|a| a.trade.is_some());
+                        }
+                        o.social.party = names;
+                    }
+                    FromZone::Invited { from } => {
+                        // Somebody who is not heard is not heard here either: the
+                        // invitation is declined, so that it holds none of the places.
+                        let unheard = self
+                            .settings
+                            .ignored
+                            .iter()
+                            .any(|i| names::skeleton(i) == names::skeleton(&from));
+                        if unheard {
+                            // (The zone takes one such request a second, as the page's.)
+                            o.social.asked = Some(Instant::now());
+                            o.net
+                                .send_control(FromClient::PartyAnswer { from, join: false });
+                        } else if o.social.invited(from.clone(), Instant::now()) {
+                            log::info!("{from} invites to a party");
+                            let line = format!("{from} invites you to a party: P");
+                            self.chat.heard(None, line, &[]);
+                        }
+                    }
+                    FromZone::Heard {
+                        channel,
+                        from,
+                        text,
+                    } => {
+                        // (Not logged: a whisper is between two people.)
+                        log::debug!("<{from} on {channel}> {text}");
+                        self.chat
+                            .heard_on(channel, from, text, &self.settings.ignored);
+                    }
+                    FromZone::TradeAsked { from } => {
+                        let Some(name) = o.names.get(&from).map(|n| n.0.clone()) else {
+                            continue;
+                        };
+                        let unheard = self
+                            .settings
+                            .ignored
+                            .iter()
+                            .any(|i| names::skeleton(i) == names::skeleton(&name));
+                        if !unheard && o.social.trade_asked(from, name.clone(), Instant::now()) {
+                            log::info!("{name} asks to trade");
+                            let line = format!("{name} asks to trade: P");
+                            self.chat.heard(None, line, &[]);
+                        }
+                    }
+                    FromZone::TradeOpened { trade, with } => {
+                        // The hub opened a trade both asked for: its window comes up
+                        // over whatever screen was up (said twice, it is up already).
+                        log::info!("trade {trade} with {with}");
+                        o.social
+                            .asks
+                            .retain(|a| a.trade.is_none() || a.from != with);
+                        let up = self.people.as_ref().is_some_and(|p| p.trading(trade));
+                        if !up
+                            && let (Some(hub), Some(account), Some(character)) =
+                                (&self.hub, &self.account, self.character)
+                        {
+                            let now = Instant::now();
+                            let session = account.session;
+                            self.people =
+                                Some(People::trade(hub, session, character, trade, with, now));
+                            self.menu = None;
+                            self.bag = None;
+                            self.chat.drop_line();
+                            self.input.keys.clear();
+                            self.input.just_pressed.clear();
+                            self.input.mouse.clear();
+                            self.input.clicks.clear();
+                        }
+                    }
+                    FromZone::Killed { victim, killer } => {
                         let me = o.client.as_ref().map(|c| c.my_id);
                         if Some(killer) == me && victim != killer {
                             o.kills += 1;
@@ -2371,7 +2534,7 @@ impl App {
                         };
                         log::info!("{} killed {}", name(killer), name(victim));
                     }
-                    Control::ReportResult(result) => {
+                    FromZone::ReportResult(result) => {
                         let (text, colour) = match result {
                             Ok(()) => (
                                 "report taken: the fight is kept for a moderator".to_string(),
@@ -2381,7 +2544,7 @@ impl App {
                         };
                         o.say(text, colour);
                     }
-                    Control::ChatFrom { from, text } => {
+                    FromZone::ChatFrom { from, text } => {
                         // From nobody: the zone itself (a refusal, a notice).
                         let who = (from != 0).then(|| {
                             o.names
@@ -2391,7 +2554,9 @@ impl App {
                         log::info!("<{}> {text}", who.as_deref().unwrap_or("zone"));
                         self.chat.heard(who, text, &self.settings.ignored);
                     }
-                    other => log::debug!("control: {other:?}"),
+                    // (Not printed: the words for every message of the zone's would be
+                    // carried by every browser for this one line.)
+                    _ => log::debug!("a message of the zone's this client has no use for"),
                 },
                 NetEvent::Disconnected(reason) => {
                     if returns {
@@ -2426,7 +2591,10 @@ impl App {
                     o.stalls.clear();
                     o.zone_name = zone;
                     o.respec_note = format!("travelling to {}", o.zone_name);
+                    // The next zone says what the party is; who asked what stays here.
+                    o.social = Social::default();
                     self.bag = None;
+                    self.people = None;
                     self.entities.clear();
                     self.bodies.clear();
                 }
@@ -2574,6 +2742,28 @@ impl App {
                 (e.and_then(|e| e.health), e.is_some_and(|e| e.alive()))
             })
             .collect();
+        // And of the party: the other members, each with the health the wire carries for
+        // its body when that is here (the bodies that are people: a hired copy of
+        // somebody bears that name too).
+        let me = Some(c.my_id);
+        self.party_view =
+            o.social
+                .party
+                .iter()
+                .filter_map(|member| {
+                    let body = o.names.iter().find(|(id, n)| {
+                        n.0 == *member && o.kinds.get(id) == Some(&BodyKind::Human)
+                    });
+                    match body {
+                        Some((id, _)) if Some(*id) == me => None,
+                        Some((id, _)) => {
+                            let health = others.iter().find(|e| e.id == *id).and_then(|e| e.health);
+                            Some((member.clone(), Some(health)))
+                        }
+                        None => Some((member.clone(), None)),
+                    }
+                })
+                .collect();
         self.target_view = None;
         if let Some(pack) = &o.pack {
             let mut best: Option<(f32, String, u16, u16)> = None;
@@ -2650,7 +2840,7 @@ impl App {
             }
             if !o.squad.is_empty() {
                 for order in orders.drain(..) {
-                    o.net.send_control(Control::Order {
+                    o.net.send_control(FromClient::Order {
                         slots: self.tactical.selected,
                         order,
                     });
@@ -3294,6 +3484,7 @@ impl App {
                 HudView {
                     bars: &self.bars,
                     squad: &self.squad_view,
+                    party: &self.party_view,
                     target: self.target_view.as_ref(),
                     scale,
                 },
@@ -3303,6 +3494,7 @@ impl App {
         let mut front_actions = [Action::None, Action::None];
         let (mut menu_action, mut said) = (MenuAction::None, None);
         let mut bag_action = BagAction::None;
+        let mut people_action = PeopleAction::None;
         if !bench {
             let playing = self.online.as_ref().is_some_and(|o| o.client.is_some());
             let screen = match (&self.front, &self.menu, &self.bag) {
@@ -3310,6 +3502,7 @@ impl App {
                 (Some(front), _, _) if self.front_up => front.screen.name(),
                 (_, Some(menu), _) => menu.page.name(),
                 (_, _, Some(bag)) => bag.page.name(),
+                _ if self.people.is_some() => self.people.as_ref().map_or("", |p| p.page.name()),
                 _ if self.chat.open => "chat",
                 _ => "game",
             };
@@ -3353,12 +3546,57 @@ impl App {
                 // that stopped playing (a travel, the zone gone) has neither.
                 if !playing {
                     self.bag = None;
+                    self.people = None;
                 }
                 match (&mut self.bag, &self.hub) {
                     (Some(bag), Some(hub)) if self.menu.is_none() => {
                         bag_action = bag.frame(&mut ui, hub, keeps_stall, Instant::now());
                     }
                     _ => {}
+                }
+                // The people here and of the party, a trade, the tavern (PARTY.md 8).
+                if let (Some(people), Some(o), None, None) =
+                    (&mut self.people, &mut self.online, &self.menu, &self.bag)
+                    && let Some(c) = &o.client
+                {
+                    // Who is here: the bodies that are people, and whether each stands
+                    // near enough to trade with (the rule the zone decides with).
+                    let mine: [f32; 3] = c.mover.mv.origin.into();
+                    let others = c.others_at(c.render_tick(0.0));
+                    let mut here: Vec<Here> = o
+                        .names
+                        .iter()
+                        .filter(|(id, _)| {
+                            **id != c.my_id && o.kinds.get(id) == Some(&BodyKind::Human)
+                        })
+                        .map(|(id, (name, _, _))| Here {
+                            body: *id,
+                            name: name.clone(),
+                            near: others.iter().find(|e| e.id == *id).is_some_and(|e| {
+                                gm_net::control::trade_in_reach(mine, e.pos.into())
+                            }),
+                        })
+                        .collect();
+                    here.sort_by(|a, b| a.name.cmp(&b.name));
+                    let hub = self
+                        .hub
+                        .as_ref()
+                        .filter(|_| self.account.is_some() && self.character.is_some())
+                        .map(|hub| hub as &dyn HubApi);
+                    let unix = web_time::SystemTime::now()
+                        .duration_since(web_time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let word = self.chat.zone_said(std::time::Duration::from_secs(8));
+                    people_action = people.frame(
+                        &mut ui,
+                        hub,
+                        &me,
+                        &mut o.social,
+                        &here,
+                        word,
+                        Instant::now(),
+                        unix,
+                    );
                 }
                 match &mut self.menu {
                     Some(_) if self.bag.is_some() => {}
@@ -3371,6 +3609,7 @@ impl App {
                         // A page's tab is closed and made fullscreen by the browser.
                         let offers = Offers {
                             inventory: playing && hub.is_some() && self.character.is_some(),
+                            people: playing,
                             travel: playing && hub.is_some(),
                             leave: returns && self.online.is_some(),
                             fullscreen: cfg!(not(target_arch = "wasm32")),
@@ -3379,7 +3618,7 @@ impl App {
                         let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
                         menu_action = menu.frame(&mut ui, hub, offers, here, &mut self.settings);
                     }
-                    None if self.bag.is_some() => {}
+                    None if self.bag.is_some() || self.people.is_some() => {}
                     None if playing && !self.chat.open && !self.tactical.active => {
                         // Where this is, and the two keys nothing else tells of.
                         let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
@@ -3519,6 +3758,7 @@ impl App {
         }
         let [answered, clicked] = front_actions;
         self.bag_act(bag_action);
+        self.people_act(people_action);
         self.act(answered, menu_action, said, event_loop);
         self.act(clicked, MenuAction::None, None, event_loop);
     }
@@ -3745,6 +3985,7 @@ impl ApplicationHandler for App {
                             // The inventory, and the stall the body stands at.
                             KeyCode::KeyI if !event.repeat => self.ui_key(Key::Inventory),
                             KeyCode::KeyE if !event.repeat => self.ui_key(Key::Use),
+                            KeyCode::KeyP if !event.repeat => self.ui_key(Key::People),
                             KeyCode::Tab if !event.repeat => self.toggle_tactical(),
                             KeyCode::KeyV if !event.repeat => {
                                 self.viewport = match self.viewport {

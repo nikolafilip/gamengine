@@ -9,10 +9,11 @@ use glam::Vec3;
 use gm_core::build::{Build, ContentPack};
 use gm_core::vocab::EntityId;
 use gm_hub_proto::protocol::{
-    CharacterId, GearReading, HiredAvatar, ModelId, ModelRef, StallSummary,
+    CharacterId, GearReading, HiredAvatar, ModelId, ModelRef, PartyNews, PartyReading, PartyReply,
+    SayTo, StallSummary,
 };
 use gm_net::PROTOCOL_VERSION;
-use gm_net::control::{self, BuildChoice, Control};
+use gm_net::control::{self, BuildChoice, FromClient, FromZone};
 use gm_net::input::InputDatagram;
 use gm_net::link::{Link, WebEndpoint, web_accept};
 use tokio::sync::{mpsc, oneshot};
@@ -40,6 +41,17 @@ pub struct HubJoin {
     pub squad: Vec<HiredAvatar>,
     /// What its worn items do, as the hub read it at the claim (ITEMS.md 3.3).
     pub gear: GearReading,
+    /// The party it is in, as the hub read it at the claim (PARTY.md 3).
+    pub party: PartyReading,
+}
+
+/// What a client asks about its party (PARTY.md 4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartyAsk {
+    Invite(String),
+    Answer { from: String, join: bool },
+    Leave,
+    Remove(String),
 }
 
 /// A person asks a screen's question a second at most, and the zone answers every one it
@@ -81,7 +93,7 @@ pub enum ClientEvent {
         team: u8,
         hub: Option<HubJoin>,
         conn: Link,
-        control: mpsc::Sender<Control>,
+        control: mpsc::Sender<FromZone>,
         reply: oneshot::Sender<Result<JoinInfo, String>>,
     },
     /// The client asks to move to another zone (HUB.md 3.3).
@@ -149,6 +161,73 @@ pub enum ClientEvent {
         item: i64,
         result: Result<GearReading, String>,
         tell: bool,
+    },
+    /// The client asks something about its party, and the hub's answer (PARTY.md 4).
+    Party {
+        id: EntityId,
+        ask: PartyAsk,
+    },
+    /// `tell`: the client is waiting for this answer (one that came after the zone
+    /// stopped waiting is still what the hub did, and is applied).
+    PartyAnswered {
+        id: EntityId,
+        ask: PartyAsk,
+        result: Result<PartyReply, String>,
+        tell: bool,
+    },
+    /// A line for the party or for one character anywhere, already checked as chat
+    /// (PARTY.md 5), and the hub's answer to it.
+    Say {
+        id: EntityId,
+        to: SayTo,
+        text: String,
+    },
+    /// `result`: for a whisper, the name of whom it went to.
+    Said {
+        id: EntityId,
+        whisper: bool,
+        text: String,
+        result: Result<String, String>,
+    },
+    /// The client asks the body `with` for a trade, or answers its asking (PARTY.md 6);
+    /// and the hub's answer when both had asked.
+    TradeAsk {
+        id: EntityId,
+        with: EntityId,
+    },
+    TradeOpened {
+        a: EntityId,
+        b: EntityId,
+        result: Result<i64, String>,
+        /// The first answer to `b`'s asking (the one its gate waits for); a trade the hub
+        /// opened after the zone stopped waiting comes with `false`.
+        tell: bool,
+    },
+    /// The hub's word on parties and lines that concern characters here.
+    HubParty(PartyNews),
+    /// The number of the hub's reading of a character's party, from a save's answer; and
+    /// the reading itself, asked for because the zone's was behind (PARTY.md 3.2).
+    PartySeq {
+        character: CharacterId,
+        seq: u64,
+    },
+    PartyRead {
+        character: CharacterId,
+        reading: PartyReading,
+    },
+    HubInvited {
+        to: CharacterId,
+        from: String,
+    },
+    HubDeclined {
+        to: CharacterId,
+        by: String,
+    },
+    HubHeard {
+        to: Vec<CharacterId>,
+        channel: u8,
+        from: String,
+        text: String,
     },
     /// The hub's answers, and its word that a stall of this zone closed.
     StallOpened {
@@ -375,7 +454,7 @@ impl ChatBucket {
     }
 }
 
-async fn refuse(conn: &Link, send: &mut gm_net::link::SendHalf, msg: &Control) {
+async fn refuse(conn: &Link, send: &mut gm_net::link::SendHalf, msg: &FromZone) {
     let _ = control::send(send, msg).await;
     let _ = send.finish();
     let _ = tokio::time::timeout(Duration::from_secs(1), conn.closed()).await;
@@ -394,7 +473,7 @@ async fn handle_connection(
     let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, control::recv(&mut recv))
         .await
         .map_err(|_| anyhow::anyhow!("no Hello within the handshake timeout"))??;
-    let Some(Control::Hello {
+    let Some(FromClient::Hello {
         version,
         name,
         token,
@@ -404,7 +483,7 @@ async fn handle_connection(
     else {
         anyhow::bail!("first control message was not Hello");
     };
-    let reject = |reason: &str| Control::Reject(reason.to_string());
+    let reject = |reason: &str| FromZone::Reject(reason.to_string());
     let rejection = if version != PROTOCOL_VERSION as u16 {
         Some(reject("protocol version mismatch"))
     } else if token.is_empty() && (!cfg.open || cfg.hub.is_some()) {
@@ -444,6 +523,7 @@ async fn handle_connection(
                             model: claimed.model,
                             squad: claimed.squad,
                             gear: claimed.gear,
+                            party: claimed.party,
                         }),
                     )
                 }
@@ -487,21 +567,21 @@ async fn handle_connection(
             if let Some((hub, character)) = claimed_here {
                 hub.release(character).await;
             }
-            refuse(&conn, &mut send, &Control::Reject(reason)).await;
+            refuse(&conn, &mut send, &FromZone::Reject(reason)).await;
             return Ok(());
         }
         Err(_) => anyhow::bail!("zone stopped during join"),
     };
     let id = info.entity;
     // From here the zone has a body for this connection: every way out says `Leave`.
-    let welcome = Control::Welcome {
+    let welcome = FromZone::Welcome {
         entity: id,
         server_tick: info.server_tick,
         hz: cfg.hz,
         map: cfg.map_name.clone(),
         map_hash: cfg.map_hash,
     };
-    let content = Control::Content {
+    let content = FromZone::Content {
         pack: (*cfg.content).clone(),
         own: info.build.clone(),
         team: info.team,
@@ -561,12 +641,34 @@ async fn handle_connection(
             }
             msg = control::recv(&mut recv) => {
                 match msg {
-                    Ok(Some(Control::Chat(text))) => {
-                        // Checked here, before the queue everybody's frames share
-                        // (PROTOCOL.md 8): a line out of bounds is dropped, a line too
-                        // many is refused to its sender alone, and a client that keeps
-                        // at it is let go.
+                    Ok(Some(
+                        msg @ (FromClient::Chat(_)
+                        | FromClient::PartySay(_)
+                        | FromClient::Whisper { .. }),
+                    )) => {
+                        // A line to the zone, to the party or to one character: all
+                        // three are chat (PARTY.md 5), and are checked here, before the
+                        // queue everybody's frames share (PROTOCOL.md 8): a line out of
+                        // bounds is dropped, a line too many is refused to its sender
+                        // alone, and a client that keeps at it is let go.
+                        let (text, to) = match msg {
+                            FromClient::Chat(text) => (text, None),
+                            FromClient::PartySay(text) => (text, Some(SayTo::Party)),
+                            FromClient::Whisper { to, text } => (text, Some(SayTo::Whisper(to))),
+                            _ => unreachable!("matched above"),
+                        };
                         let now = Instant::now();
+                        // A whisper to a name nobody can have goes nowhere, and is said
+                        // so: it is a mistake of the hand, not a line too many.
+                        if let Some(SayTo::Whisper(name)) = &to
+                            && gm_hub_proto::names::character_name(name).is_err()
+                        {
+                            let _ = to_client.try_send(FromZone::ChatFrom {
+                                from: 0,
+                                text: "nobody can be called that".into(),
+                            });
+                            continue;
+                        }
                         let text = control::valid_chat(&text);
                         let (said, flood) = {
                             let mut chat = chat.lock().unwrap();
@@ -582,7 +684,7 @@ async fn handle_connection(
                                 // Told why, then closed a moment later: a connection
                                 // closed in the same instant can take the `Kick` with it.
                                 let why = "flooding the chat";
-                                let _ = to_client.try_send(Control::Kick(why.into()));
+                                let _ = to_client.try_send(FromZone::Kick(why.into()));
                                 let conn = conn.clone();
                                 tokio::spawn(async move {
                                     tokio::time::sleep(crate::session::KICK_GRACE).await;
@@ -592,37 +694,66 @@ async fn handle_connection(
                             continue;
                         }
                         let Some(text) = said else {
-                            let _ = to_client.try_send(Control::ChatFrom {
+                            let _ = to_client.try_send(FromZone::ChatFrom {
                                 from: 0,
                                 text: "too many lines; wait a moment".into(),
                             });
                             continue;
                         };
-                        if tx.send(ClientEvent::Chat { id, text }).await.is_err() {
+                        let said = match to {
+                            None => ClientEvent::Chat { id, text },
+                            Some(to) => ClientEvent::Say { id, to, text },
+                        };
+                        if tx.send(said).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Control::Respec(build))) => {
+                    Ok(Some(
+                        msg @ (FromClient::PartyInvite { .. }
+                        | FromClient::PartyAnswer { .. }
+                        | FromClient::PartyLeave
+                        | FromClient::PartyRemove { .. }
+                        | FromClient::TradeAsk { .. }),
+                    )) => {
+                        if !asks.take(Instant::now()) {
+                            continue;
+                        }
+                        let party = |ask| ClientEvent::Party { id, ask };
+                        let ev = match msg {
+                            FromClient::PartyInvite { name } => party(PartyAsk::Invite(name)),
+                            FromClient::PartyAnswer { from, join } => {
+                                party(PartyAsk::Answer { from, join })
+                            }
+                            FromClient::PartyLeave => party(PartyAsk::Leave),
+                            FromClient::PartyRemove { name } => party(PartyAsk::Remove(name)),
+                            FromClient::TradeAsk { with } => ClientEvent::TradeAsk { id, with },
+                            _ => unreachable!("matched above"),
+                        };
+                        if tx.send(ev).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(FromClient::Respec(build))) => {
                         if tx.send(ClientEvent::Respec { id, build }).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Control::Travel(zone))) => {
+                    Ok(Some(FromClient::Travel(zone))) => {
                         if tx.send(ClientEvent::Travel { id, zone }).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Control::StallOpen)) => {
+                    Ok(Some(FromClient::StallOpen)) => {
                         if tx.send(ClientEvent::StallOpen { id }).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Control::StallClose)) => {
+                    Ok(Some(FromClient::StallClose)) => {
                         if tx.send(ClientEvent::StallClose { id }).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Control::StallBuy {
+                    Ok(Some(FromClient::StallBuy {
                         stall,
                         listing,
                         price,
@@ -640,31 +771,33 @@ async fn handle_connection(
                             break;
                         }
                     }
-                    Ok(Some(msg @ (Control::Wear { .. } | Control::TakeOff { .. }))) => {
+                    Ok(Some(msg @ (FromClient::Wear { .. } | FromClient::TakeOff { .. }))) => {
                         if !asks.take(Instant::now()) {
                             continue;
                         }
                         let ev = match msg {
-                            Control::Wear { item } => ClientEvent::Wear { id, item, on: true },
-                            Control::TakeOff { item } => ClientEvent::Wear { id, item, on: false },
+                            FromClient::Wear { item } => ClientEvent::Wear { id, item, on: true },
+                            FromClient::TakeOff { item } => ClientEvent::Wear { id, item, on: false },
                             _ => unreachable!("matched above"),
                         };
                         if tx.send(ev).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Control::Report { target, reason })) => {
+                    Ok(Some(FromClient::Report { target, reason })) => {
                         if tx.send(ClientEvent::Report { id, target, reason }).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Control::Order { slots, order })) => {
+                    Ok(Some(FromClient::Order { slots, order })) => {
                         if tx.send(ClientEvent::Order { id, slots, order }).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Control::Bye)) | Ok(None) => break,
-                    Ok(Some(other)) => warn!(entity = id, "unexpected control message {other:?}"),
+                    Ok(Some(FromClient::Bye)) | Ok(None) => break,
+                    // (A second Hello; the one message this arm can see. Not quoted: it
+                    // may be as long as a frame.)
+                    Ok(Some(_)) => warn!(entity = id, "unexpected control message after the handshake"),
                     Err(e) => {
                         debug!(entity = id, "control stream ended: {e}");
                         break;

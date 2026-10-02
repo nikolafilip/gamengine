@@ -1,7 +1,7 @@
 //! Phase 3 acceptance over the real protocol (PLAN.md 11.8, MATRIX.md 11): eight ironclads
 //! against eight blades in the arena at 150 ms round trip and 3% loss. The blades
 //! counter-pick: after ten seconds they look at the enemy's aspects and ask the zone for the
-//! preset that beats them (`Control::Respec`, applied at their next respawn). The kill share
+//! preset that beats them (`FromClient::Respec`, applied at their next respawn). The kill share
 //! must flip from the first half of the match to the second.
 
 mod common;

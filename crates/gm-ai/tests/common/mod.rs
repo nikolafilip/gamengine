@@ -26,6 +26,10 @@ pub fn content() -> ContentPack {
 
 #[derive(Clone, Debug, Default)]
 pub struct Outcome {
+    /// The humans, the commander first.
+    pub humans: Vec<EntityId>,
+    /// Parties on the ledger of the last encounter while it was engaged, at most.
+    pub parties: usize,
     /// Encounters cleared, in order, with the seconds each took.
     pub cleared: Vec<(String, u32)>,
     pub resets: u32,
@@ -83,6 +87,16 @@ pub struct Setup<'a> {
     /// The raider sends its tanks to a second creature (its default).
     pub split: bool,
     pub verbose: bool,
+    /// A second human with a squad of its own (PARTY.md 2).
+    pub ally: Option<Ally<'a>>,
+}
+
+/// A second human: its build, its squad, and whether it is of the first one's party.
+#[derive(Clone, Copy)]
+pub struct Ally<'a> {
+    pub commander: &'a str,
+    pub squad: &'a [&'a str],
+    pub party: bool,
 }
 
 /// The commander is a body the harness drives with the raider brain: it walks to each
@@ -150,9 +164,40 @@ pub fn play(setup: &Setup<'_>) -> Outcome {
     );
     raider.fights = setup.fights;
     raider.split = setup.split;
+    let mut leaders = vec![(commander, raider)];
+    if let Some(ally) = setup.ally {
+        let build = pack.build(ally.commander).expect(ally.commander).clone();
+        let sheet = Sheet::new(build, &pack, 1);
+        let at = zone.spot_near(world, spawn, gm_core::trace::Hull::Player);
+        let second = zone.add_body(sheet.clone(), at, setup.yaw, Driver::Mind);
+        for (i, name) in ally.squad.iter().enumerate() {
+            let spec = CompanionSpec {
+                name: format!("ally-{name}-{i}"),
+                build: pack.build(name).expect(name).clone(),
+                recruit: true,
+                hire: None,
+            };
+            let id = director.add_companion(&mut zone, world, second, spec);
+            assert!(id.is_some(), "{name} joins the second squad");
+        }
+        if ally.party {
+            let party = zone.player(commander).unwrap().party;
+            director.set_party(&mut zone, second, party);
+        }
+        let mut raider = Raider::new(
+            seed ^ 0xa11e,
+            &sheet,
+            setup.yaw,
+            objectives(&director.nav, spawn, &posts),
+        );
+        raider.fights = setup.fights;
+        raider.split = setup.split;
+        leaders.push((second, raider));
+    }
     let mut view = ZoneView::default();
     let mut out = Outcome {
         minds: director.minds(),
+        humans: leaders.iter().map(|(id, _)| *id).collect(),
         ..Outcome::default()
     };
     let mut spent = Duration::ZERO;
@@ -160,40 +205,43 @@ pub fn play(setup: &Setup<'_>) -> Outcome {
     let mut done_at: Option<u32> = None;
     for t in 0..max_secs * hz {
         let now = t as f32 / hz as f32;
-        let alive = zone.player(commander).is_some_and(|p| p.alive);
         let kind = |id: EntityId| match director.kind_of(id) {
             BodyKind::Creature { def } => Some(def),
             _ => None,
         };
         view.refresh(&zone, &kind);
-        let input = if !alive {
-            Input::default()
-        } else {
-            let mates: Vec<Mate> = director
-                .squad(commander)
-                .iter()
-                .enumerate()
-                .map(|(slot, m)| Mate {
-                    id: m.id,
-                    slot: slot as u8,
-                    role: m.role(),
-                    attacking: m.mind.attack_order(),
-                })
-                .collect();
-            let s = view.senses(&zone, commander, world, &director.nav).unwrap();
-            let (input, request) = raider.think(&s, &mates);
-            if let Some(Request::Order { slots, order }) = request {
-                let r = director.order(&zone, commander, slots, order, &|_| true);
-                if verbose {
-                    println!("[{now:6.1}s] order {order:?}: {r:?}");
+        for (leader, raider) in leaders.iter_mut() {
+            let leader = *leader;
+            let alive = zone.player(leader).is_some_and(|p| p.alive);
+            let input = if !alive {
+                Input::default()
+            } else {
+                let mates: Vec<Mate> = director
+                    .squad(leader)
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, m)| Mate {
+                        id: m.id,
+                        slot: slot as u8,
+                        role: m.role(),
+                        attacking: m.mind.attack_order(),
+                    })
+                    .collect();
+                let s = view.senses(&zone, leader, world, &director.nav).unwrap();
+                let (input, request) = raider.think(&s, &mates);
+                if let Some(Request::Order { slots, order }) = request {
+                    let r = director.order(&zone, leader, slots, order, &|_| true);
+                    if verbose {
+                        println!("[{now:6.1}s] order of {leader} {order:?}: {r:?}");
+                    }
+                    if r.is_ok() {
+                        out.orders += 1;
+                    }
                 }
-                if r.is_ok() {
-                    out.orders += 1;
-                }
-            }
-            input
-        };
-        zone.drive(commander, input);
+                input
+            };
+            zone.drive(leader, input);
+        }
         let t0 = Instant::now();
         director.pre_step(&mut zone, world);
         spent += t0.elapsed();
@@ -245,6 +293,9 @@ pub fn play(setup: &Setup<'_>) -> Outcome {
         let t0 = Instant::now();
         director.post_step(&mut zone, world, &events);
         spent += t0.elapsed();
+        if let Some(ledger) = director.ledger(&last.encounter) {
+            out.parties = out.parties.max(ledger.parties().len());
+        }
         for ev in director.events.drain(..) {
             match ev {
                 DirectorEvent::Encounter { name, state, .. } => {
@@ -312,7 +363,7 @@ pub fn play(setup: &Setup<'_>) -> Outcome {
             let at = zone.player(commander).map(|p| p.mover.mv.origin.round());
             println!(
                 "[{now:6.1}s] objective {} | boss {} | commander {} at {at:?} | {}",
-                raider.objective(),
+                leaders[0].1.objective(),
                 hp(boss),
                 hp(commander),
                 squad_hp.join(" ")
@@ -322,7 +373,7 @@ pub fn play(setup: &Setup<'_>) -> Outcome {
         out.ticks = t + 1;
         // Done: every objective cleared. Run two seconds more so the loot and the trial
         // verdicts of the last kill are in.
-        if raider.done() && done_at.is_none() {
+        if leaders[0].1.done() && done_at.is_none() {
             done_at = Some(t);
             out.done = true;
         }
