@@ -14,8 +14,8 @@ use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Contents, Hull};
 use gm_core::vocab::EntityId;
 use gm_net::control::{
-    self, BodyKind, BuildChoice, FromZone, PlayerEntry, SquadEntry, StallEntry, stall_in_reach,
-    trade_in_reach,
+    self, BodyKind, BuildChoice, FromZone, Look, PlayerEntry, SquadEntry, StallEntry,
+    stall_in_reach, trade_in_reach,
 };
 use rayon::prelude::*;
 use tokio::sync::{mpsc, watch};
@@ -55,6 +55,9 @@ pub struct ZoneConfig {
     pub report_tx: Option<watch::Sender<ZoneReport>>,
     /// Abilities and preset builds (MATRIX.md 10).
     pub content: ContentPack,
+    /// The looks of the content (CONTENT.md 6): the prop keys a `Look` indexes, and what
+    /// each template and primary is held as. Empty: nobody holds anything.
+    pub looks: gm_content::looks::Looks,
     /// Preset given to clients that ask for none.
     pub default_build: String,
     /// The hub this zone runs under (HUB.md); `None` = open development zone.
@@ -98,6 +101,7 @@ impl Default for ZoneConfig {
             max_ticks: None,
             report_tx: None,
             content: gm_core::sim::test_content::pack(TickRate::COMBAT),
+            looks: Default::default(),
             default_build: "blade".into(),
             hub: None,
             wild: false,
@@ -210,6 +214,25 @@ fn replay_written(w: &Written) {
     }
 }
 
+/// What a body holds (LOOK.md 6.1): the model of the weapon it wears, else the prop of
+/// its primary ability, else nothing; as an index into the pack's prop list.
+fn look_of(
+    looks: &gm_content::looks::Looks,
+    zone: &Zone,
+    hub_slots: &std::collections::BTreeMap<u32, HubSlot>,
+    body: u32,
+) -> Look {
+    let worn = hub_slots
+        .get(&body)
+        .map(|s| s.worn[0].as_str())
+        .filter(|t| !t.is_empty());
+    let primary = zone.player(body).map(|p| p.sheet.build.primary as usize);
+    Look {
+        held: looks.held(worn, primary),
+        worn: Look::NONE,
+    }
+}
+
 fn wire_kind(kind: gm_ai::BodyKind) -> BodyKind {
     match kind {
         gm_ai::BodyKind::Human => BodyKind::Human,
@@ -276,6 +299,8 @@ struct HubSlot {
     /// The number of the hub's reading of its gear that the body has (ITEMS.md 3.3): a
     /// reading with a smaller number that arrives later changes nothing.
     gear_seq: u64,
+    /// The templates worn by place, from the same reading (LOOK.md 6.2): what it holds.
+    worn: [String; 2],
 }
 
 /// An invitation for a character that has no body here yet is kept this long (the
@@ -490,6 +515,7 @@ pub async fn run_with_web(
         map_hash: world.hash,
         open: cfg.open,
         content: Arc::new(cfg.content.clone()),
+        props: Arc::new(cfg.looks.props.clone()),
         hub: cfg.hub.clone(),
         chat: Default::default(),
     });
@@ -705,6 +731,7 @@ pub async fn run_with_web(
                             let reading = GearReading {
                                 seq: slot.gear_seq,
                                 gear: p.gear,
+                                templates: slot.worn.clone(),
                             };
                             gear_kept.insert(h.character, (reading, Instant::now()));
                         }
@@ -792,7 +819,7 @@ pub async fn run_with_web(
                         // later one this zone already has for the character (the answer to
                         // a change its last body asked for). From here on it changes only
                         // through this zone.
-                        let mut reading = h.gear;
+                        let mut reading = h.gear.clone();
                         if let Some((kept, _)) = gear_kept.remove(&h.character)
                             && kept.seq > reading.seq
                         {
@@ -808,6 +835,7 @@ pub async fn run_with_web(
                             id,
                             HubSlot {
                                 gear_seq: reading.seq,
+                                worn: reading.templates.clone(),
                                 character: h.character,
                                 joined: Instant::now(),
                                 play_seconds_before: h.play_seconds,
@@ -831,6 +859,7 @@ pub async fn run_with_web(
                     session.last_input_at = scheduler.tick();
                     session.model = model;
                     session.announced = zone.player(id).and_then(|p| session.wears(p.frame()));
+                    let look = look_of(&cfg.looks, &zone, &hub_slots, id);
                     for s in sessions.values() {
                         s.send_control(FromZone::PlayerInfo {
                             id,
@@ -838,6 +867,7 @@ pub async fn run_with_web(
                             team,
                             model: session.announced,
                             kind: BodyKind::Human,
+                            look,
                         });
                     }
                     sessions.insert(id, session);
@@ -885,6 +915,7 @@ pub async fn run_with_web(
                             team: zone.player(s.id).map_or(0, |p| p.team()),
                             model: s.announced,
                             kind: BodyKind::Human,
+                            look: look_of(&cfg.looks, &zone, &hub_slots, s.id),
                         })
                         .collect();
                     roster.extend(director.driven().into_iter().map(|(body, name, kind)| {
@@ -894,6 +925,7 @@ pub async fn run_with_web(
                             team: zone.player(body).map_or(0, |p| p.team()),
                             model: companion_models.get(&body).map(|m| m.id),
                             kind: wire_kind(kind),
+                            look: look_of(&cfg.looks, &zone, &hub_slots, body),
                         }
                     }));
                     sessions[&id].send_control(FromZone::Roster(roster));
@@ -1383,19 +1415,35 @@ pub async fn run_with_web(
                     // again since it asked), and only if it is newer than what that has.
                     if let Ok(reading) = &result {
                         let here = hub_slots
-                            .iter_mut()
-                            .find(|(_, slot)| slot.character == character);
+                            .iter()
+                            .find(|(_, slot)| slot.character == character)
+                            .map(|(body, slot)| (*body, slot.gear_seq));
                         match here {
-                            Some((body, slot)) => {
-                                if reading.seq > slot.gear_seq {
-                                    slot.gear_seq = reading.seq;
-                                    zone.set_gear(*body, reading.gear);
+                            Some((body, gear_seq)) => {
+                                if reading.seq > gear_seq {
+                                    // What it held before the reading, then the reading
+                                    // (Gemini's review: measured after, the look never
+                                    // changed and nobody was told).
+                                    let before = look_of(&cfg.looks, &zone, &hub_slots, body);
+                                    if let Some(slot) = hub_slots.get_mut(&body) {
+                                        slot.gear_seq = reading.seq;
+                                        slot.worn = reading.templates.clone();
+                                    }
+                                    zone.set_gear(body, reading.gear);
                                     info!(
                                         character,
                                         dealt = ?reading.gear.dealt,
                                         taken = ?reading.gear.taken,
                                         "gear"
                                     );
+                                    // What it holds may have changed with it (LOOK.md 6.2).
+                                    let look = look_of(&cfg.looks, &zone, &hub_slots, body);
+                                    if look != before {
+                                        info!(character, body, held = look.held, "look");
+                                        for s in sessions.values() {
+                                            s.send_control(FromZone::Look { id: body, look });
+                                        }
+                                    }
                                 }
                             }
                             None => {
@@ -1406,7 +1454,7 @@ pub async fn run_with_web(
                                     .get(&character)
                                     .is_none_or(|(known, _)| reading.seq > known.seq);
                                 if newer {
-                                    gear_kept.insert(character, (*reading, Instant::now()));
+                                    gear_kept.insert(character, (reading.clone(), Instant::now()));
                                 }
                             }
                         }
@@ -2205,6 +2253,7 @@ pub async fn run_with_web(
                 DirectorEvent::Spawned { id, name, kind } => {
                     let team = zone.player(id).map_or(0, |p| p.team());
                     let model = companion_models.get(&id).map(|m| m.id);
+                    let look = look_of(&cfg.looks, &zone, &hub_slots, id);
                     for s in sessions.values() {
                         s.send_control(FromZone::PlayerInfo {
                             id,
@@ -2212,6 +2261,7 @@ pub async fn run_with_web(
                             team,
                             model,
                             kind: wire_kind(kind),
+                            look,
                         });
                     }
                 }
@@ -2402,6 +2452,9 @@ pub async fn run_with_web(
                             wears = Some((s.name.clone(), p.team(), now));
                         }
                     }
+                    // A respec may hold another weapon (the primary's prop, LOOK.md 6.1):
+                    // everyone is told either way, in one message or the other.
+                    let look = look_of(&cfg.looks, &zone, &hub_slots, id);
                     if let Some((name, team, model)) = wears {
                         for s in sessions.values() {
                             s.send_control(FromZone::PlayerInfo {
@@ -2410,7 +2463,12 @@ pub async fn run_with_web(
                                 team,
                                 model,
                                 kind: BodyKind::Human,
+                                look,
                             });
+                        }
+                    } else {
+                        for s in sessions.values() {
+                            s.send_control(FromZone::Look { id, look });
                         }
                     }
                 }

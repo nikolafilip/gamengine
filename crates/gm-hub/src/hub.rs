@@ -70,7 +70,7 @@ pub struct HubConfig {
     /// The item content (`assets/content/items.toml`): the templates a craft may name
     /// (none listed: any), and what a worn item does (ITEMS.md 3.2).
     pub items: gm_content::items::ItemContent,
-    /// The largest coin drop a zone may report in one grant, in copper (ECONOMY.md 9).
+    /// The largest coin drop a zone may report in one grant, in silver (ECONOMY.md 9).
     pub max_coin_grant: i64,
     /// Where ingested models, their previews and the uploads live (MODELS.md 6.1).
     pub models_dir: std::path::PathBuf,
@@ -1357,7 +1357,7 @@ async fn handle(
                     .await?;
                 // Read after the character became this zone's (ITEMS.md 3.3): whatever it
                 // put on through the zone it came from is in it.
-                let (seq, gear) = hub
+                let (seq, gear, templates) = hub
                     .econ
                     .gear(row.id, &hub.cfg.items)
                     .await
@@ -1365,7 +1365,11 @@ async fn handle(
                 Ok::<_, HubError>((
                     squad,
                     hub.models.worn(row.id).await?,
-                    GearReading { seq, gear },
+                    GearReading {
+                        seq,
+                        gear,
+                        templates,
+                    },
                     // As gear: read after the character became this zone's. A change
                     // that comes later is told to this zone, with a larger number.
                     hub.parties.reading(row.id).await?,
@@ -2156,12 +2160,24 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
         ZoneEconOp::Wear { character, item } => e
             .wear(character, zone, item, &hub.cfg.items)
             .await
-            .map(|(seq, gear)| EconReply::Gear(GearReading { seq, gear }))
+            .map(|(seq, gear, templates)| {
+                EconReply::Gear(GearReading {
+                    seq,
+                    gear,
+                    templates,
+                })
+            })
             .map_err(econ_err),
         ZoneEconOp::TakeOff { character, item } => e
             .take_off(character, zone, item, &hub.cfg.items)
             .await
-            .map(|(seq, gear)| EconReply::Gear(GearReading { seq, gear }))
+            .map(|(seq, gear, templates)| {
+                EconReply::Gear(GearReading {
+                    seq,
+                    gear,
+                    templates,
+                })
+            })
             .map_err(econ_err),
         // The zone saw the two stand together and both ask (PARTY.md 6); that both play in
         // it is checked again here, under their rows.

@@ -47,7 +47,7 @@ const USAGE: &str = "gm-hub --database-url URL [--listen ADDR] [--cert-out PATH]
 [--web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url https://HOST:PORT] [--web-origin ORIGIN]... [--web-info-out PATH]]   \
 (env: DATABASE_URL, GM_ZONE_SECRET)\n\
        gm-hub --database-url URL --grant-moderator EMAIL     make an existing account a moderator, then exit\n\
-       gm-hub --database-url URL --grant-coin CHARACTER COPPER   give a character coin (through the ledger), then exit\n\
+       gm-hub --database-url URL --grant-coin CHARACTER SILVER   give a character coin (through the ledger), then exit\n\
        gm-hub --database-url URL --grant-item CHARACTER TEMPLATE MATERIAL,MATERIAL,...   give it a crafted item, then exit\n\
        gm-hub --database-url URL --place CHARACTER ZONE X,Y,Z YAW   where an offline character stands when it next enters, then exit\n\
        gm-hub --database-url URL --audit                     say whether the books are sound and what moved, then exit (1: they are not)\n\
@@ -99,10 +99,10 @@ fn parse_args() -> Result<Args, String> {
             "--grant-moderator" => a.grant_moderator = Some(value("--grant-moderator")?),
             "--grant-coin" => {
                 let name = value("--grant-coin")?;
-                let copper = value("--grant-coin")?
+                let silver = value("--grant-coin")?
                     .parse()
                     .map_err(|e| format!("--grant-coin: {e}"))?;
-                a.grant_coin = Some((name, copper));
+                a.grant_coin = Some((name, silver));
             }
             "--grant-item" => {
                 let name = value("--grant-item")?;
@@ -248,12 +248,12 @@ async fn operator(db: Db, args: &Args) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("no character called {name:?}"))
         }
     };
-    if let Some((name, copper)) = &args.grant_coin {
+    if let Some((name, silver)) = &args.grant_coin {
         let id = character(name).await?;
-        econ.grant_coin_as(id, *copper, "grant", 0)
+        econ.grant_coin_as(id, *silver, "grant", 0)
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        info!(%name, copper, "coin granted");
+        info!(%name, silver, "coin granted");
     }
     if let Some((name, template, materials)) = &args.grant_item {
         let id = character(name).await?;
@@ -375,7 +375,7 @@ async fn run() -> anyhow::Result<()> {
         party_sweep: gm_hub::party::SWEEP,
         party_away: std::time::Duration::from_secs(args.party_away),
         items: gm_content::items::load_items(&args.content)?,
-        max_coin_grant: 10_000,
+        max_coin_grant: 500,
         models_dir: args.models_dir,
         // Uploads are parsed by this same binary in a child process.
         ingest: IngestMode::Worker(std::env::current_exe()?),

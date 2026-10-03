@@ -249,6 +249,7 @@ impl Playback {
                         status: e.status,
                         model: None,
                         distance: (e.pos - eye).length(),
+                        prop: None,
                     });
                 }
                 EntityKind::Projectile => boxes.push(EntityDraw {

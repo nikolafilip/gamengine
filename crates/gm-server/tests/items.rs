@@ -90,7 +90,9 @@ impl Hand {
             other => panic!("{name}: no welcome: {other:?}"),
         };
         let (pack, own, team) = match control::recv(&mut recv).await.unwrap() {
-            Some(FromZone::Content { pack, own, team }) => (pack, own, team),
+            Some(FromZone::Content {
+                pack, own, team, ..
+            }) => (pack, own, team),
             other => panic!("{name}: no content: {other:?}"),
         };
         let rate = TickRate::new(hz as u32);
@@ -390,7 +392,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
             party_sweep: std::time::Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: items.clone(),
-            max_coin_grant: 10_000,
+            max_coin_grant: 500,
             models_dir: std::env::temp_dir()
                 .join(format!("gm-items-models-{}", std::process::id())),
             ingest: IngestMode::InProcess,

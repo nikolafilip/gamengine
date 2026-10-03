@@ -1244,7 +1244,7 @@ async fn crossing_movements_neither_deadlock_nor_lose_coin() {
     for t in tasks {
         t.await.unwrap().unwrap();
     }
-    // a paid 200..209 and earned 100..109; b the reverse; ten coppers granted to each.
+    // a paid 200..209 and earned 100..109; b the reverse; ten silver granted to each.
     assert_eq!(coin(&econ, a).await, 10_000 - 2_045 + 1_045 + 10);
     assert_eq!(coin(&econ, b).await, 10_000 - 1_045 + 2_045 + 10);
     econ.stall_close(a).await.unwrap();
@@ -1260,7 +1260,7 @@ async fn a_storm_of_mixed_movements_never_deadlocks() {
     let Some(econ) = setup().await else { return };
     // Six characters do everything to each other at once: trades, stall sales and closes,
     // buy orders filled and cancelled, crafts of offered items, contracts and drops. Any
-    // deadlock would surface as `Busy`; any lost or invented copper fails the audit.
+    // deadlock would surface as `Busy`; any lost or invented silver fails the audit.
     let mut who = Vec::new();
     for _ in 0..6 {
         who.push(player(&econ, 50_000).await);

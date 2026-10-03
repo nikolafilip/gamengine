@@ -881,3 +881,140 @@ fn verify_judges_every_container_the_strict_reader_accepts() {
     // Noise is not an avatar: all of it is refused, none of it is a crash.
     assert_eq!(refused, 200 * 4);
 }
+
+// ---------- props (CONTENT.md 3.1 and 4) ----------
+
+#[test]
+fn a_flat_coloured_sword_becomes_a_prop_with_swatches_and_an_avatar_reader_refuses_it() {
+    use gm_ingest::source::Fit;
+    let glb = synth::sword_prop(0.9).build();
+    let (report, ingested) = gm_ingest::ingest_prop(&glb, Fit::default());
+    assert!(report.ok, "{:?}", report.violations);
+    let ing = ingested.unwrap();
+    let m = &ing.model;
+    assert!(m.is_prop() && m.bone_mask == 1 && m.frame == gm_model::format::PROP_FRAME);
+    assert_eq!(report.facts.triangles, 4 * 12);
+    assert!(
+        report.notes.iter().any(|n| n.contains("3 flat colours")),
+        "{:?}",
+        report.notes
+    );
+    // The blade reaches 0.9 m = 28.8 units along +X (glTF's +Z is the game's forward).
+    let tip = (0..m.vertices.len())
+        .map(|i| m.position(i).x)
+        .fold(0f32, f32::max);
+    assert!((tip - 28.8).abs() < 0.1, "tip at {tip}");
+    assert!((report.facts.top - 28.8).abs() < 0.1);
+    // Deterministic, canonical, and under the prop's file budget.
+    let again = gm_ingest::ingest_prop(&glb, Fit::default()).1.unwrap();
+    assert_eq!(again.gmm, ing.gmm);
+    assert!(ing.gmm.len() <= limits::PROP_MAX_FILE_BYTES);
+    assert_eq!(Model::decode(&ing.gmm).unwrap(), *m);
+    // The strict reader takes it; the avatar verification does not, for any frame.
+    for frame in rig::FRAMES {
+        assert!(gm_ingest::verify(&ing.gmm, frame).is_err());
+    }
+    // The same file as an avatar is refused (no skin), and never a panic.
+    let r = refused(&glb, STRIKER);
+    assert!(has(&r, "skins"), "{:?}", r.violations);
+}
+
+#[test]
+fn a_fit_moves_and_turns_a_prop_and_a_reach_past_the_hand_is_refused() {
+    use gm_ingest::source::Fit;
+    let glb = synth::sword_prop(0.9).build();
+    // Turned a quarter about Y, the blade points along glTF +X, the game's +Y (left).
+    let fit = Fit {
+        mov: [0.0, 0.0, 0.0],
+        turn: [0.0, 90.0, 0.0],
+        scale: 1.0,
+    };
+    let m = gm_ingest::ingest_prop(&glb, fit).1.unwrap().model;
+    let left = (0..m.vertices.len())
+        .map(|i| m.position(i).y)
+        .fold(0f32, f32::max);
+    assert!((left - 28.8).abs() < 0.1, "left reach {left}");
+    // Scaled four times, it is a pike, past the 96-unit reach.
+    let fit = Fit {
+        scale: 4.0,
+        ..Fit::default()
+    };
+    let (report, ingested) = gm_ingest::ingest_prop(&glb, fit);
+    assert!(!report.ok && ingested.is_none());
+    assert!(has(&report, "reaches"), "{:?}", report.violations);
+    // Moved, the grip is elsewhere: the whole thing slides.
+    let fit = Fit {
+        mov: [0.0, 0.0, -0.5],
+        ..Fit::default()
+    };
+    let m = gm_ingest::ingest_prop(&glb, fit).1.unwrap().model;
+    let tip = (0..m.vertices.len())
+        .map(|i| m.position(i).x)
+        .fold(0f32, f32::max);
+    assert!((tip - 12.8).abs() < 0.1, "tip at {tip}");
+}
+
+#[test]
+fn a_textured_prop_keeps_its_texture_and_a_mixed_one_is_refused() {
+    use gm_ingest::source::Fit;
+    let mut g = synth::sword_prop(0.6);
+    // Every part textured by one 32 × 32 image; the uvs point at its middle.
+    let n = g.positions.len();
+    g.uvs = vec![[0.5, 0.5]; n];
+    g.image = Some(png(32, 32, &vec![200u8; 32 * 32 * 4]));
+    for m in &mut g.materials {
+        m.1 = true;
+    }
+    let (report, ingested) = gm_ingest::ingest_prop(&g.build(), Fit::default());
+    assert!(report.ok, "{:?}", report.violations);
+    assert_eq!(ingested.unwrap().model.tex_w, 64);
+    assert!(!report.notes.iter().any(|n| n.contains("swatches")));
+    // One part textured, the others flat: the file must choose.
+    g.materials[1].1 = false;
+    let (report, ingested) = gm_ingest::ingest_prop(&g.build(), Fit::default());
+    assert!(!report.ok && ingested.is_none());
+    assert!(has(&report, "textured or flat"), "{:?}", report.violations);
+}
+
+#[test]
+fn a_baked_icon_runs_the_long_axis_from_bottom_left_to_top_right_and_is_deterministic() {
+    use gm_ingest::source::Fit;
+    let glb = synth::sword_prop(0.9).build();
+    let model = gm_ingest::ingest_prop(&glb, Fit::default())
+        .1
+        .unwrap()
+        .model;
+    let icon = gm_ingest::raster::icon(&model, 32);
+    assert_eq!(icon.len(), 32 * 32 * 4);
+    assert_eq!(icon, gm_ingest::raster::icon(&model, 32));
+    let alpha = |x: usize, y: usize| icon[(y * 32 + x) * 4 + 3];
+    // Along the diagonal (y down: the bottom left is (2, 29)) the blade is there; the
+    // other corners are empty; the margin rows are empty.
+    assert!(alpha(16, 15) > 0 && alpha(6, 25) > 0 && alpha(26, 5) > 0);
+    assert_eq!((alpha(2, 2), alpha(29, 29)), (0, 0));
+    assert!((0..32).all(|x| alpha(x, 0) == 0 && alpha(x, 31) == 0));
+    // Something is lit and coloured: the steel is grey, the grip is brown.
+    let covered = (0..32 * 32).filter(|i| icon[i * 4 + 3] > 0).count();
+    assert!(covered > 60 && covered < 500, "{covered} dots covered");
+    if let Ok(dir) = std::env::var("GM_ICON_DIR") {
+        std::fs::write(format!("{dir}/sword-icon.png"), png(32, 32, &icon)).unwrap();
+        let big = gm_ingest::raster::icon(&model, 128);
+        std::fs::write(format!("{dir}/sword-icon-128.png"), png(128, 128, &big)).unwrap();
+    }
+}
+
+#[test]
+fn a_portrait_is_the_head_and_shoulders() {
+    let glb = small(7, STRIKER).build();
+    let model = ingest(&glb, STRIKER).1.unwrap().model;
+    let p = gm_ingest::raster::portrait(&model, 32);
+    assert_eq!(p.len(), 32 * 32 * 4);
+    let alpha = |x: usize, y: usize| p[(y * 32 + x) * 4 + 3];
+    // The head is in the upper middle; the bottom corners hold the shoulders or nothing,
+    // and the top corners are empty.
+    assert!(alpha(16, 10) > 0, "no head in the middle");
+    assert_eq!((alpha(0, 0), alpha(31, 0)), (0, 0));
+    if let Ok(dir) = std::env::var("GM_ICON_DIR") {
+        std::fs::write(format!("{dir}/portrait.png"), png(32, 32, &p)).unwrap();
+    }
+}

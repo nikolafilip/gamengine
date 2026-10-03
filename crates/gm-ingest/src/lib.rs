@@ -198,6 +198,152 @@ pub fn ingest(upload: &[u8], frame: ArchetypeFrame) -> (Report, Option<Ingested>
     )
 }
 
+/// Validate a prop's file (CONTENT.md 3.1 and 4) under `fit` and re-encode it. The report's
+/// `frame` says `prop`; there is no envelope and no preview, and the facts' coverages are 0.
+pub fn ingest_prop(upload: &[u8], fit: source::Fit) -> (Report, Option<Ingested>) {
+    let mut report = Report {
+        frame: "prop".to_string(),
+        ..Default::default()
+    };
+    if upload.len() > MAX_UPLOAD_BYTES {
+        report.violations.push(format!(
+            "the upload is {} bytes; the limit is {MAX_UPLOAD_BYTES}",
+            upload.len()
+        ));
+        return (report, None);
+    }
+    let src = match source::read_prop(upload, fit) {
+        Ok(s) => s,
+        Err(violations) => {
+            report.violations = violations;
+            return (report, None);
+        }
+    };
+    report.notes = src.notes.clone();
+    let facts = &mut report.facts;
+    facts.triangles = src.mesh.triangles() as u32;
+    facts.vertices = src.mesh.positions.len() as u32;
+    facts.source_joints = src.source_joints as u32;
+    facts.bones = 1;
+    facts.source_texture = [src.texture.width(), src.texture.height()];
+    facts.cutout = src.cutout.is_some();
+    facts.two_sided = src.two_sided;
+    let dropped = src.source_triangles - src.mesh.triangles();
+    if dropped > 0 {
+        report
+            .notes
+            .push(format!("{dropped} degenerate triangles were dropped"));
+    }
+    let v = &mut report.violations;
+    if src.mesh.triangles() > limits::PROP_MAX_TRIANGLES {
+        v.push(format!(
+            "{} triangles; a prop's budget is {}",
+            src.mesh.triangles(),
+            limits::PROP_MAX_TRIANGLES
+        ));
+    }
+    let stray = src
+        .mesh
+        .uvs
+        .iter()
+        .filter(|uv| {
+            uv.iter()
+                .any(|c| !c.is_finite() || *c < -UV_SLACK || *c > 1.0 + UV_SLACK)
+        })
+        .count();
+    if stray > 0 {
+        v.push(format!(
+            "{stray} vertices have texture coordinates outside [0, 1]; the atlas does not tile"
+        ));
+    }
+    let reach = src
+        .mesh
+        .positions
+        .iter()
+        .fold(0f32, |m, p| m.max(p.x.abs()).max(p.y.abs()).max(p.z.abs()));
+    report.facts.top = reach;
+    if reach > limits::PROP_MAX_EXTENT {
+        v.push(format!(
+            "the prop reaches {reach:.1} units from its grip; the limit is {} (fit it, or it is no hand-held thing)",
+            limits::PROP_MAX_EXTENT
+        ));
+    }
+    if !v.is_empty() || src.mesh.triangles() == 0 {
+        if src.mesh.triangles() == 0 {
+            v.push("the file has no triangles".into());
+        }
+        return (report, None);
+    }
+    let atlas = texture::build_capped(
+        &src.texture,
+        src.base_color,
+        src.cutout,
+        limits::PROP_MAX_TEXTURE,
+    );
+    let n = src.mesh.positions.len();
+    let (scale, vertices) = format::quantize_vertices(
+        &src.mesh.positions,
+        &src.mesh.normals,
+        &src.mesh.uvs,
+        &vec![[0u8; 4]; n],
+        &vec![[1.0, 0.0, 0.0, 0.0]; n],
+    );
+    let model = Model {
+        flags: format::FLAG_PROP
+            | if src.cutout.is_some() { FLAG_CUTOUT } else { 0 }
+            | if src.two_sided { FLAG_TWO_SIDED } else { 0 },
+        frame: format::PROP_FRAME,
+        scale,
+        average: atlas.average,
+        bone_mask: 1,
+        pivots: [[0.0; 3]; rig::BONES],
+        vertices,
+        indices: src.mesh.indices.iter().map(|i| *i as u16).collect(),
+        tex_w: atlas.w,
+        tex_h: atlas.h,
+        texture: atlas.bc1,
+    };
+    report.facts.texture = [atlas.w as u32, atlas.h as u32];
+    let gmm = match model.encode() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            report
+                .violations
+                .push(format!("the prop cannot be stored: {e}"));
+            return (report, None);
+        }
+    };
+    report.facts.bytes = gmm.len() as u32;
+    // The strict reader's word, as for an avatar: what is written is what is read.
+    let model = match Model::decode(&gmm) {
+        Ok(m) if m.is_prop() && m.encode().ok().as_deref() == Some(&gmm[..]) => m,
+        Ok(_) => {
+            report
+                .violations
+                .push("the prop is not in its canonical encoding".into());
+            return (report, None);
+        }
+        Err(e) => {
+            report
+                .violations
+                .push(format!("the prop cannot be stored: {e}"));
+            return (report, None);
+        }
+    };
+    let id = format::model_id(&gmm);
+    report.ok = true;
+    report.id = format::id_hex(&id);
+    (
+        report,
+        Some(Ingested {
+            id,
+            gmm,
+            preview: Vec::new(),
+            model,
+        }),
+    )
+}
+
 /// A `.gmm` the hub may store.
 #[derive(Debug)]
 pub struct Verified {

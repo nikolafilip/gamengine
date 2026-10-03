@@ -1,6 +1,6 @@
 # Wire Protocol
 
-Status: v7 (Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+Status: v8 (Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
 and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
@@ -705,3 +705,21 @@ implementation; verdicts are ours):
 - A `Whisper` to a name no character can have is answered with a line of the zone (`nobody
   can be called that`) and counts for nothing; a name in any request is checked by its
   bytes before anything else.
+
+## 20. Changes in v8 (Phase 14)
+
+`PROTOCOL_VERSION` 8 (LOOK.md 6.2). The simulation is untouched; the control stream says
+what a body holds, so that every client draws the same weapon in the same hand:
+
+- `FromZone::Content` gains **`props: Vec<String>`**: the keys of every prop the zone's
+  content names (`ability.prop`, `template.model`), in order of first appearance. The
+  client finds the files in its bundle by key (CONTENT.md 6); the zone never reads one.
+- `PlayerEntry` (in `Roster`) and `PlayerInfo` gain **`look: Look { held: u16, worn: u16
+  }`**: indices into `props`, `u16::MAX` for nothing (`worn` is Phase 16's armour overlay
+  and always `NONE` now). A client reads an index past the list as nothing.
+- **`FromZone::Look { id, look }`**, at the end of the enum: a body's look changed (a
+  weapon worn or taken off, a respec to another primary). The indices are of the session's
+  pack: a zone restarts to change content and its clients reconnect.
+- The zone chooses: the model of the weapon template worn (the hub's gear reading names
+  the templates, HUB.md 3.9), else the primary ability's prop, else nothing; companions and
+  creatures by their build.

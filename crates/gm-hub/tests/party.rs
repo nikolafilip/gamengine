@@ -310,7 +310,7 @@ fn config(content: gm_core::build::ContentPack, sweep: Duration, tag: &str) -> H
         party_sweep: sweep,
         party_away: Duration::from_millis(600),
         items: gm_content::items::load_items(Path::new(CONTENT)).expect("items"),
-        max_coin_grant: 10_000,
+        max_coin_grant: 500,
         models_dir: std::env::temp_dir().join(format!("gm-hub-party-{tag}-{}", std::process::id())),
         ingest: gm_hub::IngestMode::InProcess,
         ingest_timeout: gm_hub::models::INGEST_TIMEOUT,

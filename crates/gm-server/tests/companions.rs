@@ -161,7 +161,7 @@ async fn a_solo_player_clears_the_dungeon_with_three_hired_avatars() {
             party_sweep: std::time::Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: Default::default(),
-            max_coin_grant: 10_000,
+            max_coin_grant: 500,
             models_dir: std::env::temp_dir()
                 .join(format!("gm-hub-models-companions-{}", std::process::id())),
             ingest: gm_hub::IngestMode::InProcess,
@@ -274,7 +274,7 @@ async fn a_solo_player_clears_the_dungeon_with_three_hired_avatars() {
     let report = run_hub_flow(cfg).await.expect("the leader's run");
     let b = &report.reports[0];
     println!(
-        "run: {:.1} s (wall {:.1} s), squad {:?}, hired {}, orders {} (refused {}), cleared {:?}, resets {}, deaths {}, loot {:?}, coin {}, trials {:?}; left with {} copper, items {:?}, trials {:?}; rx {:.0} B/s tx {:.0} B/s",
+        "run: {:.1} s (wall {:.1} s), squad {:?}, hired {}, orders {} (refused {}), cleared {:?}, resets {}, deaths {}, loot {:?}, coin {}, trials {:?}; left with {} silver, items {:?}, trials {:?}; rx {:.0} B/s tx {:.0} B/s",
         b.secs,
         started.elapsed().as_secs_f64(),
         report.squad,

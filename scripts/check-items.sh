@@ -131,7 +131,7 @@ started $town_pid "the town" "$tmp/town.log"
 [[ "$running" == 1 ]] || { show "$tmp/town.log"; echo "FAIL: the town did not come up"; exit 1; }
 # The keeper walks to the first tile of the market, opens its stall there, says where it
 # stands, and puts up for sale whatever comes to its hands, at one gold and twenty silver.
-PRICE=12000; PURSE=15000
+PRICE=120; PURSE=150
 target/release/gm-bot "${link[@]}" --user keeper@bots.test --password keeper-password --register --character Keeper \
   --zone town --bots 1 --stalls 1 --sell-at $PRICE --secs 900 --behaviour stroll --maps-dir assets/maps/built \
   > "$tmp/keeper.log" 2>&1 &

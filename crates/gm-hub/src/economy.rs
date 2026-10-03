@@ -17,7 +17,8 @@ pub const STALL_HOURS: i64 = 48;
 pub const HIRE_BURN_PER_CENT: i64 = 30;
 pub const HIRE_WINDOW_HOURS: i64 = 12;
 pub const HIRES_BEFORE_DEMOTION: i64 = 3;
-pub const MAX_PRICE: i64 = 1_000_000_000_000;
+/// The most any one amount may be, in silver (ECONOMY.md 2): a hundred million gold.
+pub const MAX_PRICE: i64 = 10_000_000_000;
 pub const LAYERS: [&str; 5] = ["shard", "core", "catalyst", "frame", "gem"];
 pub const MAX_GEMS: usize = 2;
 /// The most parts an item is made of: a shard, a core, a catalyst, a frame and the gems.
@@ -116,7 +117,7 @@ pub struct Item {
     pub worn: bool,
 }
 
-/// What a stall has for sale: the listing's id, the item and its price in copper.
+/// What a stall has for sale: the listing's id, the item and its price in silver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listing {
     pub id: i64,
@@ -555,11 +556,13 @@ async fn playing_in(tx: &mut Tx<'_>, character: i64, zone: &str) -> Result<(), E
 }
 
 /// What the character's worn items do (ITEMS.md 3.2), within a transaction.
+/// The sixteen numbers of what a character wears, and the templates worn by place
+/// (weapon, armour; empty for nothing).
 async fn gear_in(
     tx: &mut Tx<'_>,
     character: i64,
     content: &ItemContent,
-) -> Result<Gear, EconError> {
+) -> Result<(Gear, [String; 2]), EconError> {
     let rows = sqlx::query(
         "select w.slot, i.id, i.template from worn w join items i on i.id = w.item_id \
          where w.character_id = $1",
@@ -569,6 +572,7 @@ async fn gear_in(
     .await
     .map_err(internal)?;
     let mut gear = Gear::NONE;
+    let mut templates: [String; 2] = Default::default();
     for r in rows {
         let slot: String = r.try_get("slot").map_err(internal)?;
         let id: i64 = r.try_get("id").map_err(internal)?;
@@ -576,14 +580,20 @@ async fn gear_in(
         let parts = components_of(tx, id).await?;
         let materials = parts.iter().map(|c| c.material.as_str());
         // Content that no longer knows the template, or knows it as another kind than
-        // the place it was put into, gives nothing.
+        // the place it was put into, gives nothing (and is still named: what is worn is
+        // worn, whatever it does).
         match content.edges(&template, materials) {
             Some((Place::Weapon, edges, _)) if slot == Place::Weapon.name() => gear.dealt = edges,
             Some((Place::Armour, edges, _)) if slot == Place::Armour.name() => gear.taken = edges,
             _ => {}
         }
+        if slot == Place::Weapon.name() {
+            templates[0] = template;
+        } else if slot == Place::Armour.name() {
+            templates[1] = template;
+        }
     }
-    Ok(gear)
+    Ok((gear, templates))
 }
 
 /// Whether somebody wears the item (ITEMS.md 2). Asked with the item's row locked.
@@ -788,7 +798,7 @@ impl Economy {
         zone: &str,
         item: i64,
         content: &ItemContent,
-    ) -> Result<(u64, Gear), EconError> {
+    ) -> Result<(u64, Gear, [String; 2]), EconError> {
         let mut tx = self.begin().await?;
         playing_in(&mut tx, character, zone).await?;
         let inv = character_holder(&mut tx, character).await?;
@@ -848,7 +858,7 @@ impl Economy {
         zone: &str,
         item: i64,
         content: &ItemContent,
-    ) -> Result<(u64, Gear), EconError> {
+    ) -> Result<(u64, Gear, [String; 2]), EconError> {
         let mut tx = self.begin().await?;
         playing_in(&mut tx, character, zone).await?;
         let inv = character_holder(&mut tx, character).await?;
@@ -876,7 +886,7 @@ impl Economy {
         &self,
         character: i64,
         content: &ItemContent,
-    ) -> Result<(u64, Gear), EconError> {
+    ) -> Result<(u64, Gear, [String; 2]), EconError> {
         let mut conn = self.pool.acquire().await.map_err(internal)?;
         let seq: i64 = sqlx::query("select nextval('gear_seq') as seq")
             .fetch_one(&mut *conn)
@@ -885,9 +895,9 @@ impl Economy {
             .try_get("seq")
             .map_err(internal)?;
         let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(internal)?;
-        let gear = gear_in(&mut tx, character, content).await?;
+        let (gear, templates) = gear_in(&mut tx, character, content).await?;
         tx.commit().await.map_err(internal)?;
-        Ok((seq as u64, gear))
+        Ok((seq as u64, gear, templates))
     }
 
     /// Money supply (ECONOMY.md 1.2).
@@ -985,7 +995,7 @@ impl Economy {
 
     /// Everything one kill gives, as one transaction that happens once (ECONOMY.md 9):
     /// `components` are `(recipient, material)`, a recipient of `None` being the zone's
-    /// ground (a recipient who has left); `coin` is `(character, copper)`. Returns the item
+    /// ground (a recipient who has left); `coin` is `(character, silver)`. Returns the item
     /// ids, or `None` when this kill of this zone was paid before: the report was a repeat.
     pub async fn grant_kill(
         &self,

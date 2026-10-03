@@ -818,10 +818,14 @@ pub struct ItemSummary {
 /// A reading of what a character's worn items do to damage (ITEMS.md 3.3). `seq` orders
 /// the hub's readings: of two a zone has for one character, the one with the larger number
 /// is true, whichever arrived first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct GearReading {
     pub seq: u64,
     pub gear: Gear,
+    /// The keys of the templates worn, by place (weapon, armour); empty for nothing (LOOK.md
+    /// 6.2: keys, so that a hub and a zone on different content versions disagree about
+    /// nothing but what to draw). v1.9.
+    pub templates: [String; 2],
 }
 
 /// The states of a trade in `EconReply::TradeView`.
@@ -925,7 +929,7 @@ pub enum PartyReply {
 pub struct ListingSummary {
     pub id: i64,
     pub item: ItemSummary,
-    /// In copper.
+    /// In silver (ECONOMY.md 2).
     pub price: i64,
 }
 
@@ -1166,7 +1170,7 @@ pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 /// carry); any change to them is a new one. A stream that speaks them begins with it, in
 /// a frame of one byte, and the hub answers with its own before anything else: zones,
 /// tools and bots of another build are told so instead of being garbled at.
-pub const HUB_VERSION: u8 = 8;
+pub const HUB_VERSION: u8 = 9;
 pub const HUB_PREAMBLE: [u8; 3] = [0, 1, HUB_VERSION];
 pub const HUB_BIDI_STREAMS: u32 = 1024;
 /// Password hashes running at once; more answer `Busy`.

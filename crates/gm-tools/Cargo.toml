@@ -9,6 +9,9 @@ description = "gamengine CLI: map build (ericw-tools wrapper), WAD generation, a
 
 [dependencies]
 clap = { workspace = true, features = ["env"] }
+ab_glyph = { workspace = true }
+sha2 = { workspace = true }
+gm-content = { workspace = true }
 anyhow = { workspace = true }
 gltf = { workspace = true }
 image = { workspace = true, features = ["jpeg"] }

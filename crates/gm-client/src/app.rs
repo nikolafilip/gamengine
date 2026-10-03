@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use web_time::Instant;
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use gm_bsp::Bsp;
 use gm_core::build::{ContentPack, Sheet};
 use gm_core::collide::{Aabb, sweep_boxes};
@@ -23,7 +23,8 @@ use gm_hub_proto::player::PlayerRequest;
 use gm_model::ModelId;
 use gm_net::client::ClientState;
 use gm_net::control::{
-    BodyKind, BuildChoice, EncounterState, FromClient, FromZone, Order, SquadEntry, StallEntry,
+    BodyKind, BuildChoice, EncounterState, FromClient, FromZone, Look, Order, SquadEntry,
+    StallEntry,
 };
 use gm_net::snapshot::{EntityKind, SpawnInfo};
 use gm_net::transport::fnv1a64;
@@ -37,8 +38,10 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::CursorGrabMode;
 use winit::window::{Window, WindowId};
 
-use crate::avatars::{Avatars, Body, OWN, stall_boxes, stall_keeper};
+use crate::avatars::{Avatars, Body, DOLL, OWN, stall_boxes, stall_keeper};
 use crate::bag::{Bag, BagAction};
+use crate::characters::CharacterDraw;
+use crate::content::Content;
 use crate::front::{Action, Auto, Front, PANEL_UNITS};
 use crate::hub::{Account, Hub, HubApi, ticket_addr};
 use crate::hud::{self, Hud};
@@ -166,6 +169,10 @@ pub(crate) struct Online {
     rate: TickRate,
     /// Everyone in the zone: name, team, avatar model.
     names: HashMap<u32, (String, u8, Option<ModelId>)>,
+    /// What each body holds (LOOK.md 6.2), by the pack's prop list.
+    looks: HashMap<u32, Look>,
+    /// The prop keys the zone's content names: what a `Look` indexes.
+    props: Vec<String>,
     /// Who drives each body (COMPANIONS.md 2.1), as the zone announced it.
     kinds: HashMap<u32, BodyKind>,
     /// The own squad, in slot order, as the zone last told it.
@@ -328,8 +335,30 @@ struct Active {
     drawn_from: Vec<usize>,
 }
 
+/// The view model to draw this frame (LOOK.md 6.4), decided by the online frame and
+/// pushed once the avatars' frame has begun.
+#[derive(Clone, Copy)]
+struct ViewModel {
+    slot: usize,
+    eye: Vec3,
+    yaw: f32,
+    pitch: f32,
+    stride: f32,
+    kick: f32,
+    light: [f32; 3],
+}
+
 struct App {
     opts: Options,
+    /// The view model's kick (1 at a launch, decaying) and stride phase (LOOK.md 6.4).
+    view_kick: f32,
+    view_stride: f32,
+    view_model: Option<ViewModel>,
+    /// The content bundle: the manifest, the props by key (CONTENT.md 6).
+    content: Content,
+    /// `--prop FILE` or `--prop KEY` offline: the own body holds it (the fitting room of
+    /// CONTENT.md 9), once it is on the GPU.
+    offline_prop: Option<usize>,
     /// The window, from its creation: the renderer on it (`active`) may come later.
     window: Option<Arc<Window>>,
     bsp: Bsp,
@@ -491,6 +520,8 @@ fn online(opts: &Options, sim: &Sim, map_hash: u64, entry: Entry) -> Result<Onli
         last_snapshot: Instant::now(),
         rate: TickRate::COMBAT,
         names: HashMap::new(),
+        looks: HashMap::new(),
+        props: Vec::new(),
         kinds: HashMap::new(),
         squad: Vec::new(),
         social: Social::default(),
@@ -528,6 +559,22 @@ struct Start {
     settings: Settings,
     map_hash: u64,
     ui_script: Option<UiScript>,
+    /// The content bundle (CONTENT.md 6), or a client without one.
+    content: Content,
+}
+
+/// The prop a look names, on the GPU (LOOK.md 6): loaded from the bundle when first seen;
+/// nothing while it loads, for a look the pack does not name, or without a renderer.
+fn held_prop(
+    content: &mut Content,
+    active: Option<&mut Active>,
+    props: &[String],
+    look: Look,
+) -> Option<usize> {
+    let key = props.get(look.held as usize)?;
+    let active = active?;
+    let (gpu, characters) = (&active.gpu, &mut active.renderer.characters);
+    content.prop(key, |model| Some(characters.add_model(gpu, model)))
 }
 
 fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start) -> App {
@@ -543,6 +590,11 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         Viewport::First
     };
     let mut app = App {
+        view_kick: 0.0,
+        view_stride: 0.0,
+        view_model: None,
+        content: start.content,
+        offline_prop: None,
         front_up: start.front.is_some() && start.online.is_none(),
         title: None,
         hub: start.hub,
@@ -757,6 +809,7 @@ pub fn run(mut opts: Options) -> Result<(), Error> {
     opts.password.clear();
     let map_hash = fnv1a64(&map_bytes);
     let ui_script = opts.ui_script.as_deref().map(UiScript::parse).transpose()?;
+    let content = Content::load(&crate::install_root().join(&opts.assets));
     let start = match (hub_at, opts.connect) {
         // Through the hub: the screens, or the command line in their place.
         (Some((addr, cert_der)), _) if playback.is_none() => {
@@ -778,6 +831,7 @@ pub fn run(mut opts: Options) -> Result<(), Error> {
                 settings,
                 map_hash,
                 ui_script,
+                content,
             }
         }
         (_, Some(addr)) => {
@@ -799,6 +853,7 @@ pub fn run(mut opts: Options) -> Result<(), Error> {
                 settings,
                 map_hash,
                 ui_script,
+                content,
             }
         }
         _ => Start {
@@ -808,6 +863,7 @@ pub fn run(mut opts: Options) -> Result<(), Error> {
             settings,
             map_hash,
             ui_script,
+            content,
         },
     };
 
@@ -965,6 +1021,7 @@ pub async fn run_web() -> Result<(), String> {
     let sim = Sim::at(&bsp, opts.start);
     let settings = Settings::load();
     let ui_script = opts.ui_script.as_deref().map(UiScript::parse).transpose()?;
+    let content = Content::fetch(&opts.assets).await;
     // Through the hub: the screens, or the page's options in their place (the page's form
     // gave the email and the password, CLIENT.md 4.1).
     let through_hub = opts.hub_web.is_some() && opts.connect_web.is_none();
@@ -990,6 +1047,7 @@ pub async fn run_web() -> Result<(), String> {
             settings,
             map_hash,
             ui_script,
+            content,
         }
     } else {
         let online = match opts.connect_web.clone() {
@@ -1015,6 +1073,7 @@ pub async fn run_web() -> Result<(), String> {
             settings,
             map_hash,
             ui_script,
+            content,
         }
     };
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
@@ -1195,6 +1254,84 @@ pub(crate) struct HudView<'a> {
     pub party: &'a [(String, Option<Option<u16>>)],
     pub target: Option<&'a (String, u16, u16)>,
     pub scale: f32,
+    /// The bundle's manifest: where the icons' keys come from (LOOK.md 3).
+    pub manifest: Option<&'a gm_model::manifest::Manifest>,
+    /// Seconds since the client started: the hotbar's flashes run on it.
+    pub time: f32,
+    /// The own name, for the portrait frame.
+    pub own_name: &'a str,
+}
+
+/// One cell of the hotbar (LOOK.md 3.2), as `--report` and the gate read it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct HotbarCell {
+    pub key: &'static str,
+    pub ability: String,
+    /// `ready`, `cooling`, `unaffordable`, `silenced`, `active`.
+    pub state: &'static str,
+    /// Of the cooldown, 0 (just used) to 1 (ready).
+    pub ready: f32,
+    /// Seconds until ready, while cooling.
+    pub left_secs: f32,
+}
+
+/// The hotbar's cells for the own body: what each key does and its state now.
+pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
+    let (Some(c), Some(pack)) = (&o.client, &o.pack) else {
+        return Vec::new();
+    };
+    let kit = &c.sheet.kit;
+    let build = &c.sheet.build;
+    let now = c.tick;
+    let mut cells = Vec::new();
+    let mut cell = |key: &'static str, slot: Option<u8>, def: Option<u16>| {
+        let (Some(slot), Some(def)) = (slot, def) else {
+            return;
+        };
+        let (slot, def) = (slot as usize, def as usize);
+        let (Some(ab), Some(d)) = (kit.abilities.get(slot), pack.abilities.get(def)) else {
+            return;
+        };
+        let left = gm_core::sim::tick_delta(c.mover.cooldowns[slot], now).max(0) as f32;
+        let whole = ab.cooldown.ticks.max(1) as f32;
+        let ready = (1.0 - left / whole).clamp(0.0, 1.0);
+        let elemental = kit.elemental.get(slot).copied().unwrap_or(false);
+        let running = c
+            .mover
+            .script
+            .as_ref()
+            .is_some_and(|s| s.ability as usize == slot)
+            || (key == "C" && c.mover.guard != gm_core::sim::GuardState::None);
+        let state = if running {
+            "active"
+        } else if elemental && c.mover.statuses.silenced() {
+            "silenced"
+        } else if left > 0.0 {
+            "cooling"
+        } else if c.mover.stamina < ab.cost.stamina as f32 || c.mover.focus < ab.cost.focus as f32 {
+            "unaffordable"
+        } else {
+            "ready"
+        };
+        cells.push(HotbarCell {
+            key,
+            ability: d.key.clone(),
+            state,
+            ready,
+            left_secs: left * c.rate.dt(),
+        });
+    };
+    cell("LMB", kit.primary, Some(build.primary));
+    cell("RMB", kit.secondary, Some(build.secondary));
+    cell("C", kit.guard, build.guard);
+    for (i, key) in ["1", "2", "3", "4"].into_iter().enumerate() {
+        cell(
+            key,
+            kit.actives.get(i).copied().flatten(),
+            build.actives.get(i).copied(),
+        );
+    }
+    cells
 }
 
 pub(crate) fn build_hud(
@@ -1210,9 +1347,16 @@ pub(crate) fn build_hud(
         party,
         target,
         scale: s,
+        manifest,
+        time,
+        own_name,
     } = view;
     let (w, h) = hud.size;
     let line = (hud::GLYPH_H + 5.0) * s;
+    let skinned = hud.skinned;
+    // The whole HUD on the first layer, in call order: a screen's plates (the same layer,
+    // drawn after) cover it, as they covered the bars before there were layers.
+    hud.set_layer(ui::LAYER_PLATES);
     if tac.active {
         for (at, frac, colour) in bars {
             if let Some((x, y)) = project(vp, hud.size, *at) {
@@ -1241,7 +1385,8 @@ pub(crate) fn build_hud(
     let Some(o) = online else { return };
     let Some(c) = &o.client else { return };
 
-    // The own bars, bottom left.
+    // The own body, top left (LOOK.md 3.1): a portrait in its frame, the name, the three
+    // bars; without a skin, the bars alone as before, bottom left.
     let max_health = c.sheet.derived.health.max(1) as f32;
     let rows: [(&str, f32, f32, [f32; 4]); 3] = [
         ("hp", c.own_health.max(0) as f32, max_health, hud::RED),
@@ -1258,33 +1403,243 @@ pub(crate) fn build_hud(
             hud::BLUE,
         ),
     ];
-    let mut y = h - 16.0 - line * rows.len() as f32;
+    let mut y = if skinned {
+        16.0
+    } else {
+        h - 16.0 - line * rows.len() as f32
+    };
     if c.mover.commanding(c.tick) {
-        hud.label(16.0, y - line, s, hud::YELLOW, "command stance");
+        let at = if skinned {
+            h - 16.0 - 60.0 * s
+        } else {
+            y - line
+        };
+        hud.label(16.0, at, s, hud::YELLOW, "command stance");
     }
-    for (name, have, max, colour) in rows {
-        hud.label(16.0, y, s, hud::WHITE, name);
-        let x = 16.0 + 3.0 * hud::ADVANCE * s;
-        hud.bar(
-            x,
-            y + s,
-            180.0,
-            hud::GLYPH_H * s - 2.0 * s,
-            have / max,
-            colour,
-        );
-        hud.label(
-            x + 188.0,
-            y,
-            s,
-            hud::DIM,
-            &format!("{:.0}/{:.0}", have, max),
-        );
-        y += line;
+    if skinned {
+        let side = 48.0 * s;
+        let build = &c.sheet.build;
+        let portrait = manifest.and_then(|m| {
+            m.portrait(&format!(
+                "{}_{}",
+                gm_model::rig::frame_name(build.frame),
+                build.armour.name()
+            ))
+            .map(str::to_string)
+        });
+        hud.frame(16.0, y, side, side, "portrait_frame", s, hud::PLAIN);
+        if let Some(key) = &portrait {
+            hud.icon(
+                16.0 + 6.0 * s,
+                y + 6.0 * s,
+                side - 12.0 * s,
+                key,
+                hud::PLAIN,
+            );
+        }
+        let x = 16.0 + side + 6.0 * s;
+        let (lh, _) = hud.metrics(hud::FaceId::Text);
+        // The name the zone announced the own body by, else what the command line said.
+        let name = o
+            .names
+            .get(&c.my_id)
+            .map(|n| n.0.as_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(own_name);
+        hud.text_in(hud::FaceId::Text, x, y, s, hud::WHITE, name);
+        let mut by = y + lh * s + 2.0 * s;
+        let bh = 8.0 * s;
+        for (_, have, max, colour) in rows {
+            hud.frame(x, by, 150.0 * s, bh + 4.0 * s, "bar_frame", s, hud::PLAIN);
+            let inner_w = (150.0 * s - 6.0 * s) * (have / max).clamp(0.0, 1.0);
+            if inner_w > 0.0 {
+                hud.image(x + 3.0 * s, by + 2.0 * s, inner_w, bh, "bar_fill", colour);
+            }
+            let text = format!("{:.0}/{:.0}", have, max);
+            let tw = hud.width_in(hud::FaceId::Small, s, &text);
+            hud.text(
+                x + 150.0 * s - tw - 4.0 * s,
+                by + 2.0 * s + (bh - hud::GLYPH_H * s) * 0.5,
+                s,
+                hud::WHITE,
+                &text,
+            );
+            by += bh + 6.0 * s;
+        }
+        y = by + 4.0 * s;
+    } else {
+        for (name, have, max, colour) in rows {
+            hud.label(16.0, y, s, hud::WHITE, name);
+            let x = 16.0 + 3.0 * hud::ADVANCE * s;
+            hud.bar(
+                x,
+                y + s,
+                180.0,
+                hud::GLYPH_H * s - 2.0 * s,
+                have / max,
+                colour,
+            );
+            hud.label(
+                x + 188.0,
+                y,
+                s,
+                hud::DIM,
+                &format!("{:.0}/{:.0}", have, max),
+            );
+            y += line;
+        }
+        y = 16.0;
     }
 
-    // The squad, top left: slot, name, role, order, and its health under it.
-    let mut y = 16.0;
+    // The hotbar, bottom centre (LOOK.md 3.2): a cell per ability of the kit, its icon or
+    // its glyph, its key, and its state from the predicted mover; the own statuses above it.
+    if skinned {
+        let cells = hotbar(o);
+        let side = 40.0 * s;
+        let gap = 3.0 * s;
+        let total = cells.len() as f32 * (side + gap) - gap;
+        let x0 = ((w - total) * 0.5).round();
+        let y0 = h - 16.0 - side;
+        for (i, cell) in cells.iter().enumerate() {
+            let x = x0 + i as f32 * (side + gap);
+            hud.frame(x, y0, side, side, "hotbar_cell", s, hud::PLAIN);
+            let icon = manifest
+                .and_then(|m| m.ability(&cell.ability))
+                .and_then(|a| a.icon.clone());
+            let inner = side - 8.0 * s;
+            let tint = match cell.state {
+                "unaffordable" | "silenced" => [0.45, 0.45, 0.5, 1.0],
+                _ => hud::PLAIN,
+            };
+            let drawn = icon
+                .as_deref()
+                .is_some_and(|k| hud.icon(x + 4.0 * s, y0 + 4.0 * s, inner, k, tint));
+            if !drawn {
+                // No picture: the ability's name, small, as its glyph (LOOK.md 3.4).
+                let short: String = cell.ability.chars().take(5).collect();
+                let tw = hud.width_in(hud::FaceId::Small, s, &short);
+                hud.text(
+                    x + (side - tw) * 0.5,
+                    y0 + (side - hud::GLYPH_H * s) * 0.5,
+                    s,
+                    if tint == hud::PLAIN {
+                        hud::WHITE
+                    } else {
+                        hud::DIM
+                    },
+                    &short,
+                );
+            }
+            match cell.state {
+                "cooling" => {
+                    // The dark sweep, clockwise from twelve, over what is left; the seconds
+                    // when more than one.
+                    let centre = Vec2::new(x + side * 0.5, y0 + side * 0.5);
+                    hud.wedge(centre, side * 0.72, cell.ready, 1.0, [0.0, 0.0, 0.0, 0.62]);
+                    if cell.left_secs >= 1.0 {
+                        let t = format!("{:.0}", cell.left_secs.ceil());
+                        let tw = hud.width_in(hud::FaceId::Small, s, &t);
+                        hud.text(
+                            x + (side - tw) * 0.5,
+                            y0 + (side - hud::GLYPH_H * s) * 0.5,
+                            s,
+                            hud::WHITE,
+                            &t,
+                        );
+                    }
+                }
+                "silenced" => {
+                    hud.rect(
+                        x + 4.0 * s,
+                        y0 + side * 0.5 - s,
+                        side - 8.0 * s,
+                        2.0 * s,
+                        hud::RED,
+                    );
+                }
+                "active" => {
+                    let rim = [1.0, 0.85, 0.3, 1.0];
+                    hud.rect(x, y0, side, s, rim);
+                    hud.rect(x, y0 + side - s, side, s, rim);
+                    hud.rect(x, y0, s, side, rim);
+                    hud.rect(x + side - s, y0, s, side, rim);
+                }
+                _ => {}
+            }
+            // The key, in its tab at the top left of the cell.
+            let kw = hud.width_in(hud::FaceId::Small, s, cell.key) + 4.0 * s;
+            hud.frame(
+                x - s,
+                y0 - 4.0 * s,
+                kw,
+                (hud::GLYPH_H + 4.0) * s,
+                "hotbar_key",
+                s,
+                hud::PLAIN,
+            );
+            hud.text(x + s, y0 - 2.0 * s, s, hud::WHITE, cell.key);
+        }
+        // The statuses (LOOK.md 3.3), above the hotbar: an icon or the status's name, a
+        // ring of the time left as a wedge, the stacks.
+        let now = c.tick;
+        let mut sx = x0;
+        let sy = y0 - 30.0 * s;
+        for slot in c.mover.statuses.active() {
+            let Some(status) = slot.status else { continue };
+            let left = gm_core::sim::tick_delta(slot.until, now).max(0) as f32;
+            let side = 24.0 * s;
+            let harmful = !matches!(
+                status,
+                gm_core::vocab::Status::Regen
+                    | gm_core::vocab::Status::Haste
+                    | gm_core::vocab::Status::Fortify
+                    | gm_core::vocab::Status::Stealth
+            );
+            hud.rect(
+                sx,
+                sy,
+                side,
+                side,
+                if harmful {
+                    [0.35, 0.08, 0.06, 0.85]
+                } else {
+                    [0.08, 0.3, 0.1, 0.85]
+                },
+            );
+            let icon = manifest.and_then(|m| m.status_icon(status.name()).map(str::to_string));
+            let drawn = icon.as_deref().is_some_and(|k| {
+                hud.icon(sx + 2.0 * s, sy + 2.0 * s, side - 4.0 * s, k, hud::PLAIN)
+            });
+            if !drawn {
+                let short: String = status.name().chars().take(4).collect();
+                hud.text(sx + 2.0 * s, sy + 2.0 * s, s, hud::WHITE, &short);
+            }
+            // The time left, as a sweep that empties: a status of 5 s is nearly whole at 4.
+            let frac = (left / 320.0).clamp(0.0, 1.0);
+            hud.wedge(
+                Vec2::new(sx + side * 0.5, sy + side * 0.5),
+                side * 0.6,
+                frac,
+                1.0,
+                [0.0, 0.0, 0.0, 0.5],
+            );
+            if slot.stacks > 1 {
+                let t = slot.stacks.to_string();
+                let tw = hud.width_in(hud::FaceId::Small, s, &t);
+                hud.text(
+                    sx + side - tw - s,
+                    sy + side - hud::GLYPH_H * s - s,
+                    s,
+                    hud::YELLOW,
+                    &t,
+                );
+            }
+            sx += side + 3.0 * s;
+        }
+        let _ = time;
+    }
+
+    // The squad, top left under the own body: slot, name, role, order, and its health.
     for (i, m) in o.squad.iter().enumerate() {
         let (health, alive) = squad_view.get(i).copied().unwrap_or((None, false));
         let picked = tac.active && tac.selected & (1 << i) != 0;
@@ -1306,9 +1661,10 @@ pub(crate) fn build_hud(
         hud.bar(16.0, y - 2.0 * s, 150.0, 3.0 * s, frac, hud::GREEN);
         y += 6.0 * s;
     }
-    // The party, under the squad (PARTY.md 8.2): each member's health when the wire
-    // carries it (its body is here, in sight, and of the party in this fight), its name
-    // alone when its body is here and the wire does not, `away` when it is not here.
+    // The party, under the squad (PARTY.md 8.2, LOOK.md 3.1): each member's health when
+    // the wire carries it (its body is here, in sight, and of the party in this fight), its
+    // name alone when its body is here and the wire does not, `away` when it is not here;
+    // with a skin, each in a small frame with a bar.
     for (name, here) in party {
         let (text, colour) = match here {
             Some(Some(0)) => (format!("{name}  down"), hud::RED),
@@ -1316,8 +1672,28 @@ pub(crate) fn build_hud(
             Some(None) => (name.clone(), hud::WHITE),
             None => (format!("{name}  away"), hud::DIM),
         };
-        hud.label(16.0, y, s, colour, &text);
-        y += line;
+        if skinned {
+            let fw = 150.0 * s;
+            let fh = 22.0 * s;
+            hud.frame(16.0, y, fw, fh, "well", s, hud::PLAIN);
+            if let Some(Some(health)) = here {
+                let max = 400.0f32;
+                let frac = (*health as f32 / max).clamp(0.0, 1.0);
+                hud.image(
+                    16.0 + 3.0 * s,
+                    y + fh - 7.0 * s,
+                    (fw - 6.0 * s) * frac,
+                    4.0 * s,
+                    "bar_fill",
+                    hud::GREEN,
+                );
+            }
+            hud.text(16.0 + 4.0 * s, y + 3.0 * s, s, colour, &text);
+            y += fh + 3.0 * s;
+        } else {
+            hud.label(16.0, y, s, colour, &text);
+            y += line;
+        }
     }
 
     // The creature being fought, top middle; messages under it.
@@ -1431,6 +1807,10 @@ impl App {
         );
         let mesh = self.mesh.take().ok_or("world mesh already consumed")?;
         let mut renderer = Renderer::new(&gpu, view_format, &mesh, (config.width, config.height));
+        // The bundle's atlas is the HUD's texture from here on (LOOK.md 2.2).
+        if let Some(atlas) = self.content.take_atlas() {
+            renderer.hud.set_atlas(&gpu, atlas);
+        }
         // Models come from the hub, on whatever session is logged in when one is wanted.
         let source = self.hub.as_ref().map(|h| h.model_source());
         let avatars = Avatars::new(
@@ -1451,6 +1831,20 @@ impl App {
             avatars,
             drawn_from: vec![usize::MAX],
         });
+        // `--prop KEY`: the own body and the crowd hold it, from the bundle (natively it
+        // is on the GPU at once; in a browser it arrives later and nobody holds it).
+        if let Some(key) = self.opts.prop.clone() {
+            let a = self.active.as_mut().expect("just made");
+            let (gpu, characters) = (&a.gpu, &mut a.renderer.characters);
+            let slot = self
+                .content
+                .prop(&key, |model| Some(characters.add_model(gpu, model)));
+            if slot.is_none() {
+                log::warn!("--prop {key}: the bundle has no such prop on the desktop");
+            }
+            self.offline_prop = slot;
+            a.avatars.crowd_prop = slot;
+        }
         // A browser gives the pointer only to a click (WEB.md 3.4): there the first click grabs.
         if cfg!(not(target_arch = "wasm32")) && self.wants_pointer() && self.focused() {
             self.set_grab(true);
@@ -1970,6 +2364,7 @@ impl App {
             match event {
                 crate::script::Event::Press { at, double } => self.ui_press(at, double),
                 crate::script::Event::Release => self.ui_release(),
+                crate::script::Event::Move(at) => self.cursor = at,
                 crate::script::Event::Text(text) => self.ui_text(&text),
                 crate::script::Event::Key(key) => self.ui_key(key),
                 crate::script::Event::Say(text) => {
@@ -2283,12 +2678,18 @@ impl App {
                     }
                 }
                 NetEvent::Control(msg) => match msg {
-                    FromZone::Content { pack, own, team } => {
+                    FromZone::Content {
+                        pack,
+                        own,
+                        team,
+                        props,
+                    } => {
                         let Some((entity, _)) = o.welcome else {
                             log::error!("content before welcome");
                             continue;
                         };
                         o.team = team;
+                        o.props = props;
                         o.build_name = o.build_name_of(&pack, &own);
                         log::info!(
                             "content: {} abilities, {} presets; playing {} on team {team}",
@@ -2359,9 +2760,11 @@ impl App {
                     FromZone::Roster(players) => {
                         o.names.clear();
                         o.kinds.clear();
+                        o.looks.clear();
                         for p in players {
                             o.kinds.insert(p.id, p.kind);
                             o.names.insert(p.id, (p.name, p.team, p.model));
+                            o.looks.insert(p.id, p.look);
                         }
                     }
                     FromZone::PlayerInfo {
@@ -2370,9 +2773,14 @@ impl App {
                         team,
                         model,
                         kind,
+                        look,
                     } => {
                         o.kinds.insert(id, kind);
                         o.names.insert(id, (name, team, model));
+                        o.looks.insert(id, look);
+                    }
+                    FromZone::Look { id, look } => {
+                        o.looks.insert(id, look);
                     }
                     FromZone::Squad(entries) => o.squad = entries,
                     FromZone::OrderRefused(why) => {
@@ -2398,7 +2806,7 @@ impl App {
                             if !what.is_empty() {
                                 what.push_str(", ");
                             }
-                            what.push_str(&format!("{coin} copper"));
+                            what.push_str(&format!("{coin} silver"));
                         }
                         o.say(format!("loot ({encounter}): {what}"), hud::YELLOW);
                     }
@@ -2985,6 +3393,12 @@ impl App {
                         status: e.status,
                         model: o.names.get(&e.id).and_then(|n| n.2),
                         distance: (e.pos - camera).length(),
+                        prop: held_prop(
+                            &mut self.content,
+                            self.active.as_mut(),
+                            &o.props,
+                            o.looks.get(&e.id).copied().unwrap_or_default(),
+                        ),
                     });
                 }
                 EntityKind::Projectile => {
@@ -3081,7 +3495,41 @@ impl App {
             }
         }
         match viewport {
-            Viewport::First if !in_tactical => Some((eye, self.sim.yaw, self.sim.pitch)),
+            Viewport::First if !in_tactical => {
+                // The view model (LOOK.md 6.4): the held prop in the frame's corner, with
+                // the stride's bob and a kick on a launch.
+                let fired = own_actions.iter().any(|a| {
+                    matches!(
+                        a,
+                        gm_core::sim::Action::Fire { .. } | gm_core::sim::Action::Swing { .. }
+                    )
+                });
+                if fired {
+                    self.view_kick = 1.0;
+                }
+                self.view_kick = (self.view_kick - frame_dt * 6.0).max(0.0);
+                self.view_stride += own_travel / 64.0;
+                let prop = held_prop(
+                    &mut self.content,
+                    self.active.as_mut(),
+                    &o.props,
+                    o.looks.get(&c.my_id).copied().unwrap_or_default(),
+                );
+                self.view_model = prop.map(|slot| ViewModel {
+                    slot,
+                    eye,
+                    yaw: self.sim.yaw,
+                    pitch: self.sim.pitch,
+                    stride: if c.mover.mv.on_ground {
+                        self.view_stride
+                    } else {
+                        0.0
+                    },
+                    kick: self.view_kick,
+                    light: crate::avatars::light_at(bsp, eye),
+                });
+                Some((eye, self.sim.yaw, self.sim.pitch))
+            }
             _ => {
                 // The own body, posed by the server's animation state.
                 let build = &c.sheet.build;
@@ -3103,6 +3551,12 @@ impl App {
                     status: c.mover.statuses.mask(),
                     model: o.names.get(&c.my_id).and_then(|n| n.2),
                     distance: 0.0,
+                    prop: held_prop(
+                        &mut self.content,
+                        self.active.as_mut(),
+                        &o.props,
+                        o.looks.get(&c.my_id).copied().unwrap_or_default(),
+                    ),
                 });
                 if in_tactical {
                     Some((camera, self.tactical.yaw, tactical::PITCH))
@@ -3271,6 +3725,28 @@ impl App {
                 } else {
                     &o.zone_name
                 }
+            ));
+            // The hotbar as drawn (LOOK.md 3.2): key, ability, state, and how ready.
+            let cells: Vec<String> = hotbar(o)
+                .iter()
+                .map(|c| format!("{}:{}:{}:{:.2}", c.key, c.ability, c.state, c.ready))
+                .collect();
+            if !cells.is_empty() {
+                line.push_str(&format!(" hotbar={}", cells.join(",")));
+            }
+            let held: Vec<String> = o
+                .looks
+                .iter()
+                .filter_map(|(id, l)| o.props.get(l.held as usize).map(|k| format!("{id}:{k}")))
+                .collect();
+            line.push_str(&format!(
+                " held={} props_loaded={}",
+                held.len(),
+                self.content
+                    .props
+                    .values()
+                    .filter(|p| matches!(p, crate::content::PropState::Loaded(_)))
+                    .count()
             ));
             #[cfg(target_arch = "wasm32")]
             {
@@ -3506,6 +3982,8 @@ impl App {
                         status: 0,
                         model: None,
                         distance: 0.0,
+                        // Offline (`--prop FILE`, CONTENT.md 9): the prop to look at.
+                        prop: self.offline_prop,
                     });
                     if in_tactical {
                         if let Some(b) = self.bodies.last_mut() {
@@ -3597,7 +4075,19 @@ impl App {
         {
             a.avatars.pin(&id);
         }
+        // Props that arrived from the site since last frame go on the GPU, one a frame
+        // (CONTENT.md 6; natively a prop is read when first asked for).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (gpu, characters) = (&a.gpu, &mut a.renderer.characters);
+            self.content
+                .poll(|model| Some(characters.add_model(gpu, model)));
+        }
         a.avatars.begin_frame();
+        if let Some(v) = self.view_model.take() {
+            a.avatars
+                .view_model(v.slot, v.eye, v.yaw, v.pitch, v.stride, v.kick, v.light);
+        }
         for body in &self.bodies {
             a.avatars.push(
                 body,
@@ -3635,6 +4125,9 @@ impl App {
                     party: &self.party_view,
                     target: self.target_view.as_ref(),
                     scale,
+                    manifest: self.content.manifest.as_ref(),
+                    time: self.started.elapsed().as_secs_f32(),
+                    own_name: &self.opts.character,
                 },
             );
         }
@@ -3663,8 +4156,10 @@ impl App {
                 .online
                 .as_ref()
                 .is_some_and(|o| o.stalls.iter().any(|s| s.owner == me));
+            self.ui_input.last_cursor = self.ui_input.cursor;
             self.ui_input.cursor = self.cursor;
             self.ui_input.time = self.started.elapsed().as_secs_f32();
+            self.ui.paperdolls.clear();
             let mut ui = Ui::begin_at(
                 &mut a.renderer.hud,
                 &mut self.ui,
@@ -3698,7 +4193,11 @@ impl App {
                 }
                 match (&mut self.bag, &self.hub) {
                     (Some(bag), Some(hub)) if self.menu.is_none() => {
-                        bag_action = bag.frame(&mut ui, hub, keeps_stall, Instant::now());
+                        let looks = crate::bag::ItemLooks {
+                            manifest: self.content.manifest.as_ref(),
+                        };
+                        bag_action =
+                            bag.frame_with(&mut ui, hub, keeps_stall, Instant::now(), looks);
                     }
                     _ => {}
                 }
@@ -3735,7 +4234,7 @@ impl App {
                         .duration_since(web_time::UNIX_EPOCH)
                         .map_or(0, |d| d.as_secs());
                     let word = self.chat.zone_said(std::time::Duration::from_secs(8));
-                    people_action = people.frame(
+                    people_action = people.frame_with(
                         &mut ui,
                         hub,
                         &me,
@@ -3744,6 +4243,9 @@ impl App {
                         word,
                         Instant::now(),
                         unix,
+                        crate::bag::ItemLooks {
+                            manifest: self.content.manifest.as_ref(),
+                        },
                     );
                 }
                 match &mut self.menu {
@@ -3797,8 +4299,49 @@ impl App {
                 ..Default::default()
             };
         }
+        // The paperdoll (LOOK.md 5): the own body as the equip panel shows it, idle,
+        // turned by the drag across it, with what it holds, drawn into the panel's
+        // rectangle by a camera of its own.
+        let doll_draws: Vec<CharacterDraw> = match (self.ui.paperdolls.first(), &self.online) {
+            (Some(doll), Some(o)) if doll.rect.w > 1.0 && doll.rect.h > 1.0 => match &o.client {
+                Some(c) => {
+                    let build = &c.sheet.build;
+                    let body = Body {
+                        key: DOLL,
+                        origin: Vec3::new(0.0, 0.0, 24.0),
+                        yaw: 180.0 + doll.turn * 360.0,
+                        pitch: 0.0,
+                        anim: gm_core::sim::anim::IDLE,
+                        frame: gm_model::rig::frame_index(build.frame),
+                        armour: build.armour as u8,
+                        aspects: build.aspects.0,
+                        team: 0,
+                        friendly: true,
+                        status: 0,
+                        model: o.names.get(&c.my_id).and_then(|n| n.2),
+                        distance: 0.0,
+                        prop: held_prop(
+                            &mut self.content,
+                            Some(a),
+                            &o.props,
+                            o.looks.get(&c.my_id).copied().unwrap_or_default(),
+                        ),
+                    };
+                    a.avatars
+                        .doll(&body, frame_dt, &self.bsp, &a.renderer.characters)
+                }
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let doll = self.ui.paperdolls.first().map(|d| {
+            let aspect = d.rect.w / d.rect.h.max(1.0);
+            // In front of the body, at its chest, looking back at it.
+            let vp = view_proj(Vec3::new(82.0, 0.0, 31.0), 180.0, -3.0, aspect);
+            (d.rect, vp, doll_draws.as_slice())
+        });
         a.renderer
-            .render(&a.gpu, &view, vp, &self.entities, &a.avatars.draws);
+            .render_with_doll(&a.gpu, &view, vp, &self.entities, &a.avatars.draws, doll);
         a.avatars.end_frame(&a.gpu, &mut a.renderer.characters);
         a.window.pre_present_notify();
         a.gpu.queue.present(frame);

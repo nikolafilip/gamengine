@@ -3,6 +3,7 @@
 
 mod arena;
 mod budget;
+mod content;
 mod dungeon;
 mod glb;
 mod hubcli;
@@ -65,6 +66,11 @@ enum Cmd {
     Replay {
         #[command(subcommand)]
         cmd: replay::ReplayCmd,
+    },
+    /// Content (docs/CONTENT.md 5): check the tables and their looks, build the bundle, report.
+    Content {
+        #[command(subcommand)]
+        cmd: content::ContentCmd,
     },
 }
 
@@ -198,6 +204,7 @@ fn main() -> Result<()> {
     }));
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Content { cmd } => content::run(cmd),
         Cmd::Wad {
             cmd: WadCmd::Make { out, palette },
         } => wad::make(&out, &palette),

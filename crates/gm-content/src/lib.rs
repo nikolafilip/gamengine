@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod items;
+pub mod looks;
 
 use std::path::Path;
 
@@ -79,23 +80,23 @@ pub fn load_blurbs(dir: &Path) -> Result<Vec<String>, ContentError> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AbilitiesFile {
+pub(crate) struct AbilitiesFile {
     #[serde(default)]
-    ability: Vec<AbilityToml>,
+    pub(crate) ability: Vec<AbilityToml>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BuildsFile {
+pub(crate) struct BuildsFile {
     #[serde(default)]
-    build: Vec<BuildToml>,
+    pub(crate) build: Vec<BuildToml>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CreaturesFile {
+pub(crate) struct CreaturesFile {
     #[serde(default)]
-    creature: Vec<CreatureToml>,
+    pub(crate) creature: Vec<CreatureToml>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -107,12 +108,20 @@ struct TrialsFile {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AbilityToml {
-    key: String,
+pub(crate) struct AbilityToml {
+    pub(crate) key: String,
     name: String,
     slot: String,
     cost: u8,
     aspect: Option<String>,
+    /// The look fields (CONTENT.md 3): a picture, the prop held while this is the primary
+    /// and nothing is worn, the patch its cues use. Read by `looks`, not compiled.
+    #[serde(default)]
+    pub(crate) icon: Option<String>,
+    #[serde(default)]
+    pub(crate) prop: Option<String>,
+    #[serde(default)]
+    pub(crate) sound: Option<String>,
     /// Squad slots the ability adds while slotted (COMPANIONS.md 3.2).
     #[serde(default)]
     squad: u8,
@@ -425,9 +434,12 @@ struct RiposteToml {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BuildToml {
-    name: String,
+pub(crate) struct BuildToml {
+    pub(crate) name: String,
     blurb: String,
+    /// The archetype's picture (CONTENT.md 3).
+    #[serde(default)]
+    pub(crate) icon: Option<String>,
     frame: String,
     attributes: AttributesToml,
     armour: String,
@@ -451,9 +463,14 @@ struct AttributesToml {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CreatureToml {
-    key: String,
+pub(crate) struct CreatureToml {
+    pub(crate) key: String,
     name: String,
+    /// The look fields (CONTENT.md 3): its model on the standard rig, its portrait.
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) icon: Option<String>,
     frame: String,
     armour: String,
     aspects: Vec<String>,

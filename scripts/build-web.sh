@@ -38,6 +38,11 @@ build webgl --features webgl
 cp "$ROOT/web/index.html" "$ROOT/web/boot.js" "$OUT/"
 cp "$ROOT"/assets/maps/built/*.bsp "$ROOT"/assets/maps/built/*.lit "$OUT/assets/maps/"
 cp "$ROOT/assets/textures/palette.lmp" "$OUT/assets/textures/"
+# The content bundle (CONTENT.md 6): the manifest and the atlas are fetched at start, the
+# props when first seen.
+mkdir -p "$OUT/assets/built/content/props"
+cp "$ROOT"/assets/built/content/manifest.gmc "$ROOT"/assets/built/content/ui.gma "$OUT/assets/built/content/"
+cp "$ROOT"/assets/built/content/props/*.gmm "$OUT/assets/built/content/props/"
 if [[ -n "$CONFIG" ]]; then
   cp "$CONFIG" "$OUT/config.json"
 elif [[ ! -f "$OUT/config.json" ]]; then

@@ -184,6 +184,7 @@ pub fn play(m: Match) -> Outcome {
                     max_players: 64,
                     report_every,
                     max_ticks: Some(ticks),
+                    looks: Default::default(),
                     report_tx: Some(tx),
                     content,
                     default_build: "blade".into(),

@@ -13,7 +13,7 @@ use gm_core::vocab::Status;
 use gm_model::Model;
 use gm_model::anim::{Animator, armour_weight};
 use gm_model::mannequin::{self, ARMOUR_TINTS, MANNEQUIN_TEXTURE_SIZE, Shape};
-use gm_model::{ModelId, rig};
+use gm_model::{ModelId, Pose, rig};
 
 use crate::cache::{CacheStats, ModelCache};
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,6 +23,8 @@ use crate::render::{EntityDraw, Gpu};
 use crate::{Error, Options};
 
 /// Key of the own body among the animators.
+/// The paperdoll's key: its own animation track.
+pub const DOLL: u32 = u32::MAX - 1;
 pub const OWN: u32 = u32::MAX;
 /// Bodies not seen for this many frames lose their animation state.
 const FORGET_AFTER_FRAMES: u64 = 120;
@@ -71,7 +73,20 @@ pub struct Body {
     pub model: Option<ModelId>,
     /// Distance from the camera: nearest wearers load first.
     pub distance: f32,
+    /// The prop it holds (LOOK.md 6), as a slot of the character renderer, when the
+    /// bundle has it on the GPU.
+    pub prop: Option<usize>,
 }
+
+/// The grip (LOOK.md 6.3): a prop's business end (+X in its own space) runs on along the
+/// arm (the right arm points −Y in the T-pose), its edge (+Y) points down and its flat
+/// faces forward.
+const GRIP_RIGHT: Mat4 = Mat4::from_cols(
+    glam::Vec4::new(0.0, -1.0, 0.0, 0.0),
+    glam::Vec4::new(0.0, 0.0, -1.0, 0.0),
+    glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
+    glam::Vec4::new(0.0, 0.0, 0.0, 1.0),
+);
 
 struct Track {
     animator: Animator,
@@ -99,6 +114,9 @@ pub struct Avatars {
     pub draws: Vec<CharacterDraw>,
     /// Bodies drawn with their model (not the mannequin) in the last frame.
     pub with_model: usize,
+    /// A prop every member of the offline crowd holds (`--crowd-prop`): the armed town
+    /// of the look gate (LOOK.md 8).
+    pub crowd_prop: Option<usize>,
 }
 
 /// The ambient light at a body's feet.
@@ -209,6 +227,7 @@ impl Avatars {
             pinned: None,
             draws: Vec::new(),
             with_model: 0,
+            crowd_prop: None,
         })
     }
 
@@ -275,16 +294,100 @@ impl Avatars {
             armour_weight(body.armour),
         );
         let feet = body.origin + Vec3::Z * Hull::Player.mins().z;
+        let world = Mat4::from_translation(feet) * Mat4::from_rotation_z(body.yaw.to_radians());
+        let light = light_at(bsp, body.origin);
+        // What it holds, in its right hand: the prop's own draw, placed by the wearer's
+        // skinning matrix of `prop_r` at that bone's pivot (LOOK.md 6.3).
+        if let (Some(prop), Some(info)) = (body.prop, characters.info(slot)) {
+            let skin = gm_model::skin_matrices(&info.pivots, info.mask, &pose);
+            let at = gm_model::rig::bone::PROP_R;
+            let attach = skin[at] * Mat4::from_translation(info.pivots[at]) * GRIP_RIGHT;
+            self.draws.push(CharacterDraw {
+                slot: prop,
+                world,
+                pose: Pose::default(),
+                tint: [1.0; 3],
+                light,
+                attach: Some(attach),
+            });
+        }
         self.draws.push(CharacterDraw {
             slot,
-            world: Mat4::from_translation(feet) * Mat4::from_rotation_z(body.yaw.to_radians()),
+            world,
             pose,
             tint,
-            light: light_at(bsp, body.origin),
+            light,
+            attach: None,
         });
         if body.anim != anim::DEAD {
             markers(body, feet, boxes);
         }
+    }
+
+    /// The view model (LOOK.md 6.4): the held prop drawn in view space, at the bottom
+    /// right of the frame, its business end along the look, bobbing with `stride` (in
+    /// strides) and kicked back by `kick` (1 at a launch, decaying to 0).
+    #[allow(clippy::too_many_arguments)]
+    pub fn view_model(
+        &mut self,
+        slot: usize,
+        eye: Vec3,
+        yaw: f32,
+        pitch: f32,
+        stride: f32,
+        kick: f32,
+        light: [f32; 3],
+    ) {
+        let (sy, cy) = yaw.to_radians().sin_cos();
+        let (sp, cp) = pitch.to_radians().sin_cos();
+        let forward = Vec3::new(cp * cy, cp * sy, -sp);
+        let right = Vec3::new(sy, -cy, 0.0);
+        let up = right.cross(forward).normalize_or(Vec3::Z);
+        // A hand's width to the right, a little under the eye, half a metre out; the bob is
+        // a figure of eight a stride long; the kick pulls it back and tips it up.
+        let bob = Vec3::new(
+            (stride * std::f32::consts::TAU).sin() * 0.6,
+            0.0,
+            (stride * 2.0 * std::f32::consts::TAU).sin() * 0.4,
+        );
+        let at = eye + forward * (14.0 - kick * 3.0) + right * (7.0 + bob.x) + up * (-6.0 + bob.z);
+        // The prop's +X along the look (its +Y to the left, +Z up), then, in its own
+        // frame, tipped up by the kick and turned a little inward.
+        let basis = Mat4::from_cols(
+            forward.extend(0.0),
+            (-right).extend(0.0),
+            up.extend(0.0),
+            at.extend(1.0),
+        );
+        let tip = Mat4::from_rotation_y((-(4.0 + kick * 14.0f32)).to_radians());
+        let inward = Mat4::from_rotation_z(8.0f32.to_radians());
+        self.draws.push(CharacterDraw {
+            slot,
+            world: Mat4::IDENTITY,
+            pose: Pose::default(),
+            tint: [1.0; 3],
+            light,
+            attach: Some(basis * inward * tip),
+        });
+    }
+
+    /// The paperdoll (LOOK.md 5): one body's draws on their own, in model space at the
+    /// origin (its `yaw` turns it), lit flat, with its prop, animated like any other.
+    pub fn doll(
+        &mut self,
+        body: &Body,
+        dt: f32,
+        bsp: &Bsp,
+        characters: &Characters,
+    ) -> Vec<CharacterDraw> {
+        let kept = std::mem::take(&mut self.draws);
+        let mut boxes = Vec::new();
+        self.push(body, dt, bsp, characters, &mut boxes);
+        let mut draws = std::mem::replace(&mut self.draws, kept);
+        for d in &mut draws {
+            d.light = [1.15; 3];
+        }
+        draws
     }
 
     /// The offline crowd: every member stands in place and cycles through the animations.
@@ -325,6 +428,7 @@ impl Avatars {
                 status: 0,
                 model,
                 distance: (origin - camera).length(),
+                prop: self.crowd_prop,
             };
             self.push(&body, dt, bsp, characters, boxes);
             // Running on the spot: feed the stride the animator would have seen.
@@ -468,6 +572,7 @@ pub fn stall_keeper(stall: &gm_net::control::StallEntry, camera: Vec3) -> Body {
         status: 0,
         model: stall.model,
         distance: (origin - camera).length(),
+        prop: None,
     }
 }
 

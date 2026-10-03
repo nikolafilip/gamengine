@@ -17,10 +17,18 @@ pub struct Atlas {
 /// The side an uploaded side of `src` texels is stored at: the largest power of two that is
 /// neither larger than the source nor larger than the budget, and at least 64.
 pub fn target_side(src: u32) -> u16 {
-    let capped = src.clamp(limits::MIN_TEXTURE as u32, limits::MAX_TEXTURE as u32);
+    target_side_capped(src, limits::MAX_TEXTURE)
+}
+
+/// The same under another ceiling (a prop's is 256, CONTENT.md 4).
+pub fn target_side_capped(src: u32, cap: u16) -> u16 {
+    let capped = src.clamp(limits::MIN_TEXTURE as u32, cap as u32);
     1 << capped.ilog2()
 }
 
+// The curves use `gm_model::det::pow`, not the platform's `powf` (CONTENT.md 5.3): the same
+// `.gmm` bytes come out of the same upload on every machine, which the committed bundle's
+// CI check relies on.
 fn srgb_to_linear_table() -> [f32; 256] {
     let mut t = [0f32; 256];
     for (i, v) in t.iter_mut().enumerate() {
@@ -28,7 +36,7 @@ fn srgb_to_linear_table() -> [f32; 256] {
         *v = if c <= 0.04045 {
             c / 12.92
         } else {
-            ((c + 0.055) / 1.055).powf(2.4)
+            gm_model::det::pow((c + 0.055) / 1.055, 2.4)
         };
     }
     t
@@ -39,7 +47,7 @@ fn linear_to_srgb(c: f32) -> u8 {
     let s = if c <= 0.003_130_8 {
         c * 12.92
     } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
+        1.055 * gm_model::det::pow(c, 1.0 / 2.4) - 0.055
     };
     (s * 255.0 + 0.5) as u8
 }
@@ -150,7 +158,15 @@ fn to_rgba(l: &Level, cutout: bool) -> Vec<u8> {
 
 /// Build the atlas from the uploaded image.
 pub fn build(img: &RgbaImage, factor: [f32; 4], cutout: Option<f32>) -> Atlas {
-    let (w, h) = (target_side(img.width()), target_side(img.height()));
+    build_capped(img, factor, cutout, limits::MAX_TEXTURE)
+}
+
+/// The atlas under a ceiling of `cap` texels a side.
+pub fn build_capped(img: &RgbaImage, factor: [f32; 4], cutout: Option<f32>, cap: u16) -> Atlas {
+    let (w, h) = (
+        target_side_capped(img.width(), cap),
+        target_side_capped(img.height(), cap),
+    );
     let mut level = resample(img, w as usize, h as usize, factor, cutout);
     let params = texpresso::Params {
         algorithm: texpresso::Algorithm::ClusterFit,

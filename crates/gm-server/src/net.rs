@@ -297,6 +297,8 @@ pub struct NetConfig {
     pub open: bool,
     /// Sent to every client after `Welcome` (MATRIX.md 10).
     pub content: Arc<ContentPack>,
+    /// The prop keys a `Look` indexes, sent with the content (LOOK.md 6.2).
+    pub props: Arc<Vec<String>>,
     /// The hub, when this zone runs under one: tokens are then mandatory.
     pub hub: Option<Arc<crate::hub_link::HubLink>>,
     /// What each account that plays here may still say (PROTOCOL.md 8): its characters
@@ -590,6 +592,7 @@ async fn handle_connection(
         pack: (*cfg.content).clone(),
         own: info.build.clone(),
         team: info.team,
+        props: (*cfg.props).clone(),
     };
     let greeted = async {
         control::send(&mut send, &welcome).await?;

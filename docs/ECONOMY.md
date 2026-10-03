@@ -29,9 +29,14 @@ inventory and a stall are ITEMS.md (Phase 11).
 
 ## 2. Coin
 
-Integer **copper**. 100 copper = 1 silver, 100 silver = 1 gold; 1 gold (10,000 copper) is a small
-fortune. Amounts are `bigint`, never negative (check constraint); displays use the largest unit
-with a colour per unit, never a long digit string (PLAN.md 6, digit shifting).
+Integer **silver**. 100 silver = 1 gold; the silver is the smallest coin there is, and a
+gold is a day's good trade (12, the director's scale). Amounts are `bigint`, never negative
+(check constraint), and no single amount exceeds a hundred million gold (`MAX_PRICE`);
+displays use the largest unit with a colour per unit, never a long digit string (PLAN.md 6,
+digit shifting). **Copper was dropped on 2026-10-03** (Phase 14, LOOK.md 7): before that
+the integer was copper at 100 to the silver. Every stored number kept its value — what was
+30 copper is 30 silver — because no live economy existed; a database from before Phase 14
+is not carried forward.
 
 ## 3. Holders
 
@@ -209,7 +214,7 @@ with `gm_core::loot::split` and asks the hub to create the items (source → cha
    they are credited with and the blows the creatures aimed at them, in points of health
    (PARTY.md 2); between parties, step 1, damage alone counts.
 5. Coin drops are tiny and go the same way (source → holders), scaled by the zone to its active
-   population (PLAN.md 5.4); the hub refuses a single grant above 1 gold.
+   population (PLAN.md 5.4); the hub refuses a single grant above 5 gold (`max_coin_grant`, 500 silver).
 6. A zone grants only to characters playing in it. A component for a full inventory lands on
    the zone's ground, never nowhere.
 7. **A kill pays once** (Phase 7, COMPANIONS.md 10). The zone reports a kill as one
@@ -268,12 +273,16 @@ with `gm_core::loot::split` and asks the hub to create the items (source → cha
 **Proposed (director to confirm; PLAN.md 12 lists them as open):** 24 inventory slots, 60
 account storage slots, 12 stall slots, 3 s trade cooldown, the 10% party floor and 40% member
 floor, the every-other-layer salvage rule. Purchasing power, as a sanity scale for content and
-drop tuning: a meal 5 copper; standard gear 2–5 silver; a boss component 10–40 silver; a fully
-crafted top item 1–3 gold; a 12 h tavern hire 20–60 silver; a carry 50 silver – 2 gold.
+drop tuning, **in the director's scale of 2026-10-03** ("top gear tens of gold; fully crafted
+with top stones, near a hundred"): a meal 1 silver; standard gear 20–50 silver; a boss
+component 1–5 gold; a top item 10–30 gold; one fully crafted with a boss shard and two top
+gems 60–100 gold; a 12 h tavern hire 50 silver – 2 gold; a carry 2–10 gold. (Before Phase
+14, in copper: a meal 5 c, gear 2–5 s, a component 10–40 s, a top item 1–3 g.)
 Death-drop in contested zones and housing remain open and are not in this version.
 
 Also proposed: stacking of materials is **not** in v1 (every component is a row and a slot);
-the 120 min contract timeout; the 1 gold cap on a single coin grant; no self-hire; one copy
+the 120 min contract timeout; the cap on a single coin grant (1 gold before Phase 14; **5
+gold** with the new scale, `MAX_GRANT` in the hub); no self-hire; one copy
 of an avatar per squad; a recipient who left the zone before its kill is reported forfeits
 (Phase 7).
 

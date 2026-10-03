@@ -80,6 +80,22 @@ pub fn draw(
     opaque: &dyn Fn(f32, f32) -> bool,
 ) -> Raster {
     let (right, toward) = dir.axes();
+    let light = Vec3::new(0.5, 0.35, 0.8).normalize();
+    draw_axes(soup, right, Vec3::Z, toward, light, window, opaque)
+}
+
+/// Draw `soup` seen along any axes: `right` and `up` span the window (`x` along `right`,
+/// `z` along `up`), `toward` points at the camera, `light` is where the light comes from.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_axes(
+    soup: &Soup<'_>,
+    right: Vec3,
+    up: Vec3,
+    toward: Vec3,
+    light: Vec3,
+    window: Window,
+    opaque: &dyn Fn(f32, f32) -> bool,
+) -> Raster {
     let mut out = Raster {
         width: window.width,
         height: window.height,
@@ -88,7 +104,6 @@ pub fn draw(
     };
     let sx = window.width as f32 / (window.x1 - window.x0);
     let sz = window.height as f32 / (window.z1 - window.z0);
-    let light = Vec3::new(0.5, 0.35, 0.8).normalize();
     for t in soup.indices.chunks_exact(3) {
         let idx = [t[0] as usize, t[1] as usize, t[2] as usize];
         let p = idx.map(|i| soup.positions[i]);
@@ -96,7 +111,7 @@ pub fn draw(
         let s = p.map(|v| {
             [
                 (v.dot(right) - window.x0) * sx,
-                (window.z1 - v.z) * sz,
+                (window.z1 - v.dot(up)) * sz,
                 v.dot(toward),
             ]
         });
@@ -218,6 +233,157 @@ pub fn sample(model: &Model, u: f32, v: f32) -> [u8; 4] {
 }
 
 pub const PREVIEW_SIDE: usize = 256;
+
+/// Supersampling of a baked icon: drawn this many times larger, then averaged down.
+const ICON_OVER: usize = 4;
+/// Of the icon's side, this much is picture; the rest is margin.
+const ICON_FILL: f32 = 28.0 / 32.0;
+
+/// A model's icon (CONTENT.md 5.3): RGBA8, `side × side`, straight alpha, transparent where
+/// nothing is drawn. The model is seen along its thinnest axis with its longest axis
+/// running from the bottom left to the top right, lit from the top left, filling 28 of 32
+/// dots. Deterministic: IEEE basics, integer texel fetches and integer averaging only.
+pub fn icon(model: &Model, side: usize) -> Vec<u8> {
+    let soup = ModelSoup::new(model);
+    let mut lo = Vec3::splat(f32::MAX);
+    let mut hi = Vec3::splat(f32::MIN);
+    for p in &soup.positions {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let extent = (hi - lo).max(Vec3::splat(1e-3));
+    let e = extent.to_array();
+    // The longest axis, the thinnest one (looked along), and the one between.
+    let mut order = [0usize, 1, 2];
+    order.sort_by(|a, b| {
+        e[*b]
+            .partial_cmp(&e[*a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let axis = |i: usize| match i {
+        0 => Vec3::X,
+        1 => Vec3::Y,
+        _ => Vec3::Z,
+    };
+    let longest = axis(order[0]);
+    let middle = axis(order[1]);
+    let mut toward = axis(order[2]);
+    // A right-handed frame: (longest, middle, toward) as (x, y, z).
+    if longest.cross(middle).dot(toward) < 0.0 {
+        toward = -toward;
+    }
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let right = (longest - middle) * s;
+    let up = (longest + middle) * s;
+    let light = (-0.45 * right + 0.6 * up + 0.65 * toward).normalize();
+    let centre = (lo + hi) * 0.5;
+    // The picture's half-extent along the diagonal frame, with the margin.
+    let half = {
+        let mut m = 0f32;
+        for p in &soup.positions {
+            let d = *p - centre;
+            m = m.max(d.dot(right).abs()).max(d.dot(up).abs());
+        }
+        m.max(1e-3) / ICON_FILL
+    };
+    let big = side * ICON_OVER;
+    let window = Window {
+        x0: centre.dot(right) - half,
+        x1: centre.dot(right) + half,
+        z0: centre.dot(up) - half,
+        z1: centre.dot(up) + half,
+        width: big,
+        height: big,
+    };
+    let cut = model.cutout();
+    let opaque = |u: f32, v: f32| !cut || sample(model, u, v)[3] >= 128;
+    let raster = draw_axes(&soup.soup(), right, up, toward, light, window, &opaque);
+    // Average down: colour over the covered samples, alpha as the coverage.
+    let mut out = vec![0u8; side * side * 4];
+    for y in 0..side {
+        for x in 0..side {
+            let mut sum = [0u32; 3];
+            let mut covered = 0u32;
+            for yy in 0..ICON_OVER {
+                for xx in 0..ICON_OVER {
+                    let at = (y * ICON_OVER + yy) * big + x * ICON_OVER + xx;
+                    if raster.depth[at] > f32::MIN {
+                        let [u, v, shade] = raster.frag[at];
+                        let c = sample(model, u, v);
+                        // The shade in 1/256ths, as an integer, so that the sum is exact.
+                        let sh = (shade * 256.0) as u32;
+                        for k in 0..3 {
+                            sum[k] += c[k] as u32 * sh / 256;
+                        }
+                        covered += 1;
+                    }
+                }
+            }
+            let o = (y * side + x) * 4;
+            if let Some(c) = (covered > 0).then_some(covered) {
+                for k in 0..3 {
+                    out[o + k] = (sum[k] / c) as u8;
+                }
+                out[o + 3] = (c * 255 / (ICON_OVER * ICON_OVER) as u32) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// A body's portrait (CONTENT.md 5.3): the head and shoulders from the front, `side` square.
+pub fn portrait(model: &Model, side: usize) -> Vec<u8> {
+    let head = model.pivot(gm_model::rig::bone::HEAD);
+    let chest = model.pivot(gm_model::rig::bone::CHEST);
+    // From the chest to a little over the head, as wide as it is tall.
+    let z1 = head.z + (head.z - chest.z) * 0.9;
+    let z0 = chest.z - (head.z - chest.z) * 0.2;
+    let half = (z1 - z0) * 0.5;
+    let big = side * ICON_OVER;
+    let window = Window {
+        x0: -half,
+        x1: half,
+        z0,
+        z1,
+        width: big,
+        height: big,
+    };
+    let soup = ModelSoup::new(model);
+    let cut = model.cutout();
+    let opaque = |u: f32, v: f32| !cut || sample(model, u, v)[3] >= 128;
+    let (right, toward) = Dir::Front.axes();
+    let light = Vec3::new(0.5, 0.35, 0.8).normalize();
+    let raster = draw_axes(&soup.soup(), right, Vec3::Z, toward, light, window, &opaque);
+    let mut out = vec![0u8; side * side * 4];
+    for y in 0..side {
+        for x in 0..side {
+            let mut sum = [0u32; 3];
+            let mut covered = 0u32;
+            for yy in 0..ICON_OVER {
+                for xx in 0..ICON_OVER {
+                    let at = (y * ICON_OVER + yy) * big + x * ICON_OVER + xx;
+                    if raster.depth[at] > f32::MIN {
+                        let [u, v, shade] = raster.frag[at];
+                        let c = sample(model, u, v);
+                        let sh = (shade * 256.0) as u32;
+                        for k in 0..3 {
+                            sum[k] += c[k] as u32 * sh / 256;
+                        }
+                        covered += 1;
+                    }
+                }
+            }
+            let o = (y * side + x) * 4;
+            if let Some(c) = (covered > 0).then_some(covered) {
+                for k in 0..3 {
+                    out[o + k] = (sum[k] / c) as u8;
+                }
+                out[o + 3] = (c * 255 / (ICON_OVER * ICON_OVER) as u32) as u8;
+            }
+        }
+    }
+    out
+}
 
 /// The moderation preview: the front and the left side, textured and shaded, side by side.
 /// RGBA, `2 × PREVIEW_SIDE` wide and `PREVIEW_SIDE` high.

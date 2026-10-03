@@ -241,7 +241,9 @@ pub async fn run_bot_on_link(
         .await?
         .ok_or_else(|| anyhow::anyhow!("server closed before Content"))?;
     let (pack, own, team) = match content {
-        FromZone::Content { pack, own, team } => (pack, own, team),
+        FromZone::Content {
+            pack, own, team, ..
+        } => (pack, own, team),
         other => anyhow::bail!("expected Content, got {other:?}"),
     };
     let rate = TickRate::new(hz as u32);

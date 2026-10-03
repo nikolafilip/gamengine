@@ -221,7 +221,7 @@ else
   done
   equal "$both" 2 "people told at the pull that a party passes no trial"
   equal "$drops" 3 "components the Warden dropped, split between the two"
-  equal "$coins" 30 "copper the Warden dropped, split between the two"
+  equal "$coins" 30 "silver the Warden dropped, split between the two"
   secs="$(field "$(plain "$tmp/ana-dungeon.log" | /usr/bin/grep -a '^raid ' | tail -1)" secs)"
   atmost "$secs" "$(budget party max_secs_dungeon_together)" "seconds two people and their squads took for the dungeon"
   books "after the dungeon"
@@ -230,7 +230,7 @@ fi
 
 # 5. One of the two goes back to the town and stays: it joins whoever invites, trades with
 #    whoever asks (one thing it carries, for three silver), and answers what is said to it.
-PRICE=300; PURSE=5000
+PRICE=3; PURSE=50
 SPOT_BOT="272,-320,25 180"; SPOT="200,-320,25 0"
 place() { # character, "x,y,z yaw": the zone puts a character away a moment after it left
   local out=""

@@ -1,20 +1,81 @@
-//! The toolkit the screens are made of (CLIENT.md 3). Immediate mode: a screen is a function
-//! that runs every frame, lays its widgets out and learns at once what was clicked. Nothing
-//! is kept between frames but the focus, the carets, the scroll positions and what the last
-//! frame showed. Everything is drawn with two primitives, a rectangle and a line of text, so
-//! the toolkit runs against the HUD and, in tests, against a recorder.
+//! The toolkit the screens are made of (CLIENT.md 3, LOOK.md 2). Immediate mode: a screen is
+//! a function that runs every frame, lays its widgets out and learns at once what was
+//! clicked. Nothing is kept between frames but the focus, the carets, the scroll positions,
+//! a drag and what the last frame showed. Everything is drawn with a few primitives (a
+//! rectangle, a line of text, a piece of the skin, an icon, a wedge), each with a plain
+//! fallback, so the toolkit runs against the HUD with or without a bundle and, in tests,
+//! against a recorder.
 
 use std::collections::HashMap;
 
-use crate::font::{self, ADVANCE, GLYPH_H};
+use crate::font::{self, GLYPH_H};
+pub use crate::hud::FaceId;
 
-/// What the toolkit draws with.
+/// What the toolkit draws with. The pictures are optional: a canvas without them (the
+/// test recorder, a client without a bundle) answers `false` and the toolkit draws the
+/// plain thing instead (LOOK.md 1.2).
 pub trait Canvas {
     /// The frame's size in pixels.
     fn size(&self) -> (f32, f32);
     fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]);
+    /// Text in the small face, its top left at `(x, y)`.
     fn text(&mut self, x: f32, y: f32, scale: f32, color: [f32; 4], text: &str);
+    /// Text in `face`, the top of its line at `(x, y)`.
+    fn text_in(&mut self, face: FaceId, x: f32, y: f32, scale: f32, color: [f32; 4], text: &str) {
+        let _ = face;
+        self.text(x, y, scale, color, text);
+    }
+    fn width_in(&self, face: FaceId, scale: f32, text: &str) -> f32 {
+        let _ = face;
+        font::text_width(scale, text)
+    }
+    /// A face's line height and ascent in dots.
+    fn metrics(&self, face: FaceId) -> (f32, f32) {
+        let _ = face;
+        (GLYPH_H + 2.0, GLYPH_H)
+    }
+    fn has_face(&self, face: FaceId) -> bool {
+        face == FaceId::Small
+    }
+    /// A piece of the skin stretched to the rectangle; `false` when there is none.
+    fn image(&mut self, x: f32, y: f32, w: f32, h: f32, piece: &str, color: [f32; 4]) -> bool {
+        let _ = (x, y, w, h, piece, color);
+        false
+    }
+    /// A nine-slice of the skin; `false` when there is none.
+    #[allow(clippy::too_many_arguments)]
+    fn frame(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        piece: &str,
+        scale: f32,
+        color: [f32; 4],
+    ) -> bool {
+        let _ = (x, y, w, h, piece, scale, color);
+        false
+    }
+    /// An icon by key, `side` pixels square; `false` when there is none.
+    fn icon(&mut self, x: f32, y: f32, side: f32, key: &str, color: [f32; 4]) -> bool {
+        let _ = (x, y, side, key, color);
+        false
+    }
+    /// Everything after this goes to layer `n` (LOOK.md 2.1).
+    fn layer(&mut self, n: usize) {
+        let _ = n;
+    }
 }
+
+/// The layers (LOOK.md 2.1): plates, bodies drawn into the screen, ink, what is over it
+/// all (a tooltip, a dragged icon); the fifth is the cursor's, for when one is drawn.
+pub const LAYER_PLATES: usize = 0;
+pub const LAYER_INK: usize = 2;
+pub const LAYER_OVER: usize = 3;
+
+/// Lines of a tooltip: text and colour.
+pub type TipLines = Vec<(String, [f32; 4])>;
 
 pub const PLATE: [f32; 4] = [0.06, 0.06, 0.08, 0.88];
 pub const EDGE: [f32; 4] = [0.36, 0.36, 0.46, 1.0];
@@ -29,8 +90,9 @@ pub const OFF: [f32; 4] = [0.40, 0.40, 0.42, 1.0];
 pub const FOCUS: [f32; 4] = [0.90, 0.75, 0.20, 1.0];
 pub const WARN: [f32; 4] = [0.95, 0.55, 0.15, 1.0];
 
-/// The tallest panel any screen draws, in units (the new character's is 283).
-pub const PANEL_HIGH: f32 = 300.0;
+/// The tallest panel any screen draws, in units (the trade window with its three grids;
+/// the inventory with its grid and equip panel is 335, the new character's 283).
+pub const PANEL_HIGH: f32 = 360.0;
 
 /// The one scale HUD and screens are drawn at: whole dots, larger on larger frames, or the
 /// one somebody chose (1 to 4; 0: by the frame), and never so large that a panel `need`
@@ -181,6 +243,8 @@ impl Key {
 #[derive(Clone, Debug, Default)]
 pub struct UiInput {
     pub cursor: (f32, f32),
+    /// Where the pointer was last frame (a drag across the paperdoll turns it).
+    pub last_cursor: (f32, f32),
     /// The left button went down, came up, is down.
     pub pressed: bool,
     pub released: bool,
@@ -212,6 +276,8 @@ pub enum SeenKind {
     Row,
     Check,
     Slider,
+    /// A picture: its text is the icon's or the piece's key.
+    Image,
 }
 
 /// What the toolkit keeps between frames.
@@ -247,6 +313,38 @@ pub struct UiState {
     pub cut_cells: Vec<String>,
     /// Buttons pressed since this was last taken (SOUND.md 3: a click is heard).
     pub presses: u32,
+    /// A drag in progress (LOOK.md 2.4): the slot it started on (grid name, thing id,
+    /// icon key, the thing's name), and where the press was.
+    drag: Option<Drag>,
+    /// The drag that was let go this frame: the widgets look at it to see whether it
+    /// landed on them (`Ui::dropped`).
+    drag_ended: Option<Drag>,
+    /// What is hovered and since when (seconds): the tooltip's clock.
+    hover: Option<(String, f32)>,
+    /// Bodies the screen wants drawn into it this frame (LOOK.md 5), for the app.
+    pub paperdolls: Vec<Paperdoll>,
+    /// The paperdoll's turn, by a drag across it, in turns.
+    pub paperdoll_turn: f32,
+}
+
+/// A thing being dragged from a slot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drag {
+    pub grid: String,
+    pub id: i64,
+    pub icon: Option<String>,
+    pub name: String,
+    pub from: (f32, f32),
+    /// The press has moved far enough to be a drag (four dots).
+    pub live: bool,
+}
+
+/// A body drawn into a rectangle of the screen (LOOK.md 5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Paperdoll {
+    pub rect: Rect,
+    /// Turned this many turns from facing the viewer.
+    pub turn: f32,
 }
 
 impl UiState {
@@ -278,6 +376,13 @@ impl UiState {
 
     pub fn shows(&self, text: &str) -> bool {
         self.seen.iter().any(|s| s.text.contains(text))
+    }
+
+    /// A picture by its key was drawn last frame (an icon in a slot, a portrait).
+    pub fn shows_image(&self, key: &str) -> bool {
+        self.seen
+            .iter()
+            .any(|s| s.kind == SeenKind::Image && s.text == key)
     }
 }
 
@@ -340,6 +445,36 @@ pub enum RowMark {
     Struck,
 }
 
+/// A thing in a slot of a grid (LOOK.md 2.4).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SlotThing {
+    /// What it is picked by (an item's id, a listing's id).
+    pub id: i64,
+    pub name: String,
+    /// What a script finds the cell by (ITEMS.md 6: the row's words, `sword  slash
+    /// +2.0%  worn`); the name alone when empty.
+    pub said: String,
+    /// Its icon's key in the atlas.
+    pub icon: Option<String>,
+    pub worn: bool,
+    /// Drawn dim: it cannot be acted on now.
+    pub off: bool,
+    /// It cannot be dragged (a listing at another's stall is bought, not moved).
+    pub fixed: bool,
+    pub mark: Option<SlotMark>,
+    pub count: Option<u32>,
+    /// A line under the cell (a price), and its colour.
+    pub under: String,
+    pub under_colour: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotMark {
+    Worn,
+    New,
+    Taken,
+}
+
 /// What a list was asked to do this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListEvent {
@@ -359,12 +494,26 @@ pub struct Ui<'a, C: Canvas> {
     used: Vec<bool>,
     text_used: bool,
     pub scale: f32,
+    /// The face the screen's words are in (the text face when the bundle's atlas has it,
+    /// else the small one) and the face of titles.
+    pub face: FaceId,
+    pub title_face: FaceId,
+    /// The face's line height and ascent in dots.
+    line_dots: f32,
+    ascent_dots: f32,
     order: Vec<String>,
     seen: Vec<Seen>,
     clipped: Vec<String>,
     cut: Vec<String>,
     /// A row of a list was pressed this frame.
     row_pressed: bool,
+    /// The tooltip to draw at the end of the frame (over everything), if a slot was
+    /// hovered long enough.
+    tooltip: Option<(Rect, TipLines)>,
+    /// What a drag that ended this frame was dropped on (`Ui::drop_target`).
+    dropped: Option<(String, String)>,
+    /// A slot or grid was hovered this frame (the tooltip's clock runs while one is).
+    hovered: Option<String>,
 }
 
 impl<'a, C: Canvas> Ui<'a, C> {
@@ -400,6 +549,21 @@ impl<'a, C: Canvas> Ui<'a, C> {
             state.last_row = None;
         }
         let scale = scale_for(canvas.size(), need, chosen);
+        let face = if canvas.has_face(FaceId::Text) {
+            FaceId::Text
+        } else {
+            FaceId::Small
+        };
+        let title_face = if canvas.has_face(FaceId::Title) {
+            FaceId::Title
+        } else {
+            face
+        };
+        let (line_dots, ascent_dots) = canvas.metrics(face);
+        // A drag that was let go lands this frame: the widgets say where (`dropped`).
+        if input.released && state.drag.is_some() && !input.down {
+            state.drag_ended = state.drag.take();
+        }
         Ui {
             canvas,
             used: vec![false; input.keys.len()],
@@ -407,11 +571,18 @@ impl<'a, C: Canvas> Ui<'a, C> {
             input,
             text_used: false,
             scale,
+            face,
+            title_face,
+            line_dots,
+            ascent_dots,
             order: Vec::new(),
             seen: Vec::new(),
             clipped: Vec::new(),
             cut: Vec::new(),
             row_pressed: false,
+            tooltip: None,
+            dropped: None,
+            hovered: None,
         }
     }
 
@@ -421,11 +592,17 @@ impl<'a, C: Canvas> Ui<'a, C> {
 
     /// The height of a line of text, a button and a field at this scale.
     pub fn line(&self) -> f32 {
-        (GLYPH_H + 5.0) * self.scale
+        (self.line_dots + 3.0) * self.scale
+    }
+
+    /// The height of the face's capitals at this scale: what a line of text occupies
+    /// above its baseline (the small face's 7; the text face's 9).
+    pub fn ascent(&self) -> f32 {
+        self.ascent_dots * self.scale
     }
 
     pub fn button_height(&self) -> f32 {
-        (GLYPH_H + 10.0) * self.scale
+        (self.line_dots + 8.0) * self.scale
     }
 
     /// The height of a list that shows `rows` rows.
@@ -477,12 +654,33 @@ impl<'a, C: Canvas> Ui<'a, C> {
     }
 
     pub fn text_width(&self, text: &str) -> f32 {
-        font::text_width(self.scale, text)
+        self.canvas.width_in(self.face, self.scale, text)
     }
 
-    /// Characters that fit in `w` pixels.
+    /// Characters that fit in `w` pixels: a count by the face's average advance, for
+    /// wrapping and for what a cell has room for; `fit_text` is exact for one text.
     pub fn fit(&self, w: f32) -> usize {
-        ((w + self.scale) / (ADVANCE * self.scale)).floor().max(0.0) as usize
+        let avg = self.canvas.width_in(self.face, self.scale, "nenonenonen") / 11.0;
+        ((w + self.scale) / avg.max(1.0)).floor().max(0.0) as usize
+    }
+
+    /// The longest prefix of `text` that fits in `w` pixels.
+    pub fn fit_text(&self, w: f32, text: &str) -> String {
+        let mut out = String::new();
+        for c in text.chars() {
+            out.push(c);
+            if self.text_width(&out) > w {
+                out.pop();
+                break;
+            }
+        }
+        out
+    }
+
+    /// Text in the screen's face with the top of its line at `(x, y)`.
+    pub fn ink(&mut self, x: f32, y: f32, color: [f32; 4], text: &str) {
+        self.canvas
+            .text_in(self.face, x, y, self.scale, color, text);
     }
 
     /// A key press no widget has used yet: the screen's own (Enter, Escape).
@@ -515,23 +713,55 @@ impl<'a, C: Canvas> Ui<'a, C> {
     /// A plate with an edge and a title; returns the room inside it.
     pub fn panel(&mut self, r: Rect, title: &str) -> Rect {
         let s = self.scale;
-        self.canvas.rect(r.x, r.y, r.w, r.h, PLATE);
-        self.outline(r, EDGE);
+        self.canvas.layer(LAYER_PLATES);
+        if !self.canvas.frame(r.x, r.y, r.w, r.h, "panel", s, [1.0; 4]) {
+            self.canvas.rect(r.x, r.y, r.w, r.h, PLATE);
+            self.outline(r, EDGE);
+        }
+        self.canvas.layer(LAYER_INK);
         let pad = 8.0 * s;
         if title.is_empty() {
             return r.inset(pad);
         }
-        // A title longer than the panel is cut to it.
-        let shown: String = title.chars().take(self.fit(r.w - 2.0 * pad)).collect();
-        self.canvas.text(r.x + pad, r.y + pad, s, FOCUS, &shown);
+        // A title longer than the panel is cut to it, in the title face.
+        let (title_line, _) = self.canvas.metrics(self.title_face);
+        let title_h = title_line * s;
+        let shown = {
+            let mut out = String::new();
+            for c in title.chars() {
+                out.push(c);
+                if self.canvas.width_in(self.title_face, s, &out) > r.w - 2.0 * pad {
+                    out.pop();
+                    break;
+                }
+            }
+            out
+        };
+        let tw = self.canvas.width_in(self.title_face, s, &shown);
+        self.canvas.layer(LAYER_PLATES);
+        let bar = Rect::new(r.x + 3.0 * s, r.y + 3.0 * s, r.w - 6.0 * s, title_h + pad);
+        let framed = self
+            .canvas
+            .frame(bar.x, bar.y, bar.w, bar.h, "panel_title", s, [1.0; 4]);
+        self.canvas.layer(LAYER_INK);
+        self.canvas.text_in(
+            self.title_face,
+            r.x + pad,
+            r.y + pad * 0.75,
+            s,
+            FOCUS,
+            &shown,
+        );
         self.note(
             SeenKind::Label,
             title,
-            Rect::new(r.x + pad, r.y + pad, self.text_width(&shown), GLYPH_H * s),
+            Rect::new(r.x + pad, r.y + pad * 0.75, tw, title_h),
         );
-        let top = pad + self.line() + 2.0 * s;
-        self.canvas
-            .rect(r.x + pad, r.y + top - 4.0 * s, r.w - 2.0 * pad, s, EDGE);
+        let top = pad * 0.75 + title_h + pad * 0.75;
+        if !framed {
+            self.canvas
+                .rect(r.x + pad, r.y + top - 3.0 * s, r.w - 2.0 * pad, s, EDGE);
+        }
         Rect::new(
             r.x + pad,
             r.y + top,
@@ -543,15 +773,16 @@ impl<'a, C: Canvas> Ui<'a, C> {
     /// A line of text, cut to what fits in `w` pixels when `w` is positive.
     pub fn label(&mut self, x: f32, y: f32, w: f32, color: [f32; 4], text: &str) {
         let shown: String = if w > 0.0 {
-            text.chars().take(self.fit(w)).collect()
+            self.fit_text(w, text)
         } else {
             text.to_string()
         };
         if shown.len() < text.len() {
             self.clipped.push(text.to_string());
         }
-        self.canvas.text(x, y, self.scale, color, &shown);
-        let rect = Rect::new(x, y, self.text_width(&shown), GLYPH_H * self.scale);
+        self.canvas
+            .text_in(self.face, x, y, self.scale, color, &shown);
+        let rect = Rect::new(x, y, self.text_width(&shown), self.ascent());
         self.note(SeenKind::Label, text, rect);
     }
 
@@ -559,26 +790,58 @@ impl<'a, C: Canvas> Ui<'a, C> {
     /// for each unit). A script sees it as one text. Returns its width.
     pub fn spans(&mut self, x: f32, y: f32, parts: &[(String, [f32; 4])]) -> f32 {
         let mut whole = String::new();
+        let mut at = x;
+        let space = self.text_width(" ");
         for (text, color) in parts {
             if !whole.is_empty() {
                 whole.push(' ');
+                at += space;
             }
-            // Every part on the same grid of characters as a line written in one go.
-            let at = x + whole.chars().count() as f32 * ADVANCE * self.scale;
-            self.canvas.text(at, y, self.scale, *color, text);
+            self.canvas
+                .text_in(self.face, at, y, self.scale, *color, text);
+            at += self.text_width(text);
             whole.push_str(text);
         }
         let w = self.text_width(&whole);
-        self.note(
-            SeenKind::Label,
-            &whole,
-            Rect::new(x, y, w, GLYPH_H * self.scale),
-        );
+        self.note(SeenKind::Label, &whole, Rect::new(x, y, w, self.ascent()));
         w
     }
 
-    /// Small print, ending at `right`: a word in a corner, at half the scale and never
-    /// under one.
+    /// Coin with its two pieces before the numbers (LOOK.md 7): a gold coin and a silver
+    /// one from the skin, or the coloured words alone. Returns its width.
+    pub fn coins(&mut self, x: f32, y: f32, parts: &[(String, [f32; 4])]) -> f32 {
+        let s = self.scale;
+        let side = self.ascent();
+        let mut whole = String::new();
+        let mut at = x;
+        let space = self.text_width(" ");
+        for (text, color) in parts {
+            if !whole.is_empty() {
+                whole.push(' ');
+                at += space;
+            }
+            let piece = if text.ends_with(" g") {
+                "coin_gold"
+            } else {
+                "coin_silver"
+            };
+            if self.canvas.image(at, y, side, side, piece, [1.0; 4]) {
+                at += side + 2.0 * s;
+            }
+            self.canvas.text_in(self.face, at, y, s, *color, text);
+            at += self.text_width(text);
+            whole.push_str(text);
+        }
+        self.note(
+            SeenKind::Label,
+            &whole,
+            Rect::new(x, y, at - x, self.ascent()),
+        );
+        at - x
+    }
+
+    /// Small print, ending at `right`: a word in a corner, in the small face at half the
+    /// scale and never under one.
     pub fn small(&mut self, right: f32, y: f32, color: [f32; 4], text: &str) {
         let s = (self.scale * 0.5).max(1.0);
         let tw = font::text_width(s, text);
@@ -592,15 +855,15 @@ impl<'a, C: Canvas> Ui<'a, C> {
 
     /// Text wrapped at words into `r`; returns the height used.
     pub fn paragraph(&mut self, r: Rect, color: [f32; 4], text: &str) -> f32 {
-        let lines = wrap(text, self.fit(r.w).max(1));
+        let lines = wrap_measured(text, r.w, |t| self.text_width(t));
         let line = self.line();
         for (i, l) in lines.iter().enumerate() {
             let y = r.y + line * i as f32;
-            if y + GLYPH_H * self.scale > r.y + r.h && r.h > 0.0 {
+            if y + self.ascent() > r.y + r.h && r.h > 0.0 {
                 self.clipped.push(text.to_string());
                 break;
             }
-            self.canvas.text(r.x, y, self.scale, color, l);
+            self.canvas.text_in(self.face, r.x, y, self.scale, color, l);
         }
         self.note(SeenKind::Label, text, r);
         line * lines.len() as f32
@@ -644,30 +907,46 @@ impl<'a, C: Canvas> Ui<'a, C> {
         let s = self.scale;
         let id = format!("button:{text}");
         let (mut pressed, mut fill, mut ink) = (false, BUTTON, TEXT);
+        let mut piece = "button_off";
+        let mut focused = false;
         if enabled {
-            let focused = self.focusable(&id);
+            focused = self.focusable(&id);
             let (hot, down, click) = self.clicked(&id, r);
             pressed = click || (focused && self.key(Key::Enter));
             if pressed {
                 self.state.presses += 1;
             }
-            fill = match (down, hot) {
-                (true, _) => BUTTON_DOWN,
-                (false, true) => BUTTON_HOT,
-                _ => BUTTON,
+            (fill, piece) = match (down, hot) {
+                (true, _) => (BUTTON_DOWN, "button_down"),
+                (false, true) => (BUTTON_HOT, "button_hot"),
+                _ => (BUTTON, "button"),
             };
-            self.canvas.rect(r.x, r.y, r.w, r.h, fill);
-            self.outline(r, if focused { FOCUS } else { EDGE });
         } else {
             fill[3] = 0.6;
             ink = OFF;
-            self.canvas.rect(r.x, r.y, r.w, r.h, fill);
-            self.outline(r, OFF);
         }
+        self.canvas.layer(LAYER_PLATES);
+        if !self.canvas.frame(r.x, r.y, r.w, r.h, piece, s, [1.0; 4]) {
+            self.canvas.rect(r.x, r.y, r.w, r.h, fill);
+            self.outline(
+                r,
+                if !enabled {
+                    OFF
+                } else if focused {
+                    FOCUS
+                } else {
+                    EDGE
+                },
+            );
+        } else if focused {
+            self.outline(r, FOCUS);
+        }
+        self.canvas.layer(LAYER_INK);
         let tw = self.text_width(text);
-        self.canvas.text(
+        self.canvas.text_in(
+            self.face,
             (r.x + (r.w - tw) * 0.5).round(),
-            (r.y + (r.h - GLYPH_H * s) * 0.5).round(),
+            (r.y + (r.h - self.ascent()) * 0.5).round(),
             s,
             ink,
             text,
@@ -691,19 +970,31 @@ impl<'a, C: Canvas> Ui<'a, C> {
         let id = format!("field:{label}");
         let focused = self.focusable(&id);
         let label_h = self.line();
-        self.canvas.text(r.x, r.y, s, FAINT, label);
+        self.canvas.layer(LAYER_INK);
+        self.canvas.text_in(self.face, r.x, r.y, s, FAINT, label);
         let well = Rect::new(r.x, r.y + label_h, r.w, (r.h - label_h).max(0.0));
         let (_, _, _) = self.clicked(&id, well);
         let focused = focused || self.state.focus.as_deref() == Some(id.as_str());
         let mut chars: Vec<char> = value.chars().collect();
         let mut caret = (*self.state.carets.get(&id).unwrap_or(&chars.len())).min(chars.len());
         let mut changed = false;
+        let room = self.fit(well.w - 8.0 * s);
         if focused {
-            // A click puts the caret where it landed.
+            // A click puts the caret where it landed: at the character whose start is
+            // nearest, measured in the face.
             if self.input.pressed && well.contains(self.input.cursor) {
-                let first = first_shown(chars.len(), caret, self.fit(well.w - 8.0 * s));
-                let col = ((self.input.cursor.0 - well.x - 4.0 * s) / (ADVANCE * s)).round();
-                caret = (first + col.max(0.0) as usize).min(chars.len());
+                let first = first_shown(chars.len(), caret, room);
+                let shown: Vec<char> = chars.iter().skip(first).take(room).copied().collect();
+                let x = self.input.cursor.0 - well.x - 4.0 * s;
+                let mut best = (f32::MAX, 0usize);
+                for i in 0..=shown.len() {
+                    let prefix: String = shown[..i].iter().collect();
+                    let d = (self.text_width(&prefix) - x).abs();
+                    if d < best.0 {
+                        best = (d, i);
+                    }
+                }
+                caret = (first + best.1).min(chars.len());
             }
             for i in 0..self.input.keys.len() {
                 if self.used[i] {
@@ -780,9 +1071,16 @@ impl<'a, C: Canvas> Ui<'a, C> {
         }
         self.state.carets.insert(id, caret);
 
-        self.canvas.rect(well.x, well.y, well.w, well.h, WELL);
-        self.outline(well, if focused { FOCUS } else { EDGE });
-        let room = self.fit(well.w - 8.0 * s);
+        self.canvas.layer(LAYER_PLATES);
+        let piece = if focused { "field_focus" } else { "field" };
+        if !self
+            .canvas
+            .frame(well.x, well.y, well.w, well.h, piece, s, [1.0; 4])
+        {
+            self.canvas.rect(well.x, well.y, well.w, well.h, WELL);
+            self.outline(well, if focused { FOCUS } else { EDGE });
+        }
+        self.canvas.layer(LAYER_INK);
         let first = first_shown(chars.len(), caret, room);
         let shown: String = chars
             .iter()
@@ -790,11 +1088,14 @@ impl<'a, C: Canvas> Ui<'a, C> {
             .take(room)
             .map(|c| if how.secret { '*' } else { *c })
             .collect();
-        let ty = (well.y + (well.h - GLYPH_H * s) * 0.5).round();
-        self.canvas.text(well.x + 4.0 * s, ty, s, TEXT, &shown);
+        let ty = (well.y + (well.h - self.ascent()) * 0.5).round();
+        self.canvas
+            .text_in(self.face, well.x + 4.0 * s, ty, s, TEXT, &shown);
         if focused && ((self.input.time * 2.0) as u32).is_multiple_of(2) {
-            let cx = well.x + 4.0 * s + (caret - first) as f32 * ADVANCE * s - s;
-            self.canvas.rect(cx, ty - s, s, (GLYPH_H + 2.0) * s, FOCUS);
+            let before: String = shown.chars().take(caret - first).collect();
+            let cx = well.x + 4.0 * s + self.text_width(&before) - s;
+            self.canvas
+                .rect(cx, ty - s, s, self.ascent() + 2.0 * s, FOCUS);
         }
         // A script and a test see the label, and the value unless it is a secret.
         let said = if how.secret {
@@ -924,8 +1225,14 @@ impl<'a, C: Canvas> Ui<'a, C> {
         }
         first = first.min(rows.len().saturating_sub(room));
 
-        self.canvas.rect(r.x, r.y, r.w, r.h, WELL);
-        self.outline(r, if focused { FOCUS } else { EDGE });
+        self.canvas.layer(LAYER_PLATES);
+        if !self.canvas.frame(r.x, r.y, r.w, r.h, "well", s, [1.0; 4]) {
+            self.canvas.rect(r.x, r.y, r.w, r.h, WELL);
+            self.outline(r, if focused { FOCUS } else { EDGE });
+        } else if focused {
+            self.outline(r, FOCUS);
+        }
+        self.canvas.layer(LAYER_INK);
         for (i, row) in rows.iter().enumerate().skip(first).take(room) {
             let rr = Rect::new(
                 r.x + s,
@@ -953,8 +1260,7 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 let from = columns.get(c).copied().unwrap_or(0.0);
                 let to = columns.get(c + 1).copied().unwrap_or(1.0);
                 let x = rr.x + 4.0 * s + (rr.w - 8.0 * s) * from;
-                let fit = self.fit((rr.w - 8.0 * s) * (to - from) - 2.0 * s);
-                let shown: String = cell.chars().take(fit).collect();
+                let shown = self.fit_text((rr.w - 8.0 * s) * (to - from) - 2.0 * s, cell);
                 if shown.len() < cell.len() {
                     self.cut.push(cell.clone());
                 }
@@ -965,7 +1271,8 @@ impl<'a, C: Canvas> Ui<'a, C> {
                     RowMark::Plain if c == 0 => TEXT,
                     RowMark::Plain => FAINT,
                 };
-                self.canvas.text(x, rr.y + 3.0 * s, s, ink, &shown);
+                self.canvas
+                    .text_in(self.face, x, rr.y + 2.0 * s, s, ink, &shown);
             }
             if marks.get(i) == Some(&RowMark::Struck) {
                 let y = rr.y + rr.h * 0.5;
@@ -973,13 +1280,10 @@ impl<'a, C: Canvas> Ui<'a, C> {
             }
             self.note(SeenKind::Row, &row.join("  "), rr);
         }
-        // A bar on the right says where in the list the window is.
+        // A bar on the right says where in the list the window is, and moves it
+        // (LOOK.md 2.4: a scrollbar, for a machine without a wheel).
         if rows.len() > room {
-            let track = r.h - 2.0 * s;
-            let bar = (track * room as f32 / rows.len() as f32).max(6.0 * s);
-            let at = (track - bar) * first as f32 / (rows.len() - room) as f32;
-            self.canvas
-                .rect(r.x + r.w - 3.0 * s, r.y + s + at, 2.0 * s, bar, EDGE);
+            first = self.scrollbar(&id, r, first, rows.len(), room);
         }
         self.state.scrolls.insert(id.clone(), first);
         self.state.selections.insert(id, *selected);
@@ -995,7 +1299,8 @@ impl<'a, C: Canvas> Ui<'a, C> {
     pub fn choice(&mut self, r: Rect, label: &str, options: &[&str], picked: &mut usize) -> bool {
         let s = self.scale;
         let label_h = self.line();
-        self.canvas.text(r.x, r.y, s, FAINT, label);
+        self.canvas.layer(LAYER_INK);
+        self.canvas.text_in(self.face, r.x, r.y, s, FAINT, label);
         let row = Rect::new(r.x, r.y + label_h, r.w, (r.h - label_h).max(0.0));
         let before = *picked;
         for (i, (option, at)) in options.iter().zip(self.buttons(row, options)).enumerate() {
@@ -1011,12 +1316,28 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 (false, false, true) => BUTTON_HOT,
                 _ => BUTTON,
             };
-            self.canvas.rect(at.x, at.y, at.w, at.h, fill);
-            self.outline(at, if focused { FOCUS } else { EDGE });
+            let piece = match (i == *picked, down, hot) {
+                (true, _, _) => "button_down",
+                (false, true, _) => "button_down",
+                (false, false, true) => "button_hot",
+                _ => "button",
+            };
+            self.canvas.layer(LAYER_PLATES);
+            if !self
+                .canvas
+                .frame(at.x, at.y, at.w, at.h, piece, s, [1.0; 4])
+            {
+                self.canvas.rect(at.x, at.y, at.w, at.h, fill);
+                self.outline(at, if focused { FOCUS } else { EDGE });
+            } else if focused || i == *picked {
+                self.outline(at, FOCUS);
+            }
+            self.canvas.layer(LAYER_INK);
             let tw = self.text_width(option);
-            self.canvas.text(
+            self.canvas.text_in(
+                self.face,
                 (at.x + (at.w - tw) * 0.5).round(),
-                (at.y + (at.h - GLYPH_H * s) * 0.5).round(),
+                (at.y + (at.h - self.ascent()) * 0.5).round(),
                 s,
                 TEXT,
                 option,
@@ -1037,18 +1358,26 @@ impl<'a, C: Canvas> Ui<'a, C> {
         if changed {
             *value = !*value;
         }
-        let side = GLYPH_H * s + 4.0 * s;
+        let side = self.ascent() + 4.0 * s;
         let b = Rect::new(r.x, (r.y + (r.h - side) * 0.5).round(), side, side);
-        self.canvas
-            .rect(b.x, b.y, b.w, b.h, if hot { BUTTON_HOT } else { WELL });
-        self.outline(b, if focused { FOCUS } else { EDGE });
-        if *value {
-            let m = b.inset(3.0 * s);
-            self.canvas.rect(m.x, m.y, m.w, m.h, FOCUS);
+        self.canvas.layer(LAYER_PLATES);
+        let piece = if *value { "check_on" } else { "check_off" };
+        if !self.canvas.image(b.x, b.y, b.w, b.h, piece, [1.0; 4]) {
+            self.canvas
+                .rect(b.x, b.y, b.w, b.h, if hot { BUTTON_HOT } else { WELL });
+            self.outline(b, if focused { FOCUS } else { EDGE });
+            if *value {
+                let m = b.inset(3.0 * s);
+                self.canvas.rect(m.x, m.y, m.w, m.h, FOCUS);
+            }
+        } else if focused {
+            self.outline(b, FOCUS);
         }
-        self.canvas.text(
+        self.canvas.layer(LAYER_INK);
+        self.canvas.text_in(
+            self.face,
             b.x + side + 6.0 * s,
-            (r.y + (r.h - GLYPH_H * s) * 0.5).round(),
+            (r.y + (r.h - self.ascent()) * 0.5).round(),
             s,
             TEXT,
             label,
@@ -1083,31 +1412,641 @@ impl<'a, C: Canvas> Ui<'a, C> {
         }
         *value = value.clamp(range.0, range.1);
         let t = (*value - range.0) / span;
-        self.canvas
-            .text(r.x, r.y, s, FAINT, &format!("{label}  {value:.2}"));
+        self.canvas.layer(LAYER_INK);
+        self.canvas.text_in(
+            self.face,
+            r.x,
+            r.y,
+            s,
+            FAINT,
+            &format!("{label}  {value:.2}"),
+        );
         let mid = track.y + track.h * 0.5;
-        self.canvas.rect(
+        self.canvas.layer(LAYER_PLATES);
+        if !self.canvas.frame(
             track.x,
-            mid - s,
+            mid - 4.0 * s,
             track.w,
-            2.0 * s,
-            if focused { FOCUS } else { EDGE },
-        );
+            8.0 * s,
+            "slider_rail",
+            s,
+            [1.0; 4],
+        ) {
+            self.canvas.rect(
+                track.x,
+                mid - s,
+                track.w,
+                2.0 * s,
+                if focused { FOCUS } else { EDGE },
+            );
+        }
         let knob = 6.0 * s;
-        self.canvas.rect(
-            (track.x + (track.w - knob) * t).round(),
-            track.y + 2.0 * s,
-            knob,
-            (track.h - 4.0 * s).max(s),
-            TEXT,
-        );
+        let kx = (track.x + (track.w - knob) * t).round();
+        let (ky, kh) = (track.y + 2.0 * s, (track.h - 4.0 * s).max(s));
+        if !self
+            .canvas
+            .frame(kx - s, ky, knob + 2.0 * s, kh, "slider_knob", s, [1.0; 4])
+        {
+            self.canvas.rect(kx, ky, knob, kh, TEXT);
+        }
+        if focused {
+            self.outline(Rect::new(kx - s, ky, knob + 2.0 * s, kh), FOCUS);
+        }
+        self.canvas.layer(LAYER_INK);
         self.note(SeenKind::Slider, &format!("{label}: {value:.2}"), track);
         *value != before
+    }
+
+    /// A scrollbar at the right edge of `r` for a window of `room` of `len` rows starting
+    /// at `first`; returns the new `first` (a drag on the knob, a click on the rail).
+    fn scrollbar(&mut self, id: &str, r: Rect, first: usize, len: usize, room: usize) -> usize {
+        let s = self.scale;
+        let track = Rect::new(r.x + r.w - 7.0 * s, r.y + 2.0 * s, 6.0 * s, r.h - 4.0 * s);
+        let past = len.saturating_sub(room).max(1);
+        let bar = (track.h * room as f32 / len as f32).max(8.0 * s);
+        let mut first = first.min(past);
+        let bar_id = format!("scroll:{id}");
+        let (_, held, _) = self.clicked(&bar_id, track);
+        if held && self.input.down {
+            let t = ((self.input.cursor.1 - track.y - bar * 0.5) / (track.h - bar).max(1.0))
+                .clamp(0.0, 1.0);
+            first = (t * past as f32).round() as usize;
+        }
+        let at = (track.h - bar) * first as f32 / past as f32;
+        self.canvas.layer(LAYER_INK);
+        if !self.canvas.frame(
+            track.x,
+            track.y,
+            track.w,
+            track.h,
+            "scroll_rail",
+            s,
+            [1.0; 4],
+        ) {
+            self.canvas
+                .rect(track.x + 2.0 * s, track.y, 2.0 * s, track.h, WELL);
+        }
+        if !self.canvas.frame(
+            track.x,
+            track.y + at,
+            track.w,
+            bar,
+            "scroll_knob",
+            s,
+            [1.0; 4],
+        ) {
+            self.canvas
+                .rect(track.x + 2.0 * s, track.y + at, 2.0 * s, bar, EDGE);
+        }
+        first
+    }
+
+    /// The side of a slot at this scale (LOOK.md 2.4: 36 dots, an icon of 32 with a rim).
+    pub fn slot_side(&self) -> f32 {
+        36.0 * self.scale
+    }
+
+    /// A grid of `cols` slots across `r`: each thing by its id, with its icon key (an
+    /// icon the atlas lacks is drawn as the thing's initial), its name, its corner mark
+    /// (`worn`, `new`, `taken`) and a line under the cell (a price). Hovering shows the
+    /// tooltip the caller gives for the hovered thing; a press picks; a press that moves
+    /// starts a drag. `selected` is the id picked (`None` for nothing; a thing that is
+    /// gone unpicks itself, ITEMS.md 6). Returns the event, as a list does.
+    #[allow(clippy::too_many_arguments)]
+    pub fn grid(
+        &mut self,
+        r: Rect,
+        name: &str,
+        cols: usize,
+        capacity: usize,
+        things: &[SlotThing],
+        selected: &mut Option<i64>,
+        under: f32,
+        tooltip: &dyn Fn(&SlotThing) -> TipLines,
+    ) -> ListEvent {
+        let s = self.scale;
+        let id = format!("grid:{name}");
+        let side = self.slot_side();
+        let gap = 2.0 * s;
+        let cols = cols.max(1);
+        let rows_shown = ((r.h + gap) / (side + under + gap)).floor().max(1.0) as usize;
+        let rows_all = things.len().max(capacity).div_ceil(cols).max(1);
+        let mut first_row = *self.state.scrolls.get(&id).unwrap_or(&0);
+        let hot_grid = r.contains(self.input.cursor);
+        if hot_grid && self.input.wheel != 0.0 {
+            let turn = -self.input.wheel.round() as i64;
+            first_row = (first_row as i64 + turn)
+                .clamp(0, rows_all.saturating_sub(rows_shown) as i64)
+                as usize;
+        }
+        first_row = first_row.min(rows_all.saturating_sub(rows_shown));
+        // The thing picked must still be there.
+        if let Some(sel) = *selected
+            && !things.iter().any(|t| t.id == sel)
+        {
+            *selected = None;
+        }
+        let before = *selected;
+        let mut event = ListEvent::None;
+        let dropped_here = self
+            .state
+            .drag_ended
+            .as_ref()
+            .filter(|d| d.live && r.contains(self.input.cursor))
+            .cloned();
+        if let Some(d) = &dropped_here {
+            self.dropped = Some((name.to_string(), d.grid.clone()));
+        }
+        let mut hovered: Option<usize> = None;
+        for (i, thing) in things.iter().enumerate() {
+            let (row, col) = (i / cols, i % cols);
+            if row < first_row || row >= first_row + rows_shown {
+                continue;
+            }
+            let cell = Rect::new(
+                r.x + col as f32 * (side + gap),
+                r.y + (row - first_row) as f32 * (side + under + gap),
+                side,
+                side,
+            );
+            let over = cell.contains(self.input.cursor);
+            let thing_id = format!("{id}:{}", thing.id);
+            if over {
+                hovered = Some(i);
+            }
+            if self.input.pressed && over {
+                *selected = Some(thing.id);
+                self.state.last_row = Some((id.clone(), i));
+                self.row_pressed = true;
+                self.state.focus = Some(id.clone());
+                if !thing.fixed {
+                    self.state.drag = Some(Drag {
+                        grid: name.to_string(),
+                        id: thing.id,
+                        icon: thing.icon.clone(),
+                        name: thing.name.clone(),
+                        from: self.input.cursor,
+                        live: false,
+                    });
+                }
+            }
+            let picked = *selected == Some(thing.id);
+            let piece = if thing.off {
+                "slot_off"
+            } else if picked {
+                "slot_picked"
+            } else if thing.worn {
+                "slot_worn"
+            } else if over {
+                "slot_hot"
+            } else {
+                "slot"
+            };
+            self.canvas.layer(LAYER_PLATES);
+            if !self
+                .canvas
+                .frame(cell.x, cell.y, cell.w, cell.h, piece, s, [1.0; 4])
+            {
+                let fill = if picked {
+                    PICKED
+                } else if over {
+                    BUTTON
+                } else {
+                    WELL
+                };
+                self.canvas.rect(cell.x, cell.y, cell.w, cell.h, fill);
+                self.outline(
+                    cell,
+                    if thing.worn {
+                        [0.3, 0.7, 0.3, 1.0]
+                    } else {
+                        EDGE
+                    },
+                );
+            }
+            self.canvas.layer(LAYER_INK);
+            let inner = cell.inset(2.0 * s);
+            let tint = if thing.off {
+                [0.5, 0.5, 0.5, 1.0]
+            } else {
+                [1.0; 4]
+            };
+            let drawn = thing
+                .icon
+                .as_deref()
+                .is_some_and(|k| self.canvas.icon(inner.x, inner.y, inner.w, k, tint));
+            if drawn && let Some(k) = &thing.icon {
+                self.note(SeenKind::Image, k, inner);
+            }
+            if !drawn {
+                // No picture: the thing's initial, large, as a glyph of its own.
+                let initial: String = thing.name.chars().take(2).collect();
+                let tw = self.canvas.width_in(self.title_face, s, &initial);
+                let (lh, _) = self.canvas.metrics(self.title_face);
+                self.canvas.text_in(
+                    self.title_face,
+                    (cell.x + (cell.w - tw) * 0.5).round(),
+                    (cell.y + (cell.h - lh * s) * 0.5).round(),
+                    s,
+                    if thing.off { OFF } else { FAINT },
+                    &initial,
+                );
+            }
+            if let Some(mark) = thing.mark {
+                let m = 12.0 * s;
+                let piece = match mark {
+                    SlotMark::Worn => "mark_worn",
+                    SlotMark::New => "mark_new",
+                    SlotMark::Taken => "mark_taken",
+                };
+                if !self
+                    .canvas
+                    .image(cell.x + cell.w - m - s, cell.y + s, m, m, piece, [1.0; 4])
+                {
+                    let colour = match mark {
+                        SlotMark::Worn => [0.3, 0.75, 0.3, 1.0],
+                        SlotMark::New => FOCUS,
+                        SlotMark::Taken => WARN,
+                    };
+                    self.canvas
+                        .rect(cell.x + cell.w - m - s, cell.y + s, m, m, colour);
+                }
+            }
+            if let Some(count) = thing.count.filter(|c| *c > 1) {
+                let t = count.to_string();
+                let tw = self.text_width(&t);
+                self.ink(
+                    cell.x + cell.w - tw - 2.0 * s,
+                    cell.y + cell.h - self.ascent() - 2.0 * s,
+                    TEXT,
+                    &t,
+                );
+            }
+            if under > 0.0 && !thing.under.is_empty() {
+                let shown = self.fit_text(side, &thing.under);
+                let tw = self.text_width(&shown);
+                self.ink(
+                    (cell.x + (cell.w - tw) * 0.5).round(),
+                    cell.y + cell.h + s,
+                    thing.under_colour,
+                    &shown,
+                );
+            }
+            // A script finds the thing by its words, as it found the row.
+            let said = if !thing.said.is_empty() {
+                thing.said.clone()
+            } else if thing.under.is_empty() {
+                thing.name.clone()
+            } else {
+                format!("{}  {}", thing.name, thing.under)
+            };
+            self.note(SeenKind::Row, &said, cell);
+            let _ = thing_id;
+        }
+        // The empty slots up to the capacity: wells with nothing in them.
+        for i in things.len()..capacity {
+            let (row, col) = (i / cols, i % cols);
+            if row < first_row || row >= first_row + rows_shown {
+                continue;
+            }
+            let cell = Rect::new(
+                r.x + col as f32 * (side + gap),
+                r.y + (row - first_row) as f32 * (side + under + gap),
+                side,
+                side,
+            );
+            self.canvas.layer(LAYER_PLATES);
+            if !self
+                .canvas
+                .frame(cell.x, cell.y, cell.w, cell.h, "slot", s, [1.0; 4])
+            {
+                self.canvas.rect(cell.x, cell.y, cell.w, cell.h, WELL);
+                self.outline(cell, EDGE);
+            }
+            self.canvas.layer(LAYER_INK);
+        }
+        if rows_all > rows_shown {
+            first_row = self.scrollbar(&id, r, first_row, rows_all, rows_shown);
+        }
+        self.state.scrolls.insert(id.clone(), first_row);
+        // The tooltip, after 150 ms over one thing (LOOK.md 2.4).
+        if let Some(i) = hovered {
+            let key = format!("{id}:{}", things[i].id);
+            let since = match &self.state.hover {
+                Some((k, t)) if *k == key => *t,
+                _ => self.input.time,
+            };
+            self.hovered = Some(key.clone());
+            self.state.hover = Some((key, since));
+            if self.input.time - since >= 0.15 && self.state.drag.as_ref().is_none_or(|d| !d.live) {
+                let lines = tooltip(&things[i]);
+                if !lines.is_empty() {
+                    self.tooltip = Some((
+                        Rect::new(self.input.cursor.0, self.input.cursor.1, 0.0, 0.0),
+                        lines,
+                    ));
+                }
+            }
+        }
+        if event == ListEvent::None && *selected != before {
+            event = ListEvent::Picked;
+        }
+        event
+    }
+
+    /// A drop that ended on the grid or slot called `onto` this frame, from a slot of
+    /// `from`: the thing's id. Asked after the grids were drawn.
+    pub fn dropped(&self, onto: &str) -> Option<(String, i64)> {
+        let d = self.state.drag_ended.as_ref()?;
+        if !d.live {
+            return None;
+        }
+        match &self.dropped {
+            Some((target, from)) if target == onto => Some((from.clone(), d.id)),
+            _ => None,
+        }
+    }
+
+    /// A single slot that takes a drop (the weapon or armour slot of the equip panel,
+    /// LOOK.md 4): drawn like a grid's cell with what is in it, named for scripts, and
+    /// `Some(id)` when a dragged thing was let go on it this frame.
+    pub fn drop_slot(
+        &mut self,
+        r: Rect,
+        name: &str,
+        thing: Option<&SlotThing>,
+        tooltip: &dyn Fn(&SlotThing) -> TipLines,
+    ) -> Option<(String, i64)> {
+        let s = self.scale;
+        let over = r.contains(self.input.cursor);
+        let dragging = self.state.drag.as_ref().is_some_and(|d| d.live);
+        // A press on what is in the slot may become a drag out of it (a worn thing dragged
+        // into the grid comes off; Gemini's review).
+        if self.input.pressed
+            && over
+            && let Some(t) = thing
+        {
+            self.state.focus = Some(format!("slot:{name}"));
+            self.state.drag = Some(Drag {
+                grid: name.to_string(),
+                id: t.id,
+                icon: t.icon.clone(),
+                name: t.name.clone(),
+                from: self.input.cursor,
+                live: false,
+            });
+        }
+        let piece = if over && dragging {
+            "slot_hot"
+        } else if thing.is_some() {
+            "slot_worn"
+        } else {
+            "slot"
+        };
+        self.canvas.layer(LAYER_PLATES);
+        if !self.canvas.frame(r.x, r.y, r.w, r.h, piece, s, [1.0; 4]) {
+            self.canvas.rect(r.x, r.y, r.w, r.h, WELL);
+            self.outline(r, if over && dragging { FOCUS } else { EDGE });
+        }
+        self.canvas.layer(LAYER_INK);
+        match thing {
+            Some(t) => {
+                let inner = r.inset(2.0 * s);
+                let drawn = t
+                    .icon
+                    .as_deref()
+                    .is_some_and(|k| self.canvas.icon(inner.x, inner.y, inner.w, k, [1.0; 4]));
+                if drawn && let Some(k) = &t.icon {
+                    self.note(SeenKind::Image, k, inner);
+                }
+                if !drawn {
+                    let initial: String = t.name.chars().take(2).collect();
+                    let tw = self.canvas.width_in(self.title_face, s, &initial);
+                    let (lh, _) = self.canvas.metrics(self.title_face);
+                    self.canvas.text_in(
+                        self.title_face,
+                        (r.x + (r.w - tw) * 0.5).round(),
+                        (r.y + (r.h - lh * s) * 0.5).round(),
+                        s,
+                        FAINT,
+                        &initial,
+                    );
+                }
+                self.note(SeenKind::Row, &format!("{name}: {}", t.name), r);
+                if over {
+                    let key = format!("slot:{name}");
+                    let since = match &self.state.hover {
+                        Some((k, t)) if *k == key => *t,
+                        _ => self.input.time,
+                    };
+                    self.hovered = Some(key.clone());
+                    self.state.hover = Some((key, since));
+                    if self.input.time - since >= 0.15 && !dragging {
+                        let lines = tooltip(t);
+                        if !lines.is_empty() {
+                            self.tooltip = Some((
+                                Rect::new(self.input.cursor.0, self.input.cursor.1, 0.0, 0.0),
+                                lines,
+                            ));
+                        }
+                    }
+                }
+            }
+            None => {
+                let shown = self.fit_text(r.w - 4.0 * s, name);
+                let tw = self.text_width(&shown);
+                self.ink(
+                    (r.x + (r.w - tw) * 0.5).round(),
+                    (r.y + (r.h - self.ascent()) * 0.5).round(),
+                    OFF,
+                    &shown,
+                );
+                self.note(SeenKind::Row, &format!("{name}: nothing"), r);
+            }
+        }
+        let d = self.state.drag_ended.as_ref()?;
+        if d.live && over {
+            Some((d.grid.clone(), d.id))
+        } else {
+            None
+        }
+    }
+
+    /// A portrait by icon key in its frame, `side` square; the initial of `name` when the
+    /// atlas lacks it.
+    #[allow(dead_code)]
+    pub fn portrait(&mut self, r: Rect, icon: Option<&str>, name: &str) {
+        let s = self.scale;
+        self.canvas.layer(LAYER_PLATES);
+        if !self
+            .canvas
+            .frame(r.x, r.y, r.w, r.h, "portrait_frame", s, [1.0; 4])
+        {
+            self.canvas.rect(r.x, r.y, r.w, r.h, WELL);
+            self.outline(r, EDGE);
+        }
+        self.canvas.layer(LAYER_INK);
+        let inner = r.inset(6.0 * s);
+        let drawn = icon.is_some_and(|k| {
+            self.canvas
+                .icon(inner.x, inner.y, inner.w.min(inner.h), k, [1.0; 4])
+        });
+        if drawn && let Some(k) = icon {
+            self.note(SeenKind::Image, k, inner);
+        }
+        if !drawn {
+            let initial: String = name.chars().take(1).collect();
+            let tw = self.canvas.width_in(self.title_face, s, &initial);
+            let (lh, _) = self.canvas.metrics(self.title_face);
+            self.canvas.text_in(
+                self.title_face,
+                (r.x + (r.w - tw) * 0.5).round(),
+                (r.y + (r.h - lh * s) * 0.5).round(),
+                s,
+                FAINT,
+                &initial,
+            );
+        }
+    }
+
+    /// A bar in its frame, filled to `frac`, with `text` inside it.
+    #[allow(dead_code)]
+    pub fn bar(&mut self, r: Rect, frac: f32, fill: [f32; 4], text: &str) {
+        let s = self.scale;
+        self.canvas.layer(LAYER_PLATES);
+        let framed = self
+            .canvas
+            .frame(r.x, r.y, r.w, r.h, "bar_frame", s, [1.0; 4]);
+        let inner = if framed { r.inset(3.0 * s) } else { r.inset(s) };
+        if !framed {
+            self.canvas.rect(r.x, r.y, r.w, r.h, [0.0, 0.0, 0.0, 0.55]);
+        }
+        let w = (inner.w * frac.clamp(0.0, 1.0)).round();
+        if w > 0.0
+            && !self
+                .canvas
+                .image(inner.x, inner.y, w, inner.h, "bar_fill", fill)
+        {
+            self.canvas.rect(inner.x, inner.y, w, inner.h, fill);
+        }
+        self.canvas.layer(LAYER_INK);
+        if !text.is_empty() {
+            let tw = self.text_width(text);
+            self.ink(
+                (r.x + (r.w - tw) * 0.5).round(),
+                (r.y + (r.h - self.ascent()) * 0.5).round(),
+                TEXT,
+                text,
+            );
+            self.note(SeenKind::Label, text, r);
+        }
+    }
+
+    /// A rectangle a body is drawn into by the app (LOOK.md 5): a dark well now, the body
+    /// over it on layer 1; a drag across it turns the body.
+    pub fn paperdoll(&mut self, r: Rect) {
+        let s = self.scale;
+        let id = "paperdoll";
+        let (_, held, _) = self.clicked(id, r);
+        if held && self.input.down {
+            self.state.paperdoll_turn +=
+                (self.input.cursor.0 - self.input.last_cursor.0) / (120.0 * s);
+        }
+        self.canvas.layer(LAYER_PLATES);
+        if !self.canvas.frame(r.x, r.y, r.w, r.h, "well", s, [1.0; 4]) {
+            self.canvas.rect(r.x, r.y, r.w, r.h, WELL);
+            self.outline(r, EDGE);
+        }
+        self.canvas.layer(LAYER_INK);
+        self.state.paperdolls.push(Paperdoll {
+            rect: r.inset(2.0 * s),
+            turn: self.state.paperdoll_turn,
+        });
+        self.note(SeenKind::Label, "paperdoll", r);
     }
 
     /// End the frame: Tab moves the focus through what was drawn, and what was drawn is
     /// kept for scripts and tests.
     pub fn end(mut self) {
+        // The drag: live once the press has moved four dots; drawn over everything.
+        let mut shown_drag: Option<Drag> = None;
+        if let Some(d) = &mut self.state.drag {
+            if !self.input.down {
+                self.state.drag = None;
+            } else {
+                let moved =
+                    (self.input.cursor.0 - d.from.0).abs() + (self.input.cursor.1 - d.from.1).abs();
+                if moved >= 4.0 * self.scale {
+                    d.live = true;
+                }
+                if d.live {
+                    shown_drag = Some(d.clone());
+                }
+            }
+        }
+        if let Some(d) = shown_drag {
+            let side = 32.0 * self.scale;
+            let (x, y) = (
+                self.input.cursor.0 - side * 0.5,
+                self.input.cursor.1 - side * 0.5,
+            );
+            self.canvas.layer(LAYER_OVER);
+            let drawn = d
+                .icon
+                .as_deref()
+                .is_some_and(|k| self.canvas.icon(x, y, side, k, [1.0, 1.0, 1.0, 0.85]));
+            if !drawn {
+                self.canvas.rect(x, y, side, side, PICKED);
+                self.canvas.text_in(
+                    self.face,
+                    x + 2.0 * self.scale,
+                    y + 2.0 * self.scale,
+                    self.scale,
+                    TEXT,
+                    &d.name,
+                );
+            }
+            self.note(
+                SeenKind::Label,
+                &format!("dragging {}", d.name),
+                Rect::new(x, y, side, side),
+            );
+        }
+        if self.hovered.is_none() {
+            self.state.hover = None;
+        }
+        // The tooltip, beside the pointer and inside the frame.
+        if let Some((at, lines)) = self.tooltip.take() {
+            let s = self.scale;
+            let pad = 6.0 * s;
+            let line = self.line();
+            let w = lines
+                .iter()
+                .map(|(t, _)| self.text_width(t))
+                .fold(0.0, f32::max)
+                + 2.0 * pad;
+            let h = line * lines.len() as f32 + 2.0 * pad;
+            let (fw, fh) = self.size();
+            let x = (at.x + 16.0 * s).min(fw - w).max(0.0).round();
+            let y = (at.y + 16.0 * s).min(fh - h).max(0.0).round();
+            self.canvas.layer(LAYER_OVER);
+            if !self.canvas.frame(x, y, w, h, "tooltip", s, [1.0; 4]) {
+                self.canvas.rect(x, y, w, h, [0.04, 0.03, 0.03, 0.94]);
+                self.outline(Rect::new(x, y, w, h), EDGE);
+            }
+            for (i, (t, c)) in lines.iter().enumerate() {
+                self.canvas
+                    .text_in(self.face, x + pad, y + pad + line * i as f32, s, *c, t);
+            }
+            let whole: Vec<String> = lines.iter().map(|(t, _)| t.clone()).collect();
+            self.note(
+                SeenKind::Label,
+                &format!("tooltip: {}", whole.join(" / ")),
+                Rect::new(x, y, w, h),
+            );
+        }
+        self.canvas.layer(LAYER_INK);
+        self.state.drag_ended = None;
         let step = if self.key(Key::Tab) {
             1
         } else if self.key(Key::BackTab) {
@@ -1159,6 +2098,50 @@ fn first_shown(len: usize, caret: usize, room: usize) -> usize {
     } else {
         (caret + 1).saturating_sub(room).min(len - room)
     }
+}
+
+/// Text broken at spaces into lines no wider than `w` pixels as `measure` says; a word
+/// wider than a line is cut where it stops fitting.
+pub fn wrap_measured(text: &str, w: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let mut word = word.to_string();
+            loop {
+                let with = if line.is_empty() {
+                    word.clone()
+                } else {
+                    format!("{line} {word}")
+                };
+                if measure(&with) <= w {
+                    line = with;
+                    break;
+                }
+                if !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    continue;
+                }
+                // A word wider than a line: what fits, and the rest goes on.
+                let mut head = String::new();
+                for c in word.chars() {
+                    head.push(c);
+                    if measure(&head) > w && head.chars().count() > 1 {
+                        head.pop();
+                        break;
+                    }
+                }
+                let rest: String = word.chars().skip(head.chars().count()).collect();
+                lines.push(head);
+                if rest.is_empty() {
+                    break;
+                }
+                word = rest;
+            }
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 /// Text broken at spaces into lines of at most `width` characters; a word longer than a
@@ -1739,9 +2722,11 @@ pub mod tests {
         assert_eq!(scale_for((1280.0, 720.0), 300.0, 0), 2.0);
         assert_eq!(scale_for((1920.0, 1080.0), 300.0, 0), 3.0);
         assert_eq!(scale_for((3840.0, 2160.0), 300.0, 0), 4.0);
-        // Too low for the tallest panel at the scale its height would give: one less.
+        // Too low for the tallest panel (340 units since the inventory grew its grid and
+        // equip panel, LOOK.md 4) at the scale its height would give: one less.
         assert_eq!(scale_for((960.0, 540.0), 300.0, 0), 1.0);
-        assert_eq!(scale_for((1024.0, 600.0), 300.0, 0), 2.0);
+        assert_eq!(scale_for((1024.0, 600.0), 300.0, 0), 1.0);
+        assert_eq!(scale_for((1024.0, 760.0), 300.0, 0), 2.0);
         // A scale somebody chose gives way the same, in both directions.
         assert_eq!(scale_for((1920.0, 1080.0), 340.0, 1), 1.0);
         assert_eq!(scale_for((1920.0, 1080.0), 340.0, 4), 3.0);

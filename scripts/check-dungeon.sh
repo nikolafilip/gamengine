@@ -187,7 +187,7 @@ target/release/gm-bot "${leader[@]}" --zone dungeon --secs 420 --behaviour raid 
 raid_checks "$(plain "$tmp/run1.log" | grep '^raid ' | tail -1)" 0
 after1="$(plain "$tmp/run1.log" | grep '^character ' | tail -1)"
 echo "$after1"
-equal "$(field "$after1" coin)" 30 "copper in the inventory after the first kill"
+equal "$(field "$after1" coin)" 30 "silver in the inventory after the first kill"
 equal "$(field "$after1" items)" "[$DROP]" "components in the inventory"
 equal "$(field "$after1" trials)" "[warden_leader]" "trials on the character"
 zone_checks "$tmp/zone-1.log" 1
@@ -201,7 +201,7 @@ raid_checks "$(plain "$tmp/run2.log" | grep '^raid ' | tail -1)" 3
 after2="$(plain "$tmp/run2.log" | grep '^character ' | tail -1)"
 echo "$after2"
 equal "$(field "$after2" squad)" "[Avatar000,Avatar001,Avatar002]" "the squad, by name"
-equal "$(field "$after2" coin)" 30 "copper after three hires of $PRICE and a second kill"
+equal "$(field "$after2" coin)" 30 "silver after three hires of $PRICE and a second kill"
 equal "$(echo "$(field "$after2" items)" | tr ',' '\n' | wc -l)" 6 "components after two kills"
 
 # The trial opens the keep.

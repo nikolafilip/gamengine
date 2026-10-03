@@ -201,7 +201,7 @@ fn config(
         party_sweep: std::time::Duration::from_millis(300),
         party_away: std::time::Duration::from_secs(2),
         items: items.clone(),
-        max_coin_grant: 10_000,
+        max_coin_grant: 500,
         models_dir: std::env::temp_dir().join(format!("gm-hub-items-{}", std::process::id())),
         ingest: gm_hub::IngestMode::InProcess,
         ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
@@ -747,7 +747,7 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
             both += 1;
         }
         let latest = readings.iter().max_by_key(|r| r.seq).unwrap();
-        let (_, held) = direct.gear(smith, &items).await.unwrap();
+        let (_, held, _) = direct.gear(smith, &items).await.unwrap();
         assert_eq!(
             latest.gear, held,
             "round {round}: the readings {readings:?} against what the hub holds"

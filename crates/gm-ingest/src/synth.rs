@@ -272,3 +272,200 @@ pub fn template(frame: ArchetypeFrame) -> GlbBuilder {
     }
     GlbBuilder::new(mesh, png(side, side, img.as_raw()))
 }
+
+/// Flat-coloured props (CONTENT.md 7: the procedural source) for tests, for the stand-ins
+/// `gm-tools content` writes, and for the two weapons no CC0 pack had: boxes and
+/// cylinders in metres, glTF conventions (the business end along +Z, the grip at the
+/// origin), one primitive per part; the reader makes swatches of the colours.
+pub struct PropKit {
+    pub glb: crate::write::PropGlb,
+}
+
+impl PropKit {
+    pub fn new(materials: &[[f32; 4]]) -> PropKit {
+        PropKit {
+            glb: crate::write::PropGlb {
+                positions: Vec::new(),
+                normals: Vec::new(),
+                uvs: Vec::new(),
+                colours: None,
+                primitives: Vec::new(),
+                indices: Vec::new(),
+                materials: materials.iter().map(|m| (*m, false)).collect(),
+                image: None,
+                node_translation: [0.0; 3],
+            },
+        }
+    }
+
+    fn quad(&mut self, corners: [[f32; 3]; 4], normal: [f32; 3]) {
+        let g = &mut self.glb;
+        let base = g.positions.len() as u32;
+        for c in corners {
+            g.positions.push(c);
+            g.normals.push(normal);
+        }
+        g.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    /// A box from `lo` to `hi`, as one primitive of `material`.
+    pub fn cuboid(&mut self, lo: [f32; 3], hi: [f32; 3], material: usize) {
+        let first = self.glb.indices.len();
+        let faces: [([f32; 3], [usize; 4]); 6] = [
+            ([1.0, 0.0, 0.0], [1, 3, 7, 5]),
+            ([-1.0, 0.0, 0.0], [0, 4, 6, 2]),
+            ([0.0, 1.0, 0.0], [2, 6, 7, 3]),
+            ([0.0, -1.0, 0.0], [0, 1, 5, 4]),
+            ([0.0, 0.0, 1.0], [4, 5, 7, 6]),
+            ([0.0, 0.0, -1.0], [0, 2, 3, 1]),
+        ];
+        let corner = |i: usize| -> [f32; 3] {
+            [
+                if i & 1 != 0 { hi[0] } else { lo[0] },
+                if i & 2 != 0 { hi[1] } else { lo[1] },
+                if i & 4 != 0 { hi[2] } else { lo[2] },
+            ]
+        };
+        for (normal, q) in faces {
+            self.quad(
+                [corner(q[0]), corner(q[1]), corner(q[2]), corner(q[3])],
+                normal,
+            );
+        }
+        let n = self.glb.indices.len() - first;
+        self.glb.primitives.push((first, n, material));
+    }
+
+    /// A cylinder along `axis` (0 x, 1 y, 2 z) from `z0` to `z1` of radius `r`, with
+    /// `sides` flat faces and closed ends, as one primitive.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cylinder(
+        &mut self,
+        axis: usize,
+        centre: [f32; 2],
+        z0: f32,
+        z1: f32,
+        r: f32,
+        sides: usize,
+        material: usize,
+    ) {
+        let first = self.glb.indices.len();
+        let at = |a: f32, t: f32| -> [f32; 3] {
+            // `a` along the axis, `t` around it.
+            let (c, s) = (gm_model::det::cos(t) * r, gm_model::det::sin(t) * r);
+            match axis {
+                0 => [a, centre[0] + c, centre[1] + s],
+                1 => [centre[1] + s, a, centre[0] + c],
+                _ => [centre[0] + c, centre[1] + s, a],
+            }
+        };
+        let dir = |t: f32| -> [f32; 3] {
+            let (c, s) = (gm_model::det::cos(t), gm_model::det::sin(t));
+            match axis {
+                0 => [0.0, c, s],
+                1 => [s, 0.0, c],
+                _ => [c, s, 0.0],
+            }
+        };
+        let axis_dir = |sign: f32| -> [f32; 3] {
+            let mut d = [0.0; 3];
+            d[axis] = sign;
+            d
+        };
+        let step = std::f32::consts::TAU / sides as f32;
+        for i in 0..sides {
+            let (t0, t1) = (i as f32 * step, (i as f32 + 1.0) * step);
+            let n = dir((t0 + t1) * 0.5);
+            self.quad([at(z0, t0), at(z1, t0), at(z1, t1), at(z0, t1)], n);
+            // The ends, as fans of quads to the axis.
+            let (c0, c1) = (at(z0, 0.0), at(z1, 0.0));
+            let mut c0 = c0;
+            let mut c1 = c1;
+            for k in 0..3 {
+                if k != axis {
+                    c0[k] = if axis == 0 {
+                        [0.0, centre[0], centre[1]][k]
+                    } else if axis == 1 {
+                        [centre[1], 0.0, centre[0]][k]
+                    } else {
+                        [centre[0], centre[1], 0.0][k]
+                    };
+                    c1[k] = c0[k];
+                }
+            }
+            self.quad([c0, at(z0, t1), at(z0, t0), c0], axis_dir(-1.0));
+            self.quad([c1, at(z1, t0), at(z1, t1), c1], axis_dir(1.0));
+        }
+        let n = self.glb.indices.len() - first;
+        self.glb.primitives.push((first, n, material));
+    }
+}
+
+/// A sword: a blade along +Z from the grip at the origin, a guard along ±X, a grip towards
+/// −Z, in metres; flat colours, no texture, one primitive per part.
+pub fn sword_prop(length_m: f32) -> crate::write::PropGlb {
+    let mut k = PropKit::new(&[
+        [0.75, 0.76, 0.80, 1.0], // steel
+        [0.55, 0.42, 0.18, 1.0], // brass guard
+        [0.30, 0.18, 0.10, 1.0], // leather grip
+    ]);
+    let blade = length_m.max(0.2);
+    k.cuboid([-0.02, -0.004, 0.08], [0.02, 0.004, blade], 0);
+    k.cuboid([-0.08, -0.008, 0.05], [0.08, 0.008, 0.08], 1);
+    k.cuboid([-0.014, -0.014, -0.12], [0.014, 0.014, 0.05], 2);
+    k.cuboid([-0.02, -0.02, -0.15], [0.02, 0.02, -0.12], 1);
+    k.glb
+}
+
+/// A war hammer: an iron head across the top of a long haft, the grip at the origin.
+pub fn hammer_prop() -> crate::write::PropGlb {
+    let mut k = PropKit::new(&[
+        [0.36, 0.36, 0.40, 1.0], // iron
+        [0.42, 0.28, 0.14, 1.0], // ash haft
+        [0.30, 0.18, 0.10, 1.0], // leather wrap
+        [0.55, 0.42, 0.18, 1.0], // brass bands
+    ]);
+    k.cylinder(2, [0.0, 0.0], -0.18, 0.62, 0.016, 8, 1);
+    k.cylinder(2, [0.0, 0.0], -0.16, 0.06, 0.019, 8, 2);
+    k.cuboid([-0.11, -0.035, 0.58], [0.07, 0.035, 0.66], 0);
+    // The face is a little wider than the neck; a spike behind.
+    k.cuboid([-0.14, -0.045, 0.57], [-0.11, 0.045, 0.67], 0);
+    k.cuboid([0.07, -0.012, 0.605], [0.16, 0.012, 0.635], 0);
+    k.cylinder(2, [0.0, 0.0], 0.55, 0.58, 0.024, 8, 3);
+    k.cylinder(2, [0.0, 0.0], 0.66, 0.70, 0.02, 8, 0);
+    k.glb
+}
+
+/// A musket: a long barrel along +Z over a walnut stock, the lock and the trigger guard
+/// under the hand at the origin, in metres.
+pub fn musket_prop() -> crate::write::PropGlb {
+    let mut k = PropKit::new(&[
+        [0.30, 0.30, 0.34, 1.0], // barrel, blued
+        [0.36, 0.22, 0.12, 1.0], // walnut stock
+        [0.60, 0.48, 0.22, 1.0], // brass furniture
+        [0.20, 0.20, 0.22, 1.0], // the lock, dark
+    ]);
+    // The barrel: from the lock forward.
+    k.cylinder(2, [0.0, 0.03], -0.02, 1.05, 0.013, 8, 0);
+    // The fore-stock under the barrel, tapering towards the muzzle.
+    k.cuboid([-0.018, -0.005, -0.02], [0.018, 0.03, 0.72], 1);
+    k.cuboid([-0.014, 0.0, 0.72], [0.014, 0.028, 0.95], 1);
+    // The wrist behind the hand and the butt dropping back.
+    k.cuboid([-0.016, -0.02, -0.14], [0.016, 0.03, -0.02], 1);
+    k.cuboid([-0.02, -0.09, -0.40], [0.02, 0.0, -0.14], 1);
+    k.cuboid([-0.02, 0.0, -0.40], [0.02, 0.03, -0.16], 1);
+    // The butt plate, the lock plate and the trigger guard.
+    k.cuboid([-0.021, -0.095, -0.41], [0.021, 0.03, -0.40], 2);
+    k.cuboid([0.016, -0.01, -0.06], [0.022, 0.025, 0.08], 3);
+    k.cuboid([0.018, 0.02, -0.03], [0.03, 0.05, 0.0], 3); // the cock
+    k.cuboid([-0.006, -0.03, -0.05], [0.006, -0.02, 0.03], 2);
+    k.cuboid([-0.006, -0.03, -0.05], [0.006, -0.005, -0.045], 2);
+    k.cuboid([-0.006, -0.03, 0.025], [0.006, -0.005, 0.03], 2);
+    // The ramrod under the barrel, and brass bands.
+    k.cylinder(2, [0.0, -0.012], 0.0, 0.9, 0.004, 6, 2);
+    for z in [0.25f32, 0.55, 0.85] {
+        k.cuboid([-0.02, -0.008, z], [0.02, 0.046, z + 0.02], 2);
+    }
+    k.glb
+}

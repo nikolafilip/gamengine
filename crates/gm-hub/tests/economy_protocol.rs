@@ -152,7 +152,7 @@ async fn the_economy_over_the_wire() {
             party_sweep: std::time::Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: items.clone(),
-            max_coin_grant: 10_000,
+            max_coin_grant: 10_000, // this test grants 900 at once: the cap is a knob, the production default is 500 (ECONOMY.md 12)
             models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
             ingest: gm_hub::IngestMode::InProcess,
             ingest_timeout: gm_hub::models::INGEST_TIMEOUT,
@@ -626,7 +626,7 @@ async fn the_economy_over_the_wire() {
         Err(HubError::Invalid(_))
     ));
 
-    // Every copper is accounted for: 900 and the two purses of the kill created, nothing
+    // Every silver is accounted for: 900 and the two purses of the kill created, nothing
     // burned, all of it in circulation.
     let e = Economy::new(db.pool().clone());
     assert_eq!(e.audit().await.unwrap(), 0);

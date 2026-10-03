@@ -20,11 +20,11 @@ use gm_hub_proto::protocol::{
 use gm_net::control::FromClient;
 use web_time::{Duration, Instant};
 
-use crate::bag::{coin_fields, coin_parts, coin_row, copper_of, headline, keep, name};
+use crate::bag::{coin_fields, coin_parts, coin_row, headline, keep, name, silver_of};
 use crate::font::ADVANCE;
 use crate::front::PANEL_UNITS;
 use crate::hub::{Answer, HubApi, Pending, RpcError};
-use crate::ui::{self, Canvas, Column, Key, NONE, Rect, RowMark, Ui};
+use crate::ui::{self, Canvas, Column, Key, NONE, Rect, RowMark, SlotMark, SlotThing, Ui};
 
 /// The zone takes one request about the party from a player in a second.
 const ZONE_GAP: Duration = Duration::from_millis(1100);
@@ -212,7 +212,7 @@ struct Trade {
     picked: [usize; 3],
     /// The list a row was last picked in: what the line under the lists tells of.
     told: usize,
-    coin: [String; 3],
+    coin: [String; 2],
     /// How it ended, when it has.
     over: Option<&'static str>,
 }
@@ -225,7 +225,7 @@ struct Tavern {
     listed: Option<i64>,
     picked: usize,
     hired: usize,
-    price: [String; 3],
+    price: [String; 2],
 }
 
 pub struct People {
@@ -361,6 +361,7 @@ impl People {
     /// zone last said to this player, a moment ago (its answer to this page's buttons).
     /// `unix`: the wall clock, in seconds.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub fn frame<C: Canvas>(
         &mut self,
         ui: &mut Ui<'_, C>,
@@ -372,11 +373,38 @@ impl People {
         now: Instant,
         unix: u64,
     ) -> PeopleAction {
+        self.frame_with(
+            ui,
+            hub,
+            me,
+            social,
+            here,
+            word,
+            now,
+            unix,
+            crate::bag::ItemLooks::default(),
+        )
+    }
+
+    /// The same, with the bundle's pictures (LOOK.md 4).
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame_with<C: Canvas>(
+        &mut self,
+        ui: &mut Ui<'_, C>,
+        hub: Option<&dyn HubApi>,
+        me: &str,
+        social: &mut Social,
+        here: &[Here],
+        word: Option<&str>,
+        now: Instant,
+        unix: u64,
+        looks: crate::bag::ItemLooks<'_>,
+    ) -> PeopleAction {
         self.now = now;
         social.forget(now);
         let action = match (self.page, hub) {
             (Page::People, _) => self.people_page(ui, hub, me, social, here, word),
-            (Page::Trade, Some(hub)) => self.trade_page(ui, hub),
+            (Page::Trade, Some(hub)) => self.trade_page(ui, hub, looks),
             (Page::Tavern, Some(hub)) => self.tavern_page(ui, hub, unix),
             (_, None) => PeopleAction::Close,
         };
@@ -589,7 +617,12 @@ impl People {
 
     // ---------- a trade ----------
 
-    fn trade_page<C: Canvas>(&mut self, ui: &mut Ui<'_, C>, hub: &dyn HubApi) -> PeopleAction {
+    fn trade_page<C: Canvas>(
+        &mut self,
+        ui: &mut Ui<'_, C>,
+        hub: &dyn HubApi,
+        looks: crate::bag::ItemLooks<'_>,
+    ) -> PeopleAction {
         let now = self.now;
         let busy = self.busy();
         let Some(t) = &mut self.trade else {
@@ -613,21 +646,22 @@ impl People {
         let gap = 5.0 * s;
         let line = ui.line();
         let h = ui.button_height();
-        // The two offers one above the other, each as wide as the panel: a row has room
-        // for the longest name, what the thing does and its mark. The other's is the one
-        // that is read, and gets the rows.
-        let mine_h = ui.list_height(2);
-        let theirs_h = ui.list_height(4);
-        let carried = ui.list_height(3);
+        let side = ui.slot_side();
+        // The two offers one above the other as grids of six (LOOK.md 4), each with its
+        // coin on its header line; under them what is carried, to offer from, two rows of
+        // six; a drag from the carried into the offer offers, and back takes back.
+        let cols = 6usize;
+        let offer_h = side;
+        let carried_h = 2.0 * side + 2.0 * s;
         let inner = line
             + gap
-            + mine_h
+            + offer_h
             + gap
             + line
             + gap
-            + theirs_h
+            + offer_h
             + gap
-            + carried
+            + carried_h
             + gap
             + ui.field_height()
             + gap
@@ -643,16 +677,40 @@ impl People {
             Some(shown) => (shown.mine.clone(), shown.theirs.clone()),
             None => (nothing_offered(), nothing_offered()),
         };
-        // A header says whose offer it is and whether they have accepted it as it stands.
-        let header = |ui: &mut Ui<'_, C>, r: Rect, whose: &str, accepted: bool| {
-            ui.label(r.x, r.y, r.w, ui::FAINT, whose);
+        // A header says whose offer it is, its coin (with its mark), and whether they have
+        // accepted it as it stands.
+        let header = |ui: &mut Ui<'_, C>, r: Rect, whose: &str, coin_said: &str, accepted: bool| {
+            let gap = 8.0 * ui.scale;
+            let acc_w = if accepted {
+                ui.text_width("accepted") + gap
+            } else {
+                0.0
+            };
+            let coin_w = ui.text_width(coin_said);
+            let whose_w = (r.w - coin_w - acc_w - gap).max(0.0);
+            // A name too long for the room beside the coin is shortened on purpose (a
+            // cut would be a clip): `Abcdefghijklmn.. gives`.
+            let mut shown = whose.to_string();
+            while ui.text_width(&shown) > whose_w && shown.len() > 8 {
+                let (head, tail) = shown.split_once(' ').unwrap_or((&shown, ""));
+                let head = head.trim_end_matches('.');
+                let mut chars: Vec<char> = head.chars().collect();
+                if chars.len() <= 3 {
+                    break;
+                }
+                chars.truncate(chars.len() - 1);
+                let head: String = chars.into_iter().collect();
+                shown = format!("{head}.. {tail}");
+            }
+            ui.label(r.x, r.y, whose_w, ui::FAINT, &shown);
+            ui.label(r.x + r.w - acc_w - coin_w, r.y, coin_w, ui::TEXT, coin_said);
             if accepted {
                 let w = ui.text_width("accepted");
                 ui.label(r.x + r.w - w, r.y, w, ui::TEXT, "accepted");
             }
         };
-        // What a row says of a thing: its name, what it does and (for gear) how much of
-        // it is left; the coin is a row like any other.
+        // What a cell says of a thing: its name, what it does and (for gear) how much of
+        // it is left, and its mark; the coin is said on the header.
         let said_of = |i: &ItemSummary| -> String {
             let left = i.what.rsplit_once(", ").map(|(_, rest)| rest);
             match (i.does.first(), left) {
@@ -660,23 +718,55 @@ impl People {
                 _ => headline(i).to_string(),
             }
         };
-        let coin_row_of = |coin: i64| vec!["coin".to_string(), coin_row(coin, 27)];
+        let thing_of = |i: &ItemSummary, word: &str, mark: Option<SlotMark>, off: bool| SlotThing {
+            id: i.id,
+            name: name(i),
+            said: if word.is_empty() {
+                format!("{}  {}", name(i), said_of(i))
+            } else {
+                format!("{}  {}  {word}", name(i), said_of(i))
+            },
+            icon: looks.icon(i),
+            mark,
+            off,
+            fixed: off,
+            ..Default::default()
+        };
+        let tip =
+            |i: &ItemSummary| -> Vec<(String, [f32; 4])> { crate::bag::tooltip_lines(i, None) };
 
-        header(ui, col.take(line), "you give", mine.accepted);
-        let mut mine_rows: Vec<Vec<String>> = mine
+        let mine_coin = format!("coin  {}", coin_row(mine.coin, 27));
+        header(ui, col.take(line), "you give", &mine_coin, mine.accepted);
+        let mine_things: Vec<SlotThing> = mine
             .items
             .iter()
-            .map(|i| vec![name(i), said_of(i)])
+            .map(|i| thing_of(i, "", None, false))
             .collect();
-        mine_rows.push(coin_row_of(mine.coin));
         let before = t.picked;
-        ui.list(
-            col.take(mine_h),
+        let mut sel0 = mine.items.get(t.picked[0]).map(|i| i.id);
+        let mine_items = mine.items.clone();
+        let tip0 = |th: &SlotThing| {
+            mine_items
+                .iter()
+                .find(|i| i.id == th.id)
+                .map(tip)
+                .unwrap_or_default()
+        };
+        ui.grid(
+            col.take(offer_h),
             "yours",
-            &[0.0, 0.24],
-            &mine_rows,
-            &mut t.picked[0],
+            cols,
+            cols,
+            &mine_things,
+            &mut sel0,
+            0.0,
+            &tip0,
         );
+        if !mine.items.is_empty() {
+            t.picked[0] = sel0
+                .and_then(|id| mine.items.iter().position(|i| i.id == id))
+                .unwrap_or(NONE);
+        }
 
         // The other's offer, and what of it this player has not agreed to: what was not
         // there when they last accepted is marked `new`, or `changed` when it was not
@@ -696,25 +786,34 @@ impl People {
             }
         };
         let gives = format!("{} gives", t.with);
-        header(ui, col.take(line), &gives, theirs.accepted);
-        let mut their_rows: Vec<Vec<String>> = Vec::new();
+        let mut their_things: Vec<SlotThing> = Vec::new();
         let mut marks: Vec<RowMark> = Vec::new();
+        let mut their_rows: Vec<Vec<String>> = Vec::new();
         for item in &theirs.items {
             let known = t.agreed.items.iter().any(|a| a.id == item.id);
             let seen = looked.map(|l| l.items.iter().any(|a| a.id == item.id));
             let (word, mark) = word_for(known, seen);
+            let slot_mark = (mark == RowMark::Marked).then_some(SlotMark::New);
+            their_things.push(thing_of(item, word, slot_mark, true));
             their_rows.push(vec![name(item), said_of(item), word.to_string()]);
             marks.push(mark);
         }
-        {
+        let their_coin = {
             let known = theirs.coin == t.agreed.coin;
             let seen = looked.map(|l| l.coin == theirs.coin);
             let (word, mark) = word_for(known, seen);
-            let mut row = coin_row_of(theirs.coin);
-            row.push(word.to_string());
-            their_rows.push(row);
+            their_rows.push(vec![
+                "coin".into(),
+                coin_row(theirs.coin, 27),
+                word.to_string(),
+            ]);
             marks.push(mark);
-        }
+            if word.is_empty() {
+                format!("coin  {}", coin_row(theirs.coin, 27))
+            } else {
+                format!("coin  {}  {word}", coin_row(theirs.coin, 27))
+            }
+        };
         // Gone since it was agreed to, or since it was looked at: struck.
         let mut gone: Vec<&ItemSummary> = Vec::new();
         for was in t
@@ -729,21 +828,44 @@ impl People {
             }
         }
         for item in &gone {
+            their_things.push(thing_of(item, "taken back", Some(SlotMark::Taken), true));
             their_rows.push(vec![name(item), said_of(item), "taken back".to_string()]);
             marks.push(RowMark::Struck);
         }
-        ui.list_marked(
-            col.take(theirs_h),
+        header(ui, col.take(line), &gives, &their_coin, theirs.accepted);
+        let mut sel1 = theirs.items.get(t.picked[1]).map(|i| i.id);
+        let their_items: Vec<ItemSummary> = theirs
+            .items
+            .iter()
+            .cloned()
+            .chain(gone.iter().map(|i| (*i).clone()))
+            .collect();
+        let tip1 = |th: &SlotThing| {
+            their_items
+                .iter()
+                .find(|i| i.id == th.id)
+                .map(tip)
+                .unwrap_or_default()
+        };
+        ui.grid(
+            col.take(offer_h),
             "theirs",
-            &[0.0, 0.24, 0.78],
-            &their_rows,
-            &marks,
-            &mut t.picked[1],
+            cols,
+            cols,
+            &their_things,
+            &mut sel1,
+            0.0,
+            &tip1,
         );
+        if !theirs.items.is_empty() {
+            t.picked[1] = sel1
+                .and_then(|id| theirs.items.iter().position(|i| i.id == id))
+                .unwrap_or(NONE);
+        }
 
-        // What is carried, to offer from.
+        // What is carried, to offer from: what is worn or already offered is dim.
         let items: Vec<ItemSummary> = t.inventory.clone().unwrap_or_default();
-        let carried_rows: Vec<Vec<String>> = items
+        let carried_things: Vec<SlotThing> = items
             .iter()
             .map(|i| {
                 let note = if i.worn {
@@ -753,17 +875,43 @@ impl People {
                 } else {
                     ""
                 };
-                vec![name(i), said_of(i), note.to_string()]
+                let mut th = thing_of(i, note, i.worn.then_some(SlotMark::Worn), !note.is_empty());
+                th.worn = i.worn;
+                th
             })
             .collect();
-        ui.focus_default("list", "carried");
-        ui.list(
-            col.take(carried),
+        let mut sel2 = items.get(t.picked[2]).map(|i| i.id);
+        let tip2 = |th: &SlotThing| {
+            items
+                .iter()
+                .find(|i| i.id == th.id)
+                .map(tip)
+                .unwrap_or_default()
+        };
+        ui.grid(
+            col.take(carried_h),
             "carried",
-            &[0.0, 0.24, 0.84],
-            &carried_rows,
-            &mut t.picked[2],
+            cols,
+            2 * cols,
+            &carried_things,
+            &mut sel2,
+            0.0,
+            &tip2,
         );
+        if !items.is_empty() {
+            t.picked[2] = sel2
+                .and_then(|id| items.iter().position(|i| i.id == id))
+                .unwrap_or(NONE);
+        }
+        // A drag from the carried onto the offer, or from the offer into the carried.
+        let dropped_to_offer = ui
+            .dropped("yours")
+            .filter(|(from, _)| from == "carried")
+            .map(|(_, id)| id);
+        let dropped_to_retract = ui
+            .dropped("carried")
+            .filter(|(from, _)| from == "yours")
+            .map(|(_, id)| id);
         for (list, was) in before.iter().enumerate() {
             if t.picked[list] != *was && t.picked[list] != NONE {
                 t.told = list;
@@ -772,12 +920,12 @@ impl People {
         let picked = t.picked;
 
         let fields = col.take(ui.field_height());
-        // The three fields, and at the end of their row the button that sends them.
+        // The two fields, and at the end of their row the button that sends them.
         let wide = ui.text_width("Set coin") + 12.0 * s;
         let set = Rect::new(fields.x + fields.w - wide, fields.y + fields.h - h, wide, h);
         let room = Rect::new(fields.x, fields.y, fields.w - wide - gap, fields.h);
         coin_fields(ui, room, gap, &mut t.coin);
-        let coin = copper_of(&t.coin);
+        let coin = silver_of(&t.coin);
 
         // What is said: how it ended; that the other is gone; the hub's last word (about
         // this version); that they changed the offer since it was looked at; how long
@@ -852,14 +1000,23 @@ impl People {
             .map(|i| i.id);
         let offered = mine.items.get(picked[0]).map(|i| i.id);
         let mut op: Option<(What, PlayerEcon)> = None;
-        if ui.button_if(row[0], "Offer", may && loose.is_some())
-            && let Some(item) = loose
+        let offer_by_drag = dropped_to_offer
+            .filter(|id| items.iter().any(|i| i.id == *id && !i.worn))
+            .filter(|id| !mine.items.iter().any(|o| o.id == *id));
+        let offer_pressed = ui.button_if(row[0], "Offer", may && loose.is_some());
+        if let Some(item) = offer_by_drag
+            .filter(|_| may)
+            .or(loose.filter(|_| offer_pressed))
         {
             let change = PlayerEcon::TradeOffer { trade: id, item };
             op = Some((What::Change("offered"), change));
         }
-        if ui.button_if(row[1], "Take back", may && offered.is_some())
-            && let Some(item) = offered
+        let retract_by_drag =
+            dropped_to_retract.filter(|id| mine.items.iter().any(|o| o.id == *id));
+        let retract_pressed = ui.button_if(row[1], "Take back", may && offered.is_some());
+        if let Some(item) = retract_by_drag
+            .filter(|_| may)
+            .or(offered.filter(|_| retract_pressed))
         {
             let change = PlayerEcon::TradeRetract { trade: id, item };
             op = Some((What::Change("taken back"), change));
@@ -1011,7 +1168,7 @@ impl People {
         }
         let fields = col.take(ui.field_height());
         coin_fields(ui, fields, gap, &mut t.price);
-        let price = copper_of(&t.price).filter(|p| *p > 0);
+        let price = silver_of(&t.price).filter(|p| *p > 0);
         let listed = t.listed;
         let known = t.list.is_some();
         let ready = !self.busy() && known;
@@ -1749,7 +1906,7 @@ mod tests {
         assert!(run.shows("sword  slash +2.0%, 250 of 250"));
         assert!(run.shows("iron  a core, for crafting"));
         // The coin is a row of each offer.
-        assert!(run.shows("coin  0 c"));
+        assert!(run.shows("coin  0 s"));
         // It is asked for once a second while the window is up, not every frame.
         let before = hub.looks();
         run.pass(&mut p, Some(&hub), 4.0);
@@ -1804,13 +1961,7 @@ mod tests {
         run.click(&mut p, "silver", Some(&hub));
         run.typed(&mut p, "50", Some(&hub));
         run.click(&mut p, "Set coin", Some(&hub));
-        assert_eq!(
-            hub.last(),
-            PlayerEcon::TradeCoin {
-                trade: 7,
-                coin: 5000
-            }
-        );
+        assert_eq!(hub.last(), PlayerEcon::TradeCoin { trade: 7, coin: 50 });
         // The hub's word on this player's own change stays through the version it made;
         // the other's next change clears it (the word was about the offer before).
         run.pass(&mut p, Some(&hub), 1.5);
@@ -1853,7 +2004,7 @@ mod tests {
         assert!(run.shows("sword  slash +11.0%, 250 of 250  taken back"));
         assert!(run.shows("Bojan changed the offer"));
         // The coin too: a row, marked like the rest.
-        hub.they_offer(vec![item(9, "sword", "slash +2.0%")], 300);
+        hub.they_offer(vec![item(9, "sword", "slash +2.0%")], 3);
         hub.0.borrow_mut().wait_ms = 0;
         run.pass(&mut p, Some(&hub), 1.0);
         assert!(run.shows("coin  3 s  changed"), "{:?}", run.said());
@@ -1923,15 +2074,8 @@ mod tests {
         };
         let hub = Hub(RefCell::new(Desk {
             for_hire: vec![
-                row(
-                    11,
-                    "Aldric",
-                    "ironclad: colossus in plate",
-                    "tank",
-                    12_000,
-                    0,
-                ),
-                row(12, "Mirela", "mender: caster in cloth", "heal", 9_500, 4),
+                row(11, "Aldric", "ironclad: colossus in plate", "tank", 120, 0),
+                row(12, "Mirela", "mender: caster in cloth", "heal", 95, 4),
             ],
             ..Desk::default()
         }));
@@ -1954,16 +2098,16 @@ mod tests {
             hub.last(),
             PlayerEcon::Hire {
                 avatar: 11,
-                price: 12_000
+                price: 120
             }
         );
         assert!(run.shows("hired: it joins your squad at the next zone you enter"));
         assert!(run.shows("Aldric  tank  12 h 0 min"));
         // The price is another by the time of the click: nothing is hired, and it is said.
-        hub.0.borrow_mut().for_hire[1].price = 99_000;
+        hub.0.borrow_mut().for_hire[1].price = 990;
         run.click(&mut p, "Mirela", Some(&hub));
         // (The screen still shows the price it was told.)
-        hub.0.borrow_mut().for_hire[1].price = 120_000;
+        hub.0.borrow_mut().for_hire[1].price = 1_200;
         run.click(&mut p, "Hire", Some(&hub));
         assert!(
             run.shows("the price changed: look again"),
@@ -1976,7 +2120,7 @@ mod tests {
                 op,
                 PlayerEcon::Hire {
                     avatar: 12,
-                    price: 9_500
+                    price: 95
                 }
             )),
             "{:?}",
@@ -1988,11 +2132,11 @@ mod tests {
         run.click(&mut p, "Dismiss", Some(&hub));
         assert_eq!(hub.last(), PlayerEcon::Dismiss { hire: 911 });
         assert!(run.shows("sent away"));
-        // This character is listed at a price named in three fields, and taken off.
+        // This character is listed at a price named in two fields, and taken off.
         run.click(&mut p, "gold", Some(&hub));
         run.typed(&mut p, "2", Some(&hub));
         run.click(&mut p, "List", Some(&hub));
-        assert_eq!(hub.last(), PlayerEcon::HireList { price: 20_000 });
+        assert_eq!(hub.last(), PlayerEcon::HireList { price: 200 });
         assert!(run.shows("this character is for hire at"));
         run.click(&mut p, "Withdraw", Some(&hub));
         assert_eq!(hub.last(), PlayerEcon::HireUnlist);
@@ -2010,7 +2154,7 @@ mod tests {
         // dearest price there is.
         let long = "Žanamarija Škrinjarić";
         let longest_name = "Abcdefghijklmnopqrstuvwx";
-        let dearest = 1_000_000_000_000;
+        let dearest = 10_000_000_000;
         let mut thunderstone = item(2, "", "");
         thunderstone.components = vec![("catalyst".into(), "catalyst/thunderstone".into())];
         thunderstone.what = "a catalyst, for crafting".into();

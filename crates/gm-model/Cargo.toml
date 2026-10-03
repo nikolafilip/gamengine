@@ -8,6 +8,7 @@ license = "GPL-3.0-or-later"
 description = "gamengine avatar models: the standard rig, the ingested .gmm container, poses, the shared animation set and the mannequin."
 
 [dependencies]
+bitcode = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 gm-core = { workspace = true }

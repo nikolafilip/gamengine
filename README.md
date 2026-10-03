@@ -27,15 +27,19 @@ crates/gm-model     avatar models: the standard rig, the .gmm container, the sha
 crates/gm-ingest    model ingestion: a glTF upload validated against budgets and the frame envelope, re-encoded.
 crates/gm-replay    replays: the .gmr file a zone records, its playback, the aim statistics computed from its frames.
 crates/gm-ai        minds: companions, creatures, the nav grid, encounters with their ledger, loot split and trial verdicts.
-crates/gm-tools     CLI: map build and generators, WAD generation, budget lint, model and moderation tools.
+crates/gm-tools     CLI: map build and generators, WAD generation, budget lint, model and moderation tools, the
+                    content pipeline (gm-tools content check|build|report|import, docs/CONTENT.md 5).
 crates/gm-bot       headless bots: the client's prediction code with scripted behaviour, for tests and load.
 assets/maps/src     TrenchBroom .map sources and gamengine.fgd (test_room, the 8v8 arena, the town, the tutorial dungeon)
 assets/maps/built   compiled .bsp (+ .lit colored lightmaps)
 assets/textures     generated palette and WAD (gm-tools wad make)
-assets/content      abilities, preset builds, creatures, trials and items (TOML), the v1 content
+assets/content      abilities, preset builds, creatures, trials and items (TOML) with their looks: prop
+                    models (models/props, CC0 and ours), icons, the skin and two fonts (ui/), LICENSES.md
+assets/built/content  the bundle the client loads (manifest.gmc, ui.gma, props/*.gmm), written by
+                    gm-tools content build and verified byte for byte by scripts/check-look.sh
 web/                the browser client's page and loader (index.html, boot.js)
 docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md, WEB.md,
-                    ANTICHEAT.md, CLIENT.md, ITEMS.md, BUILDING.md
+                    ANTICHEAT.md, CLIENT.md, ITEMS.md, PARTY.md, SOUND.md, CONTENT.md, LOOK.md, BUILDING.md
 ci/baselines        binary-size baseline for the regression gate
 scripts/            CI gates and tool fetching
 budgets.toml        every number CI enforces

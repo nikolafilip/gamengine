@@ -10,35 +10,57 @@
 # counts for its element; shard, frame and gems count for the kinds the core and the
 # catalyst reach and for no other. An item is for one build and not for another.
 
+# Looks (CONTENT.md 3): `model` is the prop drawn in the hand of whoever wears one
+# (models/props/<model>.glb), fitted into hand space by `fit` (metres, degrees about glTF's
+# X, Y, Z in that order, a scale: the grip ends at the origin, the business end along +Z);
+# `fit_view` is where the first-person view model sits (LOOK.md 6.4). An icon is baked
+# from the model unless icons/<icon>.png is given.
+
 [[template]]
 id = "sword"
 kind = "weapon"
 strikes = "slash"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
+model = "sword"
+fit = { turn = [90, 0, 0], scale = 0.6 }
 
 [[template]]
 id = "dagger"
 kind = "weapon"
 strikes = "slash"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
+model = "dagger"
+fit = { turn = [90, 0, 0], scale = 0.55 }
 
 [[template]]
 id = "hammer"
 kind = "weapon"
 strikes = "blunt"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
+model = "hammer"
 
 [[template]]
 id = "staff"
 kind = "weapon"
 strikes = "blunt"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
+model = "staff"
+fit = { move = [0.0, 0.0, 0.3], turn = [90, 0, 0], scale = 0.6 }
 
 [[template]]
 id = "crossbow"
 kind = "weapon"
 strikes = "pierce"
 layers = ["shard", "core", "frame", "gem"]
+model = "crossbow"
+fit = { scale = 0.7 }
+
+[[template]]
+id = "musket"
+kind = "weapon"
+strikes = "pierce"
+layers = ["shard", "core", "frame", "gem"]
+model = "musket"
 
 [[template]]
 id = "cuirass"
@@ -57,6 +79,7 @@ layers = ["shard", "core", "catalyst", "frame", "gem"]
 id = "core/tin"
 edge = 10
 note = "light, soft"
+tint = [0.80, 0.82, 0.78]
 
 [[material]]
 id = "core/iron"
@@ -67,6 +90,7 @@ note = "the standard"
 id = "core/dragonbone"
 edge = 60
 note = "light and hard; boss core"
+tint = [0.92, 0.88, 0.76]
 
 # Frames: speed, stamina, crit.
 [[material]]

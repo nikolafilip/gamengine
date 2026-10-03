@@ -119,7 +119,7 @@ async fn statistics_replays_reports_reputation_and_bans() {
             party_sweep: std::time::Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: Default::default(),
-            max_coin_grant: 10_000,
+            max_coin_grant: 500,
             models_dir: scratch.join("models"),
             ingest: gm_hub::IngestMode::InProcess,
             ingest_timeout: gm_hub::models::INGEST_TIMEOUT,

@@ -59,12 +59,25 @@ with `gm_creature` entities.
 | Key | Body | Health | Kit | Sight / leash | Back after | Drops |
 |---|---|---|---|---|---|---|
 | sentinel | striker, mail, flame | 420 | sword, crossbow, parry; overhead, dash | 700 / 900 | 600 s | nothing |
-| warden (boss) | colossus, plate, stone | 7,500 (stagger 400) | maul, stone_throw; quake, stomp | 900 / 1,100 | 120 s | 3 components (standard: core/iron, frame/ash, catalyst/basalt; top: core/dragonbone, shard/boss_scale, catalyst/basalt), 30 copper |
+| warden (boss) | colossus, plate, stone | 7,500 (stagger 400) | maul, stone_throw; quake, stomp | 900 / 1,100 | 120 s | 3 components (standard: core/iron, frame/ash, catalyst/basalt; top: core/dragonbone, shard/boss_scale, catalyst/basalt), 30 silver |
 
 `trials.toml` (COMPANIONS.md 11): an encounter of a map judged through a lens. The four of
 the tutorial are on the Warden, 300 s, one human: `warden_leader` (500‰ of the party's damage
 under the candidate's orders, at most one party death), `warden_vanguard` (500‰ of the blows),
 `warden_striker` (350‰ of the damage), `warden_mender` (500‰ of the healing, no death).
+
+## Looks (Phase 14, CONTENT.md 3)
+
+Every row may name what it looks and sounds like: an ability's `icon`, `prop` (held while
+it is the primary and nothing is worn) and `sound`; a template's `model` (a prop under
+`models/props/`), `icon`, `held`, `fit` and `fit_view`; a material's `icon` and `tint`; a
+creature's and a build's `model` and `icon`. `VERSION` holds the content's number;
+`LICENSES.md` names every file that is not ours. `gm-tools content check` resolves every
+link, `build` writes `assets/built/content/` (committed), `report` lists it all.
+
+| Key | Slot | Cost | Aspect | What it does |
+|---|---|---|---|---|
+| musket | secondary | 4 | — | 55 pierce ball at 2,600 u/s, flat, one shot every 2.5 s (the gun; CONTENT.md 11) |
 
 ## Items
 

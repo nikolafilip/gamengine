@@ -22,6 +22,30 @@ pub enum BodyKind {
     Creature { def: u16 },
 }
 
+/// What a body holds and wears, as indices into the pack's `props` list the zone sent
+/// (LOOK.md 6.2; `NONE` for nothing). The indices are of that session's pack: a client
+/// reads an index past the list as `NONE`. `worn` is the armour overlay of Phase 16 and
+/// always `NONE` until then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Look {
+    pub held: u16,
+    pub worn: u16,
+}
+
+impl Look {
+    pub const NONE: u16 = u16::MAX;
+    pub const EMPTY: Look = Look {
+        held: Look::NONE,
+        worn: Look::NONE,
+    };
+}
+
+impl Default for Look {
+    fn default() -> Look {
+        Look::EMPTY
+    }
+}
+
 /// One body as a zone announces it: a player, a companion or a creature.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub struct PlayerEntry {
@@ -30,6 +54,8 @@ pub struct PlayerEntry {
     pub team: u8,
     pub model: Option<[u8; 32]>,
     pub kind: BodyKind,
+    /// v8: what it holds.
+    pub look: Look,
 }
 
 /// A standing order (COMPANIONS.md 5.3).
@@ -284,6 +310,9 @@ pub enum FromZone {
         pack: ContentPack,
         own: Build,
         team: u8,
+        /// v8: the keys of every prop the content names, in the order a `Look` indexes
+        /// (LOOK.md 6.2). The client finds the files; the zone never reads one.
+        props: Vec<String>,
     },
     /// The requested build was accepted (`Ok`) or refused with the reason.
     RespecResult(Result<(), String>),
@@ -313,6 +342,8 @@ pub enum FromZone {
         team: u8,
         model: Option<[u8; 32]>,
         kind: BodyKind,
+        /// v8: what it holds.
+        look: Look,
     },
     /// A model was taken down: forget it, delete it (MODELS.md 8).
     ModelRevoked([u8; 32]),
@@ -359,6 +390,12 @@ pub enum FromZone {
     TradeOpened {
         trade: i64,
         with: String,
+    },
+    // v8 (LOOK.md 6.2).
+    /// A body's look changed: what it holds, by the pack's prop list.
+    Look {
+        id: u32,
+        look: Look,
     },
 }
 
@@ -644,6 +681,7 @@ mod tests {
                 own: pack.build("blade").unwrap().clone(),
                 team: 1,
                 pack: pack.clone(),
+                props: vec!["sword".into()],
             },
             FromZone::Killed {
                 victim: 3,
@@ -706,6 +744,10 @@ mod tests {
                     team: (i % 3) as u8,
                     model: Some([i as u8; 32]),
                     kind: BodyKind::Companion { owner: i },
+                    look: Look {
+                        held: (i % 7) as u16,
+                        worn: Look::NONE,
+                    },
                 })
                 .collect(),
         );

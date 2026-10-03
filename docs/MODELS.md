@@ -131,8 +131,15 @@ payload                          one zlib stream to the end of the file:
   texture      BC1 blocks, largest mip first, down to the level whose smaller side is 4
 ```
 
+**A prop** (Phase 14, CONTENT.md 4) is the same container with flag bit 2 set
+(`FLAG_PROP`), `frame` 255, `bone_mask` 1, zero pivots, every vertex on bone 0 with weight
+255, at most 1,000 triangles, a 256² texture and 131,072 bytes, and no vertex further than
+96 units from the origin (the grip). The reader accepts the combination whole or refuses
+the file; the hub's verification of an upload, which wants a frame, refuses a prop.
+
 The **model id** is the SHA-256 of the whole file. Ingestion is deterministic: the same upload
-for the same frame gives the same bytes and the same id. A reader checks everything (magic,
+for the same frame gives the same bytes and the same id, on every machine since Phase 14
+(the sRGB curves of the encoder use `gm_model::det::pow`, not the platform's `powf`). A reader checks everything (magic,
 format, lengths against the counts, counts against the budgets, every index below the vertex
 count, every joint in the mask, weights summing to 255, inflation bounded by `raw_len` and by
 2 MiB) and refuses the file otherwise.

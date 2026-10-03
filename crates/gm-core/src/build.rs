@@ -56,7 +56,7 @@ pub struct Loot {
     pub components: u8,
     pub standard: Vec<String>,
     pub top: Vec<String>,
-    /// Copper, split among the recipients.
+    /// Silver, split among the recipients.
     pub coin: u32,
 }
 

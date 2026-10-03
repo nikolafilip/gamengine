@@ -1,0 +1,133 @@
+# The skin (LOOK.md 2.2): the faces the tool rasterises and the pieces of the toolkit,
+# each a PNG beside this file with its nine-slice insets (left, top, right, bottom).
+# scripts/dev/skin-gen.py wrote the first pieces; replace any file with a better one.
+
+[font.text]
+file = "pixelify_sans.ttf"
+size = 12
+
+[font.title]
+file = "medievalsharp.ttf"
+size = 18
+
+[piece.panel]
+file = "panel.png"
+inset = [10, 10, 10, 10]
+
+[piece.panel_title]
+file = "panel_title.png"
+inset = [10, 4, 10, 6]
+
+[piece.well]
+file = "well.png"
+inset = [3, 3, 3, 3]
+
+[piece.button]
+file = "button.png"
+inset = [6, 6, 6, 6]
+
+[piece.button_hot]
+file = "button_hot.png"
+inset = [6, 6, 6, 6]
+
+[piece.button_down]
+file = "button_down.png"
+inset = [6, 6, 6, 6]
+
+[piece.button_off]
+file = "button_off.png"
+inset = [6, 6, 6, 6]
+
+[piece.field]
+file = "field.png"
+inset = [4, 4, 4, 4]
+
+[piece.field_focus]
+file = "field_focus.png"
+inset = [4, 4, 4, 4]
+
+[piece.slot]
+file = "slot.png"
+inset = [3, 3, 3, 3]
+
+[piece.slot_hot]
+file = "slot_hot.png"
+inset = [3, 3, 3, 3]
+
+[piece.slot_picked]
+file = "slot_picked.png"
+inset = [3, 3, 3, 3]
+
+[piece.slot_worn]
+file = "slot_worn.png"
+inset = [3, 3, 3, 3]
+
+[piece.slot_off]
+file = "slot_off.png"
+inset = [3, 3, 3, 3]
+
+[piece.bar_frame]
+file = "bar_frame.png"
+inset = [3, 3, 3, 3]
+
+[piece.bar_fill]
+file = "bar_fill.png"
+
+[piece.portrait_frame]
+file = "portrait_frame.png"
+inset = [8, 8, 8, 8]
+
+[piece.hotbar_cell]
+file = "hotbar_cell.png"
+inset = [4, 4, 4, 4]
+
+[piece.hotbar_key]
+file = "hotbar_key.png"
+inset = [3, 3, 3, 3]
+
+[piece.tooltip]
+file = "tooltip.png"
+inset = [6, 6, 6, 6]
+
+[piece.check_off]
+file = "check_off.png"
+
+[piece.check_on]
+file = "check_on.png"
+
+[piece.slider_rail]
+file = "slider_rail.png"
+inset = [3, 3, 3, 3]
+
+[piece.slider_knob]
+file = "slider_knob.png"
+inset = [3, 3, 3, 3]
+
+[piece.scroll_rail]
+file = "scroll_rail.png"
+inset = [3, 3, 3, 3]
+
+[piece.scroll_knob]
+file = "scroll_knob.png"
+inset = [2, 3, 2, 3]
+
+[piece.cursor]
+file = "cursor.png"
+
+[piece.cursor_drag]
+file = "cursor_drag.png"
+
+[piece.coin_gold]
+file = "coin_gold.png"
+
+[piece.coin_silver]
+file = "coin_silver.png"
+
+[piece.mark_new]
+file = "mark_new.png"
+
+[piece.mark_taken]
+file = "mark_taken.png"
+
+[piece.mark_worn]
+file = "mark_worn.png"

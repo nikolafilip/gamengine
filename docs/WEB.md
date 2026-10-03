@@ -341,8 +341,8 @@ page the real GPU; WebGL2 through ANGLE on the same GPU):
 
 | What | Budget | Measured |
 |---|---|---|
-| `gm-client-webgpu_bg.wasm` | 1 MiB | 905,937 bytes |
-| the same, brotli -q 11 | 384 KiB | 298,756 bytes |
+| `gm-client-webgpu_bg.wasm` | 1 MiB; **2 MiB from Phase 14** (below) | 905,937 bytes |
+| the same, brotli -q 11 | 384 KiB; **768 KiB from Phase 14** | 298,756 bytes |
 | `gm-client-webgl_bg.wasm` | 3.25 MiB | 2,899,339 bytes |
 | the same, brotli -q 11 | 1 MiB | 871,977 bytes |
 | JavaScript: glue + loader + page | 176 KiB | 111 KB (WebGPU), 166 KB (WebGL2), uncompressed |
@@ -362,6 +362,18 @@ Chromium's acknowledgement pattern, counted by the zone's QUIC statistics.
 
 The whole first download of the WebGPU build, compressed: 299 KB of `.wasm`, about 25 KB of
 JavaScript and HTML, and the arena's 0.4 MB map with its lightmaps.
+
+**The megabyte, raised (2026-10-03).** With 39,111 bytes left after Phase 13 and a phase of
+screens ahead (LOOK.md), the director allowed the WebGPU build "double or triple, as long
+as it runs smoothly on a 100 Mbps connection". The cap is **2 MiB** raw and **768 KiB**
+packed: at 100 Mbps the raw file is 0.17 s and the packed one under 0.07 s, under the
+map that comes with it, and the WebGL2 build at 2.9 MiB already reaches its first frame in
+258–292 ms on loopback. The WebGL2 caps do not move. Every phase still reports what it
+added: Phase 14 measured **1,104,519 bytes (374,635 packed)** for WebGPU, +95,054 over
+Phase 13 (the atlas and its faces, grids, drags and tooltips, the hotbar, props, the
+paperdoll pass, the bundle), and 3,094,152 (946,533 packed) for WebGL2. The page now also
+fetches the content bundle (`assets/built/content/`: the manifest and the atlas at start,
+59 KB and 2 KB; a prop of 2–16 KB when first seen), copied by `scripts/build-web.sh`.
 
 ## 10. Deliberately absent
 

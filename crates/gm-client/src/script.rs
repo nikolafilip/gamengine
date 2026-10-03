@@ -36,7 +36,14 @@ enum Cmd {
     Key(Key),
     /// A click on what says this; twice for a double click.
     Click(String, bool),
+    /// The pointer over what says this, and left there (a tooltip, a hot slot).
+    Hover(String),
+    /// A drag (LOOK.md 2.4): a press on the first, the pointer moved to the second over
+    /// a few frames, and let go there.
+    Drag(String, String),
     Expect(String),
+    /// A picture by its key is on the screen (LOOK.md 2.1).
+    ExpectImage(String),
     Say(String),
     Where(String),
     Sleep(f32),
@@ -53,6 +60,8 @@ pub enum Event {
         double: bool,
     },
     Release,
+    /// The pointer goes here, nothing pressed or let go.
+    Move((f32, f32)),
     Text(String),
     Key(Key),
     /// A line for whoever runs the client.
@@ -109,10 +118,32 @@ impl UiScript {
                 // A field is given the keyboard by a click on it.
                 "field" | "click" => Cmd::Click(text()?, false),
                 "dclick" => Cmd::Click(text()?, true),
+                "hover" => Cmd::Hover(text()?),
+                "drag" => {
+                    // Two arguments, each quoted or bare: `drag sword weapon`,
+                    // `drag "sword  slash +2.0%" weapon`.
+                    let rest = rest.trim();
+                    let (first, second) = if let Some(r) = rest.strip_prefix('"') {
+                        let (a, b) = r.split_once('"').ok_or_else(|| bad("an unclosed quote"))?;
+                        (a.to_string(), argument(b).to_string())
+                    } else {
+                        let (a, b) = rest
+                            .split_once(char::is_whitespace)
+                            .ok_or_else(|| bad("drag needs what and where"))?;
+                        (a.to_string(), argument(b).to_string())
+                    };
+                    if first.is_empty() || second.is_empty() {
+                        return Err(bad("drag needs what and where"));
+                    }
+                    Cmd::Drag(first, second)
+                }
                 // Quoted when it begins or ends with a space.
                 "type" => Cmd::Type(text()?),
                 "key" => Cmd::Key(Key::parse(rest.trim()).ok_or_else(|| bad("no such key"))?),
-                "expect" => Cmd::Expect(text()?),
+                "expect" => match rest.trim().strip_prefix("image ") {
+                    Some(key) => Cmd::ExpectImage(argument(key).to_string()),
+                    None => Cmd::Expect(text()?),
+                },
                 "say" => Cmd::Say(text()?),
                 "where" => Cmd::Where(text()?),
                 "sleep" => Cmd::Sleep(
@@ -184,6 +215,52 @@ impl UiScript {
                 }
                 Ok(Vec::new())
             }
+            Cmd::ExpectImage(key) => {
+                if ui.shows_image(&key) {
+                    self.next();
+                } else if waited > PATIENCE {
+                    return gave_up(format!("no picture {key:?} was drawn"));
+                }
+                Ok(Vec::new())
+            }
+            Cmd::Hover(text) => match ui.find(&text) {
+                Some(seen) => {
+                    self.next();
+                    Ok(vec![Event::Move(seen.rect.centre())])
+                }
+                None if waited > PATIENCE => gave_up(format!("nothing to hover says {text:?}")),
+                None => Ok(Vec::new()),
+            },
+            Cmd::Drag(what, onto) => match (ui.find(&what), ui.find(&onto)) {
+                // Press on the first; then, a frame at a time, move a quarter of the way,
+                // halfway, three quarters and all the way (a drag must move four dots to be
+                // one); then let go on the second.
+                (Some(from), Some(to)) => {
+                    let (a, b) = (from.rect.centre(), to.rect.centre());
+                    let step = self.phase;
+                    self.phase += 1;
+                    let at = |t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                    let events = match step {
+                        0 => vec![Event::Press {
+                            at: a,
+                            double: false,
+                        }],
+                        1 => vec![Event::Move(at(0.25))],
+                        2 => vec![Event::Move(at(0.5))],
+                        3 => vec![Event::Move(at(0.75))],
+                        4 => vec![Event::Move(b)],
+                        _ => {
+                            self.next();
+                            vec![Event::Move(b), Event::Release]
+                        }
+                    };
+                    Ok(events)
+                }
+                _ if waited > PATIENCE => {
+                    gave_up(format!("nothing to drag from {what:?} onto {onto:?}"))
+                }
+                _ => Ok(Vec::new()),
+            },
             Cmd::Click(text, twice) => match ui.find(&text) {
                 // The press and the release in one frame: what is clicked cannot go
                 // away between them. (Real input, a frame or more apart, is the gate's

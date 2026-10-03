@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-10-02 (Phases 0–12 implemented; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-10-03 (Phases 0–14 implemented; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -22,7 +22,9 @@ backbone to say no. Locked, not up for softening when players complain:
 - **No pay-to-win, no matchmaking gimmicks, no minimaps, no level-skips, no upgrade casino.**
   Monetization = convenience and social cosmetics only (extra build slots, model storage slots).
 - **No junk loot, no trash mobs, no millions of gold.** Scarce meaningful encounters, 100% deterministic
-  drops, small currency (copper / silver / gold; 1 gold is a small fortune).
+  drops, small currency (silver / gold; 1 gold is a small fortune). **[CORRECTED 2026-10-03]** the
+  director dropped copper: two units are enough, the ledger's integer is silver and 100 silver is a gold
+  (LOOK.md 7, ECONOMY.md 2).
 - **No chore sinks.** No durability decay, repair fees, crafting tolls, upkeep, travel fees, sink taxes.
 - **Skill and coordination beat numbers.** Collision, friendly fire, and terrain are real.
 - **Measured in MB.** Client binary a few MB, install tens to a few hundred MB, RAM under 500 MB,
@@ -236,8 +238,9 @@ Always on for AoE and projectiles. "Friendly" affects UI only, never damage. Tea
 
 ## 5. Economy
 
-### 5.1 Currency and drops [DECIDED]
-Copper/silver/gold, small numbers. Scarce conditional spawns, 100% deterministic drops. No junk.
+### 5.1 Currency and drops [DECIDED; units CORRECTED 2026-10-03]
+Silver/gold, small numbers (copper dropped by the director in Phase 14: the smallest coin is a silver,
+a gold is a hundred of them; every stored number keeps its value, LOOK.md 7). Scarce conditional spawns, 100% deterministic drops. No junk.
 Sub-minimum items: keep or drop on the ground; dropped items persist and seed others.
 
 ### 5.2 Boss loot = modular components [DECIDED, corrected split]
@@ -499,6 +502,9 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 11 | Possessions: the inventory, the storage and what is worn; gear's edge in the simulation (3.4); a stall looked at, bought from and sold at | a character buys a weapon at another's stall, wears it, and the zone's hits show the edge; the purchase by clicking, on the desktop and in a browser. **Done 2026-10-02** (11.10; the tavern and trade screens moved to 12, the buyer's coin is an operator's grant) |
 | 12 | Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans; the tavern and a trade between two players as screens | two people clear the tutorial dungeon together and split what it drops, and one sells the other what it got. **Done 2026-10-02** (11.10) |
 | 13 | Sound: patches synthesized at start, cues inferred from the snapshots, a mixer of our own natively and the browser's nodes in the browser | steps, hits and the town are heard, inside the size budgets of both targets; proved by a run rendered to a file on a machine without a device. **Done 2026-10-03** (11.10) |
+| 14 | The look: the content standard and its tool (`docs/CONTENT.md`: every item, ability and creature a row with its model, picture and sound; `gm-tools content check/build/report/import`; a committed bundle); weapons as props drawn in hands (the first models from a CC0 pack, a musket beside the crossbow) and a first-person view model; the toolkit's skin, icons and real fonts; the inventory, storage, stall and trade as grids with tooltips and drag, an equip panel with a paperdoll; a HUD with a portrait, party frames and a hotbar showing cooldowns; silver and gold only (`docs/LOOK.md`) | a character seen by another holds the sword it wears; the inventory is a grid of pictures and a drag onto the weapon slot wears a sword; the hotbar shows each ability's state; `gm-tools content build` reproduces the committed bundle byte for byte; on the desktop and in a browser, inside the budgets of both (the browser's raised to 2 MiB by the director). **Done 2026-10-03** (11.10) |
+| 15 | *(proposed 2026-10-03; the director wants it)* The content editor: `gm-tools content edit`, native only, on the client's toolkit over the same TOML files (CONTENT.md 10): the tables as lists, a row as a form with the validation of `check` as it is typed, a model or a picture imported by path and fitted in the 3D view of `look`, links to abilities and materials picked from lists, saved back as text with the diff shown | an item is added, given a model and a picture, priced and made wearable without a text editor, and the result is a one-row diff in git that `check` accepts |
+| 16 | *(proposed 2026-10-03)* The body's look: official avatars per frame and armour class replacing the mannequin, creature models (the Warden, the sentinels), portraits baked from them, the armour overlay in `Look.worn`; sounds per ability as content (SOUND.md 9's open item); the first content pass (more weapons and materials with their pictures) | nobody in the town is a grey mannequin unless their model is refused; the Warden is a creature to look at; every ability of the content has its own picture and sound |
 | ∞ | Content, balance, ops, community | permanent |
 
 ### 11.9 First concrete step
@@ -1348,6 +1354,52 @@ the wire:
   a stranger's hit is heard only as the stagger or the knockback's landing it causes, a replay is silent,
   the callback's priority; 22,050 Hz and every number in SOUND.md 9 are proposed.
 
+**2026-10-03, Phase 14 done** (same machine; the director's decisions of the morning in CONTENT.md 11 and
+LOOK.md 9: finished CC0 models welcome, a look between Tales of Pirates and Ether Saga with Counter-Strike's
+standard for weapons, the browser's megabyte doubled, drag and keys both musts, top gear tens of gold; the
+GUI editor he wants is Phase 15):
+- **Copper is gone** (section 0 and 5.1 corrected): the ledger's integer is silver, 100 to a gold, every
+  stored number kept its value, two coin fields; `MAX_PRICE` 10^10, the grant cap 500 silver; the
+  purchasing-power scale in ECONOMY.md 12 is the director's (top gear 10–30 g, fully crafted 60–100 g).
+- **The content standard** (`docs/CONTENT.md` v1): every row may name its look (model, icon, prop, sound,
+  held, fit, tint); `assets/content/{VERSION,LICENSES.md,models/props,icons,ui}`; one `.glb`→`.gmm`
+  pipeline with a **prop** kind (flag bit 2, frame 255, bone 0 only, ≤ 1,000 tris, 256², 128 KiB, 96 u
+  from the grip; a file of flat colours gets a swatch texture); icons **baked on the CPU** from the model
+  (deterministic: IEEE basics, `gm_model::det` for the sRGB curves, integer averaging) and portraits of
+  the mannequin; `gm-tools content check|build|report|import|synth|atlas`; the bundle
+  `assets/built/content/` (manifest.gmc, ui.gma, props/*.gmm) **committed and reproduced byte for byte by
+  CI** (scripts/check-look.sh). The first models: KayKit's CC0 sword, dagger, staff and crossbow
+  (packed from `.gltf` by `import`), our own hammer and musket (`synth`); a **musket** ability and
+  template (numbers proposed). Fonts Pixelify Sans 12 and MedievalSharp 18 (OFL), the skin drawn by
+  `scripts/dev/skin-gen.py`.
+- **The look** (`docs/LOOK.md` v1): the toolkit's second version (one RGBA atlas `.gma` with the skin's
+  nine-slices, three faces and the icons; proportional text measured per glyph; grids of slots, tooltips,
+  drag and drop with every drop a button too, scrollbars, a paperdoll in a second pass with cleared depth,
+  layers); the inventory as 6 × 4 slots with an equip panel (weapon and armour slots; a drag wears), the
+  storage, the stall and the trade as grids (marks on cells, the coin on the header line); **props drawn
+  in hands** through the unchanged skinning pipeline (one matrix at bone 0, the wearer's `prop_r` pivot,
+  the blade on along the arm) and a **first-person view model** with a stride bob and a kick; the HUD's
+  portrait, framed bars, party frames, **a hotbar with cooldown wedges** from the predicted mover (LMB,
+  RMB, C, 1–4; states ready/cooling/unaffordable/silenced/active, in `--report`) and the own statuses.
+  Protocol **v8** (`Look{held,worn}` on `PlayerEntry`/`PlayerInfo`, `FromZone::Look`, the pack's `props`
+  keys), hub **v1.9** (`GearReading.templates` as keys, Gemini's point), zone `look_of` (the worn
+  weapon's model, else the primary's prop). UI scripts: `hover`, `drag`, `expect image`.
+- Measured: bundle **114,614 bytes** (atlas 512 × 176, 58,985; props 2,240–15,830); 48 held props cost
+  **0.006 ms a frame** on the iGPU (1.336 → 1.342 ms, 745 fps) and 0.20 on the software GPU; on the
+  iGPU uncapped the game with the skinned HUD and hotbar **0.42 ms** a frame (0.36–0.37 before), the
+  inventory with its grid and paperdoll pass **0.54**, the storage 0.53, the menu 0.61; WebGPU wasm
+  **1,104,519 bytes (374,635 packed)**, +95,054, under the new 2 MiB; WebGL2 3,094,152; `gm-client` **9,747,456 bytes (9.29 MiB)**, +135,856; baseline updated. **380 tests** (367 before). Gates: check-look (content reproduced,
+  the armed crowd, the desktop by script with five screenshots, the WebGPU build), the whole workspace
+  suite on the database, fmt, clippy.
+- Found by running it (LOOK.md 11.2): the HUD's ink must stay on the first layer or it draws over a
+  screen's plates; a view model pushed before the avatars' frame began was cleared; the browser's prop
+  fetches landed in an inbox nobody polled; a grid picked listings by the item's id instead of the
+  listing's; an unknown list must not drop the pick the first answer fills.
+- Known limits: armour is not drawn on the body (Phase 16), no icons for abilities and statuses yet
+  (their names stand in; CONTENT.md 8's image model is the plan), a weapon is always held (never
+  sheathed), the view model shares the world's depth (clips into a wall pressed against), the tavern and
+  people pages are rows still, a left hand holds nothing, no scrollbar on the hotbar's statuses.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -1399,4 +1451,13 @@ The sound's numbers are **proposed** in `docs/SOUND.md` 9 (22,050 Hz, the patche
 the reaches, eight cues a frame, 32 voices, volume 70), and it lists what is open: **whether sounds become
 content** (a key per ability and creature), **footsteps by surface**, **whether a replay sounds**, **music**,
 **whether a stranger's hit is heard** (bytes on the wire), **the callback's priority**.
+The look's numbers are **proposed** in `docs/CONTENT.md` 11 and `docs/LOOK.md` 9 (the prop budget of
+1,000 triangles, 256² and 128 KiB, 32-dot icons, the bundle and atlas budgets, the musket's numbers, the
+purse's scale as the director gave it, 36-dot cells, 150 ms to a tooltip, the paperdoll's camera); the
+director **decided** on 2026-10-03: finished CC0 models may be reused and the look to aim for is between
+Tales of Pirates and Ether Saga, with Counter-Strike 1.6's standard (not its assets) for weapons; a GUI
+editor is wanted (Phase 15); the browser's megabyte may be doubled or tripled (WEB.md 9: 2 MiB); drag and
+drop and keyboard shortcuts are both musts; top gear is tens of gold. As built and open to change: a
+weapon is always held (never sheathed), the two faces (Pixelify Sans, MedievalSharp), party frames for
+members present in the zone only, the view model's place.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

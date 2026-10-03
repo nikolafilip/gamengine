@@ -1,6 +1,6 @@
 # Hub: accounts, characters, zones, handoff
 
-Status: v1.8 (Phase 12: parties, lines relayed between zones, a trade opened by the zone both play in, a hire that names its price, section 3.10 and PARTY.md; Phase 11: what is worn, buying through a zone, the limit on the economy's requests and the operator's hand, section 3.9 and ITEMS.md; Phase 10: what the client's screens lean on, section 3.8; Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
+Status: v1.9 (Phase 14: a gear reading names the templates worn, so a zone can say what a body holds, LOOK.md 6.2; v1.8 of Phase 12: parties, lines relayed between zones, a trade opened by the zone both play in, a hire that names its price, section 3.10 and PARTY.md; Phase 11: what is worn, buying through a zone, the limit on the economy's requests and the operator's hand, section 3.9 and ITEMS.md; Phase 10: what the client's screens lean on, section 3.8; Phase 9: conduct, section 3.7; Phase 8: the web listener, section 3.6; Phase 4; the economy requests of Phase 5; models, stalls in the world and the
 saved position's zone of Phase 6; squads, trials and gated zones of Phase 7, section 3.5). This document is the contract between `gm-hub`, `gm-server` and the
 clients for everything that outlives a zone process: accounts, characters, where a character is,
 and how it moves between zones. PLAN.md 2.1 (Postgres via sqlx, in-memory session state), 11.3
@@ -50,7 +50,7 @@ clients and zones trust exactly that file. Every request is one bidirectional st
 requester writes one framed `HubRequest` and finishes; the hub writes one framed `HubResponse`
 and finishes. Framing is PROTOCOL.md 8 (big-endian u16 length + `bitcode`). Messages over
 65,535 bytes are protocol errors. Since v1.6 a stream **begins with the version** of these
-messages in a frame of one byte (`HUB_VERSION`, 8 since Phase 12), and the hub answers with its own in the
+messages in a frame of one byte (`HUB_VERSION`, 9 since Phase 14), and the hub answers with its own in the
 same way before anything else, going on to the response only when the two are equal: a
 zone, a tool or a bot of another build is told so ("the hub speaks version N") instead of
 failing to decode. A stream that begins with an empty frame speaks the players' messages
@@ -374,7 +374,10 @@ it does not know goes on to the next: one stream, one notice.
 ### 3.9 Possessions (ITEMS.md)
 
 - **What is worn changes through a zone.** `ZoneEconOp::Wear { character, item }` and
-  `TakeOff { character, item }` are answered `EconReply::Gear(GearReading { seq, gear })`:
+  `TakeOff { character, item }` are answered `EconReply::Gear(GearReading { seq, gear,
+  templates })` (`templates`: the keys of the templates worn by place, weapon and armour,
+  empty for nothing; v1.9, LOOK.md 6.2: keys, not indices, so a hub and a zone on
+  different content disagree about nothing but what to draw):
   a reading of what the character's worn items do, made after the change was committed.
   The transaction holds the character's row (shared) against a change of where it is, and
   refuses (`Unauthorized`) a character that does not play in the asking zone: offline, in
@@ -407,7 +410,7 @@ it does not know goes on to the next: one stream, one notice.
   anything. A zone's own requests are not counted: a zone gates its players itself
   (PROTOCOL.md 8).
 - **An operator's hand** (`gm-hub --database-url URL ...`, then exit; the hub may be
-  running): `--grant-coin CHARACTER COPPER`, `--grant-item CHARACTER TEMPLATE
+  running): `--grant-coin CHARACTER SILVER`, `--grant-item CHARACTER TEMPLATE
   MATERIAL,...` (ledger reason `grant`), `--place CHARACTER ZONE X,Y,Z YAW` (an offline
   character's saved position), `--audit` (the books in one line; exit status 1 when they
   are not sound).

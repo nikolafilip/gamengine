@@ -282,9 +282,10 @@ New in v7:
   has **not agreed to**:
   - Everything in the other's offer that was not there when the person last accepted (or
     since the window opened, if they never did) is marked `new`; what was there then and
-    is gone is still shown, struck, `taken back`. The coin is a row of the offer like any
-    item, marked the same way. The marks stay until the person accepts again. They do not
-    fade.
+    is gone is still shown, struck, `taken back`. The coin is said on the offer's header
+    line like any item (a row before Phase 14; since then the offers are grids of cells
+    with the marks on them, LOOK.md 4), marked the same way. The marks stay until the
+    person accepts again. They do not fade.
   - **Looked at.** The window also keeps the other's offer as it was when Accept last
     armed. What differs from *that* is marked `changed` rather than `new`, what was in it
     and is gone is struck, and the lines say the other changed the offer: the quick swap
@@ -430,7 +431,7 @@ price in three fields. **Hire**, **Dismiss**, **List**, **Withdraw**, **Back**.
    a party by the page, says a party's line and a whisper and reads the answers, buys what
    the other got from the Warden through the trade window for three silver, hires an
    avatar in the tavern, and leaves the party.
-5. The hub's audit is sound after all of it, to the copper, and no client logged an error.
+5. The hub's audit is sound after all of it, to the silver, and no client logged an error.
 
 ## 10. Deliberately absent, and known gaps
 
@@ -589,7 +590,7 @@ in a private cluster), none estimated; ranges are the spread over repeated runs.
 - **Two people through the dungeon** (`check-party.sh --online`): a party formed in the town
   within a second of the invitation; both back in the dungeon of the party; the Warden down
   in **120.0–149.2 s** from the first bot's entry (165 s in the first try by hand), three
-  components and 30 copper split between the two, told at the pull that a party passes no
+  components and 30 silver split between the two, told at the pull that a party passes no
   trial; the member that stayed away let go of by the hub 20–30 s after it went offline (the
   hub ran with `--party-away 20`). The final run: **120.0 s**.
 - **By UI script** (software GPU, the desktop client): from being in the party to the trade

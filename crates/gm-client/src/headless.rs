@@ -144,6 +144,9 @@ pub fn run(opts: &Options) -> Result<(), Error> {
                 squad: &[],
                 target: None,
                 scale: crate::ui::scale_for(renderer.hud.size, crate::front::PANEL_UNITS, 0),
+                manifest: None,
+                time: 0.0,
+                own_name: "",
             };
             crate::app::build_hud(&mut renderer.hud, None, &tactical, vp, view);
         }

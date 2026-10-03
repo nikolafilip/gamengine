@@ -69,16 +69,19 @@ when there is no terminal to read it in.
 its widgets out and learns at once what was clicked. Nothing is kept between frames but the
 focus, the scroll positions, the carets and the widget the button went down on.
 
-- **Font** (`font.rs`). The HUD's 5×7 dot font, extended from capitals to **printable
-  ASCII** and the ten letters `č ć đ š ž Č Ć Đ Š Ž`, with an eighth row for what hangs
-  below the line (`g j p q y , ; |`): 104 glyphs, any two at least two dots apart.
-  Anything else is drawn as `?`, and cannot be typed into a field that is shown to others.
-  Text is shown as written.
+- **Font** (`gm_model::smallfont`, re-exported by `font.rs`). The HUD's 5×7 dot font,
+  extended from capitals to **printable ASCII** and the ten letters `č ć đ š ž Č Ć Đ Š Ž`,
+  with an eighth row for what hangs below the line (`g j p q y , ; |`): 104 glyphs, any
+  two at least two dots apart. Anything else is drawn as `?`, and cannot be typed into a
+  field that is shown to others. Text is shown as written. Since Phase 14 (LOOK.md 2.3)
+  it is face 0 of the bundle's atlas and the client's fallback; the screens' words are in
+  the atlas's text face (Pixelify Sans at 12 dots) and their titles in the title face
+  (MedievalSharp at 18) when the bundle has loaded, measured per glyph, else in this one.
 - **Scale.** One whole-number scale for HUD and screens: 1 below 540 pixels of height, 2
   below 1000, 3 below 1600, 4 from there, and never so large that the widest and the
-  tallest panel (340 by 300 units) would not fit the window. The setting `ui_scale` (1 to
-  4; 0, the default: by the window) chooses one instead, and gives way the same. The
-  smallest window is 640×360.
+  tallest panel (340 by 360 units since Phase 14's trade window, LOOK.md 4; 300 before)
+  would not fit the window. The setting `ui_scale` (1 to 4; 0, the default: by the
+  window) chooses one instead, and gives way the same. The smallest window is 640×360.
 - **Widgets.** A panel (a plate with a title), a label, a paragraph (wrapped at words), a
   button (also one that is off: drawn faint, takes no click and no focus), a row of buttons
   as wide as their words, a text field (one line; optionally shown as stars; a maximum in
@@ -365,9 +368,12 @@ field email                   give the field with that label the keyboard (a cli
 type someone@example.com      characters, as if typed
 key Enter                     Enter | Escape | Tab | BackTab | Backspace | Delete | Left | Right | Up | Down | Home | End | PageUp | PageDown
                               | I | E | P (the game's own three that open a screen)
-click "New character"         the button, row or box with that text
+click "New character"         the button, row, box or grid cell with that text
 dclick "Aldric"               the same, twice
+hover "sword  slash +2.0%"    the pointer over it, and left there (a tooltip after 150 ms)
+drag "sword  slash +2.0%" weapon   a press on the first, moved over frames, let go on the second (LOOK.md 2.4)
 expect "Aldric"               some text on the screen contains it
+expect image item/sword       a picture by its key was drawn (an icon in a slot, a portrait)
 say at the characters         print `ui-script: at the characters`
 where "Play"                  print `ui-script: where X Y Play`: its middle, in pixels
 sleep 2

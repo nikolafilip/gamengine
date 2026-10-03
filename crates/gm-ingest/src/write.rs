@@ -255,6 +255,130 @@ impl GlbBuilder {
     }
 }
 
+/// A rigid thing written as a `.glb` without a skin (a prop, CONTENT.md 3.1), in glTF's own
+/// conventions: positions in metres as given, one primitive per material. A material with
+/// an image is textured by it; one without is a flat colour (its factor), the way the
+/// low-poly packs come. `COLOR_0` goes out when `colours` is given (one per vertex, linear).
+pub struct PropGlb {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub colours: Option<Vec<[f32; 4]>>,
+    /// `(first index, index count, material)`.
+    pub primitives: Vec<(usize, usize, usize)>,
+    pub indices: Vec<u32>,
+    /// Per material: a flat colour (linear), and whether the one image textures it.
+    pub materials: Vec<([f32; 4], bool)>,
+    /// PNG bytes, when any material is textured.
+    pub image: Option<Vec<u8>>,
+    /// A node transform the geometry sits under (a pack's models rarely stand at the origin).
+    pub node_translation: [f32; 3],
+}
+
+impl PropGlb {
+    pub fn build(&self) -> Vec<u8> {
+        let mut bin: Vec<u8> = Vec::new();
+        let mut views: Vec<Value> = Vec::new();
+        let mut accessors: Vec<Value> = Vec::new();
+        let mut view = |bin: &mut Vec<u8>, bytes: &[u8], target: Option<u32>| -> usize {
+            pad4(bin, 0);
+            let mut v = json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len() });
+            if let Some(t) = target {
+                v["target"] = json!(t);
+            }
+            bin.extend_from_slice(bytes);
+            views.push(v);
+            views.len() - 1
+        };
+        let n = self.positions.len();
+        let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+        let mut pos = Vec::with_capacity(n * 12);
+        for g in &self.positions {
+            for k in 0..3 {
+                mn[k] = mn[k].min(g[k]);
+                mx[k] = mx[k].max(g[k]);
+                pos.extend_from_slice(&g[k].to_le_bytes());
+            }
+        }
+        let v = view(&mut bin, &pos, Some(34962));
+        accessors.push(json!({ "bufferView": v, "componentType": 5126, "count": n, "type": "VEC3", "min": mn, "max": mx }));
+        let mut attributes = json!({ "POSITION": 0 });
+        let mut data = Vec::with_capacity(n * 12);
+        for nn in &self.normals {
+            for c in nn {
+                data.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let v = view(&mut bin, &data, Some(34962));
+        attributes["NORMAL"] = json!(accessors.len());
+        accessors
+            .push(json!({ "bufferView": v, "componentType": 5126, "count": n, "type": "VEC3" }));
+        if !self.uvs.is_empty() {
+            let mut data = Vec::with_capacity(n * 8);
+            for uv in &self.uvs {
+                data.extend_from_slice(&uv[0].to_le_bytes());
+                data.extend_from_slice(&uv[1].to_le_bytes());
+            }
+            let v = view(&mut bin, &data, Some(34962));
+            attributes["TEXCOORD_0"] = json!(accessors.len());
+            accessors.push(
+                json!({ "bufferView": v, "componentType": 5126, "count": n, "type": "VEC2" }),
+            );
+        }
+        if let Some(colours) = &self.colours {
+            let mut data = Vec::with_capacity(n * 16);
+            for c in colours {
+                for v in c {
+                    data.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            let v = view(&mut bin, &data, Some(34962));
+            attributes["COLOR_0"] = json!(accessors.len());
+            accessors.push(
+                json!({ "bufferView": v, "componentType": 5126, "count": n, "type": "VEC4" }),
+            );
+        }
+        let data: Vec<u8> = self.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+        let iv = view(&mut bin, &data, Some(34963));
+        let mut prims: Vec<Value> = Vec::new();
+        for (first, count, material) in &self.primitives {
+            let acc = accessors.len();
+            accessors.push(json!({ "bufferView": iv, "byteOffset": first * 4, "componentType": 5125, "count": count, "type": "SCALAR" }));
+            prims.push(json!({ "attributes": attributes.clone(), "indices": acc, "material": material, "mode": 4 }));
+        }
+        let image_view = self.image.as_ref().map(|img| view(&mut bin, img, None));
+        pad4(&mut bin, 0);
+        let materials: Vec<Value> = self
+            .materials
+            .iter()
+            .map(|(factor, textured)| {
+                let mut pbr = json!({ "baseColorFactor": factor, "metallicFactor": 0.0 });
+                if *textured {
+                    pbr["baseColorTexture"] = json!({ "index": 0 });
+                }
+                json!({ "pbrMetallicRoughness": pbr })
+            })
+            .collect();
+        let mut doc = json!({
+            "asset": { "version": "2.0", "generator": "gamengine gm-ingest" },
+            "buffers": [{ "byteLength": bin.len() }],
+            "bufferViews": views,
+            "accessors": accessors,
+            "materials": materials,
+            "meshes": [{ "primitives": prims }],
+            "nodes": [{ "name": "prop", "mesh": 0, "translation": self.node_translation }],
+            "scenes": [{ "nodes": [0] }],
+            "scene": 0
+        });
+        if let Some(iv) = image_view {
+            doc["images"] = json!([{ "bufferView": iv, "mimeType": "image/png" }]);
+            doc["samplers"] = json!([{}]);
+            doc["textures"] = json!([{ "source": 0, "sampler": 0 }]);
+        }
+        container(&doc, &bin)
+    }
+}
+
 /// Wrap a JSON document and a BIN chunk as a `.glb`.
 pub fn container(doc: &Value, bin: &[u8]) -> Vec<u8> {
     let mut json_bytes = serde_json::to_vec(doc).expect("a JSON value serialises");

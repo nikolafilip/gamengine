@@ -249,6 +249,9 @@ pub struct Renderer {
     entity_vertices: Vec<EntityVertex>,
     globals_buf: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
+    /// The paperdoll's camera (LOOK.md 5), its own globals.
+    doll_globals_buf: wgpu::Buffer,
+    doll_globals_bg: wgpu::BindGroup,
     textures_layout: wgpu::BindGroupLayout,
     diffuse_sampler: wgpu::Sampler,
     lightmap_sampler: wgpu::Sampler,
@@ -558,6 +561,20 @@ impl Renderer {
                 resource: globals_buf.as_entire_binding(),
             }],
         });
+        let doll_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("paperdoll globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let doll_globals_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("paperdoll globals"),
+            layout: &globals_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: doll_globals_buf.as_entire_binding(),
+            }],
+        });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world"),
@@ -687,6 +704,8 @@ impl Renderer {
             entity_vertices: Vec::new(),
             globals_buf,
             globals_bg,
+            doll_globals_buf,
+            doll_globals_bg,
             textures_layout,
             diffuse_sampler,
             lightmap_sampler,
@@ -761,12 +780,35 @@ impl Renderer {
         entities: &[EntityDraw],
         characters: &[CharacterDraw],
     ) {
+        self.render_with_doll(gpu, target, view_proj, entities, characters, None);
+    }
+
+    /// The same with a paperdoll (LOOK.md 5): bodies drawn into a rectangle of the screen
+    /// (pixels, from the top left) with a camera of their own, between the HUD's plates
+    /// and its ink, in a second pass whose depth is cleared.
+    pub fn render_with_doll(
+        &mut self,
+        gpu: &Gpu,
+        target: &wgpu::TextureView,
+        view_proj: Mat4,
+        entities: &[EntityDraw],
+        characters: &[CharacterDraw],
+        doll: Option<(crate::ui::Rect, Mat4, &[CharacterDraw])>,
+    ) {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             params: [self.lightmap_scale, 0.0, 0.0, 0.0],
         };
         gpu.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        if let Some((_, doll_vp, _)) = &doll {
+            let g = Globals {
+                view_proj: doll_vp.to_cols_array_2d(),
+                params: [self.lightmap_scale, 0.0, 0.0, 0.0],
+            };
+            gpu.queue
+                .write_buffer(&self.doll_globals_buf, 0, bytemuck::bytes_of(&g));
+        }
         self.entity_vertices.clear();
         for e in entities {
             box_vertices(&mut self.entity_vertices, e);
@@ -787,7 +829,8 @@ impl Renderer {
                 bytemuck::cast_slice(&self.entity_vertices),
             );
         }
-        self.characters.prepare(gpu, characters);
+        self.characters
+            .prepare_with_dolls(gpu, characters, doll.map_or(&[][..], |d| d.2));
         self.hud.prepare(gpu);
         self.draw_calls = (self.world.index_count > 0) as usize
             + !self.entity_vertices.is_empty() as usize
@@ -842,7 +885,75 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.entity_buf.slice(..));
                 pass.draw(0..self.entity_vertices.len() as u32, 0..1);
             }
-            self.hud.draw(&mut pass);
+            match &doll {
+                // The plates, then the doll (its own pass), then the rest.
+                Some(_) => self.hud.draw_layers(&mut pass, 0, 0),
+                None => self.hud.draw(&mut pass),
+            }
+        }
+        if let Some((rect, _, draws)) = &doll
+            && !draws.is_empty()
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("paperdoll"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let (fw, fh) = (self.depth_size.0 as f32, self.depth_size.1 as f32);
+            let x = rect.x.clamp(0.0, fw - 1.0).round();
+            let y = rect.y.clamp(0.0, fh - 1.0).round();
+            let w = rect.w.min(fw - x).max(1.0).round();
+            let h = rect.h.min(fh - y).max(1.0).round();
+            pass.set_viewport(x, y, w, h, 0.0, 1.0);
+            pass.set_scissor_rect(x as u32, y as u32, w as u32, h as u32);
+            self.characters.draw_dolls(&mut pass, &self.doll_globals_bg);
+            // Back to the whole frame for the HUD's ink (LOOK.md 5).
+            pass.set_viewport(0.0, 0.0, fw, fh, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, self.depth_size.0, self.depth_size.1);
+            self.hud.draw_layers(&mut pass, 1, crate::hud::LAYERS - 1);
+        } else if doll.is_some() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud ink"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.hud.draw_layers(&mut pass, 1, crate::hud::LAYERS - 1);
         }
         gpu.queue.submit([encoder.finish()]);
     }

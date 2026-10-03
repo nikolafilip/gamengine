@@ -11,6 +11,7 @@ mod avatars;
 mod bag;
 mod cache;
 mod characters;
+mod content;
 mod font;
 mod front;
 #[cfg(not(target_arch = "wasm32"))]
@@ -76,6 +77,9 @@ pub struct Options {
     pub seconds: f32,
     /// An ingested model (`.gmm`) to wear offline (MODELS.md 12).
     pub avatar: Option<PathBuf>,
+    /// `--prop KEY`: offline, the own body holds this prop of the bundle, and the crowd
+    /// too (the fitting room of CONTENT.md 9; the armed town of LOOK.md 8).
+    pub prop: Option<String>,
     /// Offline: this many bodies standing in front of the start.
     pub crowd: u32,
     /// Ingested models for the crowd to wear, cycled.
@@ -119,7 +123,7 @@ pub struct Options {
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
 [--third-person] [--tactical] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
-[--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--crowd N [--crowd-dir DIR]] \
+[--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--prop KEY] [--crowd N [--crowd-dir DIR]] \
 [--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW] [--script fight|walk] [--report] [--travel-to ZONE [--travel-after SECS]] \
 [--sound-dump FILE.wav]\n\
        gm-client --replay FILE.gmr [--follow NAME] [--from SECS] [--maps-dir DIR] [--third-person] [--headless --screenshot out.ppm]\n\
@@ -157,6 +161,7 @@ impl Default for Options {
             screenshot: None,
             seconds: 0.0,
             avatar: None,
+            prop: None,
             crowd: 0,
             crowd_dir: None,
             cache_dir: None,
@@ -247,6 +252,7 @@ fn parse_args() -> Result<Options, String> {
                     .map_err(|e| format!("--seconds: {e}"))?
             }
             "--avatar" => o.avatar = Some(PathBuf::from(value("--avatar")?)),
+            "--prop" => o.prop = Some(value("--prop")?.to_string()),
             "--crowd" => {
                 o.crowd = value("--crowd")?
                     .parse()

@@ -406,7 +406,7 @@ $HUB --audit                                             # the books in a line; 
 ```
 
 A stall is opened standing on a market tile (`B`; `N` closes it), filled from the inventory
-(**Sell**: a price in gold, silver and copper), and bought from by anybody who walks up to
+(**Sell**: a price in gold and silver), and bought from by anybody who walks up to
 it (`E`, **Buy**). A bot can keep one for a test:
 
 ```sh
@@ -439,7 +439,7 @@ cargo run --release -p gm-bot -- --hub 127.0.0.1:4400 --hub-cert hub-cert.der --
     --password bojan-password --register --character Bojan --zone town --behaviour hold --sociable \
     --trade-for 300 --secs 900
 # --sociable: joins whoever invites, answers a party's line with "aye" and a whisper with
-# "psst yourself"; --trade-for COPPER: offers the newest thing it carries and accepts when
+# "psst yourself"; --trade-for SILVER: offers the newest thing it carries and accepts when
 # that much coin is on the other side
 ```
 
@@ -478,6 +478,9 @@ scripts/check-party.sh --online       # also two bots: a party in the town, the 
 scripts/check-party.sh --desktop      # also the windowed client: a party by the page, its line and a whisper, a trade for what the other looted, a hire
 scripts/check-party.sh --browser      # the same in both browser builds
 scripts/check-sound.sh                # the patches, the mixer and the cues as tests; the walk and the arena fight rendered to WAVs on an Xvfb of its own and read (SOUND.md 7)
+scripts/check-look.sh                 # the content checked and the committed bundle reproduced byte for byte, props and icons as tests, the armed crowd's draw cost (--gate-fps: on the real GPU)
+scripts/check-look.sh --desktop       # also the windowed client: the inventory as a grid, the sword dragged onto its slot and worn, the tooltip, the hotbar read from --report (needs a database)
+scripts/check-look.sh --browser       # the same in the WebGPU build, and its wasm against the cap
 scripts/check-sound.sh --browser      # also both browser builds: the audio context running after a click, cues started, the same patch bytes as native (--software: no GPU)
 ```
 

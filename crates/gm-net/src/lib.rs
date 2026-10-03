@@ -35,7 +35,7 @@ pub mod transport {
 pub mod sim;
 
 /// Protocol version byte (PROTOCOL.md header). Bumped on any wire change.
-pub const PROTOCOL_VERSION: u8 = 7;
+pub const PROTOCOL_VERSION: u8 = 8;
 
 /// Largest datagram payload we ever send (PROTOCOL.md 1): well under the 1,200-byte initial
 /// QUIC MTU minus framing, so nothing depends on MTU discovery.

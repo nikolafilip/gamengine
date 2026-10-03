@@ -16,7 +16,7 @@ pub const MAX_GEMS: u32 = 2;
 /// The largest total edge of a fully crafted item over a standard one, per mille.
 pub const MAX_EDGE_PER_MILLE: u32 = 250;
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemTemplate {
     pub id: String,
@@ -30,7 +30,52 @@ pub struct ItemTemplate {
     /// `elements` (the five).
     #[serde(default)]
     pub guards: Option<String>,
+    /// The look fields (CONTENT.md 3): the prop drawn in the hand of whoever wears an item
+    /// of this template, its picture (baked from the model when absent), which hand, how
+    /// the file is fitted into the hand and into the first-person view, and whether the
+    /// template is retired (nothing new is made of it; what exists keeps its row).
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub held: Option<String>,
+    #[serde(default)]
+    pub fit: Option<Fit>,
+    #[serde(default)]
+    pub fit_view: Option<Fit>,
+    #[serde(default)]
+    pub retired: bool,
 }
+
+/// How a prop's file is moved into hand space (CONTENT.md 3.1): metres, degrees about
+/// glTF's X, Y and Z in that order, a scale; scaled first, then turned, then moved.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fit {
+    #[serde(default, rename = "move")]
+    pub mov: [f32; 3],
+    #[serde(default)]
+    pub turn: [f32; 3],
+    #[serde(default = "one")]
+    pub scale: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl Default for Fit {
+    fn default() -> Fit {
+        Fit {
+            mov: [0.0; 3],
+            turn: [0.0; 3],
+            scale: 1.0,
+        }
+    }
+}
+
+impl Eq for ItemTemplate {}
 
 const PHYSICAL: [DamageType; 3] = [DamageType::Slash, DamageType::Pierce, DamageType::Blunt];
 const ELEMENTS: [DamageType; 5] = [
@@ -159,7 +204,7 @@ fn element(name: &str) -> Option<DamageType> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Material {
     /// `layer/name`.
@@ -170,7 +215,15 @@ pub struct Material {
     pub element: Option<String>,
     #[serde(default)]
     pub note: String,
+    /// The look fields (CONTENT.md 3): a picture for the crafting screens, and the tint a
+    /// worn item's texture takes when this is its core.
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub tint: Option<[f32; 3]>,
 }
+
+impl Eq for Material {}
 
 impl Material {
     pub fn layer(&self) -> &str {
@@ -178,7 +231,7 @@ impl Material {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemContent {
     #[serde(default, rename = "template")]

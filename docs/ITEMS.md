@@ -222,7 +222,7 @@ become, not what they do.
   `Busy`. Zones' requests are not counted: a zone gates its own players (5).
 - An operator's hand, with the hub's own program as for a moderator, on a database that
   may be in use:
-  - `gm-hub --grant-coin CHARACTER COPPER` and `--grant-item CHARACTER TEMPLATE
+  - `gm-hub --grant-coin CHARACTER SILVER` and `--grant-item CHARACTER TEMPLATE
     MATERIAL,...`: out of the source like every drop, under the reason `grant` in the
     ledger and the item log; what is made obeys the craft's rule and the template's room,
     and a full inventory refuses (nothing goes to the ground).
@@ -303,7 +303,10 @@ become, not what they do.
 ## 6. Screens (CLIENT.md's toolkit)
 
 Four pages (`bag.rs`), named `inventory`, `storage`, `price` and `stall` for UI scripts.
-The body stands while one is up, as with the menu. Three rules hold on all of them:
+The body stands while one is up, as with the menu. Since Phase 14 (LOOK.md 4) the lists
+are grids of pictures with tooltips and drag, and the inventory has an equip panel with a
+paperdoll; the rules below hold as they did, and a cell is found by a script by the words
+its row had. Three rules hold on all of them:
 
 - A list is asked for when its page opens and after something the person did, and at no
   other time: what is on the screen does not move under the pointer.
@@ -341,7 +344,7 @@ and where a full inventory is emptied into.
 
 ### 6.3 Price
 
-**Sell** asks for a price in three fields (gold, silver, copper: digits only; an amount
+**Sell** asks for a price in two fields (gold, silver: digits only, since Phase 14 dropped copper; an amount
 pasted with anything else in it is not taken: `12.50` is not 1250) and says the whole back
 in words (`for 1 g 20 s`) before **List it** sends it, for the item it was opened for and
 no other.

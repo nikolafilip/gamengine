@@ -209,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
     let world = Arc::new(ZoneWorld::load(&args.map)?);
     let rate = TickRate::new(args.hz);
     let content = gm_content::load_dir(&args.content, rate)?;
+    let looks = gm_content::looks::Looks::load_dir(&args.content)?;
     if content.build(&args.default_build).is_none() {
         anyhow::bail!(
             "default build {:?} is not in {}",
@@ -323,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
         max_ticks: args.ticks,
         report_tx: None,
         content,
+        looks,
         default_build: args.default_build,
         hub,
         wild,

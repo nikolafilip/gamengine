@@ -16,22 +16,85 @@
 
 use gm_hub_proto::player::{PlayerEcon, PlayerEconReply, PlayerRequest, PlayerResponse};
 use gm_hub_proto::protocol::{
-    CharacterId, HubError, ItemSummary, ListingSummary, PLACE_NONE, SessionId,
+    CharacterId, HubError, ItemSummary, ListingSummary, PLACE_ARMOUR, PLACE_NONE, PLACE_WEAPON,
+    SessionId,
 };
 use web_time::{Duration, Instant};
 
 use crate::font::ADVANCE;
 use crate::front::PANEL_UNITS;
 use crate::hub::{Answer, HubApi, Pending, RpcError};
-use crate::ui::{self, Canvas, Column, Field, Key, NONE, Rect, Ui};
+use crate::ui::{self, Canvas, Column, Field, Key, NONE, Rect, SlotMark, SlotThing, Ui};
 
-/// A colour for each unit of coin (ECONOMY.md 2).
-const GOLD: [f32; 4] = [0.96, 0.80, 0.26, 1.0];
-const SILVER: [f32; 4] = [0.80, 0.83, 0.88, 1.0];
-const COPPER: [f32; 4] = [0.84, 0.52, 0.30, 1.0];
+/// Where an item's picture comes from (LOOK.md 4): the bundle's manifest, by the item's
+/// template (a whole thing) or its first material (a part); none without a bundle.
+#[derive(Clone, Copy, Default)]
+pub struct ItemLooks<'a> {
+    pub manifest: Option<&'a gm_model::manifest::Manifest>,
+}
 
-/// The most a price may be, in copper (the hub's own limit).
-const MAX_PRICE: i64 = 1_000_000_000_000;
+impl ItemLooks<'_> {
+    pub fn icon(&self, item: &ItemSummary) -> Option<String> {
+        let m = self.manifest?;
+        if item.place == PLACE_NONE {
+            let (_, material) = item.components.first()?;
+            m.material(material)?.icon.clone()
+        } else {
+            m.template(&item.template)?.icon.clone()
+        }
+    }
+
+    /// The thing a grid shows for an item, said as its row was (`sword  slash +2.0%  worn`).
+    pub fn thing(&self, item: &ItemSummary) -> SlotThing {
+        let worn = if item.worn { "  worn" } else { "" };
+        SlotThing {
+            id: item.id,
+            name: name(item),
+            said: format!("{}  {}{worn}", name(item), headline(item)),
+            icon: self.icon(item),
+            worn: item.worn,
+            mark: item.worn.then_some(SlotMark::Worn),
+            ..Default::default()
+        }
+    }
+}
+
+/// The lines of an item's tooltip (LOOK.md 2.4): what it is, what it does, what is made
+/// of; and what is worn in its place, when `worn` (the inventory) is known.
+pub(crate) fn tooltip_lines(
+    item: &ItemSummary,
+    worn: Option<&[ItemSummary]>,
+) -> Vec<(String, [f32; 4])> {
+    let mut lines = vec![(name(item), ui::FOCUS), (item.what.clone(), ui::TEXT)];
+    for d in &item.does {
+        lines.push((d.clone(), ui::TEXT));
+    }
+    if let (true, Some(worn)) = (item.place != PLACE_NONE && !item.worn, worn) {
+        let now = worn
+            .iter()
+            .find(|w| w.worn && w.place == item.place && w.id != item.id);
+        lines.push(match now {
+            Some(w) => (format!("you wear: {}", w.does.join("  ")), ui::FAINT),
+            None => ("you wear nothing in its place".to_string(), ui::FAINT),
+        });
+    }
+    lines.push((made_of(item), ui::FAINT));
+    lines
+}
+
+/// A colour for each unit of coin (ECONOMY.md 2: silver and gold, nothing smaller).
+pub const GOLD: [f32; 4] = [0.96, 0.80, 0.26, 1.0];
+pub const SILVER: [f32; 4] = [0.80, 0.83, 0.88, 1.0];
+
+/// Silver in a gold.
+pub const SILVER_PER_GOLD: i64 = 100;
+
+/// The most a price may be, in silver (the hub's own limit: a hundred million gold).
+const MAX_PRICE: i64 = 10_000_000_000;
+/// The slots a grid draws (ECONOMY.md 3: what a holder has room for).
+const INVENTORY_SLOTS: usize = 24;
+const STORAGE_SLOTS: usize = 60;
+const STALL_SLOTS: usize = 12;
 /// The zone takes one request of a kind from a player in a second; and one it never
 /// answers is given up after `PATIENCE`.
 const ZONE_GAP: Duration = Duration::from_millis(1100);
@@ -162,8 +225,8 @@ pub struct Bag {
     stall: Option<Stall>,
     /// The item a price is being named for.
     selling: Option<i64>,
-    /// The price being named: gold, silver, copper.
-    price: [String; 3],
+    /// The price being named: gold, silver.
+    price: [String; 2],
     /// What the hub has been asked and has not answered, each with its number.
     asks: Vec<(u32, Ask, Pending<Answer>)>,
     serial: u32,
@@ -181,11 +244,11 @@ pub struct Bag {
     now: Instant,
 }
 
-/// Copper as a person reads it (ECONOMY.md 2): its units, the largest first, each in its
+/// Silver as a person reads it (ECONOMY.md 2): its units, the largest first, each in its
 /// own colour, and never a long row of digits.
-pub fn coin_parts(copper: i64) -> Vec<(String, [f32; 4])> {
-    let copper = copper.max(0);
-    let (gold, silver, rest) = (copper / 10_000, copper / 100 % 100, copper % 100);
+pub fn coin_parts(silver: i64) -> Vec<(String, [f32; 4])> {
+    let silver = silver.max(0);
+    let (gold, rest) = (silver / SILVER_PER_GOLD, silver % SILVER_PER_GOLD);
     let mut parts = Vec::new();
     if gold > 0 {
         // Thousands of gold in threes: a digit more or less is seen.
@@ -199,26 +262,23 @@ pub fn coin_parts(copper: i64) -> Vec<(String, [f32; 4])> {
         }
         parts.push((format!("{grouped} g"), GOLD));
     }
-    if silver > 0 {
-        parts.push((format!("{silver} s"), SILVER));
-    }
     if rest > 0 || parts.is_empty() {
-        parts.push((format!("{rest} c"), COPPER));
+        parts.push((format!("{rest} s"), SILVER));
     }
     parts
 }
 
 #[cfg(test)]
-fn coin_words(copper: i64) -> String {
-    let parts: Vec<String> = coin_parts(copper).into_iter().map(|(t, _)| t).collect();
+fn coin_words(silver: i64) -> String {
+    let parts: Vec<String> = coin_parts(silver).into_iter().map(|(t, _)| t).collect();
     parts.join(" ")
 }
 
 /// A price for a row with room for `room` characters: whole when it fits; otherwise its
 /// largest units and a `+` that says there is more (the line under the list has all of it,
 /// and that is the price a purchase is made at). Never a number cut in the middle.
-pub fn coin_row(copper: i64, room: usize) -> String {
-    let mut parts: Vec<String> = coin_parts(copper).into_iter().map(|(t, _)| t).collect();
+pub fn coin_row(silver: i64, room: usize) -> String {
+    let mut parts: Vec<String> = coin_parts(silver).into_iter().map(|(t, _)| t).collect();
     let whole = parts.join(" ");
     if whole.chars().count() <= room {
         return whole;
@@ -233,9 +293,9 @@ pub fn coin_row(copper: i64, room: usize) -> String {
     format!("{}+", parts[0])
 }
 
-/// What three fields of gold, silver and copper say, in copper (an empty field is none
-/// of that unit); `None` when it is no amount the hub would take.
-pub(crate) fn copper_of(fields: &[String; 3]) -> Option<i64> {
+/// What two fields of gold and silver say, in silver (an empty field is none of that
+/// unit); `None` when it is no amount the hub would take.
+pub(crate) fn silver_of(fields: &[String; 2]) -> Option<i64> {
     let part = |text: &str| -> Option<i64> {
         if text.is_empty() {
             Some(0)
@@ -244,24 +304,20 @@ pub(crate) fn copper_of(fields: &[String; 3]) -> Option<i64> {
         }
     };
     let total = part(&fields[0])?
-        .checked_mul(10_000)?
-        .checked_add(part(&fields[1])? * 100)?
-        .checked_add(part(&fields[2])?)?;
+        .checked_mul(SILVER_PER_GOLD)?
+        .checked_add(part(&fields[1])?)?;
     (0..=MAX_PRICE).contains(&total).then_some(total)
 }
 
-/// The three fields a price is named in (gold, silver, copper: digits only), across `r`.
+/// The two fields a price is named in (gold, silver: digits only), across `r`.
 pub(crate) fn coin_fields<C: Canvas>(
     ui: &mut Ui<'_, C>,
     r: Rect,
     gap: f32,
-    fields: &mut [String; 3],
+    fields: &mut [String; 2],
 ) {
-    let w = (r.w - 2.0 * gap) / 3.0;
-    for (i, (label, digits)) in [("gold", 8), ("silver", 2), ("copper", 2)]
-        .into_iter()
-        .enumerate()
-    {
+    let w = (r.w - gap) / 2.0;
+    for (i, (label, digits)) in [("gold", 10), ("silver", 2)].into_iter().enumerate() {
         let at = Rect::new(r.x + i as f32 * (w + gap), r.y, w, r.h);
         ui.text_field(at, label, &mut fields[i], Field::number(digits));
     }
@@ -586,12 +642,25 @@ impl Bag {
     /// One frame. `ui` was begun for `self.page.name()`. `keeps_stall`: the character has
     /// an open stall in this zone, so there is somewhere to sell. `now` is the frame's
     /// time.
+    #[allow(dead_code)]
     pub fn frame<C: Canvas>(
         &mut self,
         ui: &mut Ui<'_, C>,
         hub: &dyn HubApi,
         keeps_stall: bool,
         now: Instant,
+    ) -> BagAction {
+        self.frame_with(ui, hub, keeps_stall, now, ItemLooks::default())
+    }
+
+    /// The same, with the bundle's pictures.
+    pub fn frame_with<C: Canvas>(
+        &mut self,
+        ui: &mut Ui<'_, C>,
+        hub: &dyn HubApi,
+        keeps_stall: bool,
+        now: Instant,
+        looks: ItemLooks<'_>,
     ) -> BagAction {
         self.now = now;
         // The zone takes one request of a kind in a second and may drop what comes
@@ -603,10 +672,10 @@ impl Bag {
             self.say("the zone did not answer: try again", true);
         }
         let action = match self.page {
-            Page::Inventory => self.inventory_page(ui, hub, keeps_stall),
-            Page::Storage => self.storage_page(ui, hub),
+            Page::Inventory => self.inventory_page(ui, hub, keeps_stall, looks),
+            Page::Storage => self.storage_page(ui, hub, looks),
             Page::Price => self.price_page(ui, hub),
-            Page::Stall => self.stall_page(ui, hub),
+            Page::Stall => self.stall_page(ui, hub, looks),
         };
         // Answers are taken when the frame has been drawn: a page changes between two
         // frames, never inside one.
@@ -654,7 +723,7 @@ impl Bag {
         ui.label(r.x, r.y, 0.0, ui::FAINT, label);
         if let Some(coin) = coin {
             let x = r.x + ui.text_width(label) + 2.0 * ADVANCE * ui.scale;
-            ui.spans(x, r.y, &coin_parts(coin));
+            ui.coins(x, r.y, &coin_parts(coin));
         }
     }
 
@@ -702,45 +771,83 @@ impl Bag {
         }
     }
 
+    /// The inventory (LOOK.md 4): the 24 slots as a grid, the equip panel beside it (a
+    /// paperdoll with the weapon and armour slots), the picked thing in full under them,
+    /// and the buttons. A drag onto a slot wears; a drag of a worn thing into the grid
+    /// takes it off; the buttons do the same (ITEMS.md 6 and LOOK.md 1.3).
     fn inventory_page<C: Canvas>(
         &mut self,
         ui: &mut Ui<'_, C>,
         hub: &dyn HubApi,
         keeps_stall: bool,
+        looks: ItemLooks<'_>,
     ) -> BagAction {
         let s = ui.scale;
         let gap = 5.0 * s;
         let line = ui.line();
         let h = ui.button_height();
-        let list = ui.list_height(7);
-        let inner = line + gap + list + gap + 5.0 * line + gap + 2.0 * line + gap + h;
+        let side = ui.slot_side();
+        let cols = 6usize;
+        let grid_h = 4.0 * side + 3.0 * 2.0 * s;
+        let inner = line + gap + grid_h + gap + 3.0 * line + gap + 2.0 * line + gap + h;
         let panel = Rect::centred(ui.size(), PANEL_UNITS * s, ui.panel_height(inner, true));
         let inner = ui.panel(panel, "inventory");
         let mut col = Column::new(inner, gap);
         Self::purse(ui, col.take(line), "coin", self.coin);
-        let items = self.items.as_deref().unwrap_or(&[]);
-        let rows: Vec<Vec<String>> = items
-            .iter()
-            .map(|i| {
-                let worn = if i.worn { "worn" } else { "" };
-                vec![name(i), headline(i).to_string(), worn.to_string()]
-            })
-            .collect();
-        ui.focus_default("list", "items");
-        // (A row is acted on by its buttons, not by Enter or a second click: Enter is the
-        // key of the chat line a moment before this screen opened.)
-        ui.list(
-            col.take(list),
+        let items: Vec<ItemSummary> = self.items.clone().unwrap_or_default();
+        let things: Vec<SlotThing> = items.iter().map(|i| looks.thing(i)).collect();
+        let area = col.take(grid_h);
+        let grid_w = cols as f32 * side + (cols - 1) as f32 * 2.0 * s;
+        let grid = Rect::new(area.x, area.y, grid_w, area.h);
+        let mut sel = items.get(self.picked).map(|i| i.id);
+        let worn_list = self.items.clone();
+        let tip = |t: &SlotThing| {
+            items
+                .iter()
+                .find(|i| i.id == t.id)
+                .map(|i| tooltip_lines(i, worn_list.as_deref()))
+                .unwrap_or_default()
+        };
+        ui.grid(
+            grid,
             "items",
-            &[0.0, 0.26, 0.88],
-            &rows,
-            &mut self.picked,
+            cols,
+            INVENTORY_SLOTS,
+            &things,
+            &mut sel,
+            0.0,
+            &tip,
         );
+        // (An empty or unknown list leaves the pick as it was: the first thing is picked
+        // when the list arrives, as a list's first row was.)
+        if !items.is_empty() {
+            self.picked = sel
+                .and_then(|id| items.iter().position(|i| i.id == id))
+                .unwrap_or(NONE);
+        }
+        // The equip panel: the paperdoll between the two places (LOOK.md 4).
+        let ex = grid.x + grid_w + gap;
+        let ew = (area.x + area.w - ex).max(0.0);
+        let slot_w = side;
+        let doll = Rect::new(ex, area.y, (ew - slot_w - gap).max(0.0), area.h);
+        if doll.w >= 20.0 * s {
+            ui.paperdoll(doll);
+        }
+        let weapon = items.iter().find(|i| i.worn && i.place == PLACE_WEAPON);
+        let armour = items.iter().find(|i| i.worn && i.place == PLACE_ARMOUR);
+        let sx = area.x + area.w - slot_w;
+        let weapon_slot = Rect::new(sx, area.y, slot_w, side);
+        let armour_slot = Rect::new(sx, area.y + side + gap, slot_w, side);
+        let wt = weapon.map(|i| looks.thing(i));
+        let at = armour.map(|i| looks.thing(i));
+        let dropped_on_weapon = ui.drop_slot(weapon_slot, "weapon", wt.as_ref(), &tip);
+        let dropped_on_armour = ui.drop_slot(armour_slot, "armour", at.as_ref(), &tip);
+        let dropped_in_grid = ui.dropped("items");
         let picked = items.get(self.picked).cloned();
         let nothing = Self::nothing(self.items.is_some(), items.is_empty(), "nothing is carried");
         Self::detail(
             ui,
-            col.take(5.0 * line),
+            col.take(3.0 * line),
             picked.as_ref(),
             self.items.as_deref(),
             nothing,
@@ -754,11 +861,8 @@ impl Bag {
             .is_some_and(|i| i.worn || i.place != PLACE_NONE);
         let wear = if worn { "Take off" } else { "Wear" };
         let row = ui.buttons(col.take(h), &[wear, "Sell", "Store", "Storage", "Close"]);
-        let change = ui.button_if(
-            row[0],
-            wear,
-            ready && wearable && self.wearing.free(self.now),
-        );
+        let may_change = ready && self.wearing.free(self.now);
+        let change = ui.button_if(row[0], wear, may_change && wearable);
         // What is worn is not for sale, and there must be a stall to sell at.
         let loose = picked.is_some() && !worn;
         if ui.button_if(row[1], "Sell", ready && loose && keeps_stall)
@@ -785,6 +889,36 @@ impl Bag {
         if ui.button(row[4], "Close") || ui.key(Key::Escape) {
             return BagAction::Close;
         }
+        // Drops do what the buttons do, through the same gate: an unworn thing onto its
+        // place wears it; a worn thing dragged into the grid comes off.
+        // A thing dropped on a slot must be for that slot (a cuirass on the weapon slot is
+        // nothing; the zone would refuse it, and the screen does not ask).
+        let for_slot = |dropped: Option<(String, i64)>, place: u8| {
+            dropped
+                .filter(|(from, _)| from == "items")
+                .map(|(_, id)| id)
+                .and_then(|id| items.iter().find(|i| i.id == id))
+                .filter(|i| !i.worn && i.place == place)
+                .cloned()
+        };
+        let dropped_to_wear =
+            for_slot(dropped_on_weapon, PLACE_WEAPON).or(for_slot(dropped_on_armour, PLACE_ARMOUR));
+        let dropped_to_take_off = dropped_in_grid
+            .filter(|(from, _)| from == "weapon" || from == "armour")
+            .map(|(_, id)| id)
+            .and_then(|id| items.iter().find(|i| i.id == id))
+            .filter(|i| i.worn)
+            .cloned();
+        if may_change && let Some(item) = dropped_to_wear {
+            self.wearing.begin(item.id, self.now);
+            self.notice.clear();
+            return BagAction::Wear { item: item.id };
+        }
+        if may_change && let Some(item) = dropped_to_take_off {
+            self.wearing.begin(item.id, self.now);
+            self.notice.clear();
+            return BagAction::TakeOff { item: item.id };
+        }
         match (change, picked) {
             (true, Some(item)) => {
                 self.wearing.begin(item.id, self.now);
@@ -801,29 +935,50 @@ impl Bag {
 
     /// The account's storage: where what a closed stall could not hand back is, and
     /// where a full inventory is emptied into.
-    fn storage_page<C: Canvas>(&mut self, ui: &mut Ui<'_, C>, hub: &dyn HubApi) -> BagAction {
+    fn storage_page<C: Canvas>(
+        &mut self,
+        ui: &mut Ui<'_, C>,
+        hub: &dyn HubApi,
+        looks: ItemLooks<'_>,
+    ) -> BagAction {
         let s = ui.scale;
         let gap = 5.0 * s;
         let line = ui.line();
         let h = ui.button_height();
-        let list = ui.list_height(8);
-        let inner = list + gap + 5.0 * line + gap + 2.0 * line + gap + h;
+        let side = ui.slot_side();
+        let cols = 8usize;
+        let grid_h = 4.0 * side + 3.0 * 2.0 * s;
+        let inner = grid_h + gap + 3.0 * line + gap + 2.0 * line + gap + h;
         let panel = Rect::centred(ui.size(), PANEL_UNITS * s, ui.panel_height(inner, true));
         let inner = ui.panel(panel, "storage");
         let mut col = Column::new(inner, gap);
-        let stored = self.stored.as_deref().unwrap_or(&[]);
-        let rows: Vec<Vec<String>> = stored
-            .iter()
-            .map(|i| vec![name(i), headline(i).to_string()])
-            .collect();
-        ui.focus_default("list", "stored");
-        ui.list(
-            col.take(list),
+        let stored: Vec<ItemSummary> = self.stored.clone().unwrap_or_default();
+        let things: Vec<SlotThing> = stored.iter().map(|i| looks.thing(i)).collect();
+        let area = col.take(grid_h);
+        let mut sel = stored.get(self.stored_picked).map(|i| i.id);
+        let worn_list = self.items.clone();
+        let tip = |t: &SlotThing| {
+            stored
+                .iter()
+                .find(|i| i.id == t.id)
+                .map(|i| tooltip_lines(i, worn_list.as_deref()))
+                .unwrap_or_default()
+        };
+        ui.grid(
+            area,
             "stored",
-            &[0.0, 0.26],
-            &rows,
-            &mut self.stored_picked,
+            cols,
+            STORAGE_SLOTS,
+            &things,
+            &mut sel,
+            0.0,
+            &tip,
         );
+        if !stored.is_empty() {
+            self.stored_picked = sel
+                .and_then(|id| stored.iter().position(|i| i.id == id))
+                .unwrap_or(NONE);
+        }
         let picked = stored.get(self.stored_picked).cloned();
         let nothing = Self::nothing(
             self.stored.is_some(),
@@ -832,7 +987,7 @@ impl Bag {
         );
         Self::detail(
             ui,
-            col.take(5.0 * line),
+            col.take(3.0 * line),
             picked.as_ref(),
             self.items.as_deref(),
             nothing,
@@ -854,9 +1009,9 @@ impl Bag {
         BagAction::None
     }
 
-    /// The price named so far, in copper; `None` while it is not one.
+    /// The price named so far, in silver; `None` while it is not one.
     fn price(&self) -> Option<i64> {
-        copper_of(&self.price).filter(|total| *total > 0)
+        silver_of(&self.price).filter(|total| *total > 0)
     }
 
     fn price_page<C: Canvas>(&mut self, ui: &mut Ui<'_, C>, hub: &dyn HubApi) -> BagAction {
@@ -875,15 +1030,15 @@ impl Bag {
             let said = format!("{}  {}", name(item), headline(item));
             ui.label(what.x, what.y, what.w, ui::TEXT, &said);
         }
-        // Gold, silver and copper apart, and the whole said back in words before it is
-        // sent: a price is never a row of digits to miscount.
+        // Gold and silver apart, and the whole said back in words before it is sent: a
+        // price is never a row of digits to miscount.
         let fields = col.take(ui.field_height());
         ui.focus_default("field", "gold");
         coin_fields(ui, fields, gap, &mut self.price);
         let price = self.price();
         let shown = col.take(line);
         match price {
-            Some(copper) => Self::purse(ui, shown, "for", Some(copper)),
+            Some(silver) => Self::purse(ui, shown, "for", Some(silver)),
             None => ui.label(shown.x, shown.y, shown.w, ui::FAINT, "name a price"),
         }
         self.notice_lines(ui, col.take(3.0 * line));
@@ -908,9 +1063,15 @@ impl Bag {
         BagAction::None
     }
 
-    fn stall_page<C: Canvas>(&mut self, ui: &mut Ui<'_, C>, hub: &dyn HubApi) -> BagAction {
+    fn stall_page<C: Canvas>(
+        &mut self,
+        ui: &mut Ui<'_, C>,
+        hub: &dyn HubApi,
+        looks: ItemLooks<'_>,
+    ) -> BagAction {
         let ready = self.ready();
         let free = self.buying.free(self.now);
+        let worn_list = self.items.clone();
         let Some(stall) = &mut self.stall else {
             return BagAction::Close;
         };
@@ -918,8 +1079,12 @@ impl Bag {
         let gap = 5.0 * s;
         let line = ui.line();
         let h = ui.button_height();
-        let list = ui.list_height(6);
-        let inner = line + gap + list + gap + 5.0 * line + gap + line + gap + 2.0 * line + gap + h;
+        let side = ui.slot_side();
+        let cols = 6usize;
+        let under = line;
+        let grid_h = 2.0 * (side + under) + 2.0 * s;
+        let inner =
+            line + gap + grid_h + gap + 3.0 * line + gap + line + gap + 2.0 * line + gap + h;
         let panel = Rect::centred(ui.size(), PANEL_UNITS * s, ui.panel_height(inner, true));
         let title = if stall.mine {
             "your stall".to_string()
@@ -930,30 +1095,57 @@ impl Bag {
         let mut col = Column::new(inner, gap);
         Self::purse(ui, col.take(line), "you have", self.coin);
         let known = stall.listings.is_some();
-        let listings = stall.listings.as_deref().unwrap_or(&[]);
-        let rows: Vec<Vec<String>> = listings
+        let listings = stall.listings.clone().unwrap_or_default();
+        let things: Vec<SlotThing> = listings
             .iter()
-            .map(|l| {
-                vec![
+            .map(|l| SlotThing {
+                // Picked by the listing's id, not the item's (ITEMS.md 6).
+                id: l.id,
+                said: format!(
+                    "{}  {}  {}",
                     name(&l.item),
-                    headline(&l.item).to_string(),
-                    coin_row(l.price, PRICE_CHARS),
-                ]
+                    headline(&l.item),
+                    coin_row(l.price, PRICE_CHARS)
+                ),
+                under: coin_row(l.price, 9),
+                under_colour: ui::FOCUS,
+                fixed: true,
+                ..looks.thing(&l.item)
             })
             .collect();
-        ui.focus_default("list", "for sale");
-        ui.list(
-            col.take(list),
+        let area = col.take(grid_h);
+        let mut sel = listings.get(stall.picked).map(|l| l.id);
+        let tip = |t: &SlotThing| {
+            listings
+                .iter()
+                .find(|l| l.id == t.id)
+                .map(|l| {
+                    let mut lines = tooltip_lines(&l.item, worn_list.as_deref());
+                    lines.push((format!("price: {}", coin_row(l.price, 40)), ui::FOCUS));
+                    lines
+                })
+                .unwrap_or_default()
+        };
+        ui.grid(
+            area,
             "for sale",
-            &[0.0, 0.24, 0.72],
-            &rows,
-            &mut stall.picked,
+            cols,
+            STALL_SLOTS,
+            &things,
+            &mut sel,
+            under,
+            &tip,
         );
+        if !listings.is_empty() {
+            stall.picked = sel
+                .and_then(|id| listings.iter().position(|l| l.id == id))
+                .unwrap_or(NONE);
+        }
         let picked = listings.get(stall.picked).cloned();
         let nothing = Self::nothing(known, listings.is_empty(), "nothing is for sale here");
         Self::detail(
             ui,
-            col.take(5.0 * line),
+            col.take(3.0 * line),
             picked.as_ref().map(|l| &l.item),
             self.items.as_deref(),
             nothing,
@@ -1154,7 +1346,7 @@ mod tests {
         let mut worn = item(2, "sword", &["slash +2.0%"], &["core/iron", "frame/oak"]);
         worn.what = "a weapon, 40 of 250".into();
         Hub(RefCell::new(Shop {
-            coin: 21_540,
+            coin: 215,
             items: vec![
                 item(1, "sword", &["slash +11.0%", "storm +9.5%"], &BEST),
                 worn,
@@ -1248,26 +1440,25 @@ mod tests {
 
     #[test]
     fn coin_is_said_in_units_and_never_as_a_row_of_digits() {
-        assert_eq!(coin_words(0), "0 c");
-        assert_eq!(coin_words(-5), "0 c");
-        assert_eq!(coin_words(40), "40 c");
-        assert_eq!(coin_words(100), "1 s");
-        assert_eq!(coin_words(10_000), "1 g");
-        assert_eq!(coin_words(21_540), "2 g 15 s 40 c");
-        assert_eq!(coin_words(1_000_005), "100 g 5 c");
+        assert_eq!(coin_words(0), "0 s");
+        assert_eq!(coin_words(-5), "0 s");
+        assert_eq!(coin_words(40), "40 s");
+        assert_eq!(coin_words(100), "1 g");
+        assert_eq!(coin_words(215), "2 g 15 s");
+        assert_eq!(coin_words(10_005), "100 g 5 s");
         // A price ten times another is a digit longer in gold, and the thousands stand apart.
-        assert_eq!(coin_words(1_234_567_800), "123,456 g 78 s");
+        assert_eq!(coin_words(12_345_678), "123,456 g 78 s");
         assert_eq!(coin_words(MAX_PRICE), "100,000,000 g");
-        let colours: Vec<[f32; 4]> = coin_parts(21_540).into_iter().map(|p| p.1).collect();
-        assert_eq!(colours, [GOLD, SILVER, COPPER]);
+        let colours: Vec<[f32; 4]> = coin_parts(215).into_iter().map(|p| p.1).collect();
+        assert_eq!(colours, [GOLD, SILVER]);
         // In a row: whole when it fits, else its largest units and a mark that there is
         // more; never a number cut in the middle, and never longer than the row has room.
-        assert_eq!(coin_row(21_540, 14), "2 g 15 s 40 c");
-        assert_eq!(coin_row(99_999_999, 14), "9,999 g 99 s+");
-        assert_eq!(coin_row(12_345_678, 14), "1,234 g 56 s+");
+        assert_eq!(coin_row(215, 14), "2 g 15 s");
+        assert_eq!(coin_row(999_999, 14), "9,999 g 99 s");
+        assert_eq!(coin_row(123_456_789, 14), "1,234,567 g+");
         assert_eq!(coin_row(MAX_PRICE - 1, 14), "99,999,999 g+");
         assert_eq!(coin_row(MAX_PRICE, 14), "100,000,000 g");
-        for copper in [
+        for silver in [
             1,
             99,
             100,
@@ -1278,13 +1469,13 @@ mod tests {
             MAX_PRICE - 1,
             MAX_PRICE,
         ] {
-            let row = coin_row(copper, PRICE_CHARS);
-            assert!(row.chars().count() <= PRICE_CHARS, "{copper}: {row}");
-            let whole = coin_words(copper);
+            let row = coin_row(silver, PRICE_CHARS);
+            assert!(row.chars().count() <= PRICE_CHARS, "{silver}: {row}");
+            let whole = coin_words(silver);
             assert!(
                 row == whole
                     || (row.ends_with('+') && whole.starts_with(row.trim_end_matches('+'))),
-                "{copper}: {row} of {whole}"
+                "{silver}: {row} of {whole}"
             );
         }
     }
@@ -1303,7 +1494,7 @@ mod tests {
         // The purse in units, each row by the strongest thing the item does, and the one
         // picked in full: what it is, what it does, what is worn in its place (nothing
         // yet), what it is made of. All of it the hub's words.
-        assert!(run.shows("2 g 15 s 40 c"));
+        assert!(run.shows("2 g 15 s"));
         assert!(run.shows("sword  slash +11.0%") && run.shows("ember  a catalyst, for crafting"));
         assert!(run.shows("a weapon, 250 of 250") && run.shows("slash +11.0%  storm +9.5%"));
         assert!(run.shows("you wear nothing in its place"));
@@ -1388,7 +1579,7 @@ mod tests {
         run.click(&mut bag, "Back", &hub);
         assert_eq!(bag.page, Page::Inventory);
 
-        // Selling: a price in gold, silver and copper, said back in words before it goes.
+        // Selling: a price in gold and silver, said back in words before it goes.
         run.click(&mut bag, "sword  slash +2.0%", &hub);
         run.click(&mut bag, "Sell", &hub);
         assert_eq!(bag.page, Page::Price);
@@ -1415,7 +1606,7 @@ mod tests {
         assert!(run.shows("it is in your stall"));
         assert!(hub.0.borrow().asked.contains(&PlayerEcon::StallList {
             item: 2,
-            price: 12_000
+            price: 120
         }));
         // Escape closes.
         let escape = UiInput {
@@ -1433,7 +1624,7 @@ mod tests {
         hub.0.borrow_mut().listings = vec![ListingSummary {
             id: 71,
             item: item(11, "sword", &["slash +11.0%"], &BEST),
-            price: 500,
+            price: 5,
         }];
         let mut run = Run::new(false);
         let mut bag = Bag::stall(&hub, S, ME, 5, "Smith", run.t);
@@ -1441,14 +1632,14 @@ mod tests {
         hub.0.borrow_mut().listings = vec![ListingSummary {
             id: 72,
             item: item(12, "sword", &["slash +1.0%"], &["core/tin", "frame/oak"]),
-            price: 4_000_000,
+            price: 40_000,
         }];
         assert_eq!(
             run.click(&mut bag, "Buy", &hub),
             BagAction::Buy {
                 stall: 5,
                 listing: 71,
-                price: 500
+                price: 5
             }
         );
         assert_eq!(
@@ -1473,7 +1664,7 @@ mod tests {
             BagAction::Buy {
                 stall: 5,
                 listing: 72,
-                price: 4_000_000
+                price: 40_000
             }
         );
 
@@ -1516,17 +1707,17 @@ mod tests {
                         &["slash +3.0%"],
                         &["core/dragonbone", "frame/oak"],
                     ),
-                    price: 500,
+                    price: 5,
                 },
                 ListingSummary {
                     id: 72,
                     item: item(12, "sword", &["slash +11.0%", "storm +9.5%"], &BEST),
-                    price: 12_000,
+                    price: 120,
                 },
                 ListingSummary {
                     id: 73,
                     item: item(13, "sword", &["slash +1.0%"], &["core/tin", "frame/oak"]),
-                    price: 20_000,
+                    price: 200,
                 },
             ];
         }
@@ -1540,7 +1731,7 @@ mod tests {
         run.look(&mut bag, &hub);
         // Whose it is, what the buyer has, each thing with its price in units, and the one
         // picked beside what the buyer wears.
-        assert!(run.shows("Smith's stall") && run.shows("you have") && run.shows("2 g 15 s 40 c"));
+        assert!(run.shows("Smith's stall") && run.shows("you have") && run.shows("2 g 15 s"));
         assert!(run.shows("sword  slash +11.0%  1 g 20 s"));
         assert!(run.shows("sword  slash +3.0%  5 s"));
         assert!(run.shows("you wear: slash +2.0%"));
@@ -1554,7 +1745,7 @@ mod tests {
             BagAction::Buy {
                 stall: 5,
                 listing: 72,
-                price: 12_000
+                price: 120
             }
         );
         run.look(&mut bag, &hub);
@@ -1566,7 +1757,7 @@ mod tests {
             shop.listings.remove(0);
             let bought = shop.listings.remove(0).item;
             shop.items.push(bought);
-            shop.coin -= 12_000;
+            shop.coin -= 120;
         }
         let asked = hub.0.borrow().asked.len();
         assert!(
@@ -1582,7 +1773,7 @@ mod tests {
         );
         assert_eq!(bag.bought(&hub, 72, Ok(())), None);
         run.look(&mut bag, &hub);
-        assert!(run.shows("bought: it is in the inventory") && run.shows("95 s 40 c"));
+        assert!(run.shows("bought: it is in the inventory") && run.shows("95 s"));
         assert!(run.shows("sword  slash +1.0%  2 g") && !run.shows("slash +3.0%"));
         // What was bought is gone from the stall: nothing is picked, and Buy is off until
         // the person picks (and the zone's second has passed).
@@ -1597,7 +1788,7 @@ mod tests {
             BagAction::Buy {
                 stall: 5,
                 listing: 73,
-                price: 20_000
+                price: 200
             }
         );
         assert_eq!(bag.bought(&hub, 73, Err("not enough coin".into())), None);
@@ -1755,7 +1946,7 @@ mod tests {
             let mut price = Bag::inventory(&hub, S, ME, t);
             price.page = Page::Price;
             price.selling = Some(4);
-            price.price = ["99999999".into(), "99".into(), "99".into()];
+            price.price = ["99999999".into(), "99".into()];
             pages.extend([storage, price]);
             // The stall as its keeper sees it (the answer is made when it is asked for),
             // and one whose keeper's name is as long as a name gets.

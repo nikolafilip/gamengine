@@ -15,6 +15,12 @@ pub const MAGIC: [u8; 4] = *b"GMM1";
 pub const TEX_BC1_SRGB: u8 = 1;
 pub const FLAG_CUTOUT: u16 = 1 << 0;
 pub const FLAG_TWO_SIDED: u16 = 1 << 1;
+/// A prop (CONTENT.md 4): a thing held, not a body. Its `frame` byte is `PROP_FRAME`, its
+/// bone mask is bone 0 alone with zero pivots, and every vertex is on bone 0 with weight
+/// 255: the character pipeline draws it with the hand's matrix at index 0 (LOOK.md 6.3).
+pub const FLAG_PROP: u16 = 1 << 2;
+/// The `frame` byte of a prop: no frame at all.
+pub const PROP_FRAME: u8 = 255;
 
 /// Hard limits of the format (PLAN.md 2.6; a test keeps them equal to `budgets.toml`).
 pub mod limits {
@@ -24,6 +30,12 @@ pub mod limits {
     pub const MAX_TEXTURE: u16 = 1024;
     /// The whole file.
     pub const MAX_FILE_BYTES: usize = 1_572_864;
+    /// A prop's triangles, texture side and file (CONTENT.md 4).
+    pub const PROP_MAX_TRIANGLES: usize = 1000;
+    pub const PROP_MAX_TEXTURE: u16 = 256;
+    pub const PROP_MAX_FILE_BYTES: usize = 131_072;
+    /// How far from its grip a prop may reach, in world units (3 m).
+    pub const PROP_MAX_EXTENT: f32 = 96.0;
     /// The payload after inflation.
     pub const MAX_RAW_BYTES: usize = 2 * 1024 * 1024;
     /// Coordinates and pivots stay inside this cube (world units).
@@ -233,6 +245,11 @@ impl Model {
         self.flags & FLAG_TWO_SIDED != 0
     }
 
+    /// A thing held (CONTENT.md 4), not a body: no frame, no rig.
+    pub fn is_prop(&self) -> bool {
+        self.flags & FLAG_PROP != 0
+    }
+
     pub fn position(&self, i: usize) -> Vec3 {
         let v = &self.vertices[i];
         Vec3::new(
@@ -277,10 +294,40 @@ impl Model {
 
     /// Everything the reader will check, checked on the writer's side too.
     pub fn validate(&self) -> Result<(), ModelError> {
-        if self.flags & !(FLAG_CUTOUT | FLAG_TWO_SIDED) != 0 {
+        if self.flags & !(FLAG_CUTOUT | FLAG_TWO_SIDED | FLAG_PROP) != 0 {
             return Err(ModelError::Range("flags"));
         }
-        if self.frame > 3 {
+        let prop = self.is_prop();
+        // A prop is a prop in every way at once, or it is not one: the frame byte, the
+        // flag and the rig agree, so that nothing reads a held thing as a body.
+        if prop {
+            if self.frame != PROP_FRAME {
+                return Err(ModelError::Range("a prop has no frame"));
+            }
+            if self.bone_mask != 1 || self.pivots.iter().flatten().any(|v| *v != 0.0) {
+                return Err(ModelError::Range("a prop has no rig"));
+            }
+            if self.indices.len() > limits::PROP_MAX_TRIANGLES * 3 {
+                return Err(ModelError::Range("a prop's triangles"));
+            }
+            if self.tex_w > limits::PROP_MAX_TEXTURE || self.tex_h > limits::PROP_MAX_TEXTURE {
+                return Err(ModelError::Range("a prop's texture"));
+            }
+            if !self
+                .scale
+                .iter()
+                .all(|s| s.is_finite() && *s > 0.0 && *s <= limits::PROP_MAX_EXTENT)
+            {
+                return Err(ModelError::Range("a prop's extent"));
+            }
+            if self
+                .vertices
+                .iter()
+                .any(|v| v.joints != [0; 4] || v.weights != [255, 0, 0, 0])
+            {
+                return Err(ModelError::Range("a prop's vertices are all on bone 0"));
+            }
+        } else if self.frame > 3 {
             return Err(ModelError::Range("frame"));
         }
         if !self
@@ -290,7 +337,7 @@ impl Model {
         {
             return Err(ModelError::Range("scale"));
         }
-        if self.bone_mask & !ALL_BONES != 0 || self.bone_mask & REQUIRED != REQUIRED {
+        if !prop && (self.bone_mask & !ALL_BONES != 0 || self.bone_mask & REQUIRED != REQUIRED) {
             return Err(ModelError::Range("bone mask"));
         }
         if !self
@@ -383,8 +430,13 @@ impl Model {
         out.push(TEX_BC1_SRGB);
         out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
         out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6));
-        if out.len() > limits::MAX_FILE_BYTES {
-            return Err(ModelError::TooLarge(out.len(), limits::MAX_FILE_BYTES));
+        let most = if self.is_prop() {
+            limits::PROP_MAX_FILE_BYTES
+        } else {
+            limits::MAX_FILE_BYTES
+        };
+        if out.len() > most {
+            return Err(ModelError::TooLarge(out.len(), most));
         }
         Ok(out)
     }
@@ -398,6 +450,12 @@ impl Model {
         }
         let flags = u16::from_le_bytes([file[4], file[5]]);
         let frame = file[6];
+        if flags & FLAG_PROP != 0 && file.len() > limits::PROP_MAX_FILE_BYTES {
+            return Err(ModelError::TooLarge(
+                file.len(),
+                limits::PROP_MAX_FILE_BYTES,
+            ));
+        }
         if file[7] != TEX_BC1_SRGB {
             return Err(ModelError::TextureFormat(file[7]));
         }
@@ -555,6 +613,68 @@ pub(crate) mod tests {
         assert_eq!(id_from_hex("xyz"), None);
     }
 
+    /// A small valid prop: a blade of two triangles along +X, a 64 × 64 texture.
+    pub(crate) fn sample_prop() -> Model {
+        let positions = vec![
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(40.0, -1.0, 0.0),
+            Vec3::new(40.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let normals = vec![Vec3::Z; 4];
+        let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let joints = vec![[0u8; 4]; 4];
+        let weights = vec![[1.0, 0.0, 0.0, 0.0]; 4];
+        let (scale, vertices) = quantize_vertices(&positions, &normals, &uvs, &joints, &weights);
+        let texture: Vec<u8> = (0..texture_bytes(64, 64)).map(|i| (i * 3) as u8).collect();
+        Model {
+            flags: FLAG_PROP | FLAG_TWO_SIDED,
+            frame: PROP_FRAME,
+            scale,
+            average: [180, 180, 190, 255],
+            bone_mask: 1,
+            pivots: [[0.0; 3]; BONES],
+            vertices,
+            indices: vec![0, 1, 2, 0, 2, 3],
+            tex_w: 64,
+            tex_h: 64,
+            texture,
+        }
+    }
+
+    #[test]
+    fn a_prop_round_trips_and_is_a_prop_in_every_way_or_not_at_all() {
+        let p = sample_prop();
+        let file = p.encode().unwrap();
+        let back = Model::decode(&file).unwrap();
+        assert_eq!(back, p);
+        assert!(back.is_prop() && back.frame == PROP_FRAME);
+        // The flag without the frame byte, the frame byte without the flag, a rig, a
+        // vertex on another bone, too far a reach: each is refused.
+        let mut m = sample_prop();
+        m.frame = 1;
+        assert!(m.encode().is_err());
+        let mut m = sample();
+        m.frame = PROP_FRAME;
+        assert!(m.encode().is_err());
+        let mut m = sample_prop();
+        m.bone_mask = REQUIRED | 1;
+        assert!(m.encode().is_err());
+        let mut m = sample_prop();
+        m.vertices[0].joints = [1, 0, 0, 0];
+        m.bone_mask = 0b11;
+        assert!(m.encode().is_err());
+        let mut m = sample_prop();
+        m.scale = [limits::PROP_MAX_EXTENT + 1.0, 1.0, 1.0];
+        assert!(m.encode().is_err());
+        // And an avatar's reader refuses it where a frame is expected: the flag is read.
+        let mut m = sample_prop();
+        m.tex_w = 512;
+        m.tex_h = 512;
+        m.texture = (0..texture_bytes(512, 512)).map(|i| i as u8).collect();
+        assert!(matches!(m.encode(), Err(ModelError::Range(_))));
+    }
+
     #[test]
     fn positions_survive_quantisation() {
         let m = sample();
@@ -702,5 +822,27 @@ pub(crate) mod tests {
         assert_eq!(limits::MAX_TEXTURE as usize, value("max_texture_size"));
         assert_eq!(limits::MAX_FILE_BYTES, value("max_payload_bytes"));
         assert!(BONES <= value("max_bones"));
+        // And a prop's (CONTENT.md 4), under [content].
+        let content = |key: &str| -> usize {
+            let mut in_section = false;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    in_section = line == "[content]";
+                } else if in_section
+                    && let Some((k, v)) = line.split_once('=')
+                    && k.trim() == key
+                {
+                    return v.split('#').next().unwrap().trim().parse().unwrap();
+                }
+            }
+            panic!("budgets.toml has no [content] {key}");
+        };
+        assert_eq!(limits::PROP_MAX_TRIANGLES, content("max_prop_triangles"));
+        assert_eq!(
+            limits::PROP_MAX_TEXTURE as usize,
+            content("max_prop_texture")
+        );
+        assert_eq!(limits::PROP_MAX_FILE_BYTES, content("max_prop_gmm_bytes"));
     }
 }

@@ -793,7 +793,7 @@ impl Conduct {
     }
 
     /// A contract was paid (ECONOMY.md 8): each seller's reputation, once per buyer account
-    /// a week, so that alts buying one-copper carries bank nothing.
+    /// a week, so that alts buying one-silver carries bank nothing.
     pub async fn contract_paid(
         &self,
         contract: i64,

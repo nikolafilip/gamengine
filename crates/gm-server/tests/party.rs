@@ -114,7 +114,9 @@ impl Hand {
             other => panic!("{name}: no welcome: {other:?}"),
         };
         let (pack, own, team) = match control::recv(&mut recv).await.unwrap() {
-            Some(FromZone::Content { pack, own, team }) => (pack, own, team),
+            Some(FromZone::Content {
+                pack, own, team, ..
+            }) => (pack, own, team),
             other => panic!("{name}: no content: {other:?}"),
         };
         let rate = TickRate::new(hz as u32);
@@ -617,7 +619,7 @@ async fn people_join_each_other_through_their_zones_and_a_fight_keeps_its_partie
             party_sweep: Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: items.clone(),
-            max_coin_grant: 10_000,
+            max_coin_grant: 500,
             models_dir: std::env::temp_dir()
                 .join(format!("gm-party-models-{}", std::process::id())),
             ingest: IngestMode::InProcess,

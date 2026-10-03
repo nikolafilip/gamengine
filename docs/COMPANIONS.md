@@ -386,7 +386,7 @@ On `cleared`, for an encounter with a boss:
    taken from the list in order, round-robin over the recipients in split order: the same
    kill always drops the same things.
 5. The zone reports the kill to the hub once (`ZoneEconOp::GrantKill`: the components per
-   recipient and the coin, `coin` copper split evenly among the recipients, remainder to the
+   recipient and the coin, `coin` silver split evenly among the recipients, remainder to the
    first). The hub does all of it in **one transaction that begins by claiming the kill's
    reference** for that zone, so the zone repeats the report until it is answered (six
    times over eight seconds) and a repeat pays nothing. Full inventories overflow to the
@@ -475,7 +475,7 @@ with four pillars and a dais (2,677 nav nodes; the walk from the entry to the Wa
     everyone sees it. Walk out.
   - `stone_throw` and `stomp` from the player content, for whoever stands far or crowds it.
   - Loot: 3 components; `standard` core/iron, frame/ash, catalyst/basalt; `top`
-    core/dragonbone, shard/boss_scale, catalyst/basalt; 30 copper. Respawns after 120 s.
+    core/dragonbone, shard/boss_scale, catalyst/basalt; 30 silver. Respawns after 120 s.
 
 Two abilities and one build join the player content for the healer the dungeon needs, and
 one for the leader (MATRIX.md 10 bands):
@@ -546,7 +546,7 @@ all green:
    body driven by the raider brain with the reference squad (ironclad, mender, frostweaver)
    on the real map and content clears the gate and the Warden on **8 of 8 seeds** in
    141–270 s, one reset in all (a friendly shard hit the tank at 89 health), 0–3 party
-   deaths; the drop is `core/iron, frame/ash, catalyst/basalt` and 30 copper to the one
+   deaths; the drop is `core/iron, frame/ash, catalyst/basalt` and 30 silver (copper, before Phase 14) to the one
    human; `warden_leader` passes with 100% of the damage under orders and the other three
    trials fail as they must for a leader who stood back. Without a healer, and with three
    blades, the Warden is not beaten in ten minutes on any of 3 seeds each (8–28 resets).
@@ -559,10 +559,10 @@ all green:
    repeatable (QUIC draws its own random numbers), which is why 24 were run.
 3. *Through the hub* (`crates/gm-server/tests/companions.rs` with `GM_TEST_DATABASE_URL`,
    real time, about three minutes): three accounts list an ironclad, a mender and a
-   frostweaver at 100 copper; the leader finds the gated zone `Locked`, hires the three (300
-   copper leave it, 90 burn, 70 reach each owner), enters with them (the squad is the three
+   frostweaver at 100 silver; the leader finds the gated zone `Locked`, hires the three (300
+   silver leave it, 90 burn, 70 reach each owner), enters with them (the squad is the three
    hires by name; the zone's recruits get no slot) and clears in 155 s; the database holds
-   the three components and 30 copper for the leader, nothing for the avatars, the trial
+   the three components and 30 silver for the leader, nothing for the avatars, the trial
    with its time, and a sound ledger; the gated zone lets it in; an owner who then plays
    its avatar ends that hire without a refund. `scripts/check-dungeon.sh --online` does the
    same with the real binaries and no help from a test: a first clear with recruits pays

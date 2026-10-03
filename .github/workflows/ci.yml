@@ -118,6 +118,8 @@ jobs:
         run: scripts/check-avatars.sh --software
       - name: Sound gate (the walk and the arena fight rendered to WAVs on an Xvfb of its own and read; no device)
         run: SKIP_BUILD=1 SKIP_TESTS=1 scripts/check-sound.sh
+      - name: Look gate (the content checked, the committed bundle reproduced byte for byte, props in hands over the crowd; software Vulkan)
+        run: cargo build --release -p gm-tools --locked && SKIP_BUILD=1 SKIP_TESTS=1 scripts/check-look.sh
 
   web:
     name: browser client (wasm sizes, WebTransport, headless Chromium)

@@ -1230,6 +1230,45 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 ),
             )
         },
+        // Phase 14: the gun (CONTENT.md 11), the crossbow's counterpart: slower, harder,
+        // flatter, from a little further ahead of the hand.
+        def(
+            "musket",
+            Secondary,
+            4,
+            None,
+            ability(
+                48,
+                "Musket",
+                2500,
+                0,
+                0,
+                0.5,
+                Interrupt::Never,
+                vec![(
+                    150,
+                    Verb::Projectile(Projectile {
+                        speed: 2600.0,
+                        gravity_scale: 0.15,
+                        radius: 2.0,
+                        lifetime: r.ms_to_ticks(2500),
+                        damage: packet(55, Pierce, 160.0, 15),
+                        pierce: 0,
+                        bounce: Bounce::default(),
+                        drag: 0.0,
+                        spawn: Origin::Weapon {
+                            offset: [20.0, 4.0, -2.0],
+                        },
+                        inherit_velocity: 0.0,
+                        spread_deg: 0.2,
+                        count: 1,
+                        on_hit: vec![],
+                        on_expire: vec![],
+                    }),
+                )],
+                r,
+            ),
+        ),
     ];
     let mut pack = ContentPack {
         abilities,

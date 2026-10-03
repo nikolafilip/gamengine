@@ -22,6 +22,9 @@ pub struct CharacterDraw {
     pub tint: [f32; 3],
     /// Ambient light where the character stands.
     pub light: [f32; 3],
+    /// A prop (LOOK.md 6.3): not posed, but placed by this one matrix (its model space to
+    /// the wearer's), which goes to bone 0 of the block; the other bones are unused.
+    pub attach: Option<Mat4>,
 }
 
 /// What the animation and the caches need to know about a loaded model.
@@ -126,6 +129,8 @@ pub struct Characters {
     staging: Vec<u8>,
     /// `(slot, block index)` in draw order.
     order: Vec<(usize, usize)>,
+    /// The paperdoll's draws (LOOK.md 5), after the world's in the block buffer.
+    doll_order: Vec<(usize, usize)>,
     models: Vec<Option<GpuModel>>,
     free: Vec<usize>,
     gpu_bytes: usize,
@@ -291,6 +296,7 @@ impl Characters {
             stride,
             staging: Vec::new(),
             order: Vec::new(),
+            doll_order: Vec::new(),
             models: Vec::new(),
             free: Vec::new(),
             gpu_bytes: 0,
@@ -499,37 +505,55 @@ impl Characters {
         self.gpu_bytes
     }
 
-    /// Compute and upload this frame's skinning blocks.
-    pub fn prepare(&mut self, gpu: &Gpu, draws: &[CharacterDraw]) {
+    /// Compute and upload this frame's skinning blocks: the world's draws, then the
+    /// paperdoll's (drawn by `draw_dolls`).
+    pub fn prepare_with_dolls(
+        &mut self,
+        gpu: &Gpu,
+        draws: &[CharacterDraw],
+        dolls: &[CharacterDraw],
+    ) {
         self.order.clear();
+        self.doll_order.clear();
         self.staging.clear();
         self.triangles = 0;
-        for d in draws {
+        let world_draws = draws.len();
+        for (i, d) in draws.iter().chain(dolls).enumerate() {
             let Some(m) = self.models.get(d.slot).and_then(Option::as_ref) else {
                 continue;
             };
-            let skin = skin_matrices(&m.info.pivots, m.info.mask, &d.pose);
+            let doll = i >= world_draws;
             let mut block = Block {
                 bones: [[[0.0; 4]; 4]; BONES],
                 scale: [m.scale[0], m.scale[1], m.scale[2], 0.0],
                 tint: [d.tint[0], d.tint[1], d.tint[2], 1.0],
                 light: [d.light[0], d.light[1], d.light[2], 1.0],
             };
-            for (out, s) in block.bones.iter_mut().zip(&skin) {
-                *out = (d.world * *s).to_cols_array_2d();
+            match d.attach {
+                Some(attach) => block.bones[0] = (d.world * attach).to_cols_array_2d(),
+                None => {
+                    let skin = skin_matrices(&m.info.pivots, m.info.mask, &d.pose);
+                    for (out, s) in block.bones.iter_mut().zip(&skin) {
+                        *out = (d.world * *s).to_cols_array_2d();
+                    }
+                }
             }
-            let index = self.order.len();
+            let index = self.order.len() + self.doll_order.len();
             self.staging.extend_from_slice(bytemuck::bytes_of(&block));
             self.staging.resize((index + 1) * self.stride as usize, 0);
-            self.order.push((d.slot, index));
+            if doll {
+                self.doll_order.push((d.slot, index));
+            } else {
+                self.order.push((d.slot, index));
+            }
             self.triangles += m.info.triangles as usize;
         }
-        self.drawn = self.order.len();
-        if self.order.is_empty() {
+        self.drawn = self.order.len() + self.doll_order.len();
+        if self.drawn == 0 {
             return;
         }
-        if self.order.len() > self.capacity {
-            self.capacity = self.order.len().next_power_of_two();
+        if self.drawn > self.capacity {
+            self.capacity = self.drawn.next_power_of_two();
             (self.blocks, self.blocks_bind) =
                 block_buffer(&gpu.device, &self.block_layout, self.stride, self.capacity);
         }
@@ -542,12 +566,26 @@ impl Characters {
 
     /// Draw what `prepare` set up.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, globals: &wgpu::BindGroup) {
-        if self.order.is_empty() {
+        self.draw_list(pass, globals, &self.order);
+    }
+
+    /// Draw the paperdoll's bodies (`prepare_with_dolls`).
+    pub fn draw_dolls(&self, pass: &mut wgpu::RenderPass<'_>, globals: &wgpu::BindGroup) {
+        self.draw_list(pass, globals, &self.doll_order);
+    }
+
+    fn draw_list(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        globals: &wgpu::BindGroup,
+        order: &[(usize, usize)],
+    ) {
+        if order.is_empty() {
             return;
         }
         pass.set_bind_group(0, globals, &[]);
         let mut current: Option<(bool, usize)> = None;
-        for &(slot, index) in &self.order {
+        for &(slot, index) in order {
             let Some(m) = self.models[slot].as_ref() else {
                 continue;
             };

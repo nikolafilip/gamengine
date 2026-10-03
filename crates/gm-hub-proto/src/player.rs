@@ -101,7 +101,7 @@ pub enum PlayerEcon {
     StallView {
         stall: i64,
     },
-    /// Into the character's own open stall, at a price in copper; and out of it again.
+    /// Into the character's own open stall, at a price in silver; and out of it again.
     StallList {
         item: ItemId,
         price: i64,
