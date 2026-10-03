@@ -42,6 +42,9 @@ pub const AIM_LAYOUT: i32 = 2;
 pub const AIM_KEEP_WEEKS: i32 = 26;
 /// Analysed shots in the window below which an account is not in the aim report.
 pub const REPORT_MIN_SHOTS: u32 = 40;
+/// Hard shots an account needs before its hard-hit rate is scored, or counted in the
+/// population the scores are against.
+const MIN_HARD_SHOTS: u32 = 20;
 /// A robust z-score at or above this is an outlier; two of them flag.
 pub const OUTLIER_Z: f32 = 4.0;
 
@@ -885,21 +888,28 @@ impl Conduct {
             }
         }
         accounts.retain(|a| a.2.analysed >= min_shots.max(1));
-        // The population's middle and spread, per signal.
-        let spread = |f: &dyn Fn(&AimStats) -> f32| {
-            let mut values: Vec<f32> = accounts.iter().map(|a| f(&a.2)).collect();
+        // The population's middle and spread, per signal, over the accounts whose sample
+        // carries that signal (the same minimum a score needs below): an account with no
+        // hard shots has no hard-hit rate, and a population of such zeros would put the
+        // median at nothing and give everyone who took a hard shot a score.
+        let spread = |carries: &dyn Fn(&AimStats) -> bool, f: &dyn Fn(&AimStats) -> f32| {
+            let mut values: Vec<f32> = accounts
+                .iter()
+                .filter(|a| carries(&a.2))
+                .map(|a| f(&a.2))
+                .collect();
             median_mad(&mut values)
         };
         // A rate is believed as far as its sample carries it (the Wilson lower bound):
         // one lock in three shots is not a rate of a third.
         let lock_rate = |s: &AimStats| wilson_lower(s.locks, s.moving_shots);
         let flick_rate = |s: &AimStats| wilson_lower(s.flicks, s.analysed);
-        let hard = spread(&|s| s.hard_hit_rate());
-        let lock = spread(&lock_rate);
-        let flick = spread(&flick_rate);
+        let hard = spread(&|s| s.hard_shots >= MIN_HARD_SHOTS, &|s| s.hard_hit_rate());
+        let lock = spread(&|s| s.moving_shots >= MIN_MOVING_SHOTS, &lock_rate);
+        let flick = spread(&|s| s.analysed >= MIN_SHOTS, &flick_rate);
         let mut out = Vec::with_capacity(accounts.len());
         for (account, email, stats) in accounts {
-            let z_hard_hits = if stats.hard_shots >= 20 {
+            let z_hard_hits = if stats.hard_shots >= MIN_HARD_SHOTS {
                 robust_z(stats.hard_hit_rate(), hard.0, hard.1)
             } else {
                 0.0

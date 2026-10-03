@@ -32,8 +32,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: System packages
-        run: sudo apt-get update -q && sudo apt-get install -y -q unzip
+      - name: System packages (ALSA's headers: the client links the sound device, SOUND.md 4)
+        run: sudo apt-get update -q && sudo apt-get install -y -q unzip libasound2-dev
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy (warnings are errors)
@@ -104,8 +104,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release
-      - name: System packages (software Vulkan)
-        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1
+      - name: System packages (software Vulkan; ALSA's headers for the sound device; Xvfb for the sound gate's client)
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libvulkan1 libasound2-dev xvfb
       - name: Build release client
         run: cargo build --release -p gm-client --locked
       - name: Binary size gate
@@ -116,6 +116,8 @@ jobs:
         run: SKIP_BUILD=1 FRAMES=120 scripts/check-perf.sh --software
       - name: Avatar gate smoke (48 distinct avatars, 16 MiB cache cap, software Vulkan)
         run: scripts/check-avatars.sh --software
+      - name: Sound gate (the walk and the arena fight rendered to WAVs on an Xvfb of its own and read; no device)
+        run: SKIP_BUILD=1 SKIP_TESTS=1 scripts/check-sound.sh
 
   web:
     name: browser client (wasm sizes, WebTransport, headless Chromium)
@@ -146,8 +148,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: System packages (brotli for the size gate, software Vulkan for Chromium's WebGPU)
-        run: sudo apt-get update -q && sudo apt-get install -y -q brotli mesa-vulkan-drivers libvulkan1
+      - name: System packages (brotli for the size gate, software Vulkan for Chromium's WebGPU, ALSA's headers, Xvfb for the sound gate's native client)
+        run: sudo apt-get update -q && sudo apt-get install -y -q brotli mesa-vulkan-drivers libvulkan1 libasound2-dev xvfb
       - name: Clippy for the browser target, both builds
         run: |
           cargo clippy -p gm-client --target wasm32-unknown-unknown --locked -- -D warnings
@@ -180,6 +182,15 @@ jobs:
         with:
           name: party-browser
           path: ${{ runner.temp }}/party
+          if-no-files-found: ignore
+      - name: Sound gate in the browser (the fight in both builds: the context running after a click, cues started, the patches hashing as native)
+        run: CHROME=google-chrome SKIP_TESTS=1 KEEP="$RUNNER_TEMP/sound" scripts/check-sound.sh --browser --software
+      - name: The sound gate's logs, when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sound-browser
+          path: ${{ runner.temp }}/sound
           if-no-files-found: ignore
 
   # Frame time on a real integrated GPU (PLAN.md 2.7). Enabled once a self-hosted runner exists.

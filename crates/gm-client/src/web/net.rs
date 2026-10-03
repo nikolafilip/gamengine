@@ -248,6 +248,7 @@ async fn session(
         s.push(welcome);
         for msg in std::mem::take(&mut s.early) {
             if let Ok(bytes) = control::encode_framed(&msg) {
+                s.tx_bytes += bytes.len() as u64;
                 live.control.write_detached(&bytes);
             }
         }

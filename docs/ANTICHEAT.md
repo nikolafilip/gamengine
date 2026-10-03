@@ -119,7 +119,8 @@ refuses is set aside as `.refused` and not offered again.
 
 **Retention.** 14 days, then the hub deletes bytes and rows, except a replay that a report
 or a flag points to: those are kept while the report is open or the flag is not closed, and
-at most 90 days more. A flag closes by itself 90 days after it was raised. Files in the
+at most 90 days beyond the 14 (104 days from storage; a case closed earlier does not shorten
+it, a case still open lengthens it). A flag closes by itself 90 days after it was raised. Files in the
 store that no row names are removed after an hour. Aim weeks are kept 26 weeks. Reports,
 flags, the reputation ledger, bans and the moderators' log are kept for the life of the
 account (they are its record, and a ban that could be forgotten is not one); deleting the
@@ -568,3 +569,40 @@ protocol's interpolation delay into the freshest view believed (4.2).
   what it is for (both programs' numbers in the hub's report, one of them flagged, no hand
   flagged); that every program is flagged stays the gate's claim, on sixteen players and
   ninety seconds.
+
+### 12.4 Review by Gemini 3.1 Pro, after the fact (2026-10-03)
+
+The Gemini account had no credit when this phase was written (12.1 and 12.2 are an
+independent agent's); with credit back, Gemini 3.1 Pro read this document and the whole
+commit, asked for what the earlier reviews missed. 6 findings.
+
+1. High, *`snap.normalize(base)` turns the snapshot into a delta before the analyser
+   reads it, starving the analyser of unmoved bodies and breaking the next baseline*:
+   **wrong**. `normalize` sorts the entities and fills `removed`; `encode(base)` writes the
+   delta without touching the snapshot, which stays whole for the analyser and as the
+   next baseline.
+2. Medium, *the muzzle's offset from the eye is taken at the shot's tick as a world-space
+   vector and added to the eye of every past tick, so during a turn the ideal aim of the
+   past ticks is computed from a muzzle on the wrong side*: **accepted, open**. The lock
+   rule is steadiness of the residual and is offset-invariant for a constant offset, but
+   the offset turns with the view during the very flicks the rule looks at. The fix is to
+   carry the offset in the view's frame and re-apply it per tick; to do, and to re-tune 9
+   after it.
+3. Medium, *the population's median and MAD per signal include accounts below that
+   signal's sample minimum, so a population of zero hard-hit rates puts the median at zero
+   and scores everyone who took hard shots*: **accepted, fixed**. The spread of each signal
+   is over the accounts whose sample carries it (`MIN_HARD_SHOTS`, `MIN_MOVING_SHOTS`,
+   `MIN_SHOTS`), the same minimums a score needs.
+4. Low, *a report names its target by entity id, which may be reused by a newcomer*:
+   **wrong**. A zone's ids are allocated once and never reused (`alloc_id` counts up to
+   `MAX_ENTITY_ID`, 2³¹−1).
+5. Low, *the viewer's `advance` skips the events of a replay's first frame (and of the
+   frame seeked to)*: **accepted, not fixed**. Events are shown strictly after the frame
+   stood on; a replay's first frame is the ring's oldest, thirty seconds before anything,
+   and a seek lands between frames in any case.
+6. Low, *kept replays are deleted by their storage date, not 90 days after their case
+   closed, which the contract says*: **wording**. The code keeps a replay while its report
+   is open or its flag unclosed, and at most 90 days beyond the 14 of retention (104 from
+   storage); 3.3's sentence meant that and says it now.
+
+Its verdict on the earlier reviews: sound overall.

@@ -347,7 +347,7 @@ gamengine/
     gm-net       protocol: bit writer/reader, snapshot delta encoding, input frames, reliable messages.
                  `link`: one connection type over quinn and a wtransport (WebTransport) session, for
                  zones and the hub. On wasm only the codecs and the prediction are built.
-    gm-client    winit, wgpu renderer, input, prediction/reconciliation, interpolation, audio (kira),
+    gm-client    winit, wgpu renderer, input, prediction/reconciliation, interpolation, sound (own synth + mixer),
                  dev UI (egui), game HUD, asset cache (LRU), viewport modules (fps, tps, tactical).
                  The same crate is the browser client (`src/web/`: the browser's WebTransport, its
                  Cache API as the model store, fetch for maps). Since Phase 10 the screens: a toolkit on
@@ -399,7 +399,7 @@ gamengine/
 | DB | `sqlx` 0.9 + Postgres, embedded sqlx migrations | typed location columns with a check constraint (HUB.md 4); items normalized, components as rows, escrow as transactions (Phase 5) |
 | Auth | `argon2`, signed entry tokens (`ed25519-dalek`) | hub issues, zones verify offline; 60 s, single use, zone-bound (HUB.md 3.1). **[CORRECTED]** not JWT: `bitcode` payload + raw signature, no header, no algorithm negotiation |
 | Models | `gltf`, `image`, `texpresso` (BC1), `miniz_oxide`, `sha2` | **[CORRECTED]** (2.9): `gltf`, `image` and `texpresso` only in `gm-ingest` (hub worker and tools); the client links `miniz_oxide` and `sha2`. No `ktx2`, no `basis-universal`; `lru` dropped (the caches order by file time and by last frame drawn) |
-| Audio | `kira` | |
+| Audio | *(none)* | **[CORRECTED]** (Phase 13, SOUND.md 1): `kira` measured at +62 KB of wasm and +156 KB native with no sound made, against 71 KB left of the browser's megabyte. The patches are synthesized at start (no asset bytes), the browser mixes with its own Web Audio nodes, and natively a mixer of our own renders in `cpal`'s callback (`cpal` is the one crate added) |
 | Dev UI | `egui` + `egui-wgpu` | not shipped in HUD |
 | Testing | `turmoil` (simulated network for tokio), `proptest`, `criterion` | |
 | WASM | `wasm-bindgen`, `wasm-bindgen-futures`, `web-sys`, `web-time`; `wasm-opt` | **[CORRECTED]** no `trunk`: `scripts/build-web.sh` runs cargo, the pinned `wasm-bindgen` CLI and `wasm-opt` (fetched like ericw-tools) and copies one page and one loader script |
@@ -498,7 +498,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 10 | The client's screens: login, characters, a new character from the archetypes, the game menu, chat, settings; UI scripts | a person with nothing but the program gets from a cold start into the town and on to another zone, on the desktop and in a browser, by clicking; no refusal ends the program. **Done 2026-10-02** (11.10) |
 | 11 | Possessions: the inventory, the storage and what is worn; gear's edge in the simulation (3.4); a stall looked at, bought from and sold at | a character buys a weapon at another's stall, wears it, and the zone's hits show the edge; the purchase by clicking, on the desktop and in a browser. **Done 2026-10-02** (11.10; the tavern and trade screens moved to 12, the buyer's coin is an operator's grant) |
 | 12 | Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans; the tavern and a trade between two players as screens | two people clear the tutorial dungeon together and split what it drops, and one sells the other what it got. **Done 2026-10-02** (11.10) |
-| 13 | *(proposed)* Sound | steps, hits and the town are heard, inside the size budgets of both targets |
+| 13 | Sound: patches synthesized at start, cues inferred from the snapshots, a mixer of our own natively and the browser's nodes in the browser | steps, hits and the town are heard, inside the size budgets of both targets; proved by a run rendered to a file on a machine without a device. **Done 2026-10-03** (11.10) |
 | ∞ | Content, balance, ops, community | permanent |
 
 ### 11.9 First concrete step
@@ -1294,6 +1294,60 @@ ranges are the spread over repeated runs). People together: the third of the pha
   moment it was paid for; whether whispers reach somebody in a fight, and whether strangers may whisper at
   all, is open; the people gate has not run on CI's machines yet.
 
+**2026-10-03, Phase 13 done** (same machine; all numbers measured with the final build, none estimated;
+ranges are the spread over repeated runs). Sound: the game is heard, with no asset bytes and nothing on
+the wire:
+- `docs/SOUND.md` v1 is the contract (its 10 holds the design review by an independent agent, Gemini's
+  design and code reviews with verdicts, and what running it found; its 11 the measurements). **`kira`,
+  which 11.2 named, is not used [CORRECTED]**: measured with no sound made it cost +62,142 bytes of wasm
+  against the 71,334 the browser's megabyte had left, and +155,880 native. Instead: **twenty patches
+  synthesized at start** (a source, a sweep, a vibrato, an envelope, a two-pole filter; the arithmetic is
+  the module's own series, so that the desktop and the browser render the same bytes: a hash per patch is
+  pinned, and the browser's hash of all of them is compared with the native build's in the gate),
+  **1,228,060 bytes in 32 ms**; natively **a mixer of our own** (32 voices, two loop slots for a map's
+  air, a soft clip, a declick on a stolen voice, commands through a `try_lock` queue, nothing allocated in
+  the callback: asserted by a counting allocator) in `cpal`'s callback, the one crate added; in the
+  browser the page's own Web Audio nodes (a pool of 32 gain-and-panner chains, a source node per cue, the
+  context made by the handler of the first click or key).
+- **A cue is a change between two consecutive samples of one entity**, read from each entity's sample
+  stream in tick order, never from the frame's picture (a transition is heard once whatever the frame
+  rate, a state is nothing): swings, staggers, casts, dashes, deaths, a parry that met a blow (the window
+  closed within 0.25 s), a hit as a fall of a health the wire carries, landings after a fall, steps every
+  64 units on the ground; projectiles launched here (**the owner's body behind the bolt on its line of
+  flight**: PROTOCOL.md 7.4's forward step puts a bolt's first sample hundreds of units ahead of its
+  muzzle, so the first gate run heard 2 launches of 89 bolts) and landed (the way on hits the world, or a
+  body within 48 units); the own body's swings and casts from its predicted actions, its staggers, death,
+  hurt and parry from the zone's words, each with its tick. The listener is the own body facing the
+  camera's way; at most eight cues a frame, the nearest. The air by the map's name, or its worldspawn's
+  `gm_ambience`. Volume and mute in the settings. Chat lines, invitations and button presses at the
+  listener (not for ignored names).
+- **Proved without a device**: `--sound-dump FILE` renders the mixer from the frame clock into a WAV;
+  the gate (`scripts/check-sound.sh`, on an Xvfb of its own) reads an offline walk (25 steps in 5 s,
+  standing is digital silence, steps at −27 dB per 100 ms window) and the arena with fifteen duelists
+  (1,028–1,209 cues in 20 s: 15–44 swings, 74–98 launches of 87–123 bolts, 70–108 impacts, 20–30
+  deaths, nothing dropped), and in both browser builds the context running after a click, 836–1,324 cues
+  started and the patches' hash equal to native's. 30 checks.
+- Cost: mixer **91.5 µs** per 512-frame stereo block with 31 voices (release, 44.1 kHz); the dump path
+  40–91 µs; the real device (card 1: 48 kHz, f32, dmix's 1,024-frame period) 25–39 µs mean, 110–119 max,
+  with 1 underrun in 7 s on the real GPU (the callback's thread priority is normal: an open item).
+- Sizes: WebGPU wasm **1,009,465 bytes** (345,287 packed; **+32,223**; 39,111 left of the megabyte,
+  budget `[sound].max_wasm_added_bytes` 40 KiB), WebGL2 3,003,328 (918,847 packed); `gm-client`
+  **9,611,600 bytes (9.17 MiB)**, +128,560; baseline updated.
+- Gemini is back (the account was topped up): its design review of SOUND.md (8 findings: 4 accepted, 2
+  as designed, 2 rejected with reasons) and code review (5: 4 accepted, 1 rejected) are in SOUND.md 10;
+  the reviews of Phases 8–12 that it could not do at the time are being run after the fact and recorded
+  in each contract's review log (WEB.md 12.4: 1 of 3 accepted; ANTICHEAT.md 12.4: 3 of 6 accepted, one
+  fixed in the aim report's population statistics, one open).
+- Tests: the workspace suite green (**367 tests**, 344 before; 88 in the client, 23 of them the sound's);
+  on the final build: fmt, clippy on all three targets, the sound gate (30 checks, native and both browser
+  builds), web (sizes, transports), binary size, budgets, anti-cheat online (the aim report's statistics
+  changed), screens on the desktop (the hub's `Enter` changed), people online and on the desktop (the zone's
+  trade and party mirror changed). `target/debug` had grown to 149 GB over the sessions and filled the
+  disk mid-build: its incremental cache (66 GB) was removed; BUILDING.md's note.
+- Known limits (SOUND.md 6, 9): no music, no occlusion, no sound per ability, no footsteps by surface,
+  a stranger's hit is heard only as the stagger or the knockback's landing it causes, a replay is silent,
+  the callback's priority; 22,050 Hz and every number in SOUND.md 9 are proposed.
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -1341,5 +1395,8 @@ leader), **how long an absent member stays** (two minutes), **whether somebody w
 back into it** (not while it is engaged), **whether a party of five may bring five squads** to a boss tuned
 for one, **the tavern as a place** and **paying an owner by the time served**, and **whether whispers
 reach somebody in a fight or come from strangers at all**.
-Phase 13 in 11.8 is a proposal.
+The sound's numbers are **proposed** in `docs/SOUND.md` 9 (22,050 Hz, the patches, 64 units a step,
+the reaches, eight cues a frame, 32 voices, volume 70), and it lists what is open: **whether sounds become
+content** (a key per ability and creature), **footsteps by surface**, **whether a replay sounds**, **music**,
+**whether a stranger's hit is heard** (bytes on the wire), **the callback's priority**.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

@@ -723,7 +723,7 @@ impl Hub {
     /// Whether a client may be sent to `zone` now: it is up, it has room (counted from the
     /// characters the database has in it: a heartbeat is seconds old), and a browser can
     /// reach it if the client is one.
-    async fn zone_open(&self, zone: &ZoneId, web: bool) -> Result<(), HubError> {
+    async fn zone_open(&self, zone: &ZoneId, web: bool, who: CharacterId) -> Result<(), HubError> {
         let max_players = {
             let st = self.state.lock().unwrap();
             let z = st
@@ -738,7 +738,7 @@ impl Hub {
             }
             z.max_players
         };
-        if self.db.zone_population(zone).await? >= max_players as i64 {
+        if self.db.zone_population(zone, who).await? >= max_players as i64 {
             return Err(HubError::Full);
         }
         Ok(())
@@ -1120,7 +1120,7 @@ async fn handle(
                     .into_iter()
                     .enumerate()
                 {
-                    let open = match hub.zone_open(&candidate, web).await {
+                    let open = match hub.zone_open(&candidate, web, character).await {
                         Ok(()) => hub.gate(&candidate, character).await,
                         Err(e) => Err(e),
                     };
@@ -1135,7 +1135,7 @@ async fn handle(
                 }
                 found.ok_or(refusal)?
             } else {
-                hub.zone_open(&zone, web).await?;
+                hub.zone_open(&zone, web, character).await?;
                 hub.gate(&zone, character).await?;
                 zone
             };
@@ -1432,7 +1432,7 @@ async fn handle(
                 return Err(HubError::Invalid("already there".into()));
             }
             // (The zone says whether its traveller is a browser.)
-            hub.zone_open(&to_zone, web).await?;
+            hub.zone_open(&to_zone, web, character).await?;
             state
                 .build
                 .validate(&hub.cfg.content)

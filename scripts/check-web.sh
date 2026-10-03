@@ -51,7 +51,7 @@ check_min() { # value min label
 if /usr/bin/grep -rnE 'std::time::(Instant|SystemTime)|use std::time::\{[^}]*(Instant|SystemTime)' \
      crates/gm-client/src crates/gm-core/src crates/gm-bsp/src crates/gm-model/src crates/gm-hub-proto/src \
      crates/gm-net/src/{bits,client,control,input,quant,snapshot,lib}.rs --include='*.rs' \
-     | /usr/bin/grep -vE 'gm-client/src/(headless|net/native|cache/disk)\.rs|gm-client/src/cache\.rs.*SystemTime|gm-client/src/hub\.rs|gm-hub-proto/src/(token|client)\.rs|gm-hub-proto/src/protocol\.rs.*std::time::SystemTime::now\(\)'; then
+     | /usr/bin/grep -vE 'gm-client/src/(headless|net/native|cache/disk|sound/device)\.rs|gm-client/src/cache\.rs.*SystemTime|gm-client/src/hub\.rs|gm-hub-proto/src/(token|client)\.rs|gm-hub-proto/src/protocol\.rs.*std::time::SystemTime::now\(\)'; then
   echo "FAIL: std::time::Instant / SystemTime in code the browser build compiles (use web_time)"; status=1
 else
   echo "OK: no std clock in the code the browser build compiles"

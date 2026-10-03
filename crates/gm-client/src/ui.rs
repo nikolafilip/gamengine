@@ -245,6 +245,8 @@ pub struct UiState {
     /// the characters' list); a screen whose cells are prices and numbers asks that there
     /// are none.
     pub cut_cells: Vec<String>,
+    /// Buttons pressed since this was last taken (SOUND.md 3: a click is heard).
+    pub presses: u32,
 }
 
 impl UiState {
@@ -646,6 +648,9 @@ impl<'a, C: Canvas> Ui<'a, C> {
             let focused = self.focusable(&id);
             let (hot, down, click) = self.clicked(&id, r);
             pressed = click || (focused && self.key(Key::Enter));
+            if pressed {
+                self.state.presses += 1;
+            }
             fill = match (down, hot) {
                 (true, _) => BUTTON_DOWN,
                 (false, true) => BUTTON_HOT,
@@ -754,10 +759,14 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 };
                 for c in text.chars() {
                     let fits = chars.len() < how.max_chars && bytes + c.len_utf8() <= how.max_bytes;
+                    // (Full: the rest is dropped whole, not sieved for what still fits.)
+                    if !fits {
+                        break;
+                    }
                     let known = how.any || font::has_glyph(c);
                     let wanted =
                         !(how.no_spaces && c == ' ') && (!how.digits || c.is_ascii_digit());
-                    if fits && known && wanted {
+                    if known && wanted {
                         chars.insert(caret, c);
                         caret += 1;
                         bytes += c.len_utf8();

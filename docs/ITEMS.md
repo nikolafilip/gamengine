@@ -551,6 +551,26 @@ part is a dozen lines).
 - In a 20 Hz zone a burn did a third of what it says (the review saw the constant; a test
   at both rates now holds it).
 
+**Review by Gemini 3.1 Pro, after the fact (2026-10-03).** The Gemini account had no credit
+when this phase was written (the reviews above are independent agents'); with credit back,
+Gemini 3.1 Pro read this document and the whole commit, asked for what the earlier reviews
+missed. 4 findings, all Low.
+
+1. *With the menu and the inventory both open, neither is drawn*: **rejected, unreachable**.
+   While a page is up the toolkit takes every key (Escape closes the page, it does not open
+   the menu), and the menu's Inventory button closes the menu; the two guards are each
+   other's belt and braces.
+2. *A `pasted` check in the number field is redundant*: **noted**, left (it says why the
+   pasted text is dropped).
+3. *The zone's per-player ask bucket adds single-precision gains: a flood of asks nanoseconds
+   apart could add nothing and the bucket never refill under it*: **accepted, fixed** (double
+   precision, as the hub's bucket).
+4. *`grant_item` does not lock the `source` holder before writing its `item_moves` row*:
+   **rejected**. Source and sink keep no balance and no transaction ever locks them (ECONOMY.md
+   4); a lock order is a cycle between two lockers, and there is none here.
+
+Its verdict on the earlier reviews: sound overall.
+
 ## 11. What was measured (2026-10-02, the reference machine)
 
 - **The term**, in a simulated swing (35 slash on cloth, 37.19 unrounded): 37 in nothing,

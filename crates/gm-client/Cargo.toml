@@ -34,6 +34,13 @@ quinn = { workspace = true }
 bytes = { workspace = true }
 # Paste into a field (CLIENT.md 3): a password manager's password is not typed by hand.
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+# The sound device (SOUND.md 4): the one crate sound needs; the mixer is our own.
+cpal = "0.18"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The mixer's promise that its renderer allocates nothing is asserted, not hoped (SOUND.md 4);
+# in release tests too (its default feature would switch the assertion off there).
+assert_no_alloc = { version = "1.1", default-features = false }
 
 # The browser client (WEB.md 3): the browser is the transport, the timer and the file system.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -46,4 +53,8 @@ web-sys = { version = "0.3.106", features = [
     "UrlSearchParams", "Performance", "console",
     "Request", "RequestInit", "RequestCache", "Response", "ResponseInit", "Headers",
     "Cache", "CacheStorage", "Storage",
+    # Sound (SOUND.md 5): the browser's own mixer.
+    "AudioContext", "BaseAudioContext", "AudioContextState", "AudioBuffer", "AudioBufferSourceNode",
+    "AudioScheduledSourceNode", "AudioNode", "AudioParam", "AudioDestinationNode", "GainNode",
+    "StereoPannerNode", "AnalyserNode", "EventTarget",
 ] }

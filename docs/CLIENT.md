@@ -211,10 +211,12 @@ day past its last use, 7) is still there when the zone is left.
 
 ### 4.6 Settings
 
-Mouse sensitivity (a slider, 0.01 to 0.20 degrees per count), the size of text (by the
-window, or one of 1 to 4; a size the window has no room for gives way, 3), invert the
-mouse's up and down, start in third person, fullscreen (not in a browser: the page has
-its own button). Applied at once and saved within a second.
+Mouse sensitivity (a slider, 0.01 to 0.20 degrees per count), the sound's volume (a
+slider, 0 to 100) and "no sound" (a box; SOUND.md 3.2), the size of text (by the window,
+or one of 1 to 4; a size the window has no room for gives way, 3), invert the mouse's up
+and down, start in third person, fullscreen (not in a browser: the page has its own
+button). Applied at once and saved within a second. Every button pressed on any screen
+clicks (SOUND.md 3).
 
 ## 5. Chat
 
@@ -339,7 +341,8 @@ client itself:
 | `hub`, `hub_cert` | the hub's `host:port` and the file its certificate is in (the desktop) |
 | `email`, `character` | the last successful login and the character played last: remembered only when a person went through the screens |
 | `sensitivity`, `invert`, `third_person`, `fullscreen`, `ui_scale` | 4.6 |
-| `ignored` | the players not heard (5), comma separated |
+| `volume`, `mute` | the sound (4.6, SOUND.md 3.2): 0 to 100 (70 to begin with), and off altogether |
+| `ignored` | the players not heard (5), comma separated; their lines make no sound either |
 
 No password, no session. A value is a text in double quotes (`\"` and `\\` inside), in
 single quotes, or a bare word, and may be followed by a `#` comment. A line whose key this
@@ -595,3 +598,20 @@ list of smaller ones on the hub and the zones, 13 on the page and the gate.
 | 11 | The bot's "every 3 seconds" was 9.6 in a 20 Hz zone | **Fixed** |
 | 12 | (as the client's 20) | **Fixed** |
 | 13 | Smaller: the display number raced, clients outside the cleanup, a logout with no form handler on development pages, `"dev": "false"` taken for true, a pointer given late | **Fixed** |
+
+### 12.4 Review by Gemini 3.1 Pro, after the fact (2026-10-03)
+
+The Gemini account had no credit when this phase was written (12.1 and 12.3 are independent
+agents'); with credit back, Gemini 3.1 Pro read this document and the whole commit, asked for
+what the earlier reviews missed. 2 findings.
+
+1. High, *a character whose last stay a zone has not yet given back counts against that
+   zone's room, so on a full zone its `Enter` is answered `Full` (not retried) before
+   `begin_enter` could answer `Busy` (retried)*: **accepted, fixed**. The asking character is
+   left out of the count (`zone_population(zone, except)`), for `Enter` and for a handoff
+   alike.
+2. Low, *a paste longer than a field holds is sieved: a character that does not fit is
+   skipped and smaller ones after it are still taken*: **accepted, fixed**. The first that does
+   not fit ends the paste.
+
+Its verdict on the earlier reviews: sound overall.

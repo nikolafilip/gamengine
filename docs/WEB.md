@@ -372,8 +372,8 @@ JavaScript and HTML, and the arena's 0.4 MB map with its lightmaps.
 - Touch controls and a mobile layout; ETC2/ASTC model atlases (BC1 is decoded on the CPU on
   GPUs without it, which costs memory: 4 MB per 1024² atlas instead of 0.7 MB).
 - `unadjustedMovement` under pointer lock (raw mouse input, 3.4).
-- Model upload from the browser (still `gm-tools model upload`), any inventory or trade
-  screen (there is none natively either), audio.
+- Model upload from the browser (still `gm-tools model upload`). (The inventory, the trade
+  window and sound, absent in v1, came with Phases 11, 12 and 13: 14, 15, 16.)
 - A service worker / offline install; saved logins.
 - Safari- and Firefox-specific testing: the gate runs Chromium. The client needs WebTransport
   with datagrams and either WebGPU or WebGL2; a browser without them gets a sentence saying
@@ -467,6 +467,24 @@ unchanged; `C` free as a key.
   software GPU holds 60 fps and 8.3 KB/s. Not investigated further: a client slower than the
   tick rate is a client on a machine without a GPU.
 
+### 12.4 Review by Gemini 3.1 Pro, after the fact (2026-10-03)
+
+The Gemini account had no credit when this phase was written (12.1 and 12.2 are an
+independent agent's); with credit back, Gemini 3.1 Pro read this document and the whole
+commit, asked for what the earlier reviews missed. 3 findings.
+
+1. High, *evicting a model from the GPU revokes it from the browser's cache for the
+   session*: **wrong**. `Loader::remove` (which revokes) is reached only from the cache's
+   `refuse`, that is a takedown or a model that does not decode; a GPU eviction removes the
+   entry and the slot and leaves the store alone.
+2. High, *`refuse` does not await `send.finish()`, so the FIN is never sent*: **wrong**.
+   `SendHalf` dereferences to `quinn::SendStream`, whose `finish` is synchronous in quinn
+   0.11 (it was a future in 0.10).
+3. Low, *the control messages queued before the session was live are not counted in
+   `tx_bytes` when they are flushed*: **accepted**, fixed.
+
+Its verdict on the earlier reviews: sound.
+
 ## 13. Changes in Phase 10 (the screens, docs/CLIENT.md)
 
 - The page's form is the client's login screen (5): `gmStatus` gained `login`, `login-wait`,
@@ -524,3 +542,21 @@ unchanged; `C` free as a key.
   the bytes were found: the one codec was 83 KB of the build.
 - A trade window polls the hub once a second through the players' messages (`TradeView`);
   nothing else of this phase touches the page, the transport or the cache.
+
+## 16. Changes in Phase 13 (sound, docs/SOUND.md)
+
+- The browser plays through its own Web Audio nodes (SOUND.md 5): one `AudioContext` made
+  by the handler of the first `pointerdown` or `keydown` on the page (the click that takes
+  the pointer, 3.4, usually), the twenty patches as `AudioBuffer`s, a pool of 32 gain and
+  panner chains, a source node per cue. Nothing of the native mixer is compiled in. Headless
+  Chromium gives the context a fake output: it runs after the gate's click, and the gate
+  reads the page's `sound:` line out of `GM-DONE` (cues started, the context's state, the
+  hash of every patch rendered, which must equal the native build's).
+- **Measured**: the WebGPU build is **1,009,465 bytes** (345,287 packed; +32,223 for the
+  phase; 977,242 before), the WebGL2 build **3,003,328** (918,847 packed; +30,829). `kira`
+  would have cost +62,142 of wasm with no sound made (SOUND.md 1). The budgets of 9 are
+  unchanged; the megabyte has **39,111 bytes** left. The web-sys bindings for the audio
+  nodes cost mostly in the glue (the WebGPU build's grew 6,267 bytes, to 110,616); what the
+  phase added to the wasm is the synthesis, the cue rules and the graph. Two things of it
+  were found with `twiggy` and removed: a stable sort to pick the eight nearest cues (≈7.5 KB
+  of sort machinery, now a selection) and a second hash map of fed ticks.

@@ -68,6 +68,16 @@ impl ZoneParties {
         if newer {
             self.kept.insert(character, (reading, now));
         }
+        // A number whose party nobody here (nor anybody kept) is held to be of any more is
+        // let go of: a party dissolved after its last member left this zone is news this
+        // zone never hears, and its number would otherwise stay for the zone's life.
+        let held: std::collections::HashSet<i64> = self
+            .readings
+            .values()
+            .chain(self.kept.values().map(|(r, _)| r))
+            .filter_map(|r| r.party.as_ref().map(|p| p.id))
+            .collect();
+        self.numbers.retain(|id, _| held.contains(id));
     }
 
     /// The hub's news of a change. Returns the characters with a body here whose reading
@@ -260,6 +270,18 @@ mod tests {
         p.left(1, later(121));
         assert!(!p.kept.contains_key(&2));
         assert_eq!(p.joined(2, PartyReading::default()).seq, 0);
+        // A party whose every member left this zone, and whose dissolution this zone
+        // never hears of: its number goes when nobody is held to be of it any more (the
+        // kept readings' two minutes), not at the zone's end.
+        let mut q = ZoneParties::default();
+        q.joined(1, PartyReading::default());
+        q.news(&news(5, state(7, 1, &[(1, "Ana"), (2, "Bojan")]), &[]), t0);
+        assert_eq!(q.number(1, 10), PARTY_BASE);
+        q.left(1, later(10));
+        assert_eq!(q.numbers.len(), 1, "kept for the body that may come again");
+        q.joined(3, PartyReading::default());
+        q.left(3, later(200));
+        assert!(q.numbers.is_empty(), "nobody here nor kept is of it");
         // The repair: a zone that is behind the hub's number takes the reading it asks
         // for; one that is not, and a reading for somebody without a body, change nothing.
         assert!(!p.behind(2, 0) && p.behind(2, 7) && !p.behind(9, 7));

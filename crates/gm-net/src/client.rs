@@ -132,6 +132,11 @@ pub struct ClientState {
     pub own_health: i32,
     pub own_alive: bool,
     pub own_anim: u8,
+    /// The own animation state of every snapshot since this was last taken, in order,
+    /// with the snapshot's server tick: what the zone said the body did, and when (a
+    /// client that reads it once a frame would miss a state between two snapshots of one
+    /// frame, and would time a state by its frames rather than the zone's clock).
+    pub own_anims: Vec<(u32, u8)>,
     pub stats: ClientStats,
     synced: bool,
     /// Server tick until which corrections count as explained by a hit, death or respawn.
@@ -161,6 +166,7 @@ impl ClientState {
             own_health: 0,
             own_alive: false,
             own_anim: 0,
+            own_anims: Vec::new(),
             stats: ClientStats::default(),
             synced: false,
             explained_until: 0,
@@ -352,6 +358,9 @@ impl ClientState {
         self.own_health = own.health.map_or(self.own_health, |h| h as i32);
         self.own_alive = own.flags & flags::ALIVE != 0;
         self.own_anim = own.anim;
+        if self.own_anims.len() < 64 {
+            self.own_anims.push((server_tick, own.anim));
+        }
         let respawned = !was_alive && self.own_alive && self.synced;
         // A hit (knockback), a death or a status the server put on us (a parry's stagger, a
         // freeze) lands on a server tick; the frame whose comparison reveals it may only run a

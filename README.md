@@ -213,6 +213,14 @@ books with `gm-hub --grant-coin`, `--grant-item`, `--place`, `--audit`.
   new character asks one of them into a party, says a party's line and a whisper, buys
   what the other looted through the trade window and hires an avatar in the tavern, by UI
   script; with `--browser` the same in both browser builds.
+- `scripts/check-sound.sh` — sound: the patches (pinned by hash), the mixer (no allocation
+  in its callback, no click when a voice is stolen) and every rule of what is heard as
+  tests; then the client on an Xvfb of its own rendering its sound into a WAV from the frame
+  clock (no device needed): an offline walk read for silence while standing and steps while
+  running, the arena with fifteen bots read for swings, blows and launches; what the phase
+  added to the native binary; with `--browser` both builds in headless Chromium: the audio
+  context running after the gate's click, cues started, the patches hashing to the native
+  build's bytes, what the phase added to the wasm.
 
 See [`docs/BUILDING.md`](docs/BUILDING.md).
 

@@ -1716,10 +1716,17 @@ pub async fn run_with_web(
                         trade_told.remove(&(id, with));
                         trade_told.remove(&(with, id));
                         let tx = event_tx.clone();
+                        let named = |body: EntityId| {
+                            sessions
+                                .get(&body)
+                                .map_or_else(String::new, |s| s.name.clone())
+                        };
+                        let names = (named(with), named(id));
                         tokio::spawn(async move {
                             let opened = |result, tell| ClientEvent::TradeOpened {
                                 a: with,
                                 b: id,
+                                names: names.clone(),
                                 result,
                                 tell,
                             };
@@ -1766,15 +1773,22 @@ pub async fn run_with_web(
                         other.send_control(FromZone::TradeAsked { from: id });
                     }
                 }
-                ClientEvent::TradeOpened { a, b, result, tell } => {
+                ClientEvent::TradeOpened {
+                    a,
+                    b,
+                    names,
+                    result,
+                    tell,
+                } => {
                     if tell && let Some(s) = sessions.get_mut(&b) {
                         s.end_party_request();
                     }
-                    let name = |body: EntityId| sessions.get(&body).map(|s| s.name.clone());
                     match result {
                         Ok(trade) => {
-                            for (to, other) in [(a, b), (b, a)] {
-                                if let (Some(s), Some(with)) = (sessions.get(&to), name(other)) {
+                            // (Whoever is still here is told, with the other's name as it
+                            // was: a trade the hub holds open must be seen to be closed.)
+                            for (to, with) in [(a, names.1), (b, names.0)] {
+                                if let Some(s) = sessions.get(&to) {
                                     s.send_control(FromZone::TradeOpened { trade, with });
                                 }
                             }

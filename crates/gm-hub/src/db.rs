@@ -195,11 +195,19 @@ impl Db {
     /// is not counted: a ticket nobody uses would hold a seat, for as long as somebody
     /// cared to ask for one. Two that race for the last seat are told apart at the zone's
     /// own door, which gives back the one it cannot take (`release`).
-    pub async fn zone_population(&self, zone: &ZoneId) -> Result<i64, HubError> {
+    /// Characters in `zone`, not counting `except` (the one asking: a character whose last
+    /// stay the zone has not yet given back is its own room, and `begin_enter` says Busy
+    /// for it, which a client retries; Full it would not).
+    pub async fn zone_population(
+        &self,
+        zone: &ZoneId,
+        except: CharacterId,
+    ) -> Result<i64, HubError> {
         sqlx::query(
-            "select count(*) as n from characters where location_kind = 'zone' and location_zone = $1",
+            "select count(*) as n from characters where location_kind = 'zone' and location_zone = $1 and id <> $2",
         )
         .bind(zone)
+        .bind(except)
         .fetch_one(&self.pool)
         .await
         .map_err(internal)?

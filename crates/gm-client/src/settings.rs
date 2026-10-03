@@ -7,6 +7,8 @@
 pub const DEFAULT_SENSITIVITY: f32 = 0.066;
 /// What the settings screen's slider spans.
 pub const SENSITIVITY_RANGE: (f32, f32) = (0.01, 0.20);
+/// The sound's volume to begin with (SOUND.md 3.2).
+pub const DEFAULT_VOLUME: u8 = 70;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -24,6 +26,9 @@ pub struct Settings {
     /// The scale HUD and screens are drawn at: 1 to 4, or 0 for what the window's size
     /// gives (CLIENT.md 3).
     pub ui_scale: u8,
+    /// Sound (SOUND.md 3.2): 0 to 100, and whether it is off altogether.
+    pub volume: u8,
+    pub mute: bool,
     /// Players whose chat lines are not shown (CLIENT.md 5), by name.
     pub ignored: Vec<String>,
     /// Lines with keys this build does not know (a newer build wrote them): kept as they
@@ -45,6 +50,8 @@ impl Default for Settings {
             third_person: false,
             fullscreen: false,
             ui_scale: 0,
+            volume: DEFAULT_VOLUME,
+            mute: false,
             ignored: Vec::new(),
             unknown: Vec::new(),
             read_only: false,
@@ -127,6 +134,8 @@ impl Settings {
                 "third_person" => s.third_person = flag()?,
                 "fullscreen" => s.fullscreen = flag()?,
                 "ui_scale" => s.ui_scale = text.parse::<u8>().map_err(|_| bad())?.min(4),
+                "volume" => s.volume = text.parse::<u8>().map_err(|_| bad())?.min(100),
+                "mute" => s.mute = flag()?,
                 // Names hold no comma.
                 "ignored" => {
                     s.ignored = text
@@ -146,7 +155,7 @@ impl Settings {
         let mut text = format!(
             "# gamengine client settings (docs/CLIENT.md 8)\n\
              hub = {}\nhub_cert = {}\nemail = {}\ncharacter = {}\nsensitivity = {}\n\
-             invert = {}\nthird_person = {}\nfullscreen = {}\nui_scale = {}\nignored = {}\n",
+             invert = {}\nthird_person = {}\nfullscreen = {}\nui_scale = {}\nvolume = {}\nmute = {}\nignored = {}\n",
             quoted(&self.hub),
             quoted(&self.hub_cert),
             quoted(&self.email),
@@ -156,6 +165,8 @@ impl Settings {
             self.third_person,
             self.fullscreen,
             self.ui_scale,
+            self.volume,
+            self.mute,
             quoted(&self.ignored.join(","))
         );
         for line in &self.unknown {
@@ -299,10 +310,12 @@ mod tests {
             sensitivity: 0.09,
             invert: true,
             third_person: true,
+            volume: 35,
+            mute: true,
             fullscreen: false,
             ui_scale: 3,
             ignored: vec!["Mallory".into(), "Ana-Marija".into()],
-            unknown: vec!["volume = 0.5".into()],
+            unknown: vec!["music = 0.5".into()],
             read_only: false,
         };
         assert_eq!(Settings::parse(&s.to_text()).unwrap(), s);
@@ -334,10 +347,12 @@ mod tests {
 
     #[test]
     fn a_key_from_a_newer_build_is_kept_and_nonsense_is_refused() {
-        let s = Settings::parse("# a comment\n\nvolume = 0.5\ninvert = true\n").unwrap();
+        let s =
+            Settings::parse("# a comment\n\nmusic = 0.5\ninvert = true\nvolume = 250\n").unwrap();
         assert!(s.invert);
+        assert_eq!(s.volume, 100, "a volume past the top is the top");
         // What this build does not know is written back as it stood.
-        assert!(s.to_text().ends_with("volume = 0.5\n"), "{}", s.to_text());
+        assert!(s.to_text().ends_with("music = 0.5\n"), "{}", s.to_text());
         assert!(Settings::parse("invert = yes").is_err());
         assert!(Settings::parse("email = \"a\"b\"").is_err());
         assert!(Settings::parse("email = \"unfinished").is_err());

@@ -278,8 +278,8 @@ impl GameMenu {
         let s = ui.scale;
         let gap = 6.0 * s;
         let h = ui.button_height();
-        let boxes = if offers.fullscreen { 3.0 } else { 2.0 };
-        let inner = 2.0 * (ui.field_height() + gap) + boxes * (h + gap) + h;
+        let boxes = if offers.fullscreen { 4.0 } else { 3.0 };
+        let inner = 3.0 * (ui.field_height() + gap) + boxes * (h + gap) + h;
         let panel = Rect::centred(ui.size(), 240.0 * s, ui.panel_height(inner, true));
         let inner = ui.panel(panel, "settings");
         let mut col = Column::new(inner, gap);
@@ -289,6 +289,18 @@ impl GameMenu {
             &mut settings.sensitivity,
             SENSITIVITY_RANGE,
         );
+        // The sound (SOUND.md 3.2): how loud, and whether at all.
+        let mut volume = settings.volume.min(100) as f32;
+        if ui.slider(
+            col.take(ui.field_height()),
+            "volume",
+            &mut volume,
+            (0.0, 100.0),
+        ) {
+            settings.volume = volume.round() as u8;
+            changed = true;
+        }
+        changed |= ui.checkbox(col.take(h), "no sound", &mut settings.mute);
         // The size of everything drawn here: what the window gives, or one of four.
         let mut size = settings.ui_scale.min(4) as usize;
         if ui.choice(
@@ -442,32 +454,47 @@ impl Chat {
         }
     }
 
-    /// A line arrived. Lines of players on the `ignored` list are not kept.
-    pub fn heard(&mut self, who: Option<String>, text: String, ignored: &[String]) {
+    /// A line arrived. Lines of players on the `ignored` list are not kept. Whether the
+    /// line was kept (what is not shown is not heard either, SOUND.md 3).
+    pub fn heard(&mut self, who: Option<String>, text: String, ignored: &[String]) -> bool {
         match who {
-            Some(who) if ignores(ignored, &who) => {}
-            Some(who) => self.keep(Voice::Say, who, text),
-            None => self.keep(Voice::Zone, String::new(), text),
+            Some(who) if ignores(ignored, &who) => false,
+            Some(who) => {
+                self.keep(Voice::Say, who, text);
+                true
+            }
+            None => {
+                self.keep(Voice::Zone, String::new(), text);
+                true
+            }
         }
     }
 
     /// A line that came through the hub (PARTY.md 5): the party's, a whisper, or this
     /// player's own whisper as it went out. Somebody who is not heard is not heard here.
-    pub fn heard_on(&mut self, channel: u8, from: String, text: String, ignored: &[String]) {
+    /// Whether the line was kept.
+    pub fn heard_on(
+        &mut self,
+        channel: u8,
+        from: String,
+        text: String,
+        ignored: &[String],
+    ) -> bool {
         use gm_net::control::{CHANNEL_PARTY, CHANNEL_WHISPER, CHANNEL_WHISPERED};
         let voice = match channel {
             CHANNEL_PARTY => Voice::Party,
             CHANNEL_WHISPER => Voice::Whisper,
             CHANNEL_WHISPERED => Voice::Whispered,
-            _ => return,
+            _ => return false,
         };
         if voice != Voice::Whispered && ignores(ignored, &from) {
-            return;
+            return false;
         }
         if voice == Voice::Whisper {
             self.reply_to = Some(from.clone());
         }
         self.keep(voice, from, text);
+        true
     }
 
     /// The zone's own last line, when it is not older than `within`: a page whose button

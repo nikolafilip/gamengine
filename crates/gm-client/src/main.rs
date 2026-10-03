@@ -25,6 +25,7 @@ mod playback;
 mod render;
 mod script;
 mod settings;
+mod sound;
 mod stats;
 mod tactical;
 mod ui;
@@ -111,12 +112,16 @@ pub struct Options {
     pub ui_script: Option<String>,
     /// Walk around the map offline without being asked (CLIENT.md 2).
     pub offline: bool,
+    /// Render the sound into this WAV from the frame clock instead of a device
+    /// (SOUND.md 7).
+    pub sound_dump: Option<PathBuf>,
 }
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
 [--third-person] [--tactical] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
 [--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--crowd N [--crowd-dir DIR]] \
-[--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW] [--script fight] [--report] [--travel-to ZONE [--travel-after SECS]]\n\
+[--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW] [--script fight|walk] [--report] [--travel-to ZONE [--travel-after SECS]] \
+[--sound-dump FILE.wav]\n\
        gm-client --replay FILE.gmr [--follow NAME] [--from SECS] [--maps-dir DIR] [--third-person] [--headless --screenshot out.ppm]\n\
        gm-client --hub ADDR --hub-cert PATH [--user EMAIL --password PW [--register] [--character NAME [--zone ID] [--build NAME]]] \
 [--maps-dir DIR] [--third-person] [--settings FILE] [--ui-script FILE]\n\
@@ -172,6 +177,7 @@ impl Default for Options {
             settings: None,
             ui_script: None,
             offline: false,
+            sound_dump: None,
         }
     }
 }
@@ -269,6 +275,7 @@ fn parse_args() -> Result<Options, String> {
             }
             "--settings" => o.settings = Some(PathBuf::from(value("--settings")?)),
             "--offline" => o.offline = true,
+            "--sound-dump" => o.sound_dump = Some(PathBuf::from(value("--sound-dump")?)),
             "--ui-script" => {
                 let path = value("--ui-script")?;
                 o.ui_script = Some(

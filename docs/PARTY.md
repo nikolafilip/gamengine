@@ -552,6 +552,26 @@ changed:
 | Low (client): the other's coin was abbreviated in the row | **Accepted** by the coin row (27 characters: the dearest price fits) |
 | Low (hub): `offline_zone`'s deadlock at a zone's disconnect is only logged | **Written down**: the characters stay in the zone until it registers again |
 
+### 12.4 Review by Gemini 3.1 Pro, after the fact (2026-10-03)
+
+The Gemini account had no credit when this phase was written (the reviews above are
+independent agents'); with credit back, Gemini 3.1 Pro read this document and the commit's
+hub, zone and protocol parts (the whole diff, 700 KB, left it no room to answer: its first
+attempt argued with itself and was cut off; the one claim it made before, that `trade_cancel`
+takes no caller, is false: it checks `trade_side`), asked for what the earlier reviews missed.
+2 findings.
+
+1. Medium, *a zone's party numbers leak: a party dissolved after its last member left the
+   zone is news the zone never hears, and its number stays for the zone's life*: **accepted,
+   fixed**. When a body leaves, the numbers of parties nobody here nor anybody kept (two
+   minutes) is held to be of are let go of; a test leaves everybody and waits them out.
+2. Low, *a trader who disconnects while the hub opens the trade leaves the other untold: the
+   zone looked the names up after the answer*: **accepted, fixed**. The names are taken when
+   both asked and travel with the answer; whoever is still here is told, and can close a trade
+   the hub holds open in their name.
+
+Its verdict on the earlier reviews: sound overall.
+
 ## 13. What was measured
 
 All with the final build on the development machine (AMD Renoir integrated GPU, Postgres 18

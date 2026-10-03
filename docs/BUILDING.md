@@ -6,6 +6,14 @@
 - A Vulkan driver. Linux: Arch `vulkan-radeon` / `vulkan-intel` / `vulkan-swrast`
   (software), Debian/Ubuntu `mesa-vulkan-drivers`. Without an ICD the client reports
   "no compatible GPU adapter"; `--software` selects the CPU adapter explicitly.
+- ALSA's headers to build the client's sound device (Arch `alsa-lib`, Debian/Ubuntu
+  `libasound2-dev`); at run time `libasound` (present wherever there is sound). A machine
+  without a sound device plays silently (SOUND.md 4). The client opens ALSA's `default`:
+  on a machine where that is a bare codec held by the sound server, or the wrong card (an
+  HDMI output with no analogue device, as on the development machine: "unable to open
+  slave"), either set `ALSA_CARD=1` (the card's number from `/proc/asound/cards`) or
+  install the plugin that routes ALSA's default to the server (`pipewire-alsa`, or
+  `alsa-plugins` for PulseAudio; Debian/Ubuntu `pipewire-alsa` / `libasound2-plugins`).
 - `curl`, `unzip` (or `python3`) for `scripts/fetch-ericw-tools.sh`.
 - Optional: [TrenchBroom](https://trenchbroom.github.io/) to edit maps.
 - For the browser build: `rustup target add wasm32-unknown-unknown`; Node 22+ and a Chromium
@@ -469,7 +477,13 @@ scripts/check-party.sh                # the split with people in it, the wire's 
 scripts/check-party.sh --online       # also two bots: a party in the town, the dungeon cleared together, the loot split by the hub
 scripts/check-party.sh --desktop      # also the windowed client: a party by the page, its line and a whisper, a trade for what the other looted, a hire
 scripts/check-party.sh --browser      # the same in both browser builds
+scripts/check-sound.sh                # the patches, the mixer and the cues as tests; the walk and the arena fight rendered to WAVs on an Xvfb of its own and read (SOUND.md 7)
+scripts/check-sound.sh --browser      # also both browser builds: the audio context running after a click, cues started, the same patch bytes as native (--software: no GPU)
 ```
+
+`target/` grows without bound across sessions (`target/debug` reached 149 GB and filled the disk
+once): `rm -rf target/debug/incremental` is safe at any time (a cache cargo rebuilds), and a
+`cargo clean` between phases costs one full build.
 
 `check-netcode.sh` runs the turmoil acceptance tests (`crates/gm-server/tests/netcode.rs` and
 `counterpick.rs`) in simulated time and the real-UDP loopback test; all print per-bot and

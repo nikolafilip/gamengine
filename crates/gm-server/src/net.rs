@@ -58,13 +58,15 @@ pub enum PartyAsk {
 /// is handed: so that a program sending thousands costs the tick loop nothing, a
 /// connection hands on four a second with eight in hand and drops the rest unread.
 struct AskBucket {
-    tokens: f32,
+    /// (Double precision, as the hub's bucket: a flood of asks nanoseconds apart adds
+    /// what a single-precision sum would lose, and the bucket refills under it.)
+    tokens: f64,
     last: Instant,
 }
 
 impl AskBucket {
-    const PER_SEC: f32 = 4.0;
-    const FULL: f32 = 8.0;
+    const PER_SEC: f64 = 4.0;
+    const FULL: f64 = 8.0;
 
     fn new(now: Instant) -> AskBucket {
         AskBucket {
@@ -74,7 +76,7 @@ impl AskBucket {
     }
 
     fn take(&mut self, now: Instant) -> bool {
-        let gained = now.duration_since(self.last).as_secs_f32() * Self::PER_SEC;
+        let gained = now.duration_since(self.last).as_secs_f64() * Self::PER_SEC;
         self.tokens = (self.tokens + gained).min(Self::FULL);
         self.last = now;
         if self.tokens >= 1.0 {
@@ -198,6 +200,9 @@ pub enum ClientEvent {
     TradeOpened {
         a: EntityId,
         b: EntityId,
+        /// Their names as they were when both asked: one of them may be gone by the time
+        /// the hub answers, and the other is still told whose trade it holds.
+        names: (String, String),
         result: Result<i64, String>,
         /// The first answer to `b`'s asking (the one its gate waits for); a trade the hub
         /// opened after the zone stopped waiting comes with `false`.

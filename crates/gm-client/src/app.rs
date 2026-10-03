@@ -407,6 +407,10 @@ struct App {
     /// The party's other members: `None` when no body of that name is here, else the
     /// health the wire carries for it, when it does.
     party_view: Vec<(String, Option<Option<u16>>)>,
+    /// What is heard (SOUND.md), and where the own body was at the last offline frame
+    /// (its ground travel for the steps).
+    sound: crate::sound::Sound,
+    sound_from: Option<Vec3>,
     character: Option<gm_hub_proto::protocol::CharacterId>,
     /// The toolkit's memory, and what happened since the last frame for it.
     ui: UiState,
@@ -549,6 +553,12 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         bag: None,
         people: None,
         party_view: Vec::new(),
+        sound: crate::sound::Sound::new(
+            start.settings.volume,
+            start.settings.mute,
+            opts.sound_dump.clone(),
+        ),
+        sound_from: None,
         character: None,
         ui: UiState::default(),
         ui_input: UiInput::default(),
@@ -842,6 +852,13 @@ pub fn run(mut opts: Options) -> Result<(), Error> {
     if let Some(a) = &app.active {
         print_bench_avatars(&report, &a.avatars, &a.renderer);
     }
+    log::info!("{}", app.sound.report());
+    if scripted || app.opts.sound_dump.is_some() {
+        println!("{}", app.sound.report());
+    }
+    if let Some(said) = app.sound.finish() {
+        log::info!("{said}");
+    }
     if let Some(o) = &app.online
         && let Some(c) = &o.client
     {
@@ -1069,6 +1086,14 @@ fn visible_from(bsp: &Bsp, leaves: &[usize]) -> Vec<u32> {
         }
     }
     out
+}
+
+/// What a map says its air is (SOUND.md 3): the worldspawn's `gm_ambience`, when it has one.
+fn ambience_of(bsp: &Bsp) -> Option<&str> {
+    bsp.entities
+        .iter()
+        .find(|e| e.classname() == "worldspawn")
+        .and_then(|e| e.get("gm_ambience"))
 }
 
 /// A map's name as a zone may send it: letters, digits, `_` and `-`, at most 64. It is joined
@@ -1651,6 +1676,8 @@ impl App {
 
     /// What the settings say, done: called when one changes and when the window is ready.
     fn apply_settings(&mut self) {
+        self.sound
+            .set_volume(self.settings.volume, self.settings.mute);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(a) = &self.active {
             let wanted = self
@@ -1667,6 +1694,7 @@ impl App {
     /// shown again, with the reason if there is one.
     fn leave_zone(&mut self, why: &str) {
         self.hang_up();
+        self.sound.quiet();
         self.menu = None;
         self.bag = None;
         self.people = None;
@@ -2170,6 +2198,17 @@ impl App {
                     o.rate = TickRate::new(hz as u32);
                     o.welcome = Some((entity, hz));
                     log::info!("joined as entity {entity} on {map} at {hz} Hz");
+                    // The air of the map, and nothing read from the last zone's frame. A
+                    // map already loaded says its own air now; another map says it as it
+                    // is switched to (`switch_map`).
+                    self.sound.quiet();
+                    self.sound.set_rate(o.rate.dt());
+                    self.sound.air(&map);
+                    if map_hash == o.map_hash
+                        && let Some(air) = ambience_of(&self.bsp)
+                    {
+                        self.sound.air_named(air);
+                    }
                     #[cfg(target_arch = "wasm32")]
                     crate::web::tell_page("status", "");
                     // The name becomes a file name or a URL: a zone does not choose paths.
@@ -2464,6 +2503,7 @@ impl App {
                                 .send_control(FromClient::PartyAnswer { from, join: false });
                         } else if o.social.invited(from.clone(), Instant::now()) {
                             log::info!("{from} invites to a party");
+                            self.sound.play(crate::sound::synth::Cue::Chime);
                             let line = format!("{from} invites you to a party: P");
                             self.chat.heard(None, line, &[]);
                         }
@@ -2475,8 +2515,14 @@ impl App {
                     } => {
                         // (Not logged: a whisper is between two people.)
                         log::debug!("<{from} on {channel}> {text}");
-                        self.chat
+                        // Heard as it is shown: not an ignored name's, not the own
+                        // whisper going out (SOUND.md 3).
+                        let shown = self
+                            .chat
                             .heard_on(channel, from, text, &self.settings.ignored);
+                        if shown && channel != gm_net::control::CHANNEL_WHISPERED {
+                            self.sound.play(crate::sound::synth::Cue::Blip);
+                        }
                     }
                     FromZone::TradeAsked { from } => {
                         let Some(name) = o.names.get(&from).map(|n| n.0.clone()) else {
@@ -2489,6 +2535,7 @@ impl App {
                             .any(|i| names::skeleton(i) == names::skeleton(&name));
                         if !unheard && o.social.trade_asked(from, name.clone(), Instant::now()) {
                             log::info!("{name} asks to trade");
+                            self.sound.play(crate::sound::synth::Cue::Chime);
                             let line = format!("{name} asks to trade: P");
                             self.chat.heard(None, line, &[]);
                         }
@@ -2552,7 +2599,11 @@ impl App {
                                 .map_or_else(|| format!("#{from}"), |n| n.0.clone())
                         });
                         log::info!("<{}> {text}", who.as_deref().unwrap_or("zone"));
-                        self.chat.heard(who, text, &self.settings.ignored);
+                        let mine = o.client.as_ref().is_some_and(|c| c.my_id == from);
+                        let shown = self.chat.heard(who, text, &self.settings.ignored);
+                        if shown && !mine && from != 0 {
+                            self.sound.play(crate::sound::synth::Cue::Blip);
+                        }
                     }
                     // (Not printed: the words for every message of the zone's would be
                     // carried by every browser for this one line.)
@@ -2644,6 +2695,10 @@ impl App {
                 .steer(forward, side, turn as f32, self.input.wheel, frame_dt);
         }
         self.input.wheel = 0.0;
+        // What the own body did this frame, for the sound: its predicted actions and
+        // the ground it covered by its own ticks (SOUND.md 3).
+        let mut own_actions: Vec<gm_core::sim::Action> = Vec::new();
+        let mut own_travel = 0.0_f32;
         while o.accumulator >= dt && steps < MAX_STEPS_PER_FRAME {
             let (yaw, pitch) = match viewport {
                 _ if in_tactical => (self.sim.yaw, self.sim.pitch),
@@ -2667,7 +2722,12 @@ impl App {
             } else {
                 self.input.sim_input(yaw, pitch)
             };
+            let before = c.mover.mv.origin;
             let datagram = c.local_tick(bsp, input);
+            own_actions.extend(c.actions.iter().copied());
+            if c.mover.mv.on_ground {
+                own_travel += (c.mover.mv.origin - before).truncate().length();
+            }
             o.net.send_input(datagram.encode());
             o.prev_origin = o.curr_origin;
             o.curr_origin = c.mover.mv.origin;
@@ -2848,7 +2908,7 @@ impl App {
             }
         }
         self.input.clicks.clear();
-        for e in others {
+        for e in others.iter().copied() {
             match e.kind {
                 EntityKind::Player => {
                     let SpawnInfo::Player {
@@ -2953,6 +3013,43 @@ impl App {
                     });
                 }
             }
+        }
+        // Heard (SOUND.md 3): every new sample of every entity up to the render tick,
+        // the own body as it predicted itself and as the zone said, from the own body's
+        // place with the camera's facing.
+        {
+            let world = |from: Vec3, to: Vec3| {
+                use gm_core::trace::CollisionWorld;
+                bsp.trace(Hull::Point, from, to).fraction < 1.0
+            };
+            self.sound.feed(c.tracks(), t, &world);
+            let anims = std::mem::take(&mut c.own_anims);
+            if c.synced() {
+                let me = crate::sound::cues::OwnNow {
+                    id: c.my_id,
+                    pos: centre,
+                    on_ground: c.mover.mv.on_ground,
+                    travel: own_travel,
+                    health: c.own_health,
+                    alive: c.own_alive,
+                };
+                self.sound.own(
+                    self.started.elapsed().as_secs_f32(),
+                    me,
+                    &anims,
+                    &own_actions,
+                );
+            }
+            let yaw = if in_tactical {
+                self.tactical.yaw
+            } else {
+                self.sim.yaw
+            };
+            let listener = crate::sound::Listener {
+                pos: eye,
+                yaw: yaw.to_radians(),
+            };
+            self.sound.end_frame(frame_dt, listener);
         }
         c.prune(t);
         // The market: every stall with its keeper, who never moves and costs no snapshot.
@@ -3092,6 +3189,10 @@ impl App {
     /// Replace the world (BSP, mesh, renderer) with another map.
     fn switch_map(&mut self, bsp: Bsp, hash: u64) {
         self.map_hash = hash;
+        // A map that says what its air is (SOUND.md 3) is believed over its name.
+        if let Some(air) = ambience_of(&bsp) {
+            self.sound.air_named(air);
+        }
         let mesh = world::build(&bsp, &self.palette);
         self.faces_total = mesh
             .face_ranges
@@ -3183,6 +3284,9 @@ impl App {
             crate::web::wasm_memory_bytes(),
             self.first_frame_ms
         ));
+        // What was heard, in the same line (the gates read it as `GM-DONE ... sound: ...`).
+        line.push(' ');
+        line.push_str(&self.sound.report());
         line
     }
 
@@ -3301,9 +3405,19 @@ impl App {
             let yaw = self.bench_yaw0 + BACKDROP_DEG_PER_S * self.started.elapsed().as_secs_f32();
             (self.sim.eye(), yaw.rem_euclid(360.0), 0.0)
         } else {
+            let walk = self.opts.script.as_deref() == Some("walk");
             let input = if bench {
                 MoveInput {
                     yaw: self.sim.yaw,
+                    ..Default::default()
+                }
+            } else if walk {
+                // A second standing, five seconds forward, standing again (SOUND.md 7):
+                // what the sound gate renders to a file.
+                let t = self.started.elapsed().as_secs_f32();
+                MoveInput {
+                    yaw: self.sim.yaw,
+                    forward: if (1.0..6.0).contains(&t) { 1.0 } else { 0.0 },
                     ..Default::default()
                 }
             } else {
@@ -3329,6 +3443,40 @@ impl App {
             self.input.clicks.clear();
             self.input.just_pressed.clear();
             self.sim.advance(&self.bsp, &input, frame_dt);
+            // Heard: the own body's steps and landings, offline too (its animation is
+            // the local mover's; nobody else is here).
+            {
+                let v = self.sim.curr.velocity;
+                let anim = if !self.sim.curr.on_ground {
+                    gm_core::sim::anim::AIR
+                } else if v.truncate().length() > 20.0 {
+                    gm_core::sim::anim::RUN
+                } else {
+                    gm_core::sim::anim::IDLE
+                };
+                let here = self.sim.origin();
+                let travel = match (self.sim.curr.on_ground, self.sound_from) {
+                    (true, Some(from)) => (here - from).truncate().length(),
+                    _ => 0.0,
+                };
+                self.sound_from = Some(here);
+                let me = crate::sound::cues::OwnNow {
+                    id: 0,
+                    pos: self.sim.origin(),
+                    on_ground: self.sim.curr.on_ground,
+                    travel,
+                    health: 0,
+                    alive: true,
+                };
+                let now = self.started.elapsed().as_secs_f32();
+                // (No zone here: the word's tick is the frame clock at 64 Hz.)
+                self.sound.own(now, me, &[((now * 64.0) as u32, anim)], &[]);
+                let listener = crate::sound::Listener {
+                    pos: self.sim.eye(),
+                    yaw: self.sim.yaw.to_radians(),
+                };
+                self.sound.end_frame(frame_dt, listener);
+            }
             self.entities.clear();
             self.bodies.clear();
             self.bars.clear();
@@ -3639,6 +3787,9 @@ impl App {
                 }
             }
             ui.end();
+            if std::mem::take(&mut self.ui.presses) > 0 {
+                self.sound.play(crate::sound::synth::Cue::Click);
+            }
             self.ui_drawn = true;
             // What happened is used up; a button still held is still held.
             self.ui_input = UiInput {

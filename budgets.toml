@@ -65,10 +65,10 @@ round_trip_ms = 2000
 # symmetric: on WebGPU wgpu is a thin binding, for WebGL2 it links its GLES backend and the
 # shader translator. Sizes are of the .wasm after wasm-opt; "packed" is brotli -q 11 (what a
 # static host serves), gzip -9 where brotli is not installed.
-max_webgpu_wasm_bytes = 1048576         # measured 977,242 (with the people, trade and tavern screens of Phase 12; 1,005,086 in Phase 11, 967,052 in Phase 10)
-max_webgpu_packed_bytes = 393216        # measured 332,973
-max_webgl_wasm_bytes = 3407872          # measured 2,972,499
-max_webgl_packed_bytes = 1048576        # measured 906,803
+max_webgpu_wasm_bytes = 1048576         # measured 1,009,465 (with the sound of Phase 13; 977,242 in Phase 12, 1,005,086 in Phase 11, 967,052 in Phase 10)
+max_webgpu_packed_bytes = 393216        # measured 345,287
+max_webgl_wasm_bytes = 3407872          # measured 3,003,328
+max_webgl_packed_bytes = 1048576        # measured 918,847
 max_js_bytes = 180224                   # wasm-bindgen glue + loader + page, per build; measured 170,358 (webgl)
 max_wasm_memory_bytes = 67108864        # linear memory in the 8v8 arena; measured 3.3 MiB
 min_snapshots_per_s = 55                # of the zone's 64, as the browser client counts them
@@ -106,3 +106,16 @@ max_secs_stall_to_worn = 20           # from E at the stall to the sword being w
 [party]
 max_secs_dungeon_together = 420       # two bots as people, each with three recruits, the gate and the Warden; measured 149-165
 max_secs_party_to_traded = 60         # from being in a party to the trade being done, by script (two chat lines and a 3 s lock are in it); measured 6.2-6.3
+
+# Sound (docs/SOUND.md 8; scripts/check-sound.sh): synthesized at start, mixed by the client
+# natively and by the browser in the browser; proved by rendering a run into a WAV.
+[sound]
+max_wasm_added_bytes = 40960          # what the phase may add to the WebGPU wasm, of the 71,334 that were left; measured 32,223
+webgpu_wasm_bytes_before = 977242     # the WebGPU wasm before the phase (Phase 12)
+max_native_added_bytes = 307200       # cpal with ALSA, and the mixer; measured 128,560 (the client built alone, as the baseline is)
+native_bytes_before = 9483040         # the native client before the phase (ci/baselines/gm-client-size of Phase 12)
+max_patch_bytes = 2097152             # the rendered patches in memory; measured 1,228,060 (rendered in 32 ms, release)
+max_block_us = 200                    # microseconds per 512-frame stereo block with 32 voices, release; measured 92 in the bench, 40-91 in the client's dump, 25-39 on the device
+min_walk_steps = 20                   # steps heard in five seconds of running (a stride is 64 units at ~300 units/s); measured 25
+min_quiet_db = 60                     # a standing body: the loudest 100 ms window at least this far under full scale; measured digital silence
+max_steps_db = 35                     # running, and the fight: the loudest 100 ms window no further under full scale than this; measured 27 for steps, 8-19 in the fight
