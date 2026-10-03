@@ -12,7 +12,10 @@
 
 # Looks (CONTENT.md 3): `model` is the prop drawn in the hand of whoever wears one
 # (models/props/<model>.glb), fitted into hand space by `fit` (metres, degrees about glTF's
-# X, Y, Z in that order, a scale: the grip ends at the origin, the business end along +Z);
+# X, Y, Z in that order, a scale: the grip ends at the origin, the business end along +Z).
+# The fist holds +Z across the forearm (a blade, a hammer); a turn about Y lays it
+# elsewhere: 100 along the arm (what is aimed: the crossbow, the musket), a little the
+# other way to stand it up (the staff). `gm-tools content look KEY --out x.png` shows it;
 # `fit_view` is where the first-person view model sits (LOOK.md 6.4). An icon is baked
 # from the model unless icons/<icon>.png is given.
 
@@ -45,7 +48,7 @@ kind = "weapon"
 strikes = "blunt"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
 model = "staff"
-fit = { move = [0.0, 0.0, 0.3], turn = [90, 0, 0], scale = 0.6 }
+fit = { move = [0.0, 0.0, 0.3], turn = [90, -20, 0], scale = 0.6 }
 
 [[template]]
 id = "crossbow"
@@ -53,7 +56,7 @@ kind = "weapon"
 strikes = "pierce"
 layers = ["shard", "core", "frame", "gem"]
 model = "crossbow"
-fit = { scale = 0.7 }
+fit = { turn = [0, 100, 0], scale = 0.7 }
 
 [[template]]
 id = "musket"
@@ -61,6 +64,7 @@ kind = "weapon"
 strikes = "pierce"
 layers = ["shard", "core", "frame", "gem"]
 model = "musket"
+fit = { turn = [0, 88, 0] }
 
 [[template]]
 id = "cuirass"

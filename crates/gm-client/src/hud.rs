@@ -2,6 +2,11 @@
 //! frame as quads into one RGBA atlas, one draw per layer. The atlas is the bundle's
 //! (`ui.gma`: the skin, the icons, three faces) once it has loaded, and until then one made
 //! at start from the five-by-seven font alone, so that everything draws either way.
+//!
+//! The bundle has an atlas per density (texels a dot, LOOK.md 2.2) and the client draws
+//! with the one of its UI scale: a texel is then a pixel. Sizes are asked for in pixels
+//! and metrics are in dots, so drawing with an atlas of another density (the dense one
+//! not yet here, a window too small for the scale chosen) is the same layout, coarser.
 
 use glam::Vec2;
 use gm_model::atlas::{Atlas, Cell, Face, Glyph};
@@ -92,6 +97,7 @@ pub fn fallback_atlas() -> Atlas {
     for a in &px {
         texels.extend_from_slice(&[255, 255, 255, *a]);
     }
+    let advance = (ADVANCE * gm_model::atlas::ADVANCE_PARTS) as u8;
     let mut face = Face {
         line_height: GLYPH_H as u8 + 2,
         ascent: GLYPH_H as u8,
@@ -109,7 +115,7 @@ pub fn fallback_atlas() -> Atlas {
                     h: GLYPH_ROWS as u16,
                 },
                 bearing: [0, 0],
-                advance: ADVANCE as u8,
+                advance,
             },
         );
     }
@@ -118,10 +124,11 @@ pub fn fallback_atlas() -> Atlas {
         Glyph {
             cell: Cell::default(),
             bearing: [0, 0],
-            advance: ADVANCE as u8,
+            advance,
         },
     );
     let mut a = Atlas {
+        density: 1,
         w: w as u16,
         h: h as u16,
         texels,
@@ -150,8 +157,11 @@ impl Hud {
         let device = &gpu.device;
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("hud atlas"),
+            // A texel is a pixel at the atlas's own scale, whichever filter; stretched
+            // (a nine-slice's middle, a thinner atlas standing in) it stays sharp, and
+            // drawn smaller (small print, a panel that had to give way) it is averaged.
             mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -320,7 +330,13 @@ impl Hud {
         })
     }
 
-    /// The bundle's atlas replaces the built-in one (LOOK.md 2.2).
+    /// Texels per dot of the atlas in use.
+    pub fn density(&self) -> u8 {
+        self.atlas.density.max(1)
+    }
+
+    /// The bundle's atlas replaces the one in use (LOOK.md 2.2): the built-in one at
+    /// start, a thinner or denser one when the scale changes.
     pub fn set_atlas(&mut self, gpu: &Gpu, atlas: Atlas) {
         if !atlas.faces.contains_key(&0) {
             log::warn!("the bundle's atlas has no face 0; the built-in one stays");
@@ -467,7 +483,9 @@ impl Hud {
             self.quad_cell([x, y, w, h], c, color);
             return true;
         }
-        let (sl, st, sr, sb) = (l * scale, t * scale, r * scale, b * scale);
+        // The insets are texels; `scale` is pixels a dot.
+        let k = scale / self.atlas.dots();
+        let (sl, st, sr, sb) = (l * k, t * k, r * k, b * k);
         // Three columns and three rows of texels, and of pixels.
         let cols = [
             (c.x as f32, l, x, sl),
@@ -513,22 +531,40 @@ impl Hud {
         (f.line_height as f32, f.ascent as f32)
     }
 
-    pub fn text_width(scale: f32, text: &str) -> f32 {
-        crate::font::text_width(scale, text)
-    }
-
-    /// The width of `text` in `face` at `scale`.
+    /// The width of `text` in `face` at `scale`: the same at every density.
     pub fn width_in(&self, face: FaceId, scale: f32, text: &str) -> f32 {
         let f = self.face(face);
         let unknown = f.glyphs.get(&'?');
-        text.chars()
-            .map(|c| {
-                f.glyphs
-                    .get(&c)
-                    .or(unknown)
-                    .map_or(0.0, |g| g.advance as f32 * scale)
-            })
-            .sum()
+        let parts: u32 = text
+            .chars()
+            .map(|c| f.glyphs.get(&c).or(unknown).map_or(0, |g| g.advance as u32))
+            .sum();
+        parts as f32 * scale / gm_model::atlas::ADVANCE_PARTS
+    }
+
+    /// The face the HUD's own words are in: the text face when the atlas has it, else
+    /// the small one.
+    pub fn words(&self) -> FaceId {
+        if self.has_face(FaceId::Text) {
+            FaceId::Text
+        } else {
+            FaceId::Small
+        }
+    }
+
+    /// The height of the capitals of the HUD's words, in dots.
+    pub fn cap(&self) -> f32 {
+        self.metrics(self.words()).1
+    }
+
+    /// The width of `text` in the HUD's words at `scale`.
+    pub fn width(&self, scale: f32, text: &str) -> f32 {
+        self.width_in(self.words(), scale, text)
+    }
+
+    /// Text in the HUD's words with the top of its capitals at `(x, y)`.
+    pub fn print(&mut self, x: f32, y: f32, scale: f32, color: [f32; 4], text: &str) -> f32 {
+        self.text_in(self.words(), x, y, scale, color, text)
     }
 
     /// Text with its top left at `(x, y)` in the small face; returns where it ends.
@@ -552,36 +588,40 @@ impl Hud {
             .chars()
             .filter_map(|c| f.glyphs.get(&c).copied().or(unknown))
             .collect();
+        // Cells and bearings are texels: `k` pixels each (one, at the atlas's own scale).
+        let k = scale / self.atlas.dots();
+        let y = y.round();
         let mut at = x.round();
         for g in glyphs {
             if g.cell.w > 0 && g.cell.h > 0 {
                 self.quad_cell(
                     [
-                        at + g.bearing[0] as f32 * scale,
-                        y + g.bearing[1] as f32 * scale,
-                        g.cell.w as f32 * scale,
-                        g.cell.h as f32 * scale,
+                        at + g.bearing[0] as f32 * k,
+                        y + g.bearing[1] as f32 * k,
+                        g.cell.w as f32 * k,
+                        g.cell.h as f32 * k,
                     ],
                     g.cell,
                     color,
                 );
             }
-            at += g.advance as f32 * scale;
+            at += g.advance as f32 * scale / gm_model::atlas::ADVANCE_PARTS;
         }
         at
     }
 
-    /// Text with a dark plate behind it: readable over any wall.
+    /// The HUD's words with a dark plate behind them: readable over any wall.
     pub fn label(&mut self, x: f32, y: f32, scale: f32, color: [f32; 4], text: &str) -> f32 {
-        let w = Hud::text_width(scale, text);
+        let w = self.width(scale, text);
+        let (line, cap) = self.metrics(self.words());
         self.rect(
-            x - 2.0 * scale,
+            x - 3.0 * scale,
             y - 2.0 * scale,
-            w + 4.0 * scale,
-            (GLYPH_H + 4.0) * scale,
+            w + 6.0 * scale,
+            (cap + 2.0 + (line - cap).max(2.0)) * scale,
             SHADE,
         );
-        self.text(x, y, scale, color, text)
+        self.print(x, y, scale, color, text)
     }
 
     /// A bar filled to `frac` of its width.

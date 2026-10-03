@@ -4,12 +4,22 @@
 //! (gm-ingest assembles it), read here in one call. The reader trusts nothing: every rect
 //! is inside the texture and every count is bounded before a byte of texels is touched.
 //!
+//! An atlas is made for one **density**: texels per dot, 1 to 4 (LOOK.md 2.2). The client
+//! draws with the atlas of its UI scale, so a texel is a pixel and nothing is magnified.
+//! Layouts count in dots and are the same at every density: a face's line height, its
+//! ascent and its advances are in dots (advances in quarters of one); cells, bearings and
+//! insets are in texels.
+//!
 //! Names are looked up by a 32-bit FNV-1a hash of the key; the tool refuses a collision.
 
 use std::collections::HashMap;
 
-pub const MAGIC: [u8; 4] = *b"GMA1";
-pub const MAX_SIDE: u16 = 1024;
+pub const MAGIC: [u8; 4] = *b"GMA2";
+pub const MAX_SIDE: u16 = 2048;
+/// The densities an atlas is made at: texels per dot.
+pub const MAX_DENSITY: u8 = 4;
+/// A glyph's advance is written in this many parts of a dot.
+pub const ADVANCE_PARTS: f32 = 4.0;
 pub const MAX_PIECES: usize = 512;
 pub const MAX_FACES: usize = 4;
 pub const MAX_GLYPHS: usize = 4096;
@@ -17,9 +27,17 @@ pub const MAX_ICONS: usize = 2048;
 /// An icon's side in dots (CONTENT.md 4).
 pub const ICON: u16 = 32;
 
-const HEADER: usize = 4 + 2 + 2 + 2 + 1 + 2 + 4;
+const HEADER: usize = 4 + 1 + 2 + 2 + 2 + 1 + 2 + 4;
 const PIECE_BYTES: usize = 4 + 2 * 4 + 4;
-const GLYPH_BYTES: usize = 4 + 2 + 2 + 1 + 1 + 1 + 1 + 1;
+const GLYPH_BYTES: usize = 4 + 2 + 2 + 1 + 1 + 2 + 2 + 1;
+
+/// The file of the atlas of a density, in the bundle: `ui.gma`, `ui2.gma`, ...
+pub fn file_name(density: u8) -> String {
+    match density {
+        0 | 1 => "ui.gma".to_string(),
+        d => format!("ui{d}.gma"),
+    }
+}
 const ICON_BYTES: usize = 4 + 2 + 2;
 
 /// FNV-1a over the key's UTF-8: what the tables are keyed by.
@@ -41,24 +59,26 @@ pub struct Cell {
     pub h: u16,
 }
 
-/// A piece of the skin: its cell and the nine-slice insets (left, top, right, bottom; all
-/// zero for a plain picture).
+/// A piece of the skin: its cell and the nine-slice insets in texels (left, top, right,
+/// bottom; all zero for a plain picture).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Piece {
     pub cell: Cell,
     pub inset: [u8; 4],
 }
 
-/// One glyph of a face: its cell, where it sits relative to the pen (bearing: right of the
-/// pen, down from the line's top), and how far the pen moves.
+/// One glyph of a face: its cell, where it sits relative to the pen (bearing, in texels:
+/// right of the pen, down from the line's top), and how far the pen moves (in quarters of
+/// a dot: the same at every density).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Glyph {
     pub cell: Cell,
-    pub bearing: [i8; 2],
+    pub bearing: [i16; 2],
     pub advance: u8,
 }
 
-/// A rasterised face: the line height and the ascent in dots, and its glyphs by char.
+/// A rasterised face: the line height and the ascent (the height of its capitals: the
+/// baseline is that far under the line's top) in dots, and its glyphs by char.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Face {
     pub line_height: u8,
@@ -68,13 +88,15 @@ pub struct Face {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Atlas {
+    /// Texels per dot, 1 to `MAX_DENSITY` (0 is read as 1).
+    pub density: u8,
     pub w: u16,
     pub h: u16,
     pub pieces: HashMap<u32, Piece>,
     /// By face id (LOOK.md 2.3: 0 the small five-by-seven face, written into the file
     /// from the shared table so one texture draws everything; 1 text; 2 title).
     pub faces: HashMap<u8, Face>,
-    /// By key hash; every icon is `ICON` square.
+    /// By key hash; every icon is `ICON` dots square (`ICON × density` texels).
     pub icons: HashMap<u32, Cell>,
     /// RGBA8, straight alpha, `w × h`.
     pub texels: Vec<u8>,
@@ -103,6 +125,16 @@ impl Atlas {
         self.icons.get(&hash(key)).copied()
     }
 
+    /// Texels per dot, as a factor.
+    pub fn dots(&self) -> f32 {
+        self.density.max(1) as f32
+    }
+
+    /// An icon's side in this atlas's texels.
+    pub fn icon_side(&self) -> u16 {
+        ICON * self.density.max(1) as u16
+    }
+
     fn cell_fits(&self, c: Cell) -> bool {
         c.w > 0
             && c.h > 0
@@ -112,6 +144,9 @@ impl Atlas {
 
     /// Everything the reader checks, checked on the writer's side too.
     pub fn validate(&self) -> Result<(), AtlasError> {
+        if self.density == 0 || self.density > MAX_DENSITY {
+            return Err(AtlasError::Range("density"));
+        }
         if self.w == 0 || self.h == 0 || self.w > MAX_SIDE || self.h > MAX_SIDE {
             return Err(AtlasError::Range("size"));
         }
@@ -151,7 +186,7 @@ impl Atlas {
             return Err(AtlasError::Range("icons"));
         }
         for c in self.icons.values() {
-            if c.w != ICON || c.h != ICON || !self.cell_fits(*c) {
+            if c.w != self.icon_side() || c.h != self.icon_side() || !self.cell_fits(*c) {
                 return Err(AtlasError::Range("an icon"));
             }
         }
@@ -186,8 +221,8 @@ impl Atlas {
                 raw.extend_from_slice(&g.cell.y.to_le_bytes());
                 raw.push(g.cell.w as u8);
                 raw.push(g.cell.h as u8);
-                raw.push(g.bearing[0] as u8);
-                raw.push(g.bearing[1] as u8);
+                raw.extend_from_slice(&g.bearing[0].to_le_bytes());
+                raw.extend_from_slice(&g.bearing[1].to_le_bytes());
                 raw.push(g.advance);
             }
         }
@@ -201,6 +236,7 @@ impl Atlas {
         raw.extend_from_slice(&self.texels);
         let mut out = Vec::with_capacity(HEADER + raw.len() / 3);
         out.extend_from_slice(&MAGIC);
+        out.push(self.density);
         out.extend_from_slice(&self.w.to_le_bytes());
         out.extend_from_slice(&self.h.to_le_bytes());
         out.extend_from_slice(&(self.pieces.len() as u16).to_le_bytes());
@@ -215,12 +251,16 @@ impl Atlas {
         if file.len() < HEADER || file[..4] != MAGIC {
             return Err(AtlasError::Magic);
         }
-        let w = u16::from_le_bytes([file[4], file[5]]);
-        let h = u16::from_le_bytes([file[6], file[7]]);
-        let pieces = u16::from_le_bytes([file[8], file[9]]) as usize;
-        let faces = file[10] as usize;
-        let icons = u16::from_le_bytes([file[11], file[12]]) as usize;
-        let raw_len = u32::from_le_bytes([file[13], file[14], file[15], file[16]]) as usize;
+        let density = file[4];
+        let w = u16::from_le_bytes([file[5], file[6]]);
+        let h = u16::from_le_bytes([file[7], file[8]]);
+        let pieces = u16::from_le_bytes([file[9], file[10]]) as usize;
+        let faces = file[11] as usize;
+        let icons = u16::from_le_bytes([file[12], file[13]]) as usize;
+        let raw_len = u32::from_le_bytes([file[14], file[15], file[16], file[17]]) as usize;
+        if density == 0 || density > MAX_DENSITY {
+            return Err(AtlasError::Range("density"));
+        }
         if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE {
             return Err(AtlasError::Range("size"));
         }
@@ -244,10 +284,12 @@ impl Atlas {
         }
         let mut r = Reader { buf: &raw, at: 0 };
         let mut atlas = Atlas {
+            density,
             w,
             h,
             ..Default::default()
         };
+        let icon_side = atlas.icon_side();
         for _ in 0..pieces {
             let k = r.u32()?;
             let cell = Cell {
@@ -282,7 +324,7 @@ impl Atlas {
                     w: r.u8()? as u16,
                     h: r.u8()? as u16,
                 };
-                let bearing = [r.u8()? as i8, r.u8()? as i8];
+                let bearing = [r.u16()? as i16, r.u16()? as i16];
                 let advance = r.u8()?;
                 if face
                     .glyphs
@@ -308,8 +350,8 @@ impl Atlas {
             let cell = Cell {
                 x: r.u16()?,
                 y: r.u16()?,
-                w: ICON,
-                h: ICON,
+                w: icon_side,
+                h: icon_side,
             };
             if atlas.icons.insert(k, cell).is_some() {
                 return Err(AtlasError::Range("an icon twice"));
@@ -365,6 +407,7 @@ mod tests {
     fn sample() -> Atlas {
         let (w, h) = (64u16, 48u16);
         let mut a = Atlas {
+            density: 1,
             w,
             h,
             texels: (0..w as usize * h as usize * 4)
@@ -452,10 +495,47 @@ mod tests {
         let file = a.encode().unwrap();
         // A declared length that is too small, and a truncated stream.
         let mut bad = file.clone();
-        bad[13..17].copy_from_slice(&100u32.to_le_bytes());
+        bad[14..18].copy_from_slice(&100u32.to_le_bytes());
         assert!(Atlas::decode(&bad).is_err());
         assert!(Atlas::decode(&file[..file.len() / 2]).is_err());
         assert_eq!(Atlas::decode(b"nope"), Err(AtlasError::Magic));
+    }
+
+    #[test]
+    fn a_denser_atlas_has_larger_icons_and_the_same_dots() {
+        let mut a = sample();
+        a.density = 2;
+        // The icon of the sample is 32 texels: at two texels a dot it must be 64.
+        assert_eq!(a.encode(), Err(AtlasError::Range("an icon")));
+        a.w = 128;
+        a.h = 96;
+        a.texels = vec![7; 128 * 96 * 4];
+        a.icons.insert(
+            hash("sword"),
+            Cell {
+                x: 32,
+                y: 0,
+                w: 64,
+                h: 64,
+            },
+        );
+        a.faces
+            .get_mut(&1)
+            .unwrap()
+            .glyphs
+            .get_mut(&'A')
+            .unwrap()
+            .bearing = [-3, 200];
+        let back = Atlas::decode(&a.encode().unwrap()).unwrap();
+        assert_eq!(back, a);
+        assert_eq!((back.density, back.icon_side(), back.dots()), (2, 64, 2.0));
+        assert_eq!(back.faces[&1].glyphs[&'A'].bearing, [-3, 200]);
+        a.density = 5;
+        assert_eq!(a.encode(), Err(AtlasError::Range("density")));
+        assert_eq!(
+            (file_name(1), file_name(3)),
+            ("ui.gma".into(), "ui3.gma".into())
+        );
     }
 
     #[test]

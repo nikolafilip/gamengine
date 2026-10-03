@@ -123,8 +123,8 @@ max_steps_db = 35                     # running, and the fight: the loudest 100 
 # The content bundle (docs/CONTENT.md 4 and 5, docs/LOOK.md 8; scripts/check-look.sh): what
 # `gm-tools content build` writes to assets/built/content and a browser may have to fetch.
 [content]
-max_bundle_bytes = 2097152            # the whole directory; measured 114,614 (6 props, the atlas, the manifest)
-max_atlas_bytes = 262144              # ui.gma as fetched before the first screen; measured 58,985 (512 x 176)
+max_bundle_bytes = 2097152            # the whole directory; measured 713,302 (6 props, four atlases, the manifest)
+max_atlas_bytes = 393216              # one atlas (a client fetches ui.gma and the one of its scale); measured 49,641 / 123,997 / 200,633 / 282,595 at 1 to 4 texels a dot
 max_prop_gmm_bytes = 131072           # one prop, CONTENT.md 4; measured 2,240-15,830
 max_prop_triangles = 1000             # CONTENT.md 4 (gm-model's limits::PROP_MAX_TRIANGLES)
 max_prop_texture = 256                # per axis

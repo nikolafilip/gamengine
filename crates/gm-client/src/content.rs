@@ -27,8 +27,15 @@ pub enum PropState {
 
 pub struct Content {
     pub manifest: Option<Manifest>,
-    /// The atlas, until the HUD takes it (`take_atlas`).
+    /// An atlas that arrived, until the HUD takes it (`take_atlas`).
     atlas: Option<Atlas>,
+    /// The density of the atlas last asked for (`want_atlas`): 0 before any.
+    atlas_asked: u8,
+    /// Atlases the browser fetched, by density, until `want_atlas` reads them: every one
+    /// that landed since the last frame (two may, when the scale changed twice while the
+    /// page was hidden, and the one asked for last must not be lost to the other).
+    #[cfg(target_arch = "wasm32")]
+    atlas_inbox: std::rc::Rc<std::cell::RefCell<Vec<(u8, Option<Vec<u8>>)>>>,
     pub props: HashMap<String, PropState>,
     /// Where props are read from: a directory natively, a URL prefix in the browser.
     base: String,
@@ -45,6 +52,9 @@ impl Content {
         Content {
             manifest: None,
             atlas: None,
+            atlas_asked: 0,
+            #[cfg(target_arch = "wasm32")]
+            atlas_inbox: Default::default(),
             props: HashMap::new(),
             base: String::new(),
             #[cfg(target_arch = "wasm32")]
@@ -78,9 +88,11 @@ impl Content {
         match atlas.as_deref().map(Atlas::decode) {
             Some(Ok(a)) => {
                 if let Some(m) = &c.manifest
-                    && gm_model::model_id(atlas.as_deref().unwrap_or(&[])) != m.atlas_sha256
+                    && m.atlases
+                        .iter()
+                        .all(|e| e.sha256 != gm_model::model_id(atlas.as_deref().unwrap_or(&[])))
                 {
-                    log::warn!("the atlas is not the one the manifest names");
+                    log::warn!("the atlas is not one the manifest names");
                 }
                 notes.push(format!(
                     "atlas {}x{} ({} pieces, {} faces, {} icons)",
@@ -90,6 +102,7 @@ impl Content {
                     a.faces.len(),
                     a.icons.len()
                 ));
+                c.atlas_asked = a.density;
                 c.atlas = Some(a);
             }
             Some(Err(e)) => {
@@ -140,9 +153,85 @@ impl Content {
         c
     }
 
-    /// The atlas, once: the HUD uploads it.
+    /// An atlas that arrived, once: the HUD uploads it.
     pub fn take_atlas(&mut self) -> Option<Atlas> {
         self.atlas.take()
+    }
+
+    /// Ask for the atlas to draw with at `scale` pixels a dot (LOOK.md 2.2): the bundle's
+    /// atlas of that density, or the nearest thinner one it has. Called every frame; a
+    /// change of scale reads (in the browser: fetches) the other file once, and until it
+    /// is here the HUD goes on drawing with the atlas it has. A file that is missing or
+    /// refused is said once and what is in use stays.
+    pub fn want_atlas(&mut self, scale: u8) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let arrived = std::mem::take(&mut *self.atlas_inbox.borrow_mut());
+            for (density, bytes) in arrived {
+                match bytes {
+                    Some(bytes) => self.atlas_arrived(density, &bytes),
+                    None => log::warn!("the atlas at {density} texels a dot: not on the site"),
+                }
+            }
+        }
+        let Some(entry) = self.manifest.as_ref().and_then(|m| m.atlas(scale)) else {
+            return;
+        };
+        if entry.density == self.atlas_asked {
+            return;
+        }
+        let (density, file) = (entry.density, entry.file.clone());
+        self.atlas_asked = density;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let path = std::path::Path::new(&self.base).join(&file);
+            match std::fs::read(&path) {
+                Ok(bytes) => self.atlas_arrived(density, &bytes),
+                Err(e) => log::warn!("the atlas {}: {e}", path.display()),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let url = format!("{}/{file}", self.base);
+            let inbox = self.atlas_inbox.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let bytes = match crate::web::fetch_bytes(&url).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!("{e}");
+                        None
+                    }
+                };
+                inbox.borrow_mut().push((density, bytes));
+            });
+        }
+    }
+
+    /// An atlas's bytes are here: checked against the manifest, decoded, kept for the HUD
+    /// unless another density has been asked for since.
+    fn atlas_arrived(&mut self, density: u8, bytes: &[u8]) {
+        let named = self
+            .manifest
+            .as_ref()
+            .and_then(|m| m.atlases.iter().find(|e| e.density == density))
+            .is_some_and(|e| e.sha256 == gm_model::model_id(bytes));
+        if !named {
+            log::warn!("the atlas at {density} texels a dot is not the one the manifest names");
+            return;
+        }
+        match Atlas::decode(bytes) {
+            Ok(a) if a.density == density => {
+                log::info!("atlas {}x{} at {density} texels a dot", a.w, a.h);
+                if density == self.atlas_asked {
+                    self.atlas = Some(a);
+                }
+            }
+            Ok(a) => log::warn!(
+                "the atlas file of density {density} says it is of density {}",
+                a.density
+            ),
+            Err(e) => log::error!("the atlas at {density} texels a dot: {e}"),
+        }
     }
 
     /// Ask for a prop by key: `Some(slot)` when it is on the GPU. The first ask starts the

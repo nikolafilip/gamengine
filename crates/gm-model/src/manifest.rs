@@ -7,7 +7,7 @@
 use bitcode::{Decode, Encode};
 
 /// The format's own version: a client refuses a manifest of another.
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 /// The most entries any list may have: a bound before anything is allocated.
 pub const MAX_ENTRIES: usize = 4096;
 
@@ -26,9 +26,17 @@ pub struct Manifest {
     pub statuses: Vec<IconEntry>,
     /// Portraits by `<frame>_<armour>` (`striker_mail`).
     pub portraits: Vec<IconEntry>,
-    /// SHA-256 of `ui.gma`.
-    pub atlas_sha256: [u8; 32],
-    pub atlas_bytes: u32,
+    /// The atlases, one per density (LOOK.md 2.2), thinnest first.
+    pub atlases: Vec<AtlasEntry>,
+}
+
+/// One atlas of the bundle: `ui.gma` at one texel a dot, `ui2.gma` at two, ...
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
+pub struct AtlasEntry {
+    pub density: u8,
+    pub file: String,
+    pub sha256: [u8; 32],
+    pub bytes: u32,
 }
 
 /// Which hand (CONTENT.md 3): `right`, `left`, `back`.
@@ -125,6 +133,7 @@ impl Manifest {
             m.props.len(),
             m.statuses.len(),
             m.portraits.len(),
+            m.atlases.len(),
         ]
         .iter()
         .any(|n| *n > MAX_ENTRIES)
@@ -132,6 +141,16 @@ impl Manifest {
             return Err(ManifestError::TooMany);
         }
         Ok(m)
+    }
+
+    /// The atlas to draw with at `scale` pixels a dot: the one of that density, else the
+    /// densest one under it, else the thinnest there is.
+    pub fn atlas(&self, scale: u8) -> Option<&AtlasEntry> {
+        self.atlases
+            .iter()
+            .filter(|a| a.density <= scale.max(1))
+            .max_by_key(|a| a.density)
+            .or_else(|| self.atlases.iter().min_by_key(|a| a.density))
     }
 
     pub fn template(&self, key: &str) -> Option<&TemplateEntry> {

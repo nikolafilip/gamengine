@@ -74,14 +74,19 @@ focus, the scroll positions, the carets and the widget the button went down on.
   with an eighth row for what hangs below the line (`g j p q y , ; |`): 104 glyphs, any
   two at least two dots apart. Anything else is drawn as `?`, and cannot be typed into a
   field that is shown to others. Text is shown as written. Since Phase 14 (LOOK.md 2.3)
-  it is face 0 of the bundle's atlas and the client's fallback; the screens' words are in
-  the atlas's text face (Pixelify Sans at 12 dots) and their titles in the title face
-  (MedievalSharp at 18) when the bundle has loaded, measured per glyph, else in this one.
-- **Scale.** One whole-number scale for HUD and screens: 1 below 540 pixels of height, 2
-  below 1000, 3 below 1600, 4 from there, and never so large that the widest and the
+  it is face 0 of the bundle's atlases and the client's fallback; the screens' words and
+  the HUD's are in the text face (Fira Sans Medium, a line of 12 dots) and the titles in
+  the title face (MedievalSharp, 19) when the bundle has loaded, measured per glyph, else
+  in this one.
+- **Scale.** One whole-number scale for HUD and screens: 1 below 600 pixels of height, 2
+  below 1300, 3 below 1900, 4 from there (a line of text is then 2 to 3 hundredths of the
+  frame's height; until the director played at 1080 lines it was 3 from 1000, and the
+  inventory filled the frame: LOOK.md 11.4), and never so large that the widest and the
   tallest panel (340 by 360 units since Phase 14's trade window, LOOK.md 4; 300 before)
   would not fit the window. The setting `ui_scale` (1 to 4; 0, the default: by the
   window) chooses one instead, and gives way the same. The smallest window is 640×360.
+  The bundle has an atlas made for each scale and the client draws with that one (LOOK.md
+  2.2): a dot is 1 to 4 pixels, a texel always one.
 - **Widgets.** A panel (a plate with a title), a label, a paragraph (wrapped at words), a
   button (also one that is off: drawn faint, takes no click and no focus), a row of buttons
   as wide as their words, a text field (one line; optionally shown as stars; a maximum in

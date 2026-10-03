@@ -35,7 +35,7 @@ assets/maps/built   compiled .bsp (+ .lit colored lightmaps)
 assets/textures     generated palette and WAD (gm-tools wad make)
 assets/content      abilities, preset builds, creatures, trials and items (TOML) with their looks: prop
                     models (models/props, CC0 and ours), icons, the skin and two fonts (ui/), LICENSES.md
-assets/built/content  the bundle the client loads (manifest.gmc, ui.gma, props/*.gmm), written by
+assets/built/content  the bundle the client loads (manifest.gmc, ui*.gma, props/*.gmm), written by
                     gm-tools content build and verified byte for byte by scripts/check-look.sh
 web/                the browser client's page and loader (index.html, boot.js)
 docs/               VOCABULARY.md, PROTOCOL.md, MATRIX.md, HUB.md, ECONOMY.md, MODELS.md, COMPANIONS.md, WEB.md,

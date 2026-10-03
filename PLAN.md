@@ -1399,6 +1399,22 @@ GUI editor he wants is Phase 15):
   (their names stand in; CONTENT.md 8's image model is the plan), a weapon is always held (never
   sheathed), the view model shares the world's depth (clips into a wall pressed against), the tavern and
   people pages are rows still, a left hand holds nothing, no scrollbar on the hotbar's statuses.
+- **The same evening, after the director played it** (LOOK.md 11.4: "the new UI is ultra low res ... the
+  sword as an extension of the arm is wrong"). The phase's screenshots had been taken at 1280 × 720 and
+  judged against a document that asked for dots magnified; at 1080 lines the UI was a 12-dot pixel face in
+  blocks of nine pixels and an inventory filling the frame. Changed: **an atlas per UI scale**
+  (`ui.gma`, `ui2.gma`, `ui3.gma`, `ui4.gma`; format `GMA2` with a density; the faces rasterised from
+  their outlines, the icons baked and the skin drawn at each density; layouts count in dots and are the
+  same with every one of them, advances in quarters of a dot; the client draws with the atlas of its
+  scale, a texel a pixel, and the gate fails otherwise), **Fira Sans Medium** for the text face (the
+  pixel face is gone), the HUD's own words in it, **two pixels a dot from 600 to 1,300 lines** (three at
+  1080 before); **the grip is a fist's** (a blade across the forearm, level with its tip a little raised;
+  the crossbow and the musket laid along the arm and the staff stood up by their rows' fits; the cast
+  stance raises the arms from the hang) and **`gm-tools content look KEY`** draws the mannequin holding a
+  prop in nine stances on the CPU, which is how the grip was chosen. Measured: atlases 49,641 / 123,997 /
+  200,633 / 282,595 bytes (`max_atlas_bytes` 393,216), the bundle 713,302; WebGPU wasm 1,112,187
+  (376,460 packed), WebGL2 3,103,848; `gm-client` 9,757,712 (+10,256; baseline updated). Left to the
+  director: what the marks on a body should be (12).
 
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
@@ -1458,6 +1474,7 @@ director **decided** on 2026-10-03: finished CC0 models may be reused and the lo
 Tales of Pirates and Ether Saga, with Counter-Strike 1.6's standard (not its assets) for weapons; a GUI
 editor is wanted (Phase 15); the browser's megabyte may be doubled or tripled (WEB.md 9: 2 MiB); drag and
 drop and keyboard shortcuts are both musts; top gear is tens of gold. As built and open to change: a
-weapon is always held (never sheathed), the two faces (Pixelify Sans, MedievalSharp), party frames for
-members present in the zone only, the view model's place.
+weapon is always held (never sheathed), the two faces (Fira Sans Medium, MedievalSharp), party frames for
+members present in the zone only, the view model's place, **the marks on a body** (the aspect plate at
+the feet and the side's cube over the head: the director had to ask what they are, LOOK.md 11.4).
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

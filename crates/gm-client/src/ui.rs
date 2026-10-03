@@ -96,12 +96,15 @@ pub const PANEL_HIGH: f32 = 360.0;
 
 /// The one scale HUD and screens are drawn at: whole dots, larger on larger frames, or the
 /// one somebody chose (1 to 4; 0: by the frame), and never so large that a panel `need`
-/// units wide and the tallest one would not fit.
+/// units wide and the tallest one would not fit. By the frame, a line of text is 2 to 3
+/// hundredths of the frame's height: two pixels a dot from 720 lines to 1200 (the tallest
+/// panel is then two thirds of a 1080-line frame, not all of it), three to 1800, four on
+/// 4K. The bundle has an atlas for each (LOOK.md 2.2).
 pub fn scale_for(size: (f32, f32), need: f32, chosen: u8) -> f32 {
     let mut s: f32 = match (chosen, size.1) {
-        (0, h) if h < 540.0 => 1.0,
-        (0, h) if h < 1000.0 => 2.0,
-        (0, h) if h < 1600.0 => 3.0,
+        (0, h) if h < 600.0 => 1.0,
+        (0, h) if h < 1300.0 => 2.0,
+        (0, h) if h < 1900.0 => 3.0,
         (0, _) => 4.0,
         (n, _) => n.min(4) as f32,
     };
@@ -840,16 +843,17 @@ impl<'a, C: Canvas> Ui<'a, C> {
         at - x
     }
 
-    /// Small print, ending at `right`: a word in a corner, in the small face at half the
-    /// scale and never under one.
+    /// Small print, ending at `right`: a word in a corner, in the screen's face at half
+    /// the scale and never under one.
     pub fn small(&mut self, right: f32, y: f32, color: [f32; 4], text: &str) {
         let s = (self.scale * 0.5).max(1.0);
-        let tw = font::text_width(s, text);
-        self.canvas.text(right - tw, y, s, color, text);
+        let tw = self.canvas.width_in(self.face, s, text);
+        self.canvas
+            .text_in(self.face, right - tw, y, s, color, text);
         self.note(
             SeenKind::Label,
             text,
-            Rect::new(right - tw, y, tw, GLYPH_H * s),
+            Rect::new(right - tw, y, tw, self.ascent_dots * s),
         );
     }
 
@@ -1853,11 +1857,24 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 }
             }
             None => {
-                let shown = self.fit_text(r.w - 4.0 * s, name);
-                let tw = self.text_width(&shown);
-                self.ink(
+                // What goes here, whole: in small print when the word is wider than
+                // the slot.
+                let room = r.w - 4.0 * s;
+                let print = if self.text_width(name) <= room {
+                    s
+                } else {
+                    (s * 0.5).max(1.0)
+                };
+                let mut shown = name.to_string();
+                while self.canvas.width_in(self.face, print, &shown) > room && shown.pop().is_some()
+                {
+                }
+                let tw = self.canvas.width_in(self.face, print, &shown);
+                self.canvas.text_in(
+                    self.face,
                     (r.x + (r.w - tw) * 0.5).round(),
-                    (r.y + (r.h - self.ascent()) * 0.5).round(),
+                    (r.y + (r.h - self.ascent_dots * print) * 0.5).round(),
+                    print,
                     OFF,
                     &shown,
                 );
@@ -2720,7 +2737,7 @@ pub mod tests {
     fn the_scale_grows_with_the_frame_and_keeps_a_panel_inside_it() {
         assert_eq!(scale_for((640.0, 360.0), 300.0, 0), 1.0);
         assert_eq!(scale_for((1280.0, 720.0), 300.0, 0), 2.0);
-        assert_eq!(scale_for((1920.0, 1080.0), 300.0, 0), 3.0);
+        assert_eq!(scale_for((1920.0, 1080.0), 300.0, 0), 2.0);
         assert_eq!(scale_for((3840.0, 2160.0), 300.0, 0), 4.0);
         // Too low for the tallest panel (340 units since the inventory grew its grid and
         // equip panel, LOOK.md 4) at the scale its height would give: one less.

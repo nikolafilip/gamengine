@@ -78,17 +78,23 @@ else
 fi
 bundle_bytes="$(find assets/built/content -type f -printf '%s\n' | awk '{s+=$1} END {print s+0}')"
 atmost "$bundle_bytes" "$(budget content max_bundle_bytes)" "bundle bytes"
-atmost "$(stat -c %s assets/built/content/ui.gma)" "$(budget content max_atlas_bytes)" "atlas bytes"
+# One atlas per UI scale (LOOK.md 2.2): a client fetches the first and the one of its scale.
+for d in 1 2 3 4; do
+  f="assets/built/content/ui${d#1}.gma"
+  [[ -s "$f" ]] || { fail "no atlas at $d texels a dot ($f)"; continue; }
+  atmost "$(stat -c %s "$f")" "$(budget content max_atlas_bytes)" "atlas bytes at $d texels a dot"
+done
 for f in assets/built/content/props/*.gmm; do
   atmost "$(stat -c %s "$f")" "$(budget content max_prop_gmm_bytes)" "$(basename "$f") bytes"
 done
 
 # 2. Without a display.
 if [[ "${SKIP_TESTS:-}" != 1 ]]; then
-  tests 3 "the .gmm prop kind, the atlas and the manifest" -p gm-model prop
-  tests 2 "the atlas format round trip and its bounds" -p gm-model atlas::
+  tests 1 "the .gmm prop kind" -p gm-model prop
+  tests 4 "the atlas format: round trip, bounds, densities" -p gm-model atlas::
   tests 1 "the manifest" -p gm-model manifest::
-  tests 5 "props ingested (flat colours to swatches, a fit, a reach refused), icons and portraits baked" -p gm-ingest --test ingest prop
+  tests 3 "props ingested (flat colours to swatches, a fit, a reach refused), icons and portraits baked" -p gm-ingest --test ingest prop
+  tests 3 "an atlas per density with one layout, a denser picture, the grips of the props" -p gm-tools content::
   tests 2 "the looks of the content: props by first appearance, what a body holds" -p gm-content looks::
   tests 6 "the inventory, the storage, the stall and the trade as grids, against a scripted hub" -p gm-client bag::
   tests 3 "the toolkit's scale rule and wrapping" -p gm-client ui::tests::
@@ -115,11 +121,19 @@ bench() { # label, extra arguments...; prints the frames line
     tail -5 "$tmp/bench-$label.log"; fail "the offline bench ($label)"; echo ""
   fi
 }
-bare="$(bench bare)"
-armed="$(bench armed --prop sword)"
+# The cost is a difference of two frames of some 37 ms on the software GPU, and one pair of
+# runs read anything from -0.1 to 1.4 ms on a machine doing other things (LOOK.md 12): the
+# middle one of PAIRS pairs is what is gated.
+PAIRS="${PAIRS:-5}"; costs=()
+for _ in $(seq 1 "$PAIRS"); do
+  bare="$(bench bare)"
+  armed="$(bench armed --prop sword)"
+  [[ -n "$bare" && -n "$armed" ]] || break
+  costs+=("$(awk -v a="$(field "$bare" frame_ms_avg)" -v b="$(field "$armed" frame_ms_avg)" 'BEGIN { printf "%.3f", b - a }')")
+done
 if [[ -n "$bare" && -n "$armed" ]]; then
-  cost="$(awk -v a="$(field "$bare" frame_ms_avg)" -v b="$(field "$armed" frame_ms_avg)" 'BEGIN { printf "%.3f", b - a }')"
-  echo "look: crowd=$COUNT bare_frame_ms=$(field "$bare" frame_ms_avg) armed_frame_ms=$(field "$armed" frame_ms_avg) prop_cost_ms=$cost"
+  cost="$(printf '%s\n' "${costs[@]}" | LC_ALL=C sort -g | sed -n "$(( (${#costs[@]} + 1) / 2 ))p")"
+  echo "look: crowd=$COUNT bare_frame_ms=$(field "$bare" frame_ms_avg) armed_frame_ms=$(field "$armed" frame_ms_avg) prop_cost_ms=$cost (the middle of: ${costs[*]})"
   atmost "$cost" "$(budget look max_prop_draw_ms)" "milliseconds a frame $COUNT held props add"
   if (( GATE_FPS )); then
     atleast "$(field "$armed" fps_avg)" "$(budget look min_fps)" "average fps with every body armed"
@@ -210,6 +224,13 @@ reported() { # log, label
   if [[ "$bar" == *"LMB:sword:"* ]]; then ok "$2: the hotbar's first cell is the sword"; else fail "$2: the hotbar: $bar"; fi
   atleast "$(field "$line" held)" 2 "$2: bodies holding something (the character and the walker)"
   atleast "$(field "$line" props_loaded)" 2 "$2: props loaded from the bundle"
+  # The atlas in use is the one made for the UI's scale: a texel is a pixel (LOOK.md 2.2).
+  local scale density; scale="$(field "$line" ui_scale)"; density="$(field "$line" atlas_density)"
+  if [[ -n "$scale" && "$scale" == "$density" ]]; then
+    ok "$2: drawn at $scale pixels a dot with the atlas of $density texels a dot"
+  else
+    fail "$2: the UI's scale is ${scale:-?} and its atlas's density ${density:-?}"
+  fi
 }
 
 desktop() {
@@ -287,7 +308,8 @@ browser() {
   command -v node >/dev/null || { fail "--browser needs node"; return; }
   [[ "${SKIP_BUILD:-}" == 1 && -f target/web/gm-client-webgpu_bg.wasm ]] || scripts/build-web.sh > target/web-build.log 2>&1 \
     || { tail -30 target/web-build.log; fail "the web build"; return; }
-  [[ -s target/web/assets/built/content/manifest.gmc ]] && ok "the web build carries the bundle" || fail "the web build has no bundle"
+  [[ -s target/web/assets/built/content/manifest.gmc && -s target/web/assets/built/content/ui2.gma ]] \
+    && ok "the web build carries the bundle and its atlases" || fail "the web build has no bundle"
   atmost "$(stat -c %s target/web/gm-client-webgpu_bg.wasm)" "$(budget web max_webgpu_wasm_bytes)" "WebGPU wasm bytes"
   local http=$((20000 + RANDOM % 20000)) hub_url hub_hash
   mkdir -p "$tmp/web"; rm -f "${tmp:?}/web"/*

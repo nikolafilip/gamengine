@@ -67,7 +67,7 @@ if [[ "${SKIP_TESTS:-}" != 1 ]]; then
   tests 5 "the menu, its pages and the chat" -p gm-client menu::
   tests 2 "UI scripts" -p gm-client script::
   tests 5 "the settings file" -p gm-client settings::
-  tests 2 "the font (every glyph, no two alike)" -p gm-client font::
+  tests 2 "the font (every glyph, no two alike)" -p gm-model smallfont::
   tests 2 "names (what every client can draw, nothing another could be taken for)" -p gm-hub-proto names::
   tests 1 "the players' messages are the hub's own requests" -p gm-hub-proto player::
   tests 1 "an account's chat bucket" -p gm-server --lib chat_bucket

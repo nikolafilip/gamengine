@@ -1,271 +1,340 @@
 #!/usr/bin/env python3
-"""The first skin (LOOK.md 2.2), drawn procedurally: dark leather panels in a bronze frame,
+"""The skin (LOOK.md 2.2), drawn procedurally: dark leather panels in a bronze frame,
 sunken wells and slots, bevelled buttons, bars, coins and marks. Writes every piece
-`assets/content/ui/skin.toml` names, as PNGs beside it. A person who draws better ones
-replaces the files; the tool does not care where a PNG came from (CONTENT.md 8).
+`assets/content/ui/skin.toml` names as PNGs beside it, once per density: `panel.png` at
+one texel a dot, `panel@2x.png`, `panel@3x.png` and `panel@4x.png` drawn finer (not
+enlarged: a hairline stays a hairline, a curve gets its pixels). A person who draws better
+ones replaces the files; the tool does not care where a PNG came from (CONTENT.md 8), and
+a density without a file of its own is the one-texel picture enlarged.
+
+A nine-slice's middle is stretched by the client, so nothing in a middle varies along the
+way it is stretched: no grain, only what runs straight through.
 
     scripts/dev/skin-gen.py [assets/content/ui]
 """
 import os
-import random
 import sys
 
 from PIL import Image, ImageDraw
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "assets/content/ui"
-random.seed(14)
+DENSITIES = (1, 2, 3, 4)
+# Every picture is drawn this many times larger and averaged down: the curves' edges.
+SS = 4
 
 BRONZE = (176, 138, 60)
-BRONZE_LIGHT = (222, 190, 110)
-BRONZE_DARK = (96, 68, 26)
-LEATHER = (38, 30, 26)
-LEATHER_LIGHT = (62, 50, 42)
+BRONZE_LIGHT = (226, 196, 120)
+BRONZE_DARK = (98, 70, 28)
+OUTLINE = (24, 18, 12)
+LEATHER = (40, 32, 28)
+LEATHER_LIGHT = (58, 47, 40)
 LEATHER_DARK = (22, 17, 15)
-WELL = (16, 13, 12)
+WELL = (15, 12, 11)
+WELL_LIGHT = (30, 25, 22)
 GOLD = (245, 204, 66)
 SILVER = (205, 212, 224)
 GREEN = (96, 190, 90)
 RED = (200, 70, 60)
-STEEL = (120, 124, 134)
+INK = (240, 236, 220)
 
 
-def grain(img, amount=6, alpha_only_where_opaque=True):
-    """A little noise so a stretched middle does not look flat."""
-    px = img.load()
-    w, h = img.size
-    for y in range(h):
-        for x in range(w):
-            r, g, b, a = px[x, y]
-            if a == 0:
-                continue
-            n = random.randint(-amount, amount)
-            px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)), max(0, min(255, b + n)), a)
+class Pic:
+    """A picture of `w × h` dots at `k` texels a dot, drawn in dots."""
+
+    def __init__(self, w, h, k):
+        self.w, self.h, self.k = w, h, k
+        self.u = k * SS
+        self.img = Image.new("RGBA", (w * self.u, h * self.u), (0, 0, 0, 0))
+        self.d = ImageDraw.Draw(self.img)
+
+    def hair(self):
+        """A hairline in dots: one texel at one and two texels a dot, two above."""
+        return max(1, round(self.k / 2)) / self.k
+
+    def box(self, x0, y0, x1, y1):
+        u = self.u
+        return [round(x0 * u), round(y0 * u), round(x1 * u) - 1, round(y1 * u) - 1]
+
+    def rect(self, x0, y0, x1, y1, fill, r=0.0):
+        b = self.box(x0, y0, x1, y1)
+        if b[2] < b[0] or b[3] < b[1]:
+            return
+        if r > 0:
+            self.d.rounded_rectangle(b, radius=round(r * self.u), fill=fill)
+        else:
+            self.d.rectangle(b, fill=fill)
+
+    def shade(self, x0, y0, x1, y1, top, bottom, r=0.0):
+        """A rectangle shaded from `top` to `bottom`, top to bottom."""
+        b = self.box(x0, y0, x1, y1)
+        w, h = b[2] - b[0] + 1, b[3] - b[1] + 1
+        if w <= 0 or h <= 0:
+            return
+        grad = Image.new("RGBA", (w, h))
+        gd = ImageDraw.Draw(grad)
+        for y in range(h):
+            t = y / max(1, h - 1)
+            c = tuple(round(top[i] * (1 - t) + bottom[i] * t) for i in range(3)) + (255,)
+            gd.line([(0, y), (w, y)], fill=c)
+        mask = Image.new("L", (w, h), 0)
+        md = ImageDraw.Draw(mask)
+        if r > 0:
+            md.rounded_rectangle([0, 0, w - 1, h - 1], radius=round(r * self.u), fill=255)
+        else:
+            md.rectangle([0, 0, w - 1, h - 1], fill=255)
+        self.img.paste(grad, (b[0], b[1]), mask)
+
+    def ellipse(self, x0, y0, x1, y1, fill):
+        self.d.ellipse(self.box(x0, y0, x1, y1), fill=fill)
+
+    def line(self, pts, fill, width):
+        u = self.u
+        self.d.line([(x * u, y * u) for x, y in pts], fill=fill, width=max(1, round(width * u)), joint="curve")
+
+    def polygon(self, pts, fill):
+        u = self.u
+        self.d.polygon([(x * u, y * u) for x, y in pts], fill=fill)
+
+    def done(self):
+        return self.img.resize((self.w * self.k, self.h * self.k), Image.BOX)
 
 
-def bevel(d, box, light, dark, width=1):
-    x0, y0, x1, y1 = box
-    for i in range(width):
-        d.line([(x0 + i, y0 + i), (x1 - i, y0 + i)], fill=light)
-        d.line([(x0 + i, y0 + i), (x0 + i, y1 - i)], fill=light)
-        d.line([(x0 + i, y1 - i), (x1 - i, y1 - i)], fill=dark)
-        d.line([(x1 - i, y0 + i), (x1 - i, y1 - i)], fill=dark)
+def mix(a, b, t):
+    return tuple(round(a[i] * (1 - t) + b[i] * t) for i in range(3))
 
 
-def panel(w, h, fill=LEATHER, border=4, rim=BRONZE, title_bar=False):
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    # The frame: bronze with a bevel, a dark hairline inside and out.
-    d.rectangle([0, 0, w - 1, h - 1], fill=rim)
-    bevel(d, (0, 0, w - 1, h - 1), BRONZE_LIGHT, BRONZE_DARK, 1)
-    d.rectangle([border - 1, border - 1, w - border, h - border], fill=LEATHER_DARK)
-    d.rectangle([border, border, w - border - 1, h - border - 1], fill=fill)
-    if title_bar:
-        d.rectangle([border, border, w - border - 1, h - border - 1], fill=LEATHER_DARK)
-        d.line([(border, h - border - 1), (w - border - 1, h - border - 1)], fill=BRONZE)
-    grain(img, 5)
-    return img
+def framed(p, band, r, fill_top, fill_bottom, rim_light=BRONZE_LIGHT, rim=BRONZE, rim_dark=BRONZE_DARK):
+    """A bronze frame `band` dots wide round a shaded inside."""
+    h = p.hair()
+    p.rect(0, 0, p.w, p.h, OUTLINE, r)
+    # The band: lit from above, with a bright upper edge.
+    p.shade(h, h, p.w - h, p.h - h, rim_light, rim_dark, max(0.0, r - h))
+    p.shade(2 * h, 2 * h, p.w - 2 * h, p.h - 2 * h, mix(rim, rim_light, 0.25), mix(rim, rim_dark, 0.35), max(0.0, r - 2 * h))
+    # A dark seam, then the inside.
+    p.rect(band - h, band - h, p.w - band + h, p.h - band + h, OUTLINE, max(0.0, r - band + h))
+    p.shade(band, band, p.w - band, p.h - band, fill_top, fill_bottom, max(0.0, r - band))
 
 
-def well(w, h, fill=WELL, rim=None):
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, w - 1, h - 1], fill=fill)
-    # Sunken: dark on top and left, light below and right.
-    bevel(d, (0, 0, w - 1, h - 1), LEATHER_DARK, LEATHER_LIGHT, 1)
+def panel(k):
+    p = Pic(48, 48, k)
+    framed(p, 4, 3, LEATHER_LIGHT, LEATHER)
+    return p.done()
+
+
+def panel_title(k):
+    p = Pic(48, 24, k)
+    h = p.hair()
+    p.shade(0, 0, 48, 24, LEATHER_DARK, mix(LEATHER_DARK, LEATHER, 0.5), 2)
+    # The rule under a title.
+    p.rect(2, 24 - 3, 46, 24 - 3 + h, BRONZE_DARK)
+    p.rect(2, 24 - 3 + h, 46, 24 - 3 + 2 * h, BRONZE)
+    return p.done()
+
+
+def well(k, w=24, h=24, rim=None):
+    """Sunken: a shadow under its upper edge, a light lip along its lower one."""
+    p = Pic(w, h, k)
+    hr = p.hair()
+    p.rect(0, 0, w, h, mix(LEATHER, LEATHER_LIGHT, 0.7), 1.5)
+    p.rect(0, 0, w, h - hr, OUTLINE, 1.5)
+    p.rect(hr, hr, w - hr, h - hr, WELL, 1.0)
+    p.rect(hr, hr, w - hr, 2 * hr, (6, 5, 5))
     if rim:
-        d.rectangle([0, 0, w - 1, h - 1], outline=rim)
-    grain(img, 4)
-    return img
+        p.rect(0, 0, w, h, rim, 1.5)
+        p.rect(hr, hr, w - hr, h - hr, WELL, 1.0)
+    return p.done()
 
 
-def button(w, h, top=(96, 74, 38), bottom=(64, 48, 24), light=BRONZE_LIGHT, dark=BRONZE_DARK, sunken=False):
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    for y in range(h):
-        t = y / max(1, h - 1)
-        c = tuple(int(top[k] * (1 - t) + bottom[k] * t) for k in range(3))
-        d.line([(0, y), (w - 1, y)], fill=c)
+def button(k, w=32, h=24, top=(112, 86, 44), bottom=(70, 52, 26), light=BRONZE_LIGHT, dark=BRONZE_DARK, sunken=False):
+    p = Pic(w, h, k)
+    hr = p.hair()
+    p.rect(0, 0, w, h, OUTLINE, 3)
     if sunken:
-        bevel(d, (0, 0, w - 1, h - 1), dark, light, 1)
+        p.shade(hr, hr, w - hr, h - hr, dark, mix(dark, light, 0.4), 3 - hr)
+        p.shade(2 * hr, 2 * hr + hr, w - 2 * hr, h - 2 * hr, top, bottom, 3 - 2 * hr)
     else:
-        bevel(d, (0, 0, w - 1, h - 1), light, dark, 1)
-    d.rectangle([0, 0, w - 1, h - 1], outline=LEATHER_DARK)
-    bevel(d, (1, 1, w - 2, h - 2), light if not sunken else dark, dark if not sunken else light, 1)
-    grain(img, 4)
-    return img
+        p.shade(hr, hr, w - hr, h - hr, light, dark, 3 - hr)
+        p.shade(2 * hr, 2 * hr, w - 2 * hr, h - 2 * hr - hr, top, bottom, 3 - 2 * hr)
+    return p.done()
 
 
-def slot(size=36, rim=None, dim=False):
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, size - 1, size - 1], fill=LEATHER_DARK if not dim else (28, 24, 22))
-    d.rectangle([1, 1, size - 2, size - 2], fill=WELL if not dim else (26, 22, 20))
-    bevel(d, (1, 1, size - 2, size - 2), LEATHER_DARK, LEATHER_LIGHT, 1)
+def slot(k, size=36, rim=None, dim=False):
+    p = Pic(size, size, k)
+    hr = p.hair()
+    floor = (26, 22, 20) if dim else WELL
+    p.rect(0, 0, size, size, mix(LEATHER, LEATHER_LIGHT, 0.6), 2)
+    p.rect(0, 0, size, size - hr, OUTLINE, 2)
+    p.shade(hr, hr, size - hr, size - hr, mix(floor, (0, 0, 0), 0.35), mix(floor, WELL_LIGHT, 0.6 if not dim else 0.2), 1.5)
     if rim:
-        d.rectangle([0, 0, size - 1, size - 1], outline=rim)
-        d.rectangle([1, 1, size - 2, size - 2], outline=rim)
-    grain(img, 3)
-    return img
+        w = 2 * hr if k > 1 else 2
+        p.rect(0, 0, size, size, rim, 2)
+        p.shade(w, w, size - w, size - w, mix(floor, (0, 0, 0), 0.35), mix(floor, WELL_LIGHT, 0.6), 1.0)
+    return p.done()
 
 
-def bar_frame():
-    img = Image.new("RGBA", (24, 12), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, 23, 11], fill=LEATHER_DARK)
-    d.rectangle([0, 0, 23, 11], outline=BRONZE_DARK)
-    d.rectangle([2, 2, 21, 9], fill=WELL)
-    return img
+def bar_frame(k):
+    p = Pic(24, 12, k)
+    hr = p.hair()
+    p.rect(0, 0, 24, 12, OUTLINE, 2)
+    p.shade(hr, hr, 24 - hr, 12 - hr, BRONZE_DARK, mix(BRONZE_DARK, OUTLINE, 0.5), 2 - hr)
+    p.rect(2, 2, 22, 10, WELL, 1)
+    return p.done()
 
 
-def bar_fill():
-    img = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    for y in range(8):
-        v = 255 - int(abs(y - 2.5) * 22)
-        d.line([(0, y), (7, y)], fill=(v, v, v, 255))
-    return img
+def bar_fill(k):
+    """White, tinted by the client: brighter along its upper third, as a filled tube is."""
+    p = Pic(8, 8, k)
+    p.shade(0, 0, 8, 3, (236, 236, 236), (255, 255, 255))
+    p.shade(0, 3, 8, 8, (240, 240, 240), (150, 150, 150))
+    return p.done()
 
 
-def portrait_frame():
+def portrait_frame(k):
     s = 48
-    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, s - 1, s - 1], fill=BRONZE)
-    bevel(d, (0, 0, s - 1, s - 1), BRONZE_LIGHT, BRONZE_DARK, 2)
-    d.rectangle([5, 5, s - 6, s - 6], fill=LEATHER_DARK)
-    d.rectangle([6, 6, s - 7, s - 7], fill=(40, 36, 44))
+    p = Pic(s, s, k)
+    framed(p, 5, 4, (46, 42, 52), (30, 27, 34))
     # Corner studs.
-    for x, y in [(2, 2), (s - 4, 2), (2, s - 4), (s - 4, s - 4)]:
-        d.rectangle([x, y, x + 1, y + 1], fill=BRONZE_LIGHT)
-    grain(img, 4)
-    return img
+    for x, y in [(2.5, 2.5), (s - 2.5, 2.5), (2.5, s - 2.5), (s - 2.5, s - 2.5)]:
+        p.ellipse(x - 1.2, y - 1.2, x + 1.2, y + 1.2, BRONZE_DARK)
+        p.ellipse(x - 0.8, y - 1.0, x + 0.8, y + 0.6, BRONZE_LIGHT)
+    return p.done()
 
 
-def tooltip():
-    img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, 31, 31], fill=(14, 12, 12, 236))
-    d.rectangle([0, 0, 31, 31], outline=BRONZE_DARK)
-    d.rectangle([1, 1, 30, 30], outline=BRONZE)
-    return img
+def tooltip(k):
+    p = Pic(32, 32, k)
+    hr = p.hair()
+    p.rect(0, 0, 32, 32, OUTLINE + (245,), 3)
+    p.rect(hr, hr, 32 - hr, 32 - hr, BRONZE + (255,), 3 - hr)
+    p.rect(2 * hr, 2 * hr, 32 - 2 * hr, 32 - 2 * hr, (16, 13, 13, 242), 3 - 2 * hr)
+    return p.done()
 
 
-def check(on):
-    img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, 15, 15], fill=WELL)
-    bevel(d, (0, 0, 15, 15), LEATHER_DARK, LEATHER_LIGHT, 1)
-    d.rectangle([0, 0, 15, 15], outline=BRONZE_DARK)
+def check(k, on):
+    p = Pic(16, 16, k)
+    hr = p.hair()
+    p.rect(0, 0, 16, 16, BRONZE_DARK, 2.5)
+    p.rect(hr, hr, 16 - hr, 16 - hr, WELL, 2.5 - hr)
     if on:
-        d.line([(3, 8), (7, 12), (13, 4)], fill=GOLD, width=2)
-    return img
+        p.line([(3.5, 8.2), (6.8, 11.5), (12.5, 4.5)], GOLD, 2.0)
+    return p.done()
 
 
-def rail(w, h):
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, w - 1, h - 1], fill=WELL)
-    bevel(d, (0, 0, w - 1, h - 1), LEATHER_DARK, LEATHER_LIGHT, 1)
-    return img
+def rail(k, w, h):
+    p = Pic(w, h, k)
+    hr = p.hair()
+    p.rect(0, 0, w, h, OUTLINE, 2)
+    p.rect(hr, hr, w - hr, h - hr, WELL, 2 - hr)
+    return p.done()
 
 
-def knob(w, h):
-    return button(w, h, top=(140, 110, 52), bottom=(90, 68, 30))
+def knob(k, w, h):
+    return button(k, w, h, top=(150, 118, 58), bottom=(96, 72, 32))
 
 
-def cursor(drag=False):
-    img = Image.new("RGBA", (16, 24), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+def cursor(k, drag=False):
+    p = Pic(16, 24, k)
     if not drag:
-        pts = [(0, 0), (0, 17), (4, 13), (7, 20), (10, 19), (7, 12), (12, 12)]
-        d.polygon(pts, fill=(240, 236, 220), outline=(20, 16, 14))
+        pts = [(1, 1), (1, 17.5), (5, 13.8), (7.8, 20.3), (10.6, 19.1), (7.8, 12.8), (13, 12.8)]
+        p.polygon(pts, OUTLINE)
+        inner = [(2.2, 3.6), (2.2, 14.8), (5.3, 11.9), (8.4, 18.8), (9.2, 18.4), (6.2, 11.7), (10.3, 11.7)]
+        p.polygon(inner, INK)
     else:
         # A closed hand.
-        d.rounded_rectangle([2, 8, 13, 20], radius=3, fill=(240, 236, 220), outline=(20, 16, 14))
-        for x in [3, 6, 9]:
-            d.rectangle([x, 5, x + 2, 9], fill=(240, 236, 220), outline=(20, 16, 14))
-    return img
+        for x in (3, 6, 9):
+            p.rect(x, 5, x + 3, 11, OUTLINE, 1.5)
+            p.rect(x + 0.6, 5.6, x + 2.4, 11, INK, 0.9)
+        p.rect(2, 8, 14, 21, OUTLINE, 3)
+        p.rect(2.7, 8.7, 13.3, 20.3, INK, 2.4)
+    return p.done()
 
 
-def coin(colour, dark):
-    img = Image.new("RGBA", (12, 12), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse([0, 0, 11, 11], fill=dark)
-    d.ellipse([1, 1, 10, 10], fill=colour)
-    d.ellipse([3, 3, 8, 8], outline=dark)
-    d.point((4, 3), fill=(255, 255, 240))
-    return img
+def coin(k, colour, dark):
+    p = Pic(12, 12, k)
+    p.ellipse(0, 0, 12, 12, dark)
+    p.ellipse(0.9, 0.9, 11.1, 11.1, colour)
+    p.ellipse(2.6, 2.6, 9.4, 9.4, dark)
+    p.ellipse(3.3, 3.3, 8.7, 8.7, mix(colour, dark, 0.18))
+    p.ellipse(3.2, 2.2, 5.6, 4.0, (255, 255, 244))
+    return p.done()
 
 
-def mark(kind):
-    img = Image.new("RGBA", (12, 12), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+def mark(k, kind):
+    p = Pic(12, 12, k)
     if kind == "new":
-        d.ellipse([0, 0, 11, 11], fill=GOLD, outline=BRONZE_DARK)
-        d.polygon([(6, 2), (7, 5), (10, 5), (8, 7), (9, 10), (6, 8), (3, 10), (4, 7), (2, 5), (5, 5)], fill=(90, 60, 10))
+        p.ellipse(0, 0, 12, 12, BRONZE_DARK)
+        p.ellipse(0.8, 0.8, 11.2, 11.2, GOLD)
+        star = [(6, 1.9), (7.1, 4.7), (10.1, 4.9), (7.8, 6.8), (8.6, 9.8), (6, 8.1), (3.4, 9.8), (4.2, 6.8), (1.9, 4.9), (4.9, 4.7)]
+        p.polygon(star, (96, 62, 10))
     elif kind == "taken":
-        d.ellipse([0, 0, 11, 11], fill=RED, outline=(80, 20, 20))
-        d.line([(3, 3), (8, 8)], fill=(255, 230, 230), width=2)
-        d.line([(8, 3), (3, 8)], fill=(255, 230, 230), width=2)
+        p.ellipse(0, 0, 12, 12, (86, 22, 22))
+        p.ellipse(0.8, 0.8, 11.2, 11.2, RED)
+        p.line([(3.6, 3.6), (8.4, 8.4)], (255, 232, 232), 1.6)
+        p.line([(8.4, 3.6), (3.6, 8.4)], (255, 232, 232), 1.6)
     else:
-        d.ellipse([0, 0, 11, 11], fill=GREEN, outline=(30, 80, 30))
-        d.line([(3, 6), (5, 9), (9, 3)], fill=(240, 255, 240), width=2)
-    return img
+        p.ellipse(0, 0, 12, 12, (30, 84, 30))
+        p.ellipse(0.8, 0.8, 11.2, 11.2, GREEN)
+        p.line([(3.1, 6.2), (5.2, 8.5), (9.0, 3.6)], (242, 255, 242), 1.6)
+    return p.done()
 
 
 PIECES = {
-    "panel": (panel(48, 48), [10, 10, 10, 10]),
-    "panel_title": (panel(48, 24, title_bar=True), [10, 4, 10, 6]),
-    "well": (well(24, 24), [3, 3, 3, 3]),
-    "button": (button(32, 24), [6, 6, 6, 6]),
-    "button_hot": (button(32, 24, top=(128, 100, 52), bottom=(86, 64, 30)), [6, 6, 6, 6]),
-    "button_down": (button(32, 24, top=(60, 46, 22), bottom=(84, 64, 32), sunken=True), [6, 6, 6, 6]),
-    "button_off": (button(32, 24, top=(62, 58, 54), bottom=(44, 42, 40), light=(92, 88, 82), dark=(30, 28, 26)), [6, 6, 6, 6]),
-    "field": (well(24, 24, rim=BRONZE_DARK), [4, 4, 4, 4]),
-    "field_focus": (well(24, 24, rim=GOLD), [4, 4, 4, 4]),
-    "slot": (slot(), [3, 3, 3, 3]),
-    "slot_hot": (slot(rim=BRONZE_LIGHT), [3, 3, 3, 3]),
-    "slot_picked": (slot(rim=GOLD), [3, 3, 3, 3]),
-    "slot_worn": (slot(rim=GREEN), [3, 3, 3, 3]),
-    "slot_off": (slot(dim=True), [3, 3, 3, 3]),
-    "bar_frame": (bar_frame(), [3, 3, 3, 3]),
-    "bar_fill": (bar_fill(), [0, 0, 0, 0]),
-    "portrait_frame": (portrait_frame(), [8, 8, 8, 8]),
-    "hotbar_cell": (slot(40, rim=BRONZE_DARK), [4, 4, 4, 4]),
-    "hotbar_key": (button(16, 12, top=(50, 40, 30), bottom=(30, 24, 18)), [3, 3, 3, 3]),
-    "tooltip": (tooltip(), [6, 6, 6, 6]),
-    "check_off": (check(False), [0, 0, 0, 0]),
-    "check_on": (check(True), [0, 0, 0, 0]),
-    "slider_rail": (rail(16, 8), [3, 3, 3, 3]),
-    "slider_knob": (knob(12, 16), [3, 3, 3, 3]),
-    "scroll_rail": (rail(8, 16), [3, 3, 3, 3]),
-    "scroll_knob": (knob(8, 16), [2, 3, 2, 3]),
-    "cursor": (cursor(), [0, 0, 0, 0]),
-    "cursor_drag": (cursor(True), [0, 0, 0, 0]),
-    "coin_gold": (coin(GOLD, (140, 100, 20)), [0, 0, 0, 0]),
-    "coin_silver": (coin(SILVER, (90, 96, 110)), [0, 0, 0, 0]),
-    "mark_new": (mark("new"), [0, 0, 0, 0]),
-    "mark_taken": (mark("taken"), [0, 0, 0, 0]),
-    "mark_worn": (mark("worn"), [0, 0, 0, 0]),
+    "panel": (panel, [10, 10, 10, 10]),
+    "panel_title": (panel_title, [10, 4, 10, 6]),
+    "well": (well, [3, 3, 3, 3]),
+    "button": (button, [6, 6, 6, 6]),
+    "button_hot": (lambda k: button(k, top=(146, 114, 60), bottom=(94, 70, 34)), [6, 6, 6, 6]),
+    "button_down": (lambda k: button(k, top=(62, 47, 23), bottom=(86, 66, 33), sunken=True), [6, 6, 6, 6]),
+    "button_off": (lambda k: button(k, top=(64, 60, 56), bottom=(46, 44, 42), light=(96, 92, 86), dark=(32, 30, 28)), [6, 6, 6, 6]),
+    "field": (lambda k: well(k, rim=BRONZE_DARK), [4, 4, 4, 4]),
+    "field_focus": (lambda k: well(k, rim=GOLD), [4, 4, 4, 4]),
+    "slot": (slot, [3, 3, 3, 3]),
+    "slot_hot": (lambda k: slot(k, rim=BRONZE_LIGHT), [3, 3, 3, 3]),
+    "slot_picked": (lambda k: slot(k, rim=GOLD), [3, 3, 3, 3]),
+    "slot_worn": (lambda k: slot(k, rim=GREEN), [3, 3, 3, 3]),
+    "slot_off": (lambda k: slot(k, dim=True), [3, 3, 3, 3]),
+    "bar_frame": (bar_frame, [3, 3, 3, 3]),
+    "bar_fill": (bar_fill, [0, 0, 0, 0]),
+    "portrait_frame": (portrait_frame, [8, 8, 8, 8]),
+    "hotbar_cell": (lambda k: slot(k, 40, rim=BRONZE_DARK), [4, 4, 4, 4]),
+    "hotbar_key": (lambda k: button(k, 16, 12, top=(58, 46, 34), bottom=(34, 27, 20)), [3, 3, 3, 3]),
+    "tooltip": (tooltip, [6, 6, 6, 6]),
+    "check_off": (lambda k: check(k, False), [0, 0, 0, 0]),
+    "check_on": (lambda k: check(k, True), [0, 0, 0, 0]),
+    "slider_rail": (lambda k: rail(k, 16, 8), [3, 3, 3, 3]),
+    "slider_knob": (lambda k: knob(k, 12, 16), [3, 3, 3, 3]),
+    "scroll_rail": (lambda k: rail(k, 8, 16), [3, 3, 3, 3]),
+    "scroll_knob": (lambda k: knob(k, 8, 16), [2, 3, 2, 3]),
+    "cursor": (cursor, [0, 0, 0, 0]),
+    "cursor_drag": (lambda k: cursor(k, True), [0, 0, 0, 0]),
+    "coin_gold": (lambda k: coin(k, GOLD, (140, 100, 20)), [0, 0, 0, 0]),
+    "coin_silver": (lambda k: coin(k, SILVER, (90, 96, 110)), [0, 0, 0, 0]),
+    "mark_new": (lambda k: mark(k, "new"), [0, 0, 0, 0]),
+    "mark_taken": (lambda k: mark(k, "taken"), [0, 0, 0, 0]),
+    "mark_worn": (lambda k: mark(k, "worn"), [0, 0, 0, 0]),
 }
 
 os.makedirs(OUT, exist_ok=True)
 lines = [
     "# The skin (LOOK.md 2.2): the faces the tool rasterises and the pieces of the toolkit,",
-    "# each a PNG beside this file with its nine-slice insets (left, top, right, bottom).",
-    "# scripts/dev/skin-gen.py wrote the first pieces; replace any file with a better one.",
+    "# each a PNG beside this file with its nine-slice insets in dots (left, top, right,",
+    "# bottom). `name.png` is the piece at one texel a dot; `name@2x.png`, `@3x` and `@4x`",
+    "# are the same piece drawn finer, for the atlases of the larger UI scales (a density",
+    "# without a file is the first one enlarged). scripts/dev/skin-gen.py wrote these;",
+    "# replace any file with a better one.",
     "",
     "[font.text]",
-    'file = "pixelify_sans.ttf"',
-    "size = 12",
+    'file = "fira_sans_medium.ttf"',
+    "size = 15.5",
     "",
     "[font.title]",
     'file = "medievalsharp.ttf"',
-    "size = 18",
+    "size = 20",
     "",
 ]
-for name, (img, inset) in PIECES.items():
-    img.save(os.path.join(OUT, f"{name}.png"))
+for name, (draw, inset) in PIECES.items():
+    for k in DENSITIES:
+        suffix = "" if k == 1 else f"@{k}x"
+        draw(k).save(os.path.join(OUT, f"{name}{suffix}.png"), optimize=True)
     lines.append(f"[piece.{name}]")
     lines.append(f'file = "{name}.png"')
     if any(inset):
@@ -273,4 +342,4 @@ for name, (img, inset) in PIECES.items():
     lines.append("")
 with open(os.path.join(OUT, "skin.toml"), "w") as f:
     f.write("\n".join(lines))
-print(f"skin: {len(PIECES)} pieces written to {OUT}")
+print(f"skin: {len(PIECES)} pieces at {len(DENSITIES)} densities written to {OUT}")

@@ -230,7 +230,7 @@ fi
 
 # 5. One of the two goes back to the town and stays: it joins whoever invites, trades with
 #    whoever asks (one thing it carries, for three silver), and answers what is said to it.
-PRICE=3; PURSE=50
+PRICE=3; PURSE=300
 SPOT_BOT="272,-320,25 180"; SPOT="200,-320,25 0"
 place() { # character, "x,y,z yaw": the zone puts a character away a moment after it left
   local out=""

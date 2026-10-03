@@ -78,16 +78,6 @@ pub struct Body {
     pub prop: Option<usize>,
 }
 
-/// The grip (LOOK.md 6.3): a prop's business end (+X in its own space) runs on along the
-/// arm (the right arm points −Y in the T-pose), its edge (+Y) points down and its flat
-/// faces forward.
-const GRIP_RIGHT: Mat4 = Mat4::from_cols(
-    glam::Vec4::new(0.0, -1.0, 0.0, 0.0),
-    glam::Vec4::new(0.0, 0.0, -1.0, 0.0),
-    glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
-    glam::Vec4::new(0.0, 0.0, 0.0, 1.0),
-);
-
 struct Track {
     animator: Animator,
     last: Vec3,
@@ -300,8 +290,7 @@ impl Avatars {
         // skinning matrix of `prop_r` at that bone's pivot (LOOK.md 6.3).
         if let (Some(prop), Some(info)) = (body.prop, characters.info(slot)) {
             let skin = gm_model::skin_matrices(&info.pivots, info.mask, &pose);
-            let at = gm_model::rig::bone::PROP_R;
-            let attach = skin[at] * Mat4::from_translation(info.pivots[at]) * GRIP_RIGHT;
+            let attach = gm_model::pose::prop_attach(&info.pivots, &skin);
             self.draws.push(CharacterDraw {
                 slot: prop,
                 world,

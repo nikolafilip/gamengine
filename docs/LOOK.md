@@ -11,7 +11,10 @@ kilobytes.
 
 Code follows this document; a change to either goes in one commit. v0 was the proposal
 (2026-10-03, reviewed in 11.1); the director's decisions are in 9; v1 is what Phase 14
-built (11.2: found by running it; 12: measured).
+built (11.2: found by running it; 12: measured). The same evening the director played it
+and three things changed (11.4): an atlas per UI scale and drawn faces instead of one
+atlas of dots magnified (2.2, 2.3), the grip (6.3), two pixels a dot at 1080 lines
+(CLIENT.md 3).
 
 ## 1. Principles
 
@@ -43,26 +46,49 @@ built (11.2: found by running it; 12: measured).
 | Call | Draws |
 |---|---|
 | `image(rect, piece, tint)` | a piece of the atlas stretched to `rect`, times `tint` (white = as painted) |
-| `frame(rect, piece)` | a **nine-slice**: the piece's corners unscaled, its edges stretched one way, its middle both ways; insets come from the atlas's piece table |
+| `frame(rect, piece)` | a **nine-slice**: the piece's corners unscaled (a texel a pixel at the atlas's own scale), its edges stretched one way, its middle both ways; insets come from the atlas's piece table |
 | `wedge(centre, radius, from, to, colour)` | a filled circular sector in sixteenths of a turn, as a fan of triangles: the cooldown sweep |
 | `layer(n)` | everything after this goes to layer `n` (0 plates and wells, 1 bodies drawn into the screen (5), 2 pictures and text, 3 the tooltip and the dragged icon, 4 the cursor, unused); the HUD issues one draw per layer in order. The game's own HUD (3) stays on layer 0 in call order, so a screen's plates cover it as they covered the bars before there were layers |
-| `text` with a `font` | `Font::Small` (the five-by-seven of today), `Font::Text` (the atlas's 12-dot proportional face), `Font::Title` (16 dots); a face not in the atlas falls back to `Small` |
+| `text` with a `font` | `Font::Small` (the five-by-seven of today), `Font::Text` (the atlas's proportional face, a line of 12 dots), `Font::Title` (a line of 18); a face not in the atlas falls back to `Small` |
 
 An icon drawn in a slot or a portrait is recorded as `Seen { kind: Image, text: <icon key>
 }` (`item/sword`, `portrait/striker_mail`), so a test or a script asks `expect image
 item/sword` the way it asks for a label.
 
-### 2.2 The atlas (`ui.gma`)
+### 2.2 The atlases (`ui.gma`, `ui2.gma`, `ui3.gma`, `ui4.gma`)
 
-Written by `gm-tools content build` (CONTENT.md 5.2), read in one call with `miniz_oxide`
-(already linked): `GMA1`, `w`, `h` (each ≤ 1024), the **piece table** (name hash, rect,
-nine-slice insets), the **glyph tables** (per face: char → cell, advance, bearing, the line
-height), the **icon table** (key hash → cell), then the RGBA8 texels, one zlib stream whose
-inflation is bounded by `w × h × 4` (4 MiB at most; the atlas has its own reader and its own
-bound, not the `.gmm` reader's 2 MiB). The five-by-seven glyphs of `font.rs` are copied
-into it too, so the client draws with one texture whether the atlas loaded or not: the
-HUD's pipeline samples RGBA8 from now on, and the **built-in fallback atlas is made as RGBA8
-at start** from the same glyph bitmaps (white, the dot as alpha).
+**One atlas per density**: texels a dot, 1 to 4, the UI's scales (CLIENT.md 3). The client
+draws with the atlas of its scale, so **a texel is a pixel and nothing is magnified**: a
+glyph is rasterised from its outline at the size it is seen at, an icon is baked at 64
+pixels for a scale of two and not at 32 and doubled, a frame's hairline is a pixel or two
+whatever the scale. (v1 had one atlas of dots drawn two to four times larger with nearest
+sampling, which is what "ultra low res" was: 11.4.)
+
+Each is written by `gm-tools content build` (CONTENT.md 5.2) and read in one call with
+`miniz_oxide` (already linked): `GMA2`, the **density**, `w`, `h` (each ≤ 2048), the **piece
+table** (name hash, rect, nine-slice insets), the **glyph tables** (per face: the line
+height and the ascent; char → cell, bearing, advance), the **icon table** (key hash →
+cell, `32 × density` square), then the RGBA8 texels, one zlib stream whose inflation is
+bounded by `w × h × 4` (the atlas has its own reader and its own bound, not the `.gmm`
+reader's 2 MiB). **What a layout counts with is in dots and is the same in every one of
+them**: a face's line height and ascent, and a glyph's advance, written in quarters of a
+dot; cells, bearings and insets are texels. A screen is therefore laid out the same at
+every scale and with whichever atlas, and a test of the tool holds the four to that
+(`the_atlases_differ_in_texels_and_in_nothing_a_layout_counts`).
+
+The manifest lists them (`atlases`: density, file, hash, bytes). The client reads `ui.gma`
+at start and asks every frame for the atlas of the scale it draws at
+(`Content::want_atlas`): a change of scale (the window, the setting) reads the other file
+once (in a browser: fetches it), and until it is here the HUD draws with what it has, the
+same layout, coarser. A scale without an atlas takes the densest one under it. The
+sampler magnifies with nearest (a nine-slice's middle, a thinner atlas standing in) and
+minifies with linear (small print at half the scale, a panel that had to give way to a
+small window).
+
+The five-by-seven glyphs of `font.rs` are copied into each too (a dot a square of the
+density), so the client draws with one texture whether an atlas loaded or not: the
+**built-in fallback atlas is made as RGBA8 at start** from the same glyph bitmaps (white,
+the dot as alpha), at density 1.
 
 Pieces the toolkit asks for, by name (`skin.toml` maps each to a picture and its insets):
 
@@ -75,13 +101,35 @@ Pieces the toolkit asks for, by name (`skin.toml` maps each to a picture and its
 A missing piece draws its fallback (a plate or a line of today's colours). A tint is the
 colour the old toolkit used (the skin may be greyscale and tinted, or painted).
 
+A piece is `name.png` at one texel a dot, with `name@2x.png`, `name@3x.png` and
+`name@4x.png` beside it: the same piece drawn finer, each exactly that many times the
+first one's size (the tool refuses another size). A density without a file of its own is
+the first picture enlarged, so one picture is enough to begin with. `skin.toml`'s insets
+are in dots. A nine-slice's middle is stretched, so nothing in a middle may vary along the
+way it is stretched: v1's grain became squares the size of a fingernail; the pieces are
+shaded top to bottom instead (`scripts/dev/skin-gen.py` draws all four densities, each
+four times oversampled).
+
 ### 2.3 Fonts
 
 Two faces rasterised by the tool from font files in `assets/content/ui/` (OFL or CC0 only,
-named in LICENSES.md) at a fixed dot size, hinted to whole dots, no antialiasing beyond the
-coverage the rasteriser gives: `Text` at 12 dots (ASCII, Gaj's letters, the few marks the
-chat uses), `Title` at 16. The client knows nothing of TrueType. The scale rule stays
-(CLIENT.md 3: whole dots, 1–4 by the frame or the setting); layouts count in dots as now.
+named in LICENSES.md), **once per density from the outlines**, with the coverage the
+rasteriser gives as alpha: `Text` (**Fira Sans Medium**; ASCII, Gaj's letters, the few
+marks the chat uses) and `Title` (MedievalSharp). `skin.toml` gives each its height in dots
+from the top of its ascenders to the bottom of its descenders (15.5 and 20). The metrics
+are made for layouts and are the same at every density: the **ascent** is the height of
+the face's capitals to the nearest dot (9 and 14: the baseline lies that far under the
+line's top, and an accent stands over the line), the **line** is that and the descent (12
+and 19), an **advance** is the outline's own to the nearest quarter of a dot (the pen
+runs in quarters and each glyph lands on a whole pixel). The client knows nothing of
+TrueType. The scale rule is CLIENT.md 3's (whole dots, 1–4 by the frame or the setting);
+layouts count in dots as before.
+
+The words of the game's own HUD (the bars' numbers, the hotbar's keys and names, the
+squad, the messages, the corner hints) are in the text face too when the atlas has it
+(`Hud::print`, `Hud::label`), and small print (the corner hint, a slot's name that is
+wider than the slot) is the same face at half the scale, never under one. The
+five-by-seven face remains what is drawn without a bundle.
 
 ### 2.4 Widgets
 
@@ -163,10 +211,11 @@ with green.
 
 ### 3.4 Glyphs
 
-An ability or status without a picture is drawn by the client as its name's first
-letters in the cell (`sword`, `fireb`, `parry`; a status's first four), in the small face:
-plain on purpose, so that a missing picture is seen and fixed, but a new ability has a
-cell the moment it exists. (v0 proposed glyphs by verb kind; the letters say more for
+An ability or status without a picture is drawn by the client as its name in the cell
+(`sword`, `firebolt`, `parry`; whole, all the hotbar's names in small print when any of
+them is wider than a cell; a status's as much as fits), in the HUD's words: plain on
+purpose, so that a missing picture is seen and fixed, but a new ability has a cell the
+moment it exists. (v0 proposed glyphs by verb kind; the letters say more for
 less, and the pictures are the plan: CONTENT.md 8.) An item with a model gets its icon
 baked; one without (an armour, today) shows its first two letters in the title face.
 
@@ -193,6 +242,8 @@ runs), and shows its things in grids instead of rows:
 
 The tallest panel is now the trade's: `ui::PANEL_HIGH` is 360 units (300 before), so a
 window of 720 lines holds scale 2 exactly and one of 600 falls to scale 1 (CLIENT.md 3).
+An empty equip slot says what goes in it whole (`weapon`, `armour`), in small print when
+the word is wider than the slot.
 
 A grid cell is found by `ui.find` by the words its row had, so `click "sword  slash
 +2.0%"` still picks it, and the equip panel's slots are found as `weapon: sword` and
@@ -246,17 +297,36 @@ avatar wears no gear yet: ITEMS.md 9). A stall keeper holds nothing in v1.
 A prop `.gmm` (CONTENT.md 4) has every vertex on bone 0 with weight 255. It is drawn by the
 character pipeline unchanged: one more `CharacterDraw` with a uniform block of the usual
 layout (24 matrices, scale, tint, light: MODELS.md 9) in which matrix 0 is **the wearer's
-skinning matrix of `prop_r` times the translation to that bone's pivot** (MODELS.md 2:
-`prop_r` follows `hand_r`) and the other twenty-three are unused, the prop's own position
+skinning matrix of `prop_r` times the translation to that bone's pivot times the grip**
+(MODELS.md 2: `prop_r` follows `hand_r`; `gm_model::pose::prop_attach`) and the other
+twenty-three are unused, the prop's own position
 scale, the material `tint` of the item's core (CONTENT.md 3; white for a bare prop) and the
 wearer's light. A custom avatar that carries a `prop_r` bone places the grip where its hand is; one
 that does not gets the frame's pivot. The prop is in the model cache like any model, keyed by
 the manifest's hash for its file; a prop not yet loaded is not drawn (never a stand-in: an
 empty hand is correct for a moment).
 
-The animation set gains nothing in v1: the swing, the windup and the cast move the arm as
-they do, and the prop follows the hand. (The crossbow's bolt already leaves `spawn.weapon`
-= 16 u ahead of the hand, VOCABULARY.md; the musket's the same.)
+**The grip** (`gm_model::pose::grip_right`): a prop is held **in the fist, across the
+forearm**, not as the arm's continuation. Its business end (+X of hand space) points ahead
+of a hanging arm and is tipped 12° towards the elbow, so a sword at rest is level with its
+tip a little raised; its edge follows the knuckles. (v1 laid the blade on along the arm:
+a sword pointing at the ground like a walking stick. The director, playing it: "it should
+be perpendicular to the arm, like held in hand": 11.4.) What is not swung is laid
+otherwise by its row's `fit` (CONTENT.md 3.1), a turn about glTF's Y: the **crossbow** and
+the **musket** lie along the arm (carried muzzle down, levelled when the arm is raised),
+the **staff** stands 20° nearer upright than a blade.
+
+The animation set gains one thing: in the **cast** stance the arms are raised from where
+they hang (a turn about the shoulders' axis) instead of swept round from the T-pose, so
+that what a fist holds across the forearm stands up (a staff raised) and what lies along
+it points where the arm does (a crossbow levelled); the arms look the same as before. The
+swing, the windup and the rest move the arm as they did and the prop follows the hand:
+the windup carries a blade back over the shoulder and the swing brings it across. (The
+crossbow's bolt already leaves `spawn.weapon` = 16 u ahead of the hand, VOCABULARY.md; the
+musket's the same.) A long gun in one hand is a compromise until a two-handed hold exists
+(its muzzle is near the ground at rest and a little high when levelled).
+`gm-tools content look KEY --out x.png` draws the mannequin holding a prop in nine stances
+from the front and from its right: the fitting room on paper (CONTENT.md 9).
 
 ### 6.4 The view model (first person)
 
@@ -294,7 +364,7 @@ two gem sockets: no casino, PLAN.md 0.) The screens show two coins (`coin_gold`,
 | Number | Proposed | Why |
 |---|---|---|
 | `max_bundle_bytes` | 2 MiB | the whole of `assets/built/content/`: what a browser may have to fetch over a session |
-| `max_atlas_bytes` | 262,144 | `ui.gma` as fetched before the first screen (the wasm is 345 KB packed) |
+| `max_atlas_bytes` | 393,216 | one atlas: a client fetches `ui.gma` before the first screen and the one of its scale after (measured 49,641 / 123,997 / 200,633 / 282,595 at one to four texels a dot; 262,144 while there was one atlas) |
 | `max_prop_gmm_bytes` | 131,072 | CONTENT.md 4 |
 | `max_webgpu_wasm_bytes` (WEB.md 9) | 2,097,152 | raised from 1 MiB by the director (9); the phase reports what it added |
 | `max_native_added_bytes` | 262,144 | the native client |
@@ -321,7 +391,8 @@ in headless Chromium, with the wasm's bytes against WEB.md 9's cap.
 
 Proposed: 36-dot cells, 32-dot icons, 24-dot status icons, 150 ms to a tooltip, four dots to
 a drag, the paperdoll's camera, four party frames, sixteenths of a turn for the wedge, the
-`Text` face at 12 dots and `Title` at 16, every budget in 8.
+faces and their sizes (2.3), the grip's 12° and the fits of the staff, the crossbow and
+the musket (6.3), two pixels a dot from 600 to 1300 lines (CLIENT.md 3), every budget in 8.
 
 **Decided by the director, 2026-10-03:**
 
@@ -338,8 +409,12 @@ a drag, the paperdoll's camera, four party frames, sixteenths of a turn for the 
    components it nears a hundred; ECONOMY.md 12's scale is rewritten to that.
 
 Open still (small; the implementation picks and says so): where the weapon rests out of a
-fight (v1 holds it always); which two faces (OFL or CC0 pixel faces, named in LICENSES.md);
-the party frames' reach (v1: members present in the zone).
+fight (v1 holds it always); which two faces (Fira Sans Medium and MedievalSharp, both OFL,
+named in LICENSES.md: v1's pixel face was part of what read as low resolution, 11.4);
+the party frames' reach (v1: members present in the zone); **the marks on a body** (the
+plate of its aspects' colours at the feet and the cube over the head, blue for the own
+side and red for the other: flat boxes since Phases 3 and 6, and the director had to ask
+what they are, 11.4).
 
 ## 10. Deliberately absent
 
@@ -409,6 +484,50 @@ servers and the pipeline); on the client:
   rather than cut, which the tidiness test refuses.
 - The trade window is the tallest panel now: `PANEL_HIGH` 360.
 
+### 11.4 Found by the director playing it (2026-10-03, the evening of the commit)
+
+"The game is barely playable but the new UI is ultra low res, did you take screenshots?
+What are those colours below characters and boxes above them? Having the sword as an
+extension of the arm is wrong, it should be perpendicular to the arm, like held in hand."
+
+- **The screenshots were taken at 1280 × 720 only, and judged against the document**
+  (which asked for dots, magnified). At 1920 × 1080 the scale was 3: a 12-dot pixel face
+  36 pixels high in blocks of nine pixels, 32-dot icons as 96-pixel mosaics, the skin's
+  grain as squares, the inventory 1,020 × 940 pixels of a 1,080-line frame. Looking at the
+  frame the director sees, and not at the one the gate uses, is the lesson. What changed:
+  an atlas per density drawn at that density (2.2), outline faces (2.3), the skin drawn
+  per density without grain, **two pixels a dot from 600 to 1,300 lines** (CLIENT.md 3: the
+  inventory at 1080 lines is 680 × 620), the HUD's own words in the text face, names
+  shown whole (the hotbar's, the equip slots'). The gate now fails unless the atlas in
+  use has the density of the UI's scale (`ui_scale` and `atlas_density` in `--report`).
+- **The sword was the arm's continuation** because 6.3 said "the blade on along the arm":
+  written without picturing a hand. The grip is a fist's now, the fits lay the crossbow,
+  the musket and the staff, the cast stance raises the arms from the hang (6.3), and
+  `gm-tools content look` shows any prop in every stance, which is how the grip was
+  chosen this time.
+- **The marks on a body were not understood**: the plate under the feet is the body's
+  aspects (MODELS.md 9: an avatar may look like anything, so its element must be read at
+  a glance), the cube over the head its side. Nothing was changed; what they should be is
+  the director's call (9).
+- **Gates that had been failing since the commit**, found by running all of them again:
+  two of this gate's test counts asked for more tests than the filters match (`-p gm-model
+  prop`: one, not three; `-p gm-ingest --test ingest prop`: three, not five); the screens'
+  gate looked for the font's tests in the client (they moved to `gm_model::smallfont` with
+  the font); the party gate's desktop character was given 50 silver for a hire that costs
+  150 (the purse was cut with the copper, the price was not). All three count and pay
+  what is there now, and the tool's three new tests are counted too. The phase's report
+  said the gates passed; these parts of them had not been run again after their last edit.
+
+### 11.5 Code review of 11.4's change (Gemini 3.1 Pro, 2026-10-03, over its diff)
+
+| # | Finding | Verdict |
+|---|---|---|
+| 1 | In the browser the fetched atlas lands in a one-place inbox: two fetches that land between two frames (the scale changed twice while the page was hidden) and the later one asked for is lost, never asked for again | **Accepted.** The inbox is a list and every arrival is read; the one of the density asked for last is kept |
+| 2 | A glyph's cell is written with its sides as bytes: over 255 texels at density 4 it is truncated | **Rejected.** `validate` refuses such a glyph on both sides and the tool refuses to make one ("a smaller face") |
+| 3 | The grip's matrix may be a mirror | **Rejected.** Its determinant is +1; a test says so now |
+| 4, 5 | The width and the pen lose the fractions of the quarter-dot advances | **Rejected.** Both are sums in quarters converted to pixels at the end; only the glyph's quad is put on a whole pixel |
+| 6 | The atlas reader slices without checking its position | **Rejected.** `Reader::bytes` checks the end with `checked_add` against the buffer and returns an error |
+
 ## 12. What was measured (2026-10-03, the reference machine)
 
 - Pages, uncapped, the Radeon iGPU, by `--report` while a UI script holds each (whole
@@ -426,3 +545,18 @@ servers and the pipeline); on the client:
   updated); the bundle 114,614 bytes.
 - Tests: 380 in the workspace (367 before); the client's 86 cover the grids, the drag, the
   tooltip, the scale rule and the scripts' new verbs.
+- After 11.4 (the same evening): the four atlases **49,641 / 123,997 / 200,633 / 282,595
+  bytes** (512 × 180, 512 × 632, 512 × 1,364, 1,024 × 1,220), the bundle **713,302 bytes**
+  in 11 files; WebGPU wasm **1,112,187 bytes (376,460 packed)**, +7,668; WebGL2 3,103,848
+  (948,678), +9,696; the native client **9,757,712 bytes**, +10,256 (baseline updated).
+  The gate's desktop run at 1280 × 720 draws at two pixels a dot with the atlas of two
+  texels a dot; the browser's (a 600-line page) at one with one. By eye at 1920 × 1080 on
+  the software GPU: the game, the inventory with a tooltip, at scale 2 and (chosen) 3.
+  Not measured again: the pages' frame cost on the iGPU (the quads are the same number;
+  the texture is larger; no display was logged in). The prop cost on the software GPU
+  read anything from −0.13 to 1.45 ms in single pairs of runs with the play stack and
+  other sessions loading the machine (a difference of two 37 ms frames); over seven
+  pairs the middle was **0.30 ms** for the sword (0.20 in the phase: a blade across the
+  arm covers a few more pixels than one along it), and the gate now takes the middle of
+  five pairs instead of one (with three it still read 0.53 once, the play stack's bots
+  fighting beside it).

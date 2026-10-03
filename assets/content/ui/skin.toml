@@ -1,14 +1,17 @@
 # The skin (LOOK.md 2.2): the faces the tool rasterises and the pieces of the toolkit,
-# each a PNG beside this file with its nine-slice insets (left, top, right, bottom).
-# scripts/dev/skin-gen.py wrote the first pieces; replace any file with a better one.
+# each a PNG beside this file with its nine-slice insets in dots (left, top, right,
+# bottom). `name.png` is the piece at one texel a dot; `name@2x.png`, `@3x` and `@4x`
+# are the same piece drawn finer, for the atlases of the larger UI scales (a density
+# without a file is the first one enlarged). scripts/dev/skin-gen.py wrote these;
+# replace any file with a better one.
 
 [font.text]
-file = "pixelify_sans.ttf"
-size = 12
+file = "fira_sans_medium.ttf"
+size = 15.5
 
 [font.title]
 file = "medievalsharp.ttf"
-size = 18
+size = 20
 
 [piece.panel]
 file = "panel.png"

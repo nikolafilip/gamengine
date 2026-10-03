@@ -176,12 +176,15 @@ pub fn pose(i: &AnimInput) -> Pose {
             legs(&mut p, -10.0, 14.0, 8.0, 12.0);
         }
         anim::CAST => {
-            // Both hands forward and a little up, pulsing.
+            // Both hands forward and a little up, pulsing. The arms are raised from
+            // where they hang, not swept round from the T-pose: what a fist holds across
+            // the forearm then stands up (a staff raised), and what lies along it points
+            // where the arm does (a crossbow levelled).
             let pulse = 4.0 * (t * 9.0).sin();
-            p.rot[UPPER_ARM_L] = ry(-15.0 + pulse) * rz(-80.0);
-            p.rot[UPPER_ARM_R] = ry(-15.0 + pulse) * rz(80.0);
-            p.rot[FOREARM_L] = rz(-15.0);
-            p.rot[FOREARM_R] = rz(15.0);
+            p.rot[UPPER_ARM_L] = ry(-80.0 + pulse) * rx(-90.0);
+            p.rot[UPPER_ARM_R] = ry(-80.0 + pulse) * rx(90.0);
+            p.rot[FOREARM_L] = rz(-6.0);
+            p.rot[FOREARM_R] = rz(6.0);
             torso(&mut p, -5.0, 0.0);
             legs(&mut p, -8.0, 10.0, 8.0, 10.0);
         }

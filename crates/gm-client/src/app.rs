@@ -1352,8 +1352,22 @@ pub(crate) fn build_hud(
         own_name,
     } = view;
     let (w, h) = hud.size;
-    let line = (hud::GLYPH_H + 5.0) * s;
+    // The HUD's words: the text face of the bundle, the small one without it.
+    let cap = hud.cap();
+    let line = (cap + 5.0) * s;
     let skinned = hud.skinned;
+    // As much of `text` as fits in `room` pixels.
+    let fit = |hud: &Hud, text: &str, room: f32| -> String {
+        let mut out = String::new();
+        for c in text.chars() {
+            out.push(c);
+            if hud.width(s, &out) > room {
+                out.pop();
+                break;
+            }
+        }
+        out
+    };
     // The whole HUD on the first layer, in call order: a screen's plates (the same layer,
     // drawn after) cover it, as they covered the bars before there were layers.
     hud.set_layer(ui::LAYER_PLATES);
@@ -1367,16 +1381,10 @@ pub(crate) fn build_hud(
         // Bottom right: the own bars are bottom left.
         // (Small print is half the scale, and never under one.)
         let small = (s * 0.5).max(1.0);
-        let tw = Hud::text_width(small, hint);
+        let tw = hud.width(small, hint);
         hud.label(w - tw - 16.0, h - 14.0 * s, small, hud::DIM, hint);
         let title = "tactical";
-        hud.label(
-            w - Hud::text_width(s, title) - 16.0,
-            16.0,
-            s,
-            hud::YELLOW,
-            title,
-        );
+        hud.label(w - hud.width(s, title) - 16.0, 16.0, s, hud::YELLOW, title);
     } else {
         // The aim: a dot in the middle.
         hud.rect(w * 0.5 - 2.0, h * 0.5 - 2.0, 4.0, 4.0, hud::SHADE);
@@ -1448,37 +1456,30 @@ pub(crate) fn build_hud(
             .unwrap_or(own_name);
         hud.text_in(hud::FaceId::Text, x, y, s, hud::WHITE, name);
         let mut by = y + lh * s + 2.0 * s;
-        let bh = 8.0 * s;
+        let bh = 10.0 * s;
         for (_, have, max, colour) in rows {
             hud.frame(x, by, 150.0 * s, bh + 4.0 * s, "bar_frame", s, hud::PLAIN);
             let inner_w = (150.0 * s - 6.0 * s) * (have / max).clamp(0.0, 1.0);
             if inner_w > 0.0 {
                 hud.image(x + 3.0 * s, by + 2.0 * s, inner_w, bh, "bar_fill", colour);
             }
+            // The numbers, with a shade under them: white on a yellow bar is not read.
             let text = format!("{:.0}/{:.0}", have, max);
-            let tw = hud.width_in(hud::FaceId::Small, s, &text);
-            hud.text(
+            let tw = hud.width(s, &text);
+            let (tx, ty) = (
                 x + 150.0 * s - tw - 4.0 * s,
-                by + 2.0 * s + (bh - hud::GLYPH_H * s) * 0.5,
-                s,
-                hud::WHITE,
-                &text,
+                by + 2.0 * s + (bh - cap * s) * 0.5,
             );
+            hud.print(tx + 1.0, ty + 1.0, s, [0.0, 0.0, 0.0, 0.7], &text);
+            hud.print(tx, ty, s, hud::WHITE, &text);
             by += bh + 6.0 * s;
         }
         y = by + 4.0 * s;
     } else {
         for (name, have, max, colour) in rows {
             hud.label(16.0, y, s, hud::WHITE, name);
-            let x = 16.0 + 3.0 * hud::ADVANCE * s;
-            hud.bar(
-                x,
-                y + s,
-                180.0,
-                hud::GLYPH_H * s - 2.0 * s,
-                have / max,
-                colour,
-            );
+            let x = 16.0 + hud.width(s, "hp ") + 4.0 * s;
+            hud.bar(x, y + s, 180.0, cap * s - 2.0 * s, have / max, colour);
             hud.label(
                 x + 188.0,
                 y,
@@ -1500,6 +1501,14 @@ pub(crate) fn build_hud(
         let total = cells.len() as f32 * (side + gap) - gap;
         let x0 = ((w - total) * 0.5).round();
         let y0 = h - 16.0 - side;
+        // The cells without a picture show their ability's name (LOOK.md 3.4), whole and
+        // all in one size: small print when any of them is wider than a cell.
+        let name_room = side - 8.0 * s;
+        let name_print = if cells.iter().all(|c| hud.width(s, &c.ability) <= name_room) {
+            s
+        } else {
+            (s * 0.5).max(1.0)
+        };
         for (i, cell) in cells.iter().enumerate() {
             let x = x0 + i as f32 * (side + gap);
             hud.frame(x, y0, side, side, "hotbar_cell", s, hud::PLAIN);
@@ -1515,13 +1524,14 @@ pub(crate) fn build_hud(
                 .as_deref()
                 .is_some_and(|k| hud.icon(x + 4.0 * s, y0 + 4.0 * s, inner, k, tint));
             if !drawn {
-                // No picture: the ability's name, small, as its glyph (LOOK.md 3.4).
-                let short: String = cell.ability.chars().take(5).collect();
-                let tw = hud.width_in(hud::FaceId::Small, s, &short);
-                hud.text(
+                let print = name_print;
+                let mut short = cell.ability.clone();
+                while hud.width(print, &short) > inner && short.pop().is_some() {}
+                let tw = hud.width(print, &short);
+                hud.print(
                     x + (side - tw) * 0.5,
-                    y0 + (side - hud::GLYPH_H * s) * 0.5,
-                    s,
+                    y0 + (side - cap * print) * 0.5,
+                    print,
                     if tint == hud::PLAIN {
                         hud::WHITE
                     } else {
@@ -1538,10 +1548,10 @@ pub(crate) fn build_hud(
                     hud.wedge(centre, side * 0.72, cell.ready, 1.0, [0.0, 0.0, 0.0, 0.62]);
                     if cell.left_secs >= 1.0 {
                         let t = format!("{:.0}", cell.left_secs.ceil());
-                        let tw = hud.width_in(hud::FaceId::Small, s, &t);
-                        hud.text(
+                        let tw = hud.width(s, &t);
+                        hud.print(
                             x + (side - tw) * 0.5,
-                            y0 + (side - hud::GLYPH_H * s) * 0.5,
+                            y0 + (side - cap * s) * 0.5,
                             s,
                             hud::WHITE,
                             &t,
@@ -1567,17 +1577,17 @@ pub(crate) fn build_hud(
                 _ => {}
             }
             // The key, in its tab at the top left of the cell.
-            let kw = hud.width_in(hud::FaceId::Small, s, cell.key) + 4.0 * s;
+            let kw = hud.width(s, cell.key) + 4.0 * s;
             hud.frame(
                 x - s,
                 y0 - 4.0 * s,
                 kw,
-                (hud::GLYPH_H + 4.0) * s,
+                (cap + 4.0) * s,
                 "hotbar_key",
                 s,
                 hud::PLAIN,
             );
-            hud.text(x + s, y0 - 2.0 * s, s, hud::WHITE, cell.key);
+            hud.print(x + s, y0 - 2.0 * s, s, hud::WHITE, cell.key);
         }
         // The statuses (LOOK.md 3.3), above the hotbar: an icon or the status's name, a
         // ring of the time left as a wedge, the stacks.
@@ -1611,8 +1621,8 @@ pub(crate) fn build_hud(
                 hud.icon(sx + 2.0 * s, sy + 2.0 * s, side - 4.0 * s, k, hud::PLAIN)
             });
             if !drawn {
-                let short: String = status.name().chars().take(4).collect();
-                hud.text(sx + 2.0 * s, sy + 2.0 * s, s, hud::WHITE, &short);
+                let short = fit(hud, status.name(), side - 4.0 * s);
+                hud.print(sx + 2.0 * s, sy + 2.0 * s, s, hud::WHITE, &short);
             }
             // The time left, as a sweep that empties: a status of 5 s is nearly whole at 4.
             let frac = (left / 320.0).clamp(0.0, 1.0);
@@ -1625,10 +1635,10 @@ pub(crate) fn build_hud(
             );
             if slot.stacks > 1 {
                 let t = slot.stacks.to_string();
-                let tw = hud.width_in(hud::FaceId::Small, s, &t);
-                hud.text(
+                let tw = hud.width(s, &t);
+                hud.print(
                     sx + side - tw - s,
-                    sy + side - hud::GLYPH_H * s - s,
+                    sy + side - cap * s - s,
                     s,
                     hud::YELLOW,
                     &t,
@@ -1688,7 +1698,7 @@ pub(crate) fn build_hud(
                     hud::GREEN,
                 );
             }
-            hud.text(16.0 + 4.0 * s, y + 3.0 * s, s, colour, &text);
+            hud.print(16.0 + 4.0 * s, y + 3.0 * s, s, colour, &text);
             y += fh + 3.0 * s;
         } else {
             hud.label(16.0, y, s, colour, &text);
@@ -1699,7 +1709,7 @@ pub(crate) fn build_hud(
     // The creature being fought, top middle; messages under it.
     let mut y = 16.0;
     if let Some((name, health, max)) = target {
-        let tw = Hud::text_width(s, name);
+        let tw = hud.width(s, name);
         hud.label((w - tw) * 0.5, y, s, hud::WHITE, name);
         y += line;
         let bw = (w * 0.34).min(520.0);
@@ -1713,8 +1723,8 @@ pub(crate) fn build_hud(
         );
         let count = format!("{health}/{max}");
         let small = (s * 0.5).max(1.0);
-        hud.text(
-            (w - Hud::text_width(small, &count)) * 0.5,
+        hud.print(
+            (w - hud.width(small, &count)) * 0.5,
             y + 0.75 * s,
             small,
             hud::WHITE,
@@ -1727,9 +1737,8 @@ pub(crate) fn build_hud(
             continue;
         }
         // A long line is cut to the screen: the log has the whole of it.
-        let fit = ((w - 40.0) / (hud::ADVANCE * s)) as usize;
-        let shown: String = text.chars().take(fit).collect();
-        let tw = Hud::text_width(s, &shown);
+        let shown = fit(hud, text, w - 40.0);
+        let tw = hud.width(s, &shown);
         hud.label((w - tw) * 0.5, y, s, *colour, &shown);
         y += line;
     }
@@ -3748,6 +3757,15 @@ impl App {
                     .filter(|p| matches!(p, crate::content::PropState::Loaded(_)))
                     .count()
             ));
+            // The UI's scale and the density of the atlas it is drawn with (LOOK.md 2.2):
+            // the same number when the bundle has that atlas.
+            if let Some(a) = &self.active {
+                line.push_str(&format!(
+                    " ui_scale={} atlas_density={}",
+                    ui::scale_for(a.renderer.hud.size, PANEL_UNITS, self.settings.ui_scale),
+                    a.renderer.hud.density()
+                ));
+            }
             #[cfg(target_arch = "wasm32")]
             {
                 let (rx, tx) = o.net.bytes();
@@ -4106,13 +4124,22 @@ impl App {
             &mut self.entities,
         );
         let vp = view_proj(camera, cam_yaw, cam_pitch, aspect);
+        // One scale for the HUD and the screens: what the window gives, or what was chosen;
+        // and the atlas made for that scale (LOOK.md 2.2), from the frame it is here.
+        let scale = ui::scale_for(
+            (a.config.width.max(1) as f32, a.config.height.max(1) as f32),
+            PANEL_UNITS,
+            self.settings.ui_scale,
+        );
+        self.content.want_atlas(scale as u8);
+        if let Some(atlas) = self.content.take_atlas() {
+            a.renderer.hud.set_atlas(&a.gpu, atlas);
+        }
         a.renderer.hud.begin((a.config.width, a.config.height));
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(p) = &self.playback {
             p.hud(&mut a.renderer.hud);
         }
-        // One scale for the HUD and the screens: what the window gives, or what was chosen.
-        let scale = ui::scale_for(a.renderer.hud.size, PANEL_UNITS, self.settings.ui_scale);
         if !watching && (!bench || self.opts.tactical) && !self.front_up && self.title.is_none() {
             build_hud(
                 &mut a.renderer.hud,

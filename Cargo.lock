@@ -1664,6 +1664,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "clap",
+ "glam",
  "gltf",
  "gm-bsp",
  "gm-content",

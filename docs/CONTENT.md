@@ -64,7 +64,7 @@ assets/content/
 assets/built/content/         what `gm-tools content build` writes (committed, 5.4)
   manifest.gmc                every entry by key: files, hashes, icon keys, held, fits
   props/<key>.gmm             ingested props
-  ui.gma                      the atlas (LOOK.md 2.2)
+  ui.gma ui2.gma ui3.gma ui4.gma   the atlases, one per UI scale (LOOK.md 2.2)
 ```
 
 A thing's **key** is its table's id (`sword`, `catalyst/ember`, `warden`); file names are the
@@ -103,7 +103,10 @@ A prop is authored like a glTF avatar (MODELS.md 3: metres, +Y up, facing +Z; on
 texture; triangles) with two differences: it has **no skin** (a skin, if present, is
 dropped), and its **grip** is its origin: the hand closes on the origin, the business end
 points along +Z (a blade's tip, a barrel's muzzle, a staff's head), the edge or the sight
-along +Y. Models from packs rarely come that way, so a row may carry a `fit`:
+along +Y. The fist holds +Z **across the forearm** (LOOK.md 6.3: a blade, a hammer); what
+is aimed and not swung is turned about Y by its fit to lie along the arm (`turn = [0, 100,
+0]` for the crossbow, 88 for the musket), a staff a little the other way to stand up.
+Models from packs rarely come the right way round either, so a row may carry a `fit`:
 
 ```toml
 [[template]]
@@ -113,8 +116,8 @@ fit = { move = [0.0, -0.02, 0.0], turn = [0, 90, 0], scale = 1.0 }   # metres, d
 ```
 
 `gm-tools content build` applies the fit before quantising, so the `.gmm` is already in hand
-space and the client does nothing at draw time. `gm-tools content look prop sword` (9) shows
-the result on the mannequin, swinging, to tune a fit by eye.
+space and the client does nothing at draw time. `gm-tools content look sword --out x.png`
+(9) shows the result on the mannequin in every stance, to tune a fit by eye.
 
 A prop's vertices are written with `joints = [0, 0, 0, 0]`, `weights = [255, 0, 0, 0]`: the
 character pipeline's uniform block (MODELS.md 9: 24 matrices, the scale, a tint, the light)
@@ -150,8 +153,12 @@ says so; `bone_mask` is 1 and the pivots are zero. The strict reader (MODELS.md 
 prop only with that combination, and a zone or hub asked to treat a prop as an avatar refuses
 it (the hub's `verify` requires an avatar frame).
 
-Pictures: an icon is **32 × 32** dots, RGBA, straight alpha, drawn at the UI scale (1–4 dots
-per dot: 32 to 128 pixels). The skin's pictures are what `skin.toml` declares, each ≤ 256².
+Pictures: an icon is **32 × 32** dots, RGBA, straight alpha, and is in each atlas at that
+atlas's density (LOOK.md 2.2): 32 to 128 texels, baked from its model at that size, or
+given as `icons/<key>.png` (32 × 32) with `<key>@2x.png`, `@3x`, `@4x` beside it when
+somebody has drawn them (64, 96, 128; a density without a file is the 32 enlarged). The
+skin's pictures are what `skin.toml` declares, each ≤ 256² dots, with their finer
+pictures beside them the same way.
 
 ## 5. The tool: `gm-tools content`
 
@@ -172,13 +179,17 @@ gm-tools content import prop|creature|avatar|icon KEY FILE
     icons/<key>.png; the row that names the key is the author's to write
 gm-tools content synth sword|hammer|musket --out FILE.glb
     one of the tool's own flat-coloured props (7)
-gm-tools content atlas [DIR] --out FILE.png
-    the built atlas as a picture, to look at
+gm-tools content atlas [DIR] [--density 1..4] --out FILE.png
+    a built atlas as a picture, to look at
+gm-tools content look KEY [--dir DIR] --out FILE.png
+    the fitting room: the mannequin holding the prop KEY in nine stances (standing,
+    running, the windup, the swing, the recovery, the guard, the parry, the cast, the
+    dash), from the front and from its right
 ```
 
 Still to come (Phase 15, the editor, carries them): `new` (a row written for you), `import csv`
-(a spreadsheet's rows into a table), `look` (the fitting room: today `gm-client --offline
---prop KEY` holds a prop in the own hand and arms the crowd, CONTENT.md 9).
+(a spreadsheet's rows into a table), and a fitting room that moves (`look` draws stills;
+`gm-client --offline --prop KEY` holds a prop in the own hand and arms the crowd, 9).
 
 ### 5.1 `check`
 
@@ -291,8 +302,11 @@ The fitting room of v1 is the client itself: `gm-client --offline --map
 assets/maps/built/town.bsp --prop sword` (CLIENT.md 2) stands the own body in the town
 holding the prop of that key from the bundle, and arms the crowd with it (`--crowd N
 --crowd-dir DIR`): walk, swing, look in third person (`V`). Change the row's `fit`, run
-`gm-tools content build`, run again. The orbiting camera, the animation cycling and a
-screenshot flag (`gm-tools content look`) are Phase 15's, with the editor.
+`gm-tools content build`, run again. Faster, and without a GPU: `gm-tools content look
+sword --out sword.png` draws the mannequin holding the prop in nine stances from the front
+and from its right (the CPU rasteriser that bakes the icons), which is how the grip and
+the fits of LOOK.md 6.3 were chosen. The orbiting camera and the animation cycling are
+Phase 15's, with the editor.
 
 ## 10. Why the editor is a text file (deliberately absent)
 
@@ -371,8 +385,10 @@ Five findings on the servers and the pipeline (LOOK.md 11.2 has the client's sev
   as views). KayKit's four weapons came in that way; their 1024² palette texture is
   resampled to the prop's 256 (palette cells are large: nothing is lost).
 - A face's glyphs are stored with the coverage the rasteriser gives as alpha, not cut to
-  bits: a pixel face at its design size (Pixelify Sans at 12) is crisp either way, and a
-  drawn face (MedievalSharp at 18, the titles) is smooth at every whole scale.
+  bits. (v1 added: "a pixel face at its design size is crisp either way, and a drawn face
+  is smooth at every whole scale". Neither was true on a screen: both were magnified with
+  nearest sampling, and the director saw blocks. The faces are rasterised per density
+  now, LOOK.md 2.2, 2.3 and 11.4.)
 - The small five-by-seven font moved from the client into `gm_model::smallfont` so that
   the tool writes the same dots into the atlas as face 0 and the client's fallback atlas is
   made of them; nothing in the client draws text any other way than through an `Atlas`.
@@ -386,6 +402,9 @@ Five findings on the servers and the pipeline (LOOK.md 11.2 has the client's sev
 - The bundle: **114,614 bytes** in 8 files; the atlas 512 × 176, **58,985 bytes**
   (33 pieces, 3 faces of 105 glyphs each, 22 icons: 6 baked from props, 16 portraits of the
   mannequin); props 2,240 (hammer) to 15,830 (crossbow) bytes, 48 to 584 triangles.
+  With an atlas per density (LOOK.md 11.4, the same evening): **713,302 bytes** in 11
+  files, the atlases 49,641 / 123,997 / 200,633 / 282,595 bytes; the build takes about
+  three seconds.
 - `gm-tools content build`: the sources to the bundle in about a second in release; the
   rebuild in CI compares hash for hash and found no difference between runs.
 - Props drawn: 48 avatars in the town, every one holding the sword, cost **0.006 ms a

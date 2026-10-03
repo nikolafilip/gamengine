@@ -372,8 +372,11 @@ map that comes with it, and the WebGL2 build at 2.9 MiB already reaches its firs
 added: Phase 14 measured **1,104,519 bytes (374,635 packed)** for WebGPU, +95,054 over
 Phase 13 (the atlas and its faces, grids, drags and tooltips, the hotbar, props, the
 paperdoll pass, the bundle), and 3,094,152 (946,533 packed) for WebGL2. The page now also
-fetches the content bundle (`assets/built/content/`: the manifest and the atlas at start,
-59 KB and 2 KB; a prop of 2–16 KB when first seen), copied by `scripts/build-web.sh`.
+fetches the content bundle (`assets/built/content/`: the manifest and the thinnest atlas
+at start, 2 KB and 50 KB, then the atlas of the UI's scale, 124 to 283 KB, once per
+scale; a prop of 2–16 KB when first seen), copied by `scripts/build-web.sh`. With the
+atlases per density (LOOK.md 2.2 and 11.4) the builds are **1,112,187 bytes (376,460
+packed)** and 3,103,848 (948,678).
 
 ## 10. Deliberately absent
 

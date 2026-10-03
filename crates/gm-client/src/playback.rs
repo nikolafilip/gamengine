@@ -284,7 +284,7 @@ impl Playback {
     pub fn hud(&self, hud: &mut Hud) {
         let (w, h) = hud.size;
         let s = if h >= 1000.0 { 3.0 } else { 2.0 };
-        let line = (hud::GLYPH_H + 5.0) * s;
+        let line = (hud.cap() + 5.0) * s;
         hud.rect(w * 0.5 - 2.0, h * 0.5 - 2.0, 4.0, 4.0, hud::SHADE);
         hud.rect(w * 0.5 - 1.0, h * 0.5 - 1.0, 2.0, 2.0, hud::WHITE);
         let head = format!(
@@ -335,7 +335,7 @@ impl Playback {
         }
         let hint = "[ ] player   space pause   , . step   arrows seek   1-4 speed   v third person";
         hud.label(
-            w - Hud::text_width(s * 0.5, hint) - 16.0,
+            w - hud.width(s * 0.5, hint) - 16.0,
             h - 14.0 * s,
             s * 0.5,
             hud::DIM,

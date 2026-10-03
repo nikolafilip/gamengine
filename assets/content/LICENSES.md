@@ -22,10 +22,11 @@ The pack's files were packed into single `.glb`s by `gm-tools content import pro
 
 | File | From | Licence |
 |---|---|---|
-| `ui/pixelify_sans.ttf` | Pixelify Sans (variable), Stefie Justprince, https://github.com/eifetx/Pixelify-Sans via github.com/google/fonts (`ofl/pixelifysans`) | SIL OFL 1.1 (`ui/OFL-pixelify_sans.txt`) |
+| `ui/fira_sans_medium.ttf` | Fira Sans Medium, The Mozilla Foundation and Telefonica S.A., via github.com/google/fonts (`ofl/firasans/FiraSans-Medium.ttf`) | SIL OFL 1.1 (`ui/OFL-fira_sans.txt`) |
 | `ui/medievalsharp.ttf` | MedievalSharp, Wojciech Kalinowski, via github.com/google/fonts (`ofl/medievalsharp`) | SIL OFL 1.1 (`ui/OFL-medievalsharp.txt`) |
 
 ## The skin (`ui/*.png`) and icons (`icons/*.png`)
 
-Drawn for this project (`scripts/dev/skin-gen.py` writes the first skin), CC-BY-SA 4.0
-unless a row above says otherwise.
+Drawn for this project (`scripts/dev/skin-gen.py` writes the skin, each piece once per
+density: `name.png`, `name@2x.png`, `name@3x.png`, `name@4x.png`), CC-BY-SA 4.0 unless a
+row above says otherwise.
