@@ -100,7 +100,16 @@ fn bullet(rate: TickRate, damage: DamagePacket, offset: [f32; 3]) -> Verb {
         inherit_velocity: 0.0,
         spread_deg: 0.0,
         count: 1,
-        on_hit: vec![],
+        // Tagging (MODES.md 10.2): a body hit by a bullet is slowed for a moment.
+        on_hit: vec![Trigger::Status(status(
+            Status::Slow,
+            1500,
+            0.5,
+            StackRule::Refresh,
+            1,
+            StatusTarget::Hit,
+            rate,
+        ))],
         on_expire: vec![],
     })
 }

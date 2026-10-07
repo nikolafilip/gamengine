@@ -442,12 +442,21 @@ pub enum FromZone {
         target: u32,
         amount: u16,
         absorbed: u16,
+        /// v13 (LOOK.md 13.11): where the blow landed, in world units; the number is
+        /// drawn there, not over the head.
+        at: [f32; 3],
     },
     /// v10 (LOOK.md 13.8): a Regen the own hand put on another body gave it `amount`
     /// health back this pulse. The own healings are read from the own health.
     Healed {
         target: u32,
         amount: u16,
+    },
+    /// v13 (MODES.md 10.2): a bullet met the world here, the surface facing `normal`;
+    /// the mark it leaves for a while is the client's. To everyone in the zone.
+    Impact {
+        at: [f32; 3],
+        normal: [f32; 3],
     },
 }
 
@@ -743,10 +752,15 @@ mod tests {
                 target: 3,
                 amount: 40,
                 absorbed: 5,
+                at: [1.0, 2.0, 3.0],
             },
             FromZone::Healed {
                 target: 3,
                 amount: 25,
+            },
+            FromZone::Impact {
+                at: [100.0, 200.0, 50.0],
+                normal: [0.0, 0.0, 1.0],
             },
         ];
         let mut buf = Vec::new();

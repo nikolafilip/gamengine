@@ -782,14 +782,21 @@ pub fn cone_deg(
     m: &Mover,
     g: &GunState,
     crouched: bool,
+    scoped: bool,
     shot: u8,
     now: Tick,
 ) -> f32 {
-    let base = if crouched && m.mv.on_ground {
+    let mut base = if crouched && m.mv.on_ground {
         f.cone.crouch
     } else {
         f.cone.stand
     };
+    // The scope is what makes the shot (MODES.md 3.2, the director 2026-10-07): the
+    // standing cone shrinks to a fraction of itself while it is up; the move, the air and
+    // the spray open it as before.
+    if scoped && f.scope > 0 {
+        base *= SCOPED_CONE;
+    }
     let speed = m.mv.ground_speed() / max_speed.max(1.0);
     let recent = if shot > 0 && tick_delta(now, g.last_shot) <= f.cone.recover as i32 {
         shot as f32
@@ -800,6 +807,9 @@ pub fn cone_deg(
         + if m.mv.on_ground { 0.0 } else { f.cone.air }
         + f.cone.shot * recent
 }
+
+/// What is left of the standing cone under the scope (MODES.md 10.2).
+pub const SCOPED_CONE: f32 = 0.25;
 
 /// Line of sight from `eye` to a body's `centre` through the mover's world, which holds
 /// the other bodies as solids: the trace stops a little short of the body, so the body
@@ -1006,8 +1016,17 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
                 Some(f) => {
                     let g = &m.guns[m.held.min(1) as usize];
                     let crouched = input.buttons & buttons::CROUCH != 0;
-                    let cone =
-                        cone_deg(f, sheet.derived.max_speed, m, g, crouched, script.shot, now);
+                    let scoped = input.buttons & buttons::SCOPE != 0;
+                    let cone = cone_deg(
+                        f,
+                        sheet.derived.max_speed,
+                        m,
+                        g,
+                        crouched,
+                        scoped,
+                        script.shot,
+                        now,
+                    );
                     (f.kick(script.shot), cone, f.headshot)
                 }
                 None => ((0.0, 0.0), 0.0, 1.0),

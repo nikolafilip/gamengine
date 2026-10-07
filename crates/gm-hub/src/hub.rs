@@ -1761,17 +1761,43 @@ fn build_words(content: &ContentPack, build: &Build) -> Option<(String, String)>
 
 /// An item as a person is shown it: where it is worn, what it does there and the words
 /// for both are the content's to say (ITEMS.md 3.2), so that no client works them out.
-fn item_summary(content: &ItemContent, i: crate::economy::Item) -> ItemSummary {
+fn item_summary(
+    content: &ItemContent,
+    pack: &gm_core::build::ContentPack,
+    i: crate::economy::Item,
+) -> ItemSummary {
     let mut view = content.view(
         &i.template,
         i.components
             .iter()
             .map(|c| (c.layer.as_str(), c.material.as_str())),
     );
-    // A stack says how many it is (MODES.md 11.1).
+    // A stack says how many it is (MODES.md 11.1), and rounds say which gun they load:
+    // carried is loaded, there is nothing to equip (the director, 2026-10-07).
     let cap = match content.stack(&i.template) {
-        Some((cap, _)) => {
+        Some((cap, heals)) => {
             view.what = content.stack_words(&i.template, i.quantity);
+            if heals.is_none() {
+                let guns: Vec<&str> = pack
+                    .abilities
+                    .iter()
+                    .filter(|a| {
+                        a.ability
+                            .firearm
+                            .as_ref()
+                            .is_some_and(|f| f.ammo == i.template)
+                    })
+                    .map(|a| a.ability.name.as_str())
+                    .collect();
+                view.does = if guns.is_empty() {
+                    vec!["rounds no gun of this world takes".to_string()]
+                } else {
+                    vec![format!(
+                        "loads the {}: carried is loaded, R reloads",
+                        guns.join(" and the ")
+                    )]
+                };
+            }
             cap
         }
         None => 0,
@@ -1800,6 +1826,7 @@ fn item_summary(content: &ItemContent, i: crate::economy::Item) -> ItemSummary {
 
 fn trade_offer(
     content: &ItemContent,
+    pack: &gm_core::build::ContentPack,
     (coin, accepted, items): (i64, bool, Vec<crate::economy::Item>),
 ) -> TradeOffer {
     TradeOffer {
@@ -1807,7 +1834,7 @@ fn trade_offer(
         accepted,
         items: items
             .into_iter()
-            .map(|i| item_summary(content, i))
+            .map(|i| item_summary(content, pack, i))
             .collect(),
     }
 }
@@ -1854,13 +1881,14 @@ async fn tell_zone_of_items(hub: &Hub, character: CharacterId) {
 
 fn holder_reply(
     content: &ItemContent,
+    pack: &gm_core::build::ContentPack,
     (coin, items): (i64, Vec<crate::economy::Item>),
 ) -> EconReply {
     EconReply::Holder {
         coin,
         items: items
             .into_iter()
-            .map(|i| item_summary(content, i))
+            .map(|i| item_summary(content, pack, i))
             .collect(),
     }
 }
@@ -1885,12 +1913,12 @@ async fn econ_op(
         EconOp::Inventory => e
             .inventory(me)
             .await
-            .map(|h| holder_reply(items, h))
+            .map(|h| holder_reply(items, &hub.cfg.content, h))
             .map_err(econ_err),
         EconOp::Storage => e
             .storage(me)
             .await
-            .map(|h| holder_reply(items, h))
+            .map(|h| holder_reply(items, &hub.cfg.content, h))
             .map_err(econ_err),
         EconOp::StorageDeposit { item } => done(e.storage_deposit(me, item).await),
         EconOp::StorageWithdraw { item } => done(e.storage_withdraw(me, item).await),
@@ -1937,8 +1965,8 @@ async fn econ_op(
                 wait_ms: seen.wait_ms,
                 with: seen.with,
                 together: seen.together,
-                mine: trade_offer(items, seen.mine),
-                theirs: trade_offer(items, seen.theirs),
+                mine: trade_offer(items, &hub.cfg.content, seen.mine),
+                theirs: trade_offer(items, &hub.cfg.content, seen.theirs),
             })
             .map_err(econ_err),
         // A stall is kept where it stands: its keeper lists and unlists while playing in
@@ -1955,7 +1983,7 @@ async fn econ_op(
                     .into_iter()
                     .map(|l| ListingSummary {
                         id: l.id,
-                        item: item_summary(items, l.item),
+                        item: item_summary(items, &hub.cfg.content, l.item),
                         price: l.price,
                     })
                     .collect(),

@@ -622,6 +622,8 @@ instant the windup ends, VOCABULARY.md 5.1) and never drawn. This section draws 
 | a body's health drops (where the frame knows it: the own, the party's, the squad's, a creature's) | a spark at its chest, the body lit for 0.14 s; the own: the frame's edge red for a third of a second, and the number lost (13.8) |
 | the zone says the own hand landed | the number dealt, in gold over the body hit (13.8) |
 | the zone says the own hand's Regen gave another body health back | the number, in green over the body healed (13.8) |
+| the zone says the own hand landed, since v13 | the number and a spark **where the blow landed** (13.11), not over the head |
+| a bullet meets the world | a dark mark on the surface for twenty seconds (13.11, MODES.md 10.2) |
 | always | **the ring of its aspects** at a body's feet (one colour, or a half each) instead of v1's square plate |
 
 Colours: the own swing warm white, a friend's blue, anybody else's orange-red.
@@ -797,3 +799,17 @@ pistol dropped to the frame's corner and the musket dipped and rolled; the captu
 1,237,363 (+9,801 over 15c's 1,227,562; the cap 2 MiB), the bundle 7 props and 23 baked
 icons (the pistol's among them), `content check` reproduces it; the two tests of
 `items.rs` pass against the test database, the workspace's unit tests as before.
+
+### 13.11 Where the blow landed, and the bullet's mark (2026-10-07, the director played the gun)
+
+The director: "our hit animation highlight is misleading since it's always centering no
+matter where we hit", and "black marks on hit, bullet marks are a must". Since protocol
+v13 the zone says **where** a blow landed (`FromZone::Hit.at`: the point of the hull a bolt
+or a blade met, the body's centre for an area or a pulse), and the gold number of 13.8 and
+a spark are drawn there, not over the head: a headshot shows at the head, a shot in the
+leg at the leg. The own hurts stay where they were (the frame's red edge, the number from
+the own health). A **bullet's mark**: a bolt at 10,000 u/s or more that meets the world
+leaves a dark disc of 3.5 units on the surface, 0.6 off it, for twenty seconds, the last
+four fading; 160 at most. Nothing marks a body yet: blood is the body's look (Phase 17).
+The effects table of 13 gains two rows by this.
+

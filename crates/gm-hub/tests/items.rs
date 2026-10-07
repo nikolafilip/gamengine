@@ -929,7 +929,12 @@ async fn stacks_merge_to_the_cap_and_are_spent_through_the_zone() {
     assert_eq!(ball.place, PLACE_NONE);
     let kit = carried.iter().find(|i| i.id == kits).unwrap();
     assert_eq!((kit.quantity, kit.cap), (2, 5));
-    assert_eq!(kit.does, vec!["heals 50, used with F".to_string()]);
+    assert_eq!(kit.does, vec!["heals 300, used with F".to_string()]);
+    assert_eq!(
+        ball.does,
+        vec!["loads the Musket: carried is loaded, R reloads".to_string()],
+        "a stack of rounds says which gun it loads (MODES.md 10.2)"
+    );
 
     // The reading carries the stacks, as a zone takes them.
     let (_, _, _, stacks) = direct.gear(smith, &items).await.unwrap();
@@ -940,7 +945,7 @@ async fn stacks_merge_to_the_cap_and_are_spent_through_the_zone() {
             .map(|s| (s.quantity, s.heals))
     };
     assert_eq!(find(&stacks, "ball"), Some((25, None)));
-    assert_eq!(find(&stacks, "kit"), Some((2, Some(50))));
+    assert_eq!(find(&stacks, "kit"), Some((2, Some(300))));
 
     // The zone spent rounds: the hub follows and answers the reading after. More than is
     // carried: refused (logged), and the reading says what is.

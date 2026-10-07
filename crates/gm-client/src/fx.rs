@@ -29,6 +29,21 @@ fn fade(c: Rgba, a: f32) -> Rgba {
 /// Degrees of arc one segment of a curve covers.
 const SEGMENT_DEG: f32 = 7.5;
 
+/// A bullet's mark on the world (MODES.md 10.2): where, which way the wall faces, how old.
+struct Decal {
+    at: Vec3,
+    normal: Vec3,
+    age: f32,
+}
+
+/// How long a bullet's mark stays, and how long its fading takes at the end.
+const DECAL_SECS: f32 = 20.0;
+const DECAL_FADE: f32 = 4.0;
+/// The most marks kept: the oldest go first.
+const DECALS_MAX: usize = 160;
+/// A mark's radius, in units.
+const DECAL_RADIUS: f32 = 3.5;
+
 /// The frame's triangles.
 #[derive(Default)]
 pub struct FxMesh {
@@ -52,6 +67,27 @@ impl FxMesh {
     fn quad(&mut self, a: (Vec3, Rgba), b: (Vec3, Rgba), c: (Vec3, Rgba), d: (Vec3, Rgba)) {
         self.tri(a, b, c);
         self.tri(a, c, d);
+    }
+
+    /// A disc of radius `r` lying on a surface that faces `normal`, lifted a little off it
+    /// so that it is drawn over the wall and not in it: a bullet's mark (MODES.md 10.2).
+    /// Dark in the middle, fading to nothing at the rim.
+    pub fn disc(&mut self, at: Vec3, normal: Vec3, r: f32, ink: Rgba) {
+        let n = normal.normalize_or(Vec3::Z);
+        let seed = if n.z.abs() < 0.9 { Vec3::Z } else { Vec3::X };
+        let u = seed.cross(n).normalize_or(Vec3::X);
+        let v = n.cross(u);
+        let c = at + n * 0.6;
+        let rim = fade(ink, 0.0);
+        let steps = 10;
+        for k in 0..steps {
+            let a0 = k as f32 / steps as f32 * std::f32::consts::TAU;
+            let a1 = (k + 1) as f32 / steps as f32 * std::f32::consts::TAU;
+            let p0 = c + (u * a0.cos() + v * a0.sin()) * r;
+            let p1 = c + (u * a1.cos() + v * a1.sin()) * r;
+            self.tri((c, ink), (p0, rim), (p1, rim));
+            self.tri((c, ink), (p1, rim), (p0, rim));
+        }
     }
 
     /// A piece of a ring lying flat at `centre.z`: between the radii `r0` and `r1` and the
@@ -350,6 +386,7 @@ pub struct Effects {
     bursts: Vec<Burst>,
     tracers: Vec<Tracer>,
     numbers: Vec<Number>,
+    decals: Vec<Decal>,
     flashes: HashMap<u32, f32>,
     frame: u64,
     dt: f32,
@@ -389,6 +426,10 @@ impl Effects {
             n.age += dt;
         }
         self.numbers.retain(|n| n.age < NUMBER_SECS);
+        for d in &mut self.decals {
+            d.age += dt;
+        }
+        self.decals.retain(|d| d.age < DECAL_SECS);
         self.own_hurt = (self.own_hurt - dt * 3.0).max(0.0);
     }
 
@@ -405,12 +446,28 @@ impl Effects {
 
     /// The zone says the own hand landed a blow on the body whose head is at `head`:
     /// `amount` came off its health after its block took `absorbed`.
-    pub fn hit(&mut self, head: Vec3, amount: u32, absorbed: u32) {
+    pub fn hit(&mut self, at: Vec3, amount: u32, absorbed: u32) {
+        // Since LOOK.md 13.11 `at` is where the blow landed, not the head: the number
+        // floats from the wound, and a spark marks it.
+        self.sparks.push(Spark { at, age: 0.0 });
         if amount == 0 && absorbed > 0 {
-            self.number(head, 0, Blow::Blocked);
+            self.number(at, 0, Blow::Blocked);
         } else {
-            self.number(head, amount, Blow::Dealt);
+            self.number(at, amount, Blow::Dealt);
         }
+    }
+
+    /// The zone says a bullet met the world at `at`, a surface facing `normal`: a dark
+    /// mark there for a while (MODES.md 10.2), the oldest forgotten past `DECALS_MAX`.
+    pub fn impact(&mut self, at: Vec3, normal: Vec3) {
+        if self.decals.len() >= DECALS_MAX {
+            self.decals.remove(0);
+        }
+        self.decals.push(Decal {
+            at,
+            normal,
+            age: 0.0,
+        });
     }
 
     /// The zone says a Regen of the own hand gave the body whose head is at `head`
@@ -596,6 +653,15 @@ impl Effects {
 
     /// What is in the air: the slashes, the sparks, the bursts, the own tracers.
     pub fn draw(&self, eye: Vec3, mesh: &mut FxMesh) {
+        for d in &self.decals {
+            let left = ((DECAL_SECS - d.age) / DECAL_FADE).clamp(0.0, 1.0);
+            mesh.disc(
+                d.at,
+                d.normal,
+                DECAL_RADIUS,
+                [0.02, 0.02, 0.02, 0.85 * left],
+            );
+        }
         for t in &self.tracers {
             let left = 1.0 - t.age / TRACER_SECS;
             let flown = (t.pos - t.from).length();

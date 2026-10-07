@@ -379,9 +379,37 @@ Built as section 3 says, with these readings:
 - **The HUD**: the four lines of the crosshair at the cone's angle, the magazine over
   the reserve bottom right (red under half a magazine), "reloading", the hotbar as the
   three weapons (the one in hand lit) and the actives.
-- Not built: an ammo item and a pickup (the reserve refills at a respawn), wall
-  penetration, a scope model; the `musket` at 20,000 u/s is 3.6's bolt, hitscan is not
-  built.
+- Not built: wall penetration, a scope model; the `musket` at 20,000 u/s is 3.6's bolt,
+  hitscan is not built. (The ammo item came the same evening: section 11.)
+- **The director played it (2026-10-07, evening)**: "the sniper scope mode seems way
+  less precise", "the bullet should leave black mark in environment for some time as it
+  is in CS 1.6", "making target slow down for a second or two when hit taken", "our hit
+  animation highlight is misleading since it's always centering no matter where we hit".
+  Built the same evening (protocol v13, content v4):
+  - **The scope is the shot**: while the scope is up the standing (or crouching) cone is
+    a quarter of itself (`SCOPED_CONE` 0.25, in `cone_deg` on both sides, so the
+    crosshair shows it); the move, the air and the spray open it as before. The mouse is
+    still divided by the zoom.
+  - **Tagging**: every bullet (the musket's, the pistol's, the carbine's) carries an
+    `on_hit` Slow of 0.5 for 1,500 ms, refreshed by the next hit: the body hit walks at
+    half speed for a moment, as the root's does. Content, not code.
+  - **Bullet marks**: a bolt at 10,000 u/s or more that meets the world says
+    `ZoneEvent::Impact { at, normal }`; everyone in the zone gets `FromZone::Impact` and
+    draws a dark disc of 3.5 u on the wall, lifted 0.6 u off it, for 20 s (the last 4 s
+    fading), 160 at most, the oldest forgotten first. Bodies leave no mark (the blood of
+    the root is Phase 17's, with the body's look).
+  - **The hit where it landed**: `ZoneEvent::Hit` and `FromZone::Hit` carry `at`; the
+    gold number and a spark are drawn at the point of the hull the bolt or the blade
+    met (LOOK.md 13.11), the head band's shots at the head. Nothing is drawn at the
+    centre of the screen that was not before (the crosshair itself does not react).
+  - **The rounds**: the director: "no way to use rounds from inventory, they should be
+    auto equipped or something". They are: a stack carried is the reserve, nothing is
+    equipped; the hub's logs show his balls and carbine rounds bought at 14:39–14:43 and
+    spent within seconds. What was missing was the word: a stack of rounds now says
+    which gun it loads ("loads the Musket: carried is loaded, R reloads") in the
+    inventory and at the stall. A stack of rounds for a gun that is not in the build
+    loads nothing, and says so. The kit heals 300 (a third of a body of about 1,000;
+    50 was nothing).
 
 ### 10.3 The RPG mode (15c, 2026-10-07)
 

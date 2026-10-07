@@ -680,6 +680,7 @@ impl Director {
                     amount,
                     kind,
                     absorbed,
+                    ..
                 } => {
                     let a_slot = self.creature_ids.get(&attacker).copied();
                     let t_slot = self.creature_ids.get(&target).copied();

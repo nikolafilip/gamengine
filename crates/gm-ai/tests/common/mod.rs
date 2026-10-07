@@ -272,6 +272,7 @@ pub fn play(setup: &Setup<'_>) -> Outcome {
                     amount,
                     kind,
                     absorbed,
+                    ..
                 } if verbose && std::env::var("GM_HITS").is_ok() => {
                     let hp = zone.player(*target).map_or(0, |p| p.health);
                     println!(

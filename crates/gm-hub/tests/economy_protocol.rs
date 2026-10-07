@@ -524,7 +524,8 @@ async fn the_economy_over_the_wire() {
         Err(HubError::NotFound),
         "not a listing of the stall the buyer stands at"
     );
-    assert_eq!(buy(&town, stall.id).await, Ok(EconReply::Done));
+    // Answered with the reading of what the buyer carries now (MODES.md 11.7).
+    assert!(matches!(buy(&town, stall.id).await, Ok(EconReply::Gear(_))));
     assert_eq!(buy(&town, stall.id).await, Err(HubError::NotFound));
 
     // The owner closes the stall from its own session; the tile is free again.

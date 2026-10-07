@@ -813,3 +813,14 @@ in the simulation's snapshots:
   (MODES.md 11.2); its encoding is unchanged.
 - Hub protocol 11 and the players' protocol 4 (ITEMS.md 4).
 
+## 25. Changes in v13 (the director played the gun again, 2026-10-07)
+
+`PROTOCOL_VERSION` 13 (MODES.md 10.2, LOOK.md 13.11). The simulation's datagrams are unchanged:
+
+- `FromZone::Hit` carries `at: [f32; 3]`, where the blow landed (a bolt's or a blade's point
+  on the hull, the body's centre for an area or a pulse): the number is drawn there, not
+  over the head, so a headshot reads as one.
+- `FromZone::Impact { at, normal }`, appended: a bullet (a bolt at 10,000 u/s or more) met
+  the world there; the client leaves a dark mark on the wall for twenty seconds. To every
+  session of the zone, a few bytes a shot.
+

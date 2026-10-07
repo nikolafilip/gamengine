@@ -197,7 +197,6 @@ pub(crate) struct Online {
     deaths: u32,
     /// Blows the own hand landed, as the zone said (target, amount, absorbed): the
     /// numbers the next frame floats over the bodies it finds (LOOK.md 13.8).
-    hits: Vec<(u32, u16, u16)>,
     /// And what the own hand's Regen gave other bodies back (target, amount).
     heals: Vec<(u32, u16)>,
     /// The hash of the map this connection plays on: the one loaded when it began, and
@@ -633,7 +632,6 @@ fn online(opts: &Options, sim: &Sim, map_hash: u64, entry: Entry) -> Result<Onli
         gm_note: String::new(),
         kills: 0,
         deaths: 0,
-        hits: Vec::new(),
         heals: Vec::new(),
         map_hash,
         respec_note: String::new(),
@@ -1457,6 +1455,8 @@ pub(crate) struct HudView<'a> {
     /// scope's zoom this frame (1 without).
     pub crouched: bool,
     pub zoom: f32,
+    /// The scope is up: the cone the crosshair shows shrinks with it (MODES.md 10.2).
+    pub scoped: bool,
 }
 
 /// A name over a body (LOOK.md 13): where its head is, what it is called, the colour of
@@ -1725,6 +1725,7 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
         combo,
         crouched,
         zoom,
+        scoped,
     } = view;
     let (w, h) = hud.size;
     // The HUD's words: the text face of the bundle, the small one without it.
@@ -1850,6 +1851,7 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
             &c.mover,
             g,
             crouched,
+            scoped,
             g.spray,
             now,
         );
@@ -3643,8 +3645,13 @@ impl App {
                         target,
                         amount,
                         absorbed,
+                        at,
                     } => {
-                        o.hits.push((target, amount, absorbed));
+                        // The number where the blow landed (LOOK.md 13.11), not over the
+                        // head: a headshot reads as one.
+                        let _ = target;
+                        self.effects
+                            .hit(Vec3::from_array(at), amount as u32, absorbed as u32);
                         let now = Instant::now();
                         self.combo = match self.combo {
                             (n, Some(last))
@@ -3656,6 +3663,10 @@ impl App {
                         };
                     }
                     FromZone::Healed { target, amount } => o.heals.push((target, amount)),
+                    FromZone::Impact { at, normal } => {
+                        self.effects
+                            .impact(Vec3::from_array(at), Vec3::from_array(normal));
+                    }
                     FromZone::Killed { victim, killer } => {
                         let me = o.client.as_ref().map(|c| c.my_id);
                         if Some(killer) == me && victim != killer {
@@ -4063,13 +4074,6 @@ impl App {
                         // What the own hand did to it, as the zone said: a number over
                         // its head (LOOK.md 13.8).
                         let over_head = e.pos + feet_under + Vec3::Z * 72.0;
-                        o.hits.retain(|&(target, amount, absorbed)| {
-                            if target != e.id {
-                                return true;
-                            }
-                            self.effects.hit(over_head, amount as u32, absorbed as u32);
-                            false
-                        });
                         o.heals.retain(|&(target, amount)| {
                             if target != e.id {
                                 return true;
@@ -4296,7 +4300,6 @@ impl App {
             }
         }
         // A blow on a body the frame did not find (gone, or never in sight) says nothing.
-        o.hits.clear();
         o.heals.clear();
         self.effects.draw(camera, &mut self.fx);
         // The RPG mode's marks (MODES.md 5.5): where the body is going, and a ring under
@@ -5070,6 +5073,7 @@ impl App {
                         || self.input.down(KeyCode::ControlRight)
                         || self.input.down(KeyCode::KeyC),
                     zoom: self.zoom,
+                    scoped: self.input.scoped,
                 },
             );
         }

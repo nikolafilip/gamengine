@@ -625,12 +625,12 @@ mod tests {
         assert_eq!(items.place("ball"), None);
         assert_eq!(items.edges("ball", []), None);
         assert_eq!(items.stack("ball"), Some((30, None)));
-        assert_eq!(items.stack("kit"), Some((5, Some(50))));
+        assert_eq!(items.stack("kit"), Some((5, Some(300))));
         assert_eq!(items.stack("sword"), None);
         assert_eq!(items.stack_words("ball", 12), "ball ×12 of 30");
         assert_eq!(
             items.view("kit", []).does,
-            vec!["heals 50, used with F".to_string()]
+            vec!["heals 300, used with F".to_string()]
         );
     }
 

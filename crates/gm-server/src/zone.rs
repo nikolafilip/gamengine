@@ -140,6 +140,7 @@ fn replay_event(ev: &ZoneEvent) -> Option<gm_replay::Event> {
             amount,
             kind,
             absorbed,
+            ..
         } => Event::Hit {
             attacker,
             target,
@@ -2694,6 +2695,7 @@ pub async fn run_with_web(
                     target,
                     amount,
                     absorbed,
+                    at,
                 } => {
                     match kind {
                         HitKind::Melee => report.hits_melee += 1,
@@ -2713,10 +2715,20 @@ pub async fn run_with_web(
                             target,
                             amount: amount.min(u16::MAX as u64) as u16,
                             absorbed: absorbed.clamp(0, u16::MAX as i32) as u16,
+                            at: at.to_array(),
                         });
                     }
                     if let Some(s) = sessions.get_mut(&target) {
                         s.damage_taken += amount;
+                    }
+                }
+                // A bullet's mark (MODES.md 10.2): everyone in the zone may see the wall.
+                ZoneEvent::Impact { at, normal } => {
+                    for s in sessions.values() {
+                        s.send_control(FromZone::Impact {
+                            at: at.to_array(),
+                            normal: normal.to_array(),
+                        });
                     }
                 }
                 ZoneEvent::Killed { victim, killer } => {

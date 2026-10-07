@@ -1589,7 +1589,11 @@ in every mode (`USE`, protocol v12, the own block's `kits`), 1.5 s, heals 50, dr
 kit kept, refused at full health; the HUD's kits line; the Quartermaster stall bot in `play.sh people`.
 MODES.md 11.7 lists the readings and what is not built (a stack never splits, no ground pickup of a stack,
 one price per bot stall, the kit borrows the reload's motion, the stranger's `USE` stance is idle until
-Phase 17).
+Phase 17). **The director played it the same evening** (MODES.md 10.2, LOOK.md 13.11; protocol v13, content
+v4): the scope's cone a quarter while it is up, tagging (a Slow of 0.5 for 1.5 s on every bullet, content),
+bullet marks on the world for 20 s, the hit's number and spark where the blow landed instead of over the head,
+a stack of rounds saying which gun it loads, the kit at 300. His "no way to use rounds from inventory" was
+the missing word, not a missing mechanism: the hub's logs show his rounds bought and spent within seconds.
 
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute

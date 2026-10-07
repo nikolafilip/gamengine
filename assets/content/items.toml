@@ -119,7 +119,7 @@ id = "kit"                # used with F, in every mode
 kind = "stack"
 layers = []
 cap = 5
-heals = 50
+heals = 300              # a third of a body of 1,000 (MATRIX.md: 500 + 40 × con)
 
 # Cores: weight and physical bias.
 [[material]]

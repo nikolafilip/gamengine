@@ -31,6 +31,9 @@ use crate::vocab::{
     Status, StatusTarget, Trigger, Verb,
 };
 
+/// A bolt this fast is a bullet (MODES.md 3.6): it leaves a mark where it meets the world.
+pub const BULLET_SPEED: f32 = 10_000.0;
+
 /// Damage- and heal-over-time pulse every this many server ticks (MATRIX.md 8: 4 per second).
 pub const DOT_INTERVAL_TICKS: Tick = 64 / DOT_PULSES_PER_S;
 /// From this many living bodies on, a tick keeps a grid over them for its sweeps.
@@ -280,6 +283,15 @@ pub enum ZoneEvent {
         kind: HitKind,
         /// What the target's block took off the hit (0 when it was not blocked).
         absorbed: i32,
+        /// Where the blow landed (LOOK.md 13.11): a bolt's or a blade's point on the hull,
+        /// the body's centre for an area or a pulse.
+        at: Vec3,
+    },
+    /// A bullet met the world (MODES.md 10.2, the director 2026-10-07): where, and the
+    /// surface's normal; the mark it leaves is the client's.
+    Impact {
+        at: Vec3,
+        normal: Vec3,
     },
     Healed {
         target: EntityId,
@@ -1084,6 +1096,7 @@ impl Zone {
             parryable: bool,
             on_hit: Vec<ApplyStatus>,
             dir: Vec3,
+            point: Vec3,
         }
         let mut hits: Vec<Landed> = Vec::new();
         for s in self.swings.iter_mut() {
@@ -1141,6 +1154,7 @@ impl Zone {
                     parryable: s.arc.parryable,
                     on_hit: s.on_hit.clone(),
                     dir,
+                    point,
                 });
             }
         }
@@ -1153,6 +1167,7 @@ impl Zone {
                 h.dir,
                 HitKind::Melee,
                 Some(h.parryable),
+                Some(h.point),
             );
             if landed {
                 for st in &h.on_hit {
@@ -1376,6 +1391,7 @@ impl Zone {
                     dir,
                     HitKind::Projectile,
                     None,
+                    Some(proj.pos),
                 );
                 if landed {
                     self.run_triggered(&def.on_hit, owner, stats, proj.pos, Some(target));
@@ -1402,6 +1418,12 @@ impl Zone {
                     }
                     let at = world_hit.end;
                     let def = proj.def.clone();
+                    if def.speed >= BULLET_SPEED {
+                        self.events.push(ZoneEvent::Impact {
+                            at,
+                            normal: world_hit.plane_normal,
+                        });
+                    }
                     self.run_triggered(&def.on_hit, proj.owner, proj.stats, at, None);
                     return false;
                 }
@@ -1654,6 +1676,7 @@ impl Zone {
                         dir,
                         HitKind::Area,
                         None,
+                        None,
                     );
                 }
             }
@@ -1714,6 +1737,7 @@ impl Zone {
                             stats,
                             Vec3::ZERO,
                             HitKind::Dot,
+                            None,
                             None,
                         );
                     }
@@ -1813,6 +1837,7 @@ impl Zone {
     /// (whether the swing can be parried); projectiles pass `None` (never parried, blocked only
     /// by shields); areas and DoTs ignore guards. Returns whether the packet landed.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn apply_damage(
         &mut self,
         target: EntityId,
@@ -1822,6 +1847,7 @@ impl Zone {
         dir: Vec3,
         kind: HitKind,
         parryable: Option<bool>,
+        at: Option<Vec3>,
     ) -> bool {
         let now = self.tick;
         let respawn_ticks = self.respawn_ticks;
@@ -1977,6 +2003,7 @@ impl Zone {
             amount,
             kind,
             absorbed,
+            at: at.unwrap_or_else(|| t.capsule().center()),
         });
         // Stagger build-up (guard mitigation does not reduce it), immunity window.
         let mut stagger = guard_broke;
