@@ -929,12 +929,12 @@ fn compile_ability(
         .chain
         .as_ref()
         .map(|c| {
-            let next = keys
-                .iter()
-                .position(|k| *k == c.next)
-                .ok_or_else(|| {
-                    ContentError::Invalid(format!("{}: chain names unknown ability {:?}", a.key, c.next))
-                })?;
+            let next = keys.iter().position(|k| *k == c.next).ok_or_else(|| {
+                ContentError::Invalid(format!(
+                    "{}: chain names unknown ability {:?}",
+                    a.key, c.next
+                ))
+            })?;
             Ok::<_, ContentError>(Chain {
                 next: next as u16,
                 window: ctx.ticks(c.window_ms),

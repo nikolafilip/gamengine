@@ -445,7 +445,10 @@ pub enum FromZone {
     },
     /// v10 (LOOK.md 13.8): a Regen the own hand put on another body gave it `amount`
     /// health back this pulse. The own healings are read from the own health.
-    Healed { target: u32, amount: u16 },
+    Healed {
+        target: u32,
+        amount: u16,
+    },
 }
 
 pub const MAX_MESSAGE_BYTES: usize = u16::MAX as usize;

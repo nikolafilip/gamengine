@@ -129,7 +129,10 @@ pub fn build_editor<C: Canvas>(
     // ability in.
     let rest = col.rest();
     let kit_h = (line + gap)
-        + ui.list_height(kit_rows(pack, rest.w - BODY_WIDE * s - 2.0 * gap >= SPLIT_ACTIVES_AT * s));
+        + ui.list_height(kit_rows(
+            pack,
+            rest.w - BODY_WIDE * s - 2.0 * gap >= SPLIT_ACTIVES_AT * s,
+        ));
     let columns_h = body_height(ui).max(kit_h).min(rest.h - gap - line);
     let read_lines = (((rest.h - columns_h - gap) / line).floor() as usize).clamp(1, 2);
     let both = Rect::new(rest.x, rest.y, rest.w, columns_h);
@@ -248,7 +251,10 @@ fn body_column<C: Canvas>(ui: &mut Ui<'_, C>, area: Rect, b: &mut Build) {
     // (A draft from elsewhere may be over the points: said so, in the warning's colour.)
     let (budget, ink) = match Attributes::FREE_POINTS.checked_sub(spent) {
         Some(left) => (
-            format!("attributes   {left} of {} points left", Attributes::FREE_POINTS),
+            format!(
+                "attributes   {left} of {} points left",
+                Attributes::FREE_POINTS
+            ),
             ui::FOCUS,
         ),
         None => (
@@ -304,7 +310,13 @@ fn body_column<C: Canvas>(ui: &mut Ui<'_, C>, area: Rect, b: &mut Build) {
             &value,
         );
         let words_x = plus.x + button_w + 2.0 * gap;
-        ui.label(words_x, text_y, row.x + row.w - words_x, ui::FAINT, &buys[i]);
+        ui.label(
+            words_x,
+            text_y,
+            row.x + row.w - words_x,
+            ui::FAINT,
+            &buys[i],
+        );
     }
     let [str_, agi, con, int, spr] = attrs;
     b.attributes = Attributes {
@@ -350,7 +362,10 @@ fn kit_columns<C: Canvas>(
     ui.label(cols[1].x, head_y, cols[1].w, ui::FAINT, "secondary");
     // The budget over the actives, which are the kit's choice; short where narrow.
     let budget = if split {
-        format!("actives, up to {MAX_ACTIVES}   kit {}/{BUDGET} points", b.cost(pack))
+        format!(
+            "actives, up to {MAX_ACTIVES}   kit {}/{BUDGET} points",
+            b.cost(pack)
+        )
     } else {
         format!("kit {}/{BUDGET}", b.cost(pack))
     };
@@ -362,9 +377,8 @@ fn kit_columns<C: Canvas>(
     let row_h = line + 2.0 * s;
     let fits = ((room - 2.0 * s) / row_h).floor().max(1.0) as usize;
     let row_height = |rows: usize| rows as f32 * row_h + 2.0 * s;
-    let list_rect = move |c: Rect, rows: usize| {
-        Rect::new(c.x, lists_y, c.w, row_height(rows.min(fits).max(1)))
-    };
+    let list_rect =
+        move |c: Rect, rows: usize| Rect::new(c.x, lists_y, c.w, row_height(rows.min(fits).max(1)));
     // Name, then the cost in its own column.
     const COLS: [f32; 2] = [0.0, 0.86];
     let rows_of = |list: &[(u16, String, String)], none: bool| -> Vec<Vec<String>> {
@@ -543,7 +557,9 @@ pub fn words_of(def: &AbilityDef, rate: TickRate) -> String {
                 };
                 for t in &p.on_hit {
                     match t {
-                        Trigger::Status(st) => w.push_str(&format!(", {} on whom it hits", status(st))),
+                        Trigger::Status(st) => {
+                            w.push_str(&format!(", {} on whom it hits", status(st)))
+                        }
                         Trigger::Area(ar) => {
                             w.push_str(&format!(", then {}", shape(&ar.shape)));
                             if let Some(d) = &ar.damage {
@@ -576,7 +592,9 @@ pub fn words_of(def: &AbilityDef, rate: TickRate) -> String {
                     format!("a dash at {speed:.0} u/s for {}", secs(rate, duration))
                 }
                 MoveKind::Leap { .. } => "a leap".to_string(),
-                MoveKind::Charge { speed, duration, .. } => {
+                MoveKind::Charge {
+                    speed, duration, ..
+                } => {
                     format!("a charge at {speed:.0} u/s for {}", secs(rate, duration))
                 }
                 MoveKind::Blink { distance } => format!("a blink of {distance:.0} u"),

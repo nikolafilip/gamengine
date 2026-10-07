@@ -265,7 +265,10 @@ impl Mover {
     }
 
     /// The firearm in hand and its state, if the weapon in hand is one.
-    pub fn gun_in_hand<'a>(&self, kit: &'a crate::build::Kit) -> Option<(&'a crate::vocab::Firearm, &GunState)> {
+    pub fn gun_in_hand<'a>(
+        &self,
+        kit: &'a crate::build::Kit,
+    ) -> Option<(&'a crate::vocab::Firearm, &GunState)> {
         let slot = self.in_hand(kit)?;
         let f = kit.abilities[slot as usize].firearm.as_ref()?;
         Some((f, &self.guns[self.held.min(1) as usize]))
@@ -518,7 +521,9 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
         };
     }
     // A chain's window closes by itself (MODES.md 4.3).
-    if m.chain.is_some_and(|(_, _, until)| tick_delta(now, until) >= 0) {
+    if m.chain
+        .is_some_and(|(_, _, until)| tick_delta(now, until) >= 0)
+    {
         m.chain = None;
     }
 
@@ -539,7 +544,9 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
     {
         scale *= kit.abilities[i as usize].move_scale;
     }
-    if m.reloading(now) && let Some(i) = primary {
+    if m.reloading(now)
+        && let Some(i) = primary
+    {
         scale *= kit.abilities[i as usize].move_scale.max(0.5);
     }
     let vars = MoveVars {
@@ -657,7 +664,14 @@ fn guard_step(
 
 /// The reload of the firearm in hand (MODES.md 3.2): `R`, or the trigger on an empty
 /// magazine; it ends by itself, a stagger drops it and the rounds are kept.
-fn reload_step(sheet: &Sheet, m: &mut Mover, input: &Input, pressed: u16, now: Tick, staggered: bool) {
+fn reload_step(
+    sheet: &Sheet,
+    m: &mut Mover,
+    input: &Input,
+    pressed: u16,
+    now: Tick,
+    staggered: bool,
+) {
     let kit = &sheet.kit;
     if kit.mode != Mode::Gun || m.held > 1 {
         return;
@@ -671,7 +685,8 @@ fn reload_step(sheet: &Sheet, m: &mut Mover, input: &Input, pressed: u16, now: T
     let g = &mut m.guns[m.held as usize];
     match g.reload_until {
         Some(until) if tick_delta(now, until) >= 0 => {
-            let take = (f.magazine - g.magazine.min(f.magazine)).min(g.reserve.min(u8::MAX as u16) as u8);
+            let take =
+                (f.magazine - g.magazine.min(f.magazine)).min(g.reserve.min(u8::MAX as u16) as u8);
             g.magazine += take;
             g.reserve -= take as u16;
             g.reload_until = None;
@@ -683,11 +698,7 @@ fn reload_step(sheet: &Sheet, m: &mut Mover, input: &Input, pressed: u16, now: T
                 || (input.buttons & buttons::PRIMARY != 0
                     && g.magazine == 0
                     && f.fire == FireMode::Auto);
-            if asked
-                && !staggered
-                && g.magazine < f.magazine
-                && g.reserve > 0
-                && m.script.is_none()
+            if asked && !staggered && g.magazine < f.magazine && g.reserve > 0 && m.script.is_none()
             {
                 g.reload_until = Some(now.wrapping_add(f.reload.max(1)));
                 g.spray = 0;
@@ -920,7 +931,8 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
                     let want = yaw_toward(m.mv.origin, b.centre);
                     let turn = turn_between(m.yaw, want).clamp(-arc.assist_deg, arc.assist_deg);
                     let yaw = m.yaw + turn;
-                    m.lock_yaw = Some((yaw, now.wrapping_add(arc.timing.windup + arc.timing.active)));
+                    m.lock_yaw =
+                        Some((yaw, now.wrapping_add(arc.timing.windup + arc.timing.active)));
                     m.yaw = yaw;
                 }
             }
@@ -937,7 +949,8 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
                 Some(f) => {
                     let g = &m.guns[m.held.min(1) as usize];
                     let crouched = input.buttons & buttons::CROUCH != 0;
-                    let cone = cone_deg(f, sheet.derived.max_speed, m, g, crouched, script.shot, now);
+                    let cone =
+                        cone_deg(f, sheet.derived.max_speed, m, g, crouched, script.shot, now);
                     (f.kick(script.shot), cone, f.headshot)
                 }
                 None => ((0.0, 0.0), 0.0, 1.0),

@@ -1777,7 +1777,6 @@ fn a_status_pulses_four_times_a_second_at_any_rate() {
     }
 }
 
-
 // ---------- MODES.md: the action mode (15a) ----------
 
 /// Two bodies on different teams, `apart` units apart on the x axis, the first facing
@@ -1822,13 +1821,21 @@ fn a_chain_plays_its_stages_in_the_window_and_the_third_knocks_down() {
     // The target presses toward the attacker, as a fighter does: the knockback of the
     // first blows would otherwise carry it out of the third's reach.
     let idle = |zone: &mut Zone, world: &BoxWorld, n: usize| {
-        run(zone, world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 1.0, 0))], n)
+        run(
+            zone,
+            world,
+            &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 1.0, 0))],
+            n,
+        )
     };
     let press = |zone: &mut Zone, world: &BoxWorld| {
         tick(
             zone,
             world,
-            &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, input(180.0, 1.0, 0))],
+            &[
+                (a, input(0.0, 0.0, buttons::PRIMARY)),
+                (b, input(180.0, 1.0, 0)),
+            ],
             0,
         )
     };
@@ -1845,14 +1852,21 @@ fn a_chain_plays_its_stages_in_the_window_and_the_third_knocks_down() {
     // Let the second stage end; within its window the slot still plays the third.
     idle(&mut zone, &world, 40);
     assert_eq!(running(&zone, a), None);
-    assert!(zone.player(a).unwrap().mover.chain.is_some(), "the window is open");
+    assert!(
+        zone.player(a).unwrap().mover.chain.is_some(),
+        "the window is open"
+    );
     press(&mut zone, &world);
     idle(&mut zone, &world, 1);
     assert_eq!(running(&zone, a), Some(s3), "the third stage");
     // The third lands and puts the target on the ground.
     idle(&mut zone, &world, 30);
     let t = zone.player(b).unwrap();
-    assert!(t.mover.statuses.has(Status::Knockdown), "{:?}", t.mover.statuses);
+    assert!(
+        t.mover.statuses.has(Status::Knockdown),
+        "{:?}",
+        t.mover.statuses
+    );
     assert_eq!(t.anim, anim::DOWN);
     assert_eq!(hits(&zone, HitKind::Melee), 3);
     // Down, the body goes nowhere of its own (the knockback's last push aside) and
@@ -1862,11 +1876,18 @@ fn a_chain_plays_its_stages_in_the_window_and_the_third_knocks_down() {
     run(
         &mut zone,
         &world,
-        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 1.0, buttons::PRIMARY))],
+        &[
+            (a, input(0.0, 0.0, 0)),
+            (b, input(180.0, 1.0, buttons::PRIMARY)),
+        ],
         8,
     );
     let t = zone.player(b).unwrap();
-    assert!((t.mover.mv.origin - before).length() < 4.0, "{:?} from {before:?}", t.mover.mv.origin);
+    assert!(
+        (t.mover.mv.origin - before).length() < 4.0,
+        "{:?} from {before:?}",
+        t.mover.mv.origin
+    );
     assert_eq!(t.mover.script, None);
     // After the chain the window closes by itself: the slot is the first stage again.
     idle(&mut zone, &world, 80);
@@ -1884,7 +1905,10 @@ fn the_chains_window_closes_and_a_press_too_late_is_the_first_stage() {
         tick(
             zone,
             world,
-            &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, input(180.0, 0.0, 0))],
+            &[
+                (a, input(0.0, 0.0, buttons::PRIMARY)),
+                (b, input(180.0, 0.0, 0)),
+            ],
             0,
         )
     };
@@ -1904,19 +1928,38 @@ fn a_dash_cuts_a_recovery_and_cannot_be_hit_in_its_first_150_ms() {
     tick(
         &mut zone,
         &world,
-        &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, input(180.0, 0.0, 0))],
+        &[
+            (a, input(0.0, 0.0, buttons::PRIMARY)),
+            (b, input(180.0, 0.0, 0)),
+        ],
         0,
     );
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 13);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        13,
+    );
     // The other starts a swing (it lands ten ticks on)...
     tick(
         &mut zone,
         &world,
-        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, buttons::PRIMARY))],
+        &[
+            (a, input(0.0, 0.0, 0)),
+            (b, input(180.0, 0.0, buttons::PRIMARY)),
+        ],
         0,
     );
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 3);
-    assert!(running(&zone, a).is_some_and(|s| s != dash), "the sword in its recovery");
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        3,
+    );
+    assert!(
+        running(&zone, a).is_some_and(|s| s != dash),
+        "the sword in its recovery"
+    );
     // ...and Space (active 1) in the recovery: the dash starts at once, untouchable.
     tick(
         &mut zone,
@@ -1924,11 +1967,21 @@ fn a_dash_cuts_a_recovery_and_cannot_be_hit_in_its_first_150_ms() {
         &[(a, active(0.0, 0.0, 1)), (b, input(180.0, 0.0, 0))],
         0,
     );
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 1);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        1,
+    );
     assert_eq!(running(&zone, a), Some(dash));
     let p = zone.player(a).unwrap();
     assert!(p.mover.invulnerable(p.last_input_tick));
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 12);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        12,
+    );
     let on_a = zone
         .events
         .iter()
@@ -1959,7 +2012,10 @@ fn the_magnet_turns_a_swing_toward_the_nearest_enemy_but_not_an_ally() {
         run(
             &mut zone,
             &world,
-            &[(a, input(70.0, 0.0, buttons::PRIMARY)), (b, input(180.0, 0.0, 0))],
+            &[
+                (a, input(70.0, 0.0, buttons::PRIMARY)),
+                (b, input(180.0, 0.0, 0)),
+            ],
             13,
         );
         assert_eq!(hits(&zone, HitKind::Melee), expect as usize, "team {team}");
@@ -1991,18 +2047,38 @@ fn controls_diminish_the_second_lasts_half_the_third_does_nothing() {
             .get(Status::Knockdown)
             .map(|s| tick_delta(s.until, p.last_input_tick))
     };
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     zone.apply_status(b, a, &down);
     assert_eq!(left(&zone), Some(64));
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 70);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        70,
+    );
     assert_eq!(left(&zone), None, "it ran out");
     zone.apply_status(b, a, &down);
     assert_eq!(left(&zone), Some(32), "the second lasts half");
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 40);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        40,
+    );
     zone.apply_status(b, a, &down);
     assert_eq!(left(&zone), None, "the third does nothing");
     // Ten seconds later the count is forgotten.
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 64 * 11);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        64 * 11,
+    );
     zone.apply_status(b, a, &down);
     assert_eq!(left(&zone), Some(64));
 }
@@ -2019,13 +2095,30 @@ fn launched_lifts_the_body_and_it_is_down_until_it_lands() {
         target: crate::vocab::StatusTarget::Hit,
         dispellable: true,
     };
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     zone.apply_status(b, a, &up);
     let t = zone.player(b).unwrap();
     assert!(t.mover.mv.velocity.z >= 300.0 && !t.mover.mv.on_ground);
-    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 1.0, buttons::PRIMARY))], 6);
+    run(
+        &mut zone,
+        &world,
+        &[
+            (a, input(0.0, 0.0, 0)),
+            (b, input(180.0, 1.0, buttons::PRIMARY)),
+        ],
+        6,
+    );
     let t = zone.player(b).unwrap();
-    assert!(t.mover.mv.origin.z > REST_Z + 10.0, "in the air: {:?}", t.mover.mv.origin);
+    assert!(
+        t.mover.mv.origin.z > REST_Z + 10.0,
+        "in the air: {:?}",
+        t.mover.mv.origin
+    );
     assert_eq!(t.anim, anim::DOWN);
     assert_eq!(t.mover.script, None, "nothing is swung from the air");
 }
@@ -2073,61 +2166,146 @@ fn a_gun_build_carries_its_knife_and_loads_at_a_spawn() {
     assert_eq!(kit.mode, crate::vocab::Mode::Gun);
     assert!(kit.knife.is_some(), "the knife comes with the mode");
     assert!(kit.guard.is_none());
-    assert_eq!((gun(&zone, a, 0).magazine, gun(&zone, a, 0).reserve), (1, 24));
-    assert_eq!((gun(&zone, a, 1).magazine, gun(&zone, a, 1).reserve), (8, 32));
+    assert_eq!(
+        (gun(&zone, a, 0).magazine, gun(&zone, a, 0).reserve),
+        (1, 24)
+    );
+    assert_eq!(
+        (gun(&zone, a, 1).magazine, gun(&zone, a, 1).reserve),
+        (8, 32)
+    );
 }
 
 #[test]
 fn the_musket_fires_one_round_then_reloads_by_itself_and_r_reloads_a_pistol() {
     let (world, mut zone, a, b) = gun_duel(0.0, 400.0);
     let quiet = |zone: &mut Zone, world: &BoxWorld, n: usize, h: u8| {
-        run(zone, world, &[(a, held(0.0, 0.0, 0, h)), (b, input(180.0, 0.0, 0))], n)
+        run(
+            zone,
+            world,
+            &[(a, held(0.0, 0.0, 0, h)), (b, input(180.0, 0.0, 0))],
+            n,
+        )
     };
     // One shot: the magazine is empty and the bolt flies.
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 0)), (b, input(180.0, 0.0, 0))], 0);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::PRIMARY, 0)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
     quiet(&mut zone, &world, 2, 0);
     assert_eq!(bolts(&zone), 1);
     assert_eq!(gun(&zone, a, 0).magazine, 0);
     // The trigger on an empty magazine: the reload begins (2.8 s), nothing flies.
     quiet(&mut zone, &world, 80, 0);
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 0)), (b, input(180.0, 0.0, 0))], 0);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::PRIMARY, 0)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
     quiet(&mut zone, &world, 2, 0);
     assert_eq!(bolts(&zone), 1);
     let p = zone.player(a).unwrap();
     assert!(p.mover.reloading(p.last_input_tick));
     assert_eq!(p.anim, anim::RELOAD);
     // While it reloads the trigger does nothing; when it is done the round is in.
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 0)), (b, input(180.0, 0.0, 0))], 0);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::PRIMARY, 0)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
     quiet(&mut zone, &world, 190, 0);
     assert_eq!(bolts(&zone), 1);
-    assert_eq!((gun(&zone, a, 0).magazine, gun(&zone, a, 0).reserve), (1, 23));
+    assert_eq!(
+        (gun(&zone, a, 0).magazine, gun(&zone, a, 0).reserve),
+        (1, 23)
+    );
     // The pistol in hand: three shots, then R puts the rounds back from the reserve.
     quiet(&mut zone, &world, 1, 1);
     for _ in 0..3 {
-        tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 1)), (b, input(180.0, 0.0, 0))], 0);
+        tick(
+            &mut zone,
+            &world,
+            &[
+                (a, held(0.0, 0.0, buttons::PRIMARY, 1)),
+                (b, input(180.0, 0.0, 0)),
+            ],
+            0,
+        );
         quiet(&mut zone, &world, 14, 1);
     }
     assert_eq!(bolts(&zone), 4);
     assert_eq!(gun(&zone, a, 1).magazine, 5);
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::RELOAD, 1)), (b, input(180.0, 0.0, 0))], 0);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::RELOAD, 1)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
     quiet(&mut zone, &world, 110, 1);
-    assert_eq!((gun(&zone, a, 1).magazine, gun(&zone, a, 1).reserve), (8, 29));
+    assert_eq!(
+        (gun(&zone, a, 1).magazine, gun(&zone, a, 1).reserve),
+        (8, 29)
+    );
 }
 
 #[test]
 fn the_cycle_bounds_the_rate_and_a_stagger_drops_the_reload_keeping_the_rounds() {
     let (world, mut zone, a, b) = gun_duel(0.0, 400.0);
     // The pistol's cycle is 180 ms (12 ticks): a click a tick fires every twelfth.
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     for i in 0..24 {
         let b_ = if i % 2 == 0 { buttons::PRIMARY } else { 0 };
-        tick(&mut zone, &world, &[(a, held(0.0, 0.0, b_, 1)), (b, input(180.0, 0.0, 0))], 0);
+        tick(
+            &mut zone,
+            &world,
+            &[(a, held(0.0, 0.0, b_, 1)), (b, input(180.0, 0.0, 0))],
+            0,
+        );
     }
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     assert_eq!(bolts(&zone), 2, "two shots in 24 ticks at a 12-tick cycle");
     // A reload begun, then a stagger: the reload is dropped, the rounds are where they were.
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::RELOAD, 1)), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 3);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::RELOAD, 1)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        3,
+    );
     let p = zone.player(a).unwrap();
     assert!(p.mover.reloading(p.last_input_tick));
     let stagger = crate::vocab::ApplyStatus {
@@ -2140,10 +2318,18 @@ fn the_cycle_bounds_the_rate_and_a_stagger_drops_the_reload_keeping_the_rounds()
         dispellable: true,
     };
     zone.apply_status(a, b, &stagger);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     let p = zone.player(a).unwrap();
     assert!(!p.mover.reloading(p.last_input_tick));
-    assert_eq!((gun(&zone, a, 1).magazine, gun(&zone, a, 1).reserve), (6, 32));
+    assert_eq!(
+        (gun(&zone, a, 1).magazine, gun(&zone, a, 1).reserve),
+        (6, 32)
+    );
 }
 
 #[test]
@@ -2151,44 +2337,117 @@ fn the_pattern_kicks_each_shot_of_a_spray_and_the_cone_opens_on_the_move() {
     // Standing still, the pistol's first shot flies within its cone (1 degree) of the
     // aim; the second, 12 ticks on, is kicked by the pattern's second pair (0.3, 1.5).
     let (world, mut zone, a, b) = gun_duel(0.0, 2000.0);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     let dir_of = |zone: &Zone| -> Vec3 {
         let pr = zone.projectiles().last().expect("a bolt");
         pr.vel.normalize()
     };
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 1)), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 1);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::PRIMARY, 1)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        1,
+    );
     let first = dir_of(&zone);
     let off = first.dot(Vec3::X).clamp(-1.0, 1.0).acos().to_degrees();
-    assert!(off <= 1.0 + 0.8 + 0.1, "the first shot: {off} degrees off the aim");
+    assert!(
+        off <= 1.0 + 0.8 + 0.1,
+        "the first shot: {off} degrees off the aim"
+    );
     // The kick lifts the bolt: its pitch is up (positive z) by about the pattern's.
     assert!(first.z > 0.0, "{first:?}");
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 11);
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 1)), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 1);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        11,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::PRIMARY, 1)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        1,
+    );
     let second = dir_of(&zone);
     let lift2 = second.z.asin().to_degrees();
-    assert!(lift2 > 1.5 - 1.8 - 0.1 && lift2 < 1.5 + 1.8 + 0.1, "the second: {lift2}");
-    assert!(second.z > first.z - 0.5f32.to_radians(), "the spray climbs: {} then {}", first.z, second.z);
+    assert!(
+        lift2 > 1.5 - 1.8 - 0.1 && lift2 < 1.5 + 1.8 + 0.1,
+        "the second: {lift2}"
+    );
+    assert!(
+        second.z > first.z - 0.5f32.to_radians(),
+        "the spray climbs: {} then {}",
+        first.z,
+        second.z
+    );
     // On the run the cone opens to the move's share: many shots scatter wider than standing.
     let mut spread_still = 0.0f32;
     let mut spread_moving = 0.0f32;
     for (moving, spread) in [(0.0, &mut spread_still), (1.0, &mut spread_moving)] {
         // (The other stands far off: a runner covers two thousand units in the time.)
         let (world, mut zone, a, b) = gun_duel(0.0, 6000.0);
-        run(&mut zone, &world, &[(a, held(0.0, moving, 0, 1)), (b, input(180.0, 0.0, 0))], 40);
+        run(
+            &mut zone,
+            &world,
+            &[(a, held(0.0, moving, 0, 1)), (b, input(180.0, 0.0, 0))],
+            40,
+        );
         for _ in 0..8 {
-            tick(&mut zone, &world, &[(a, held(0.0, moving, buttons::PRIMARY, 1)), (b, input(180.0, 0.0, 0))], 0);
-            run(&mut zone, &world, &[(a, held(0.0, moving, 0, 1)), (b, input(180.0, 0.0, 0))], 1);
+            tick(
+                &mut zone,
+                &world,
+                &[
+                    (a, held(0.0, moving, buttons::PRIMARY, 1)),
+                    (b, input(180.0, 0.0, 0)),
+                ],
+                0,
+            );
+            run(
+                &mut zone,
+                &world,
+                &[(a, held(0.0, moving, 0, 1)), (b, input(180.0, 0.0, 0))],
+                1,
+            );
             let d = dir_of(&zone);
             let yaw_off = d.y.atan2(d.x).to_degrees().abs();
             *spread = spread.max(yaw_off);
             // A long pause between shots: no spray, so only the stance and the movement.
-            run(&mut zone, &world, &[(a, held(0.0, moving, 0, 1)), (b, input(180.0, 0.0, 0))], 50);
+            run(
+                &mut zone,
+                &world,
+                &[(a, held(0.0, moving, 0, 1)), (b, input(180.0, 0.0, 0))],
+                50,
+            );
         }
     }
     assert!(spread_still <= 1.0 + 0.6, "standing: {spread_still}");
-    assert!(spread_moving > spread_still, "moving {spread_moving} vs still {spread_still}");
+    assert!(
+        spread_moving > spread_still,
+        "moving {spread_moving} vs still {spread_still}"
+    );
 }
 
 #[test]
@@ -2197,13 +2456,32 @@ fn a_bolt_in_the_head_band_is_a_headshot_and_a_bolt_action_needs_a_stand() {
     // lands once; aimed at the top of the hull, four times over.
     let hit_for = |pitch_deg: f32| -> i32 {
         let (world, mut zone, a, b) = gun_duel(0.0, 300.0);
-        run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))], 2);
+        run(
+            &mut zone,
+            &world,
+            &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))],
+            2,
+        );
         let aim = Input {
             pitch: pitch_deg,
             ..held(0.0, 0.0, buttons::PRIMARY, 0)
         };
         tick(&mut zone, &world, &[(a, aim), (b, input(180.0, 0.0, 0))], 0);
-        run(&mut zone, &world, &[(a, Input { pitch: pitch_deg, ..held(0.0, 0.0, 0, 0) }), (b, input(180.0, 0.0, 0))], 6);
+        run(
+            &mut zone,
+            &world,
+            &[
+                (
+                    a,
+                    Input {
+                        pitch: pitch_deg,
+                        ..held(0.0, 0.0, 0, 0)
+                    },
+                ),
+                (b, input(180.0, 0.0, 0)),
+            ],
+            6,
+        );
         zone.events
             .iter()
             .find_map(|e| match e {
@@ -2221,13 +2499,49 @@ fn a_bolt_in_the_head_band_is_a_headshot_and_a_bolt_action_needs_a_stand() {
     assert!(head >= body * 3, "the head band: {head} against {body}");
     // Running, a bolt action does not fire; walking, it does.
     let (world, mut zone, a, b) = gun_duel(0.0, 2000.0);
-    run(&mut zone, &world, &[(a, held(0.0, 1.0, 0, 0)), (b, input(180.0, 0.0, 0))], 30);
-    tick(&mut zone, &world, &[(a, held(0.0, 1.0, buttons::PRIMARY, 0)), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, held(0.0, 1.0, 0, 0)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 1.0, 0, 0)), (b, input(180.0, 0.0, 0))],
+        30,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 1.0, buttons::PRIMARY, 0)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 1.0, 0, 0)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     assert_eq!(bolts(&zone), 0, "no shot at a run");
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))], 20);
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 0)), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))],
+        20,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::PRIMARY, 0)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     assert_eq!(bolts(&zone), 1, "a shot standing");
 }
 
@@ -2235,22 +2549,81 @@ fn a_bolt_in_the_head_band_is_a_headshot_and_a_bolt_action_needs_a_stand() {
 fn the_knife_in_hand_swings_and_a_switch_drops_a_reload() {
     let (world, mut zone, a, b) = gun_duel(0.0, 48.0);
     let knife = zone.player(a).unwrap().sheet.kit.knife.unwrap();
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 2)), (b, input(180.0, 0.0, 0))], 2);
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 2)), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 2)), (b, input(180.0, 0.0, 0))], 1);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 2)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::PRIMARY, 2)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 2)), (b, input(180.0, 0.0, 0))],
+        1,
+    );
     assert_eq!(running(&zone, a), Some(knife));
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 2)), (b, input(180.0, 0.0, 0))], 14);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 2)), (b, input(180.0, 0.0, 0))],
+        14,
+    );
     assert_eq!(hits(&zone, HitKind::Melee), 1);
     assert_eq!(bolts(&zone), 0);
     // The pistol, a reload begun, then the knife: the reload is dropped.
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 30);
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::PRIMARY, 1)), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 14);
-    tick(&mut zone, &world, &[(a, held(0.0, 0.0, buttons::RELOAD, 1)), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        30,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::PRIMARY, 1)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        14,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::RELOAD, 1)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     let p = zone.player(a).unwrap();
     assert!(p.mover.reloading(p.last_input_tick));
-    run(&mut zone, &world, &[(a, held(0.0, 0.0, 0, 2)), (b, input(180.0, 0.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 2)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
     let p = zone.player(a).unwrap();
     assert!(!p.mover.guns[1].reload_until.is_some());
     assert_eq!(gun(&zone, a, 1).magazine, 7);
@@ -2286,25 +2659,67 @@ fn a_target_action_turns_the_body_and_leads_the_bolt_within_range_and_sight() {
         90.0,
     );
     // The runner gets going (90 degrees: along +y, across the line of fire).
-    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (runner, input(90.0, 1.0, 0))], 20);
+    run(
+        &mut zone,
+        &world,
+        &[
+            (shooter, input(180.0, 0.0, 0)),
+            (runner, input(90.0, 1.0, 0)),
+        ],
+        20,
+    );
     tick(
         &mut zone,
         &world,
-        &[(shooter, at(runner, input(180.0, 0.0, buttons::PRIMARY))), (runner, input(90.0, 1.0, 0))],
+        &[
+            (shooter, at(runner, input(180.0, 0.0, buttons::PRIMARY))),
+            (runner, input(90.0, 1.0, 0)),
+        ],
         0,
     );
-    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (runner, input(90.0, 1.0, 0))], 2);
+    run(
+        &mut zone,
+        &world,
+        &[
+            (shooter, input(180.0, 0.0, 0)),
+            (runner, input(90.0, 1.0, 0)),
+        ],
+        2,
+    );
     let p = zone.player(shooter).unwrap();
     assert!(p.mover.lock_yaw.is_some(), "the body turned to its target");
-    assert!(p.mover.yaw.abs() < 20.0, "faces the runner, not 180: {}", p.mover.yaw);
+    assert!(
+        p.mover.yaw.abs() < 20.0,
+        "faces the runner, not 180: {}",
+        p.mover.yaw
+    );
     // (The crossbow lets go 150 ms into its script.)
-    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (runner, input(90.0, 1.0, 0))], 10);
+    run(
+        &mut zone,
+        &world,
+        &[
+            (shooter, input(180.0, 0.0, 0)),
+            (runner, input(90.0, 1.0, 0)),
+        ],
+        10,
+    );
     assert_eq!(bolts(&zone), 1);
     let pr = zone.projectiles().last().expect("the bolt");
     let dir = pr.vel.normalize();
-    assert!(dir.x > 0.9, "flies toward the runner, not where the view looked: {dir:?}");
+    assert!(
+        dir.x > 0.9,
+        "flies toward the runner, not where the view looked: {dir:?}"
+    );
     assert!(dir.y > 0.0, "led ahead of it: {dir:?}");
-    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (runner, input(90.0, 1.0, 0))], 40);
+    run(
+        &mut zone,
+        &world,
+        &[
+            (shooter, input(180.0, 0.0, 0)),
+            (runner, input(90.0, 1.0, 0)),
+        ],
+        40,
+    );
     assert_eq!(hits(&zone, HitKind::Projectile), 1, "the led bolt lands");
 }
 
@@ -2317,27 +2732,95 @@ fn a_target_out_of_range_or_out_of_sight_is_not_aimed_at() {
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(900.0, 0.0, REST_Z), 180.0),
     ]);
-    let shooter = zone.add_player_at(pack.build("marksman").unwrap().clone(), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
-    let far = zone.add_player_at(pack.build("blade").unwrap().clone(), 2, Vec3::new(900.0, 0.0, REST_Z), 180.0);
-    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (far, input(180.0, 0.0, 0))], 2);
-    tick(&mut zone, &world, &[(shooter, at(far, input(180.0, 0.0, buttons::PRIMARY))), (far, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (far, input(180.0, 0.0, 0))], 12);
+    let shooter = zone.add_player_at(
+        pack.build("marksman").unwrap().clone(),
+        1,
+        Vec3::new(0.0, 0.0, REST_Z),
+        180.0,
+    );
+    let far = zone.add_player_at(
+        pack.build("blade").unwrap().clone(),
+        2,
+        Vec3::new(900.0, 0.0, REST_Z),
+        180.0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(shooter, input(180.0, 0.0, 0)), (far, input(180.0, 0.0, 0))],
+        2,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (shooter, at(far, input(180.0, 0.0, buttons::PRIMARY))),
+            (far, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(shooter, input(180.0, 0.0, 0)), (far, input(180.0, 0.0, 0))],
+        12,
+    );
     let p = zone.player(shooter).unwrap();
     assert!(p.mover.lock_yaw.is_none());
     let dir = zone.projectiles().last().expect("a bolt").vel.normalize();
     assert!(dir.x < -0.9, "flies where the body looks: {dir:?}");
     // Out of sight: a wall between, at 300 u.
-    world.push(Vec3::new(140.0, -256.0, 0.0), Vec3::new(160.0, 256.0, 200.0));
+    world.push(
+        Vec3::new(140.0, -256.0, 0.0),
+        Vec3::new(160.0, 256.0, 200.0),
+    );
     let mut zone = zone_with(vec![
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(300.0, 0.0, REST_Z), 180.0),
     ]);
-    let shooter = zone.add_player_at(pack.build("marksman").unwrap().clone(), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
-    let hidden = zone.add_player_at(pack.build("blade").unwrap().clone(), 2, Vec3::new(300.0, 0.0, REST_Z), 180.0);
-    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (hidden, input(180.0, 0.0, 0))], 2);
-    tick(&mut zone, &world, &[(shooter, at(hidden, input(180.0, 0.0, buttons::PRIMARY))), (hidden, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (hidden, input(180.0, 0.0, 0))], 2);
-    assert!(zone.player(shooter).unwrap().mover.lock_yaw.is_none(), "unseen: not turned to");
+    let shooter = zone.add_player_at(
+        pack.build("marksman").unwrap().clone(),
+        1,
+        Vec3::new(0.0, 0.0, REST_Z),
+        180.0,
+    );
+    let hidden = zone.add_player_at(
+        pack.build("blade").unwrap().clone(),
+        2,
+        Vec3::new(300.0, 0.0, REST_Z),
+        180.0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[
+            (shooter, input(180.0, 0.0, 0)),
+            (hidden, input(180.0, 0.0, 0)),
+        ],
+        2,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (shooter, at(hidden, input(180.0, 0.0, buttons::PRIMARY))),
+            (hidden, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[
+            (shooter, input(180.0, 0.0, 0)),
+            (hidden, input(180.0, 0.0, 0)),
+        ],
+        2,
+    );
+    assert!(
+        zone.player(shooter).unwrap().mover.lock_yaw.is_none(),
+        "unseen: not turned to"
+    );
 }
 
 #[test]
@@ -2345,12 +2828,34 @@ fn a_target_action_with_a_melee_arc_swings_at_a_body_behind() {
     let (world, mut zone, a, b) = duel(180.0, 48.0);
     // Facing away, the sword pressed with the other as the target: the body turns and
     // the blow lands.
-    run(&mut zone, &world, &[(a, input(180.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 2);
-    tick(&mut zone, &world, &[(a, at(b, input(180.0, 0.0, buttons::PRIMARY))), (b, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(a, input(180.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 16);
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(180.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        2,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, at(b, input(180.0, 0.0, buttons::PRIMARY))),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(180.0, 0.0, 0)), (b, input(180.0, 0.0, 0))],
+        16,
+    );
     assert_eq!(hits(&zone, HitKind::Melee), 1);
     let p = zone.player(a).unwrap();
-    assert!(p.mover.yaw.abs() < 1.0 || p.mover.lock_yaw.is_none(), "{}", p.mover.yaw);
+    assert!(
+        p.mover.yaw.abs() < 1.0 || p.mover.lock_yaw.is_none(),
+        "{}",
+        p.mover.yaw
+    );
 }
 
 #[test]
@@ -2363,8 +2868,18 @@ fn an_aimed_area_goes_under_its_target() {
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(400.0, 0.0, REST_Z), 180.0),
     ]);
-    let caster = zone.add_player_at(pack.build("frostweaver").unwrap().clone(), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
-    let mark = zone.add_player_at(pack.build("blade").unwrap().clone(), 2, Vec3::new(400.0, 0.0, REST_Z), 180.0);
+    let caster = zone.add_player_at(
+        pack.build("frostweaver").unwrap().clone(),
+        1,
+        Vec3::new(0.0, 0.0, REST_Z),
+        180.0,
+    );
+    let mark = zone.add_player_at(
+        pack.build("blade").unwrap().clone(),
+        2,
+        Vec3::new(400.0, 0.0, REST_Z),
+        180.0,
+    );
     let kit = &zone.player(caster).unwrap().sheet.kit;
     let nova_slot = kit
         .actives
@@ -2383,9 +2898,27 @@ fn an_aimed_area_goes_under_its_target() {
     };
     let range = kit.abilities[kit.actives[slot as usize - 1].unwrap() as usize].range;
     assert!(range >= 400.0, "the nova reaches: {range}");
-    run(&mut zone, &world, &[(caster, input(180.0, 0.0, 0)), (mark, input(180.0, 0.0, 0))], 2);
-    tick(&mut zone, &world, &[(caster, at(mark, active(180.0, 0.0, slot))), (mark, input(180.0, 0.0, 0))], 0);
-    run(&mut zone, &world, &[(caster, input(180.0, 0.0, 0)), (mark, input(180.0, 0.0, 0))], 30);
+    run(
+        &mut zone,
+        &world,
+        &[(caster, input(180.0, 0.0, 0)), (mark, input(180.0, 0.0, 0))],
+        2,
+    );
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (caster, at(mark, active(180.0, 0.0, slot))),
+            (mark, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(caster, input(180.0, 0.0, 0)), (mark, input(180.0, 0.0, 0))],
+        30,
+    );
     let area = zone.areas().iter().chain(zone.areas().iter()).next();
     let placed = zone
         .events
@@ -2393,7 +2926,11 @@ fn an_aimed_area_goes_under_its_target() {
         .any(|e| matches!(e, ZoneEvent::AreaSpawned { .. }));
     assert!(placed, "the nova was cast");
     if let Some(a) = area {
-        assert!((a.origin.truncate() - Vec2::new(400.0, 0.0)).length() < 40.0, "under the mark: {:?}", a.origin);
+        assert!(
+            (a.origin.truncate() - Vec2::new(400.0, 0.0)).length() < 40.0,
+            "under the mark: {:?}",
+            a.origin
+        );
     }
     assert!(hits(&zone, HitKind::Area) >= 1, "it struck the mark");
 }

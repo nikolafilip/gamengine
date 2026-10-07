@@ -26,7 +26,7 @@ fn roster() -> Vec<RosterEntry> {
         party: id,
         build: "blade".into(),
         character: 0,
-            mode: 1,
+        mode: 1,
     };
     vec![body(SHOOTER, "shooter", 1), body(TARGET, "target", 2)]
 }

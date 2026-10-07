@@ -4,7 +4,7 @@
 use crate::matrix::{ArmourClass, Aspects, Attributes, Derived, Element};
 use crate::tick::{Tick, TickRate};
 use crate::vocab::{
-    Ability, ArchetypeFrame, Mode, DamageType, Guard, MoveKind, MoveSelf, Riposte, Trigger, Verb,
+    Ability, ArchetypeFrame, DamageType, Guard, Mode, MoveKind, MoveSelf, Riposte, Trigger, Verb,
 };
 
 /// The kit's budget (MATRIX.md 9): armour, a second aspect and the abilities may cost at
@@ -134,16 +134,26 @@ pub struct ContentPack {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuildError {
     AttributeOutOfRange,
-    AttributePoints { spent: u32 },
+    AttributePoints {
+        spent: u32,
+    },
     NoAspect,
     TooManyAspects,
     UnknownAbility(u16),
-    WrongSlot { index: u16, expected: Slot },
+    WrongSlot {
+        index: u16,
+        expected: Slot,
+    },
     DuplicateAbility(u16),
-    MissingAspect { index: u16, needs: Element },
+    MissingAspect {
+        index: u16,
+        needs: Element,
+    },
     SharedCooldownGroup(u8),
     TooManyActives,
-    Budget { spent: u32 },
+    Budget {
+        spent: u32,
+    },
     CreatureOnly(u16),
     /// A chain stage or a mode's extra, slotted by hand (MODES.md 4.3).
     NotSlottable(u16),
@@ -172,7 +182,10 @@ impl core::fmt::Display for BuildError {
             }
             BuildError::DuplicateAbility(i) => write!(f, "ability {i} slotted twice"),
             BuildError::NotSlottable(i) => {
-                write!(f, "ability {i} comes with another and is not slotted by hand")
+                write!(
+                    f,
+                    "ability {i} comes with another and is not slotted by hand"
+                )
             }
             BuildError::GunNeedsFirearm => write!(f, "a gun build's primary is a firearm"),
             BuildError::FirearmNeedsGun(i) => {
@@ -445,7 +458,9 @@ impl ContentPack {
             while let Some(c) = self.abilities[at].ability.chain {
                 let next = c.next as usize;
                 if next >= self.abilities.len() {
-                    return Err(err(format!("chain names ability {next}, which is not there")));
+                    return Err(err(format!(
+                        "chain names ability {next}, which is not there"
+                    )));
                 }
                 if self.abilities[next].slot != Slot::Extra {
                     return Err(err("a chain's next stage is an extra".into()));
@@ -456,7 +471,8 @@ impl ContentPack {
                 }
                 at = next;
             }
-            if def.ability.firearm.is_some() && !matches!(def.slot, Slot::Primary | Slot::Secondary) {
+            if def.ability.firearm.is_some() && !matches!(def.slot, Slot::Primary | Slot::Secondary)
+            {
                 return Err(err("a firearm is a primary or a secondary".into()));
             }
             let mut types = Vec::new();

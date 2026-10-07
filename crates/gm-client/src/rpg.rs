@@ -129,13 +129,7 @@ impl Rpg {
 
     /// A left click (MODES.md 5.2, 5.5): the body under the pointer becomes the target;
     /// else the ground there becomes where the body walks.
-    pub fn click(
-        &mut self,
-        world: &dyn CollisionWorld,
-        from: Vec3,
-        dir: Vec3,
-        bodies: &[Body],
-    ) {
+    pub fn click(&mut self, world: &dyn CollisionWorld, from: Vec3, dir: Vec3, bodies: &[Body]) {
         let wall = world.trace(Hull::Point, from, from + dir * PICK_REACH);
         let reach = PICK_REACH * wall.fraction;
         let mut best: Option<(f32, u32)> = None;
@@ -281,10 +275,10 @@ impl Rpg {
             }
         }
         if let Some(g) = goal {
-            let nav = self.nav.get_or_insert_with(|| NavGrid::build(world, &[pos]));
-            let steer = self
-                .navigator
-                .steer(nav, world, pos, g, ARRIVE, tick, hz);
+            let nav = self
+                .nav
+                .get_or_insert_with(|| NavGrid::build(world, &[pos]));
+            let steer = self.navigator.steer(nav, world, pos, g, ARRIVE, tick, hz);
             if steer.arrived || steer.blocked {
                 if self.walk == Some(g) {
                     self.walk = None;

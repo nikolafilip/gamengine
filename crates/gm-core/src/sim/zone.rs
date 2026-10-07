@@ -19,9 +19,9 @@ use crate::sim::mover::{
     step_mover,
 };
 use crate::sim::{
-    CONTROL_WINDOW_MS, CREDIT_BURST, DRAIN_DEPTH, HISTORY_TICKS, MAX_FRAMES_PER_TICK, MAX_QUEUED_FRAMES,
-    MAX_REWIND_TICKS, PROJECTILE_OWNER_GRACE, RESERVE_FRAMES, RESPAWN_MS, REWIND_ALLOWANCE_TICKS,
-    tick_delta,
+    CONTROL_WINDOW_MS, CREDIT_BURST, DRAIN_DEPTH, HISTORY_TICKS, MAX_FRAMES_PER_TICK,
+    MAX_QUEUED_FRAMES, MAX_REWIND_TICKS, PROJECTILE_OWNER_GRACE, RESERVE_FRAMES, RESPAWN_MS,
+    REWIND_ALLOWANCE_TICKS, tick_delta,
 };
 use crate::tick::{Tick, TickRate};
 use crate::trace::{CollisionWorld, Contents, Hull};
@@ -1107,7 +1107,15 @@ impl Zone {
         // Where the bolt goes: at a target, led as a mind leads (MODES.md 5.3), when the
         // target is within the ability's range and in sight; else where the body looks,
         // kicked by the firearm's pattern (3.3).
-        let led = self.lead_at(world, p, shot.target, ab.range, origin, def.speed, def.gravity_scale);
+        let led = self.lead_at(
+            world,
+            p,
+            shot.target,
+            ab.range,
+            origin,
+            def.speed,
+            def.gravity_scale,
+        );
         let dir = match led {
             Some(d) => d,
             None => {
@@ -1268,7 +1276,9 @@ impl Zone {
                     };
                     let top = cap.b.z.max(cap.a.z) + cap.radius;
                     if proj.pos.z >= top - HEAD_BAND {
-                        packet.amount = ((packet.amount as f32) * proj.headshot).round().min(u16::MAX as f32) as u16;
+                        packet.amount = ((packet.amount as f32) * proj.headshot)
+                            .round()
+                            .min(u16::MAX as f32) as u16;
                     }
                 }
                 let landed = self.apply_damage(

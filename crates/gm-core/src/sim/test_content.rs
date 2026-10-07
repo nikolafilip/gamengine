@@ -1331,7 +1331,10 @@ pub fn pack(rate: TickRate) -> ContentPack {
                     0,
                     0.5,
                     Interrupt::Never,
-                    vec![(0, bullet(r, packet(110, Pierce, 160.0, 15), [20.0, 4.0, -2.0]))],
+                    vec![(
+                        0,
+                        bullet(r, packet(110, Pierce, 160.0, 15), [20.0, 4.0, -2.0]),
+                    )],
                     r,
                 ),
                 1,
@@ -1456,7 +1459,17 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 vec![(
                     0,
                     assisted(
-                        melee(r, 76.0, 110.0, 120, 60, 280, packet(65, Slash, 60.0, 25), 3, 0.7),
+                        melee(
+                            r,
+                            76.0,
+                            110.0,
+                            120,
+                            60,
+                            280,
+                            packet(65, Slash, 60.0, 25),
+                            3,
+                            0.7,
+                        ),
                         30.0,
                     ),
                 )],
@@ -1480,7 +1493,17 @@ pub fn pack(rate: TickRate) -> ContentPack {
                     (
                         0,
                         match assisted(
-                            melee(r, 80.0, 70.0, 260, 70, 450, packet(85, Slash, 220.0, 40), 2, 0.7),
+                            melee(
+                                r,
+                                80.0,
+                                70.0,
+                                260,
+                                70,
+                                450,
+                                packet(85, Slash, 220.0, 40),
+                                2,
+                                0.7,
+                            ),
                             30.0,
                         ) {
                             Verb::MeleeArc(m) => Verb::MeleeArc(MeleeArc {
@@ -1523,7 +1546,17 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 vec![(
                     0,
                     assisted(
-                        melee(r, 58.0, 80.0, 80, 40, 180, packet(38, Slash, 70.0, 12), 1, 1.0),
+                        melee(
+                            r,
+                            58.0,
+                            80.0,
+                            80,
+                            40,
+                            180,
+                            packet(38, Slash, 70.0, 12),
+                            1,
+                            1.0,
+                        ),
                         30.0,
                     ),
                 )],
@@ -1547,7 +1580,17 @@ pub fn pack(rate: TickRate) -> ContentPack {
                     (
                         0,
                         match assisted(
-                            melee(r, 60.0, 60.0, 180, 50, 360, packet(55, Pierce, 120.0, 30), 1, 1.0),
+                            melee(
+                                r,
+                                60.0,
+                                60.0,
+                                180,
+                                50,
+                                360,
+                                packet(55, Pierce, 120.0, 30),
+                                1,
+                                1.0,
+                            ),
                             30.0,
                         ) {
                             Verb::MeleeArc(m) => Verb::MeleeArc(MeleeArc {
@@ -1589,7 +1632,17 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 Interrupt::OnStagger,
                 vec![(
                     0,
-                    melee(r, 56.0, 70.0, 100, 40, 200, packet(40, Slash, 60.0, 10), 1, 1.0),
+                    melee(
+                        r,
+                        56.0,
+                        70.0,
+                        100,
+                        40,
+                        200,
+                        packet(40, Slash, 60.0, 10),
+                        1,
+                        1.0,
+                    ),
                 )],
                 r,
             ),
@@ -1617,7 +1670,14 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 1600,
                 180,
                 FireMode::Semi,
-                &[(0.0, 0.8), (0.3, 1.5), (-0.4, 2.1), (0.5, 2.6), (-0.3, 3.0), (0.2, 3.3)],
+                &[
+                    (0.0, 0.8),
+                    (0.3, 1.5),
+                    (-0.4, 2.1),
+                    (0.5, 2.6),
+                    (-0.3, 3.0),
+                    (0.2, 3.3),
+                ],
                 [1.0, 0.6, 2.5, 7.0, 0.8],
                 350,
             ),
