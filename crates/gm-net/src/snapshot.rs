@@ -764,8 +764,9 @@ mod tests {
         next.own.statuses.clear();
         let bytes = next.encode(Some(&base));
         // header 2 + 3 x 4 + own (stamina 1, focus 2, count 4 bits, the guns' bit and
-        // their 4 bytes) + count 1 + removed 1, bit-packed: 23 bytes.
-        assert_eq!(bytes.len(), 23);
+        // their 4 bytes, the kits and the kit's bit since v12) + count 1 + removed 1,
+        // bit-packed: 24 bytes.
+        assert_eq!(bytes.len(), 24);
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, next);
         // One entity moves: only it is on the wire, the rest still come back.

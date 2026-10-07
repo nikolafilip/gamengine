@@ -2344,8 +2344,9 @@ fn the_cycle_bounds_the_rate_and_a_stagger_drops_the_reload_keeping_the_rounds()
 
 #[test]
 fn the_pattern_kicks_each_shot_of_a_spray_and_the_cone_opens_on_the_move() {
-    // Standing still, the pistol's first shot flies within its cone (1 degree) of the
-    // aim; the second, 12 ticks on, is kicked by the pattern's second pair (0.3, 1.5).
+    // Standing still, the pistol's first shot flies within its cone (0.8 degrees) of the
+    // aim, turned by nothing (MODES.md 3.3); the second, 12 ticks on, is turned by the
+    // pattern's first pair (0.0, 0.8), the kick after the first shot.
     let (world, mut zone, a, b) = gun_duel(0.0, 2000.0);
     run(
         &mut zone,
@@ -2375,11 +2376,9 @@ fn the_pattern_kicks_each_shot_of_a_spray_and_the_cone_opens_on_the_move() {
     let first = dir_of(&zone);
     let off = first.dot(Vec3::X).clamp(-1.0, 1.0).acos().to_degrees();
     assert!(
-        off <= 1.0 + 0.8 + 0.1,
+        off <= 0.8 + 0.1,
         "the first shot: {off} degrees off the aim"
     );
-    // The kick lifts the bolt: its pitch is up (positive z) by about the pattern's.
-    assert!(first.z > 0.0, "{first:?}");
     run(
         &mut zone,
         &world,
@@ -2403,8 +2402,9 @@ fn the_pattern_kicks_each_shot_of_a_spray_and_the_cone_opens_on_the_move() {
     );
     let second = dir_of(&zone);
     let lift2 = second.z.asin().to_degrees();
+    // The second shot's cone: the stance's 0.8 and the spray's 0.8 × (1/4)².
     assert!(
-        lift2 > 1.5 - 1.8 - 0.1 && lift2 < 1.5 + 1.8 + 0.1,
+        lift2 > 0.8 - 0.85 - 0.1 && lift2 < 0.8 + 0.85 + 0.1,
         "the second: {lift2}"
     );
     assert!(
@@ -2453,11 +2453,161 @@ fn the_pattern_kicks_each_shot_of_a_spray_and_the_cone_opens_on_the_move() {
             );
         }
     }
-    assert!(spread_still <= 1.0 + 0.6, "standing: {spread_still}");
+    assert!(spread_still <= 0.8 + 0.1, "standing: {spread_still}");
     assert!(
         spread_moving > spread_still,
         "moving {spread_moving} vs still {spread_still}"
     );
+}
+
+#[test]
+fn the_bolt_leaves_the_muzzle_for_the_point_under_the_crosshair() {
+    // The director (2026-10-07): under the scope the mark was always up and right of the
+    // crosshair. The musket's muzzle is 20 ahead, 4 right and 2 below the eye; its first
+    // shot, scoped and still (a cone of 0.05°), flies from there (right is -Y at yaw 0)
+    // to the point the eye
+    // ray meets, the other body's capsule 2,000 u ahead, not parallel to the look.
+    let (world, mut zone, a, b) = gun_duel(0.0, 2000.0);
+    let still = held(0.0, 0.0, buttons::SCOPE, 0);
+    run(
+        &mut zone,
+        &world,
+        &[(a, still), (b, input(180.0, 0.0, 0))],
+        4,
+    );
+    let eye = zone.player(a).unwrap().mover.eye();
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::SCOPE | buttons::PRIMARY, 0)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(a, still), (b, input(180.0, 0.0, 0))],
+        1,
+    );
+    let (origin, dir) = match zone.events.iter().rev().find_map(|e| match e {
+        ZoneEvent::ProjectileSpawned { origin, .. } => Some(*origin),
+        _ => None,
+    }) {
+        Some(o) => (
+            o,
+            zone.projectiles().last().expect("a bolt").vel.normalize(),
+        ),
+        None => panic!("no bolt"),
+    };
+    assert!(
+        (origin - (eye + Vec3::new(20.0, -4.0, -2.0))).length() < 0.01,
+        "the muzzle: {origin:?} for the eye {eye:?}"
+    );
+    // Where the bolt crosses the other body's plane: at the eye's height and on its line.
+    let bx = zone.player(b).unwrap().mover.mv.origin.x - 16.0;
+    let t = (bx - origin.x) / dir.x;
+    let at = origin + dir * t;
+    assert!(
+        (at.y - eye.y).abs() < 2.5 && (at.z - eye.z).abs() < 2.5,
+        "the bolt crosses the target at {at:?}, the eye ray at ({}, {})",
+        eye.y,
+        eye.z
+    );
+}
+
+#[test]
+fn a_crouch_lowers_the_eye_and_halves_the_pace() {
+    let (world, mut zone, a, b) = gun_duel(0.0, 6000.0);
+    let standing = zone.player(a).unwrap().mover.eye();
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 1.0, 0, 0)), (b, input(180.0, 0.0, 0))],
+        40,
+    );
+    let run_speed = zone.player(a).unwrap().mover.mv.ground_speed();
+    run(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 1.0, buttons::CROUCH, 0)),
+            (b, input(180.0, 0.0, 0)),
+        ],
+        40,
+    );
+    let m = &zone.player(a).unwrap().mover;
+    assert!(m.crouched);
+    assert!(
+        (m.mv.ground_speed() - run_speed * 0.5).abs() < run_speed * 0.1,
+        "crouched {} of a run's {run_speed}",
+        m.mv.ground_speed()
+    );
+    assert!(
+        ((standing.z - m.eye().z) - CROUCH_DROP).abs() < 0.01,
+        "the eye: {} standing, {} crouched",
+        standing.z,
+        m.eye().z
+    );
+    // Let go: the eye is back where it was.
+    run(
+        &mut zone,
+        &world,
+        &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))],
+        3,
+    );
+    let m = &zone.player(a).unwrap().mover;
+    assert!(!m.crouched && (m.eye().z - standing.z).abs() < 0.01);
+}
+
+#[test]
+fn the_spray_forgets_itself_after_recover() {
+    // The pistol's recover is 350 ms: a second shot inside it is the spray's second, a
+    // shot after a pause longer than that is a first again (click, pause, click).
+    let (world, mut zone, a, b) = gun_duel(0.0, 2000.0);
+    let shoot = |zone: &mut Zone| {
+        tick(
+            zone,
+            &world,
+            &[
+                (a, held(0.0, 0.0, buttons::PRIMARY, 1)),
+                (b, input(180.0, 0.0, 0)),
+            ],
+            0,
+        );
+    };
+    let rest = |zone: &mut Zone, ticks: usize| {
+        run(
+            zone,
+            &world,
+            &[(a, held(0.0, 0.0, 0, 1)), (b, input(180.0, 0.0, 0))],
+            ticks,
+        );
+    };
+    rest(&mut zone, 2);
+    shoot(&mut zone);
+    rest(&mut zone, 1);
+    assert_eq!(gun(&zone, a, 1).spray, 1);
+    rest(&mut zone, 11);
+    shoot(&mut zone);
+    rest(&mut zone, 1);
+    assert_eq!(gun(&zone, a, 1).spray, 2, "the second within recover");
+    rest(&mut zone, RATE.ms_to_ticks(350) as usize + 2);
+    shoot(&mut zone);
+    rest(&mut zone, 1);
+    assert_eq!(gun(&zone, a, 1).spray, 1, "a first again after the pause");
+}
+
+#[test]
+fn the_cone_is_the_roots_shape() {
+    // Nothing from the move up to a creep of half speed, all of it from four fifths; the
+    // spray's share grows with the square of the shots to four times `shot` by the eighth.
+    assert_eq!(move_share(0.0), 0.0);
+    assert_eq!(move_share(0.5), 0.0);
+    assert!(move_share(0.65) > 0.4 && move_share(0.65) < 0.6);
+    assert_eq!(move_share(0.8), 1.0);
+    assert_eq!(move_share(1.2), 1.0);
 }
 
 #[test]
@@ -2472,9 +2622,10 @@ fn a_bolt_in_the_head_band_is_a_headshot_and_a_bolt_action_needs_a_stand() {
             &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))],
             2,
         );
+        // Under the scope: the cone is 0.05 degrees, nothing of the shot is luck.
         let aim = Input {
             pitch: pitch_deg,
-            ..held(0.0, 0.0, buttons::PRIMARY, 0)
+            ..held(0.0, 0.0, buttons::PRIMARY | buttons::SCOPE, 0)
         };
         tick(&mut zone, &world, &[(a, aim), (b, input(180.0, 0.0, 0))], 0);
         run(
@@ -2485,7 +2636,7 @@ fn a_bolt_in_the_head_band_is_a_headshot_and_a_bolt_action_needs_a_stand() {
                     a,
                     Input {
                         pitch: pitch_deg,
-                        ..held(0.0, 0.0, 0, 0)
+                        ..held(0.0, 0.0, buttons::SCOPE, 0)
                     },
                 ),
                 (b, input(180.0, 0.0, 0)),
@@ -2501,10 +2652,10 @@ fn a_bolt_in_the_head_band_is_a_headshot_and_a_bolt_action_needs_a_stand() {
             .unwrap_or(0)
     };
     // The eye is 46 u over the feet, the hull's top at 56 (a striker) and the band from
-    // 44 up; the musket's pattern lifts its one shot 2.4 degrees. Aimed 8 degrees down
-    // the bolt enters the body low; aimed 2 degrees down it enters within the band.
-    let body = hit_for(8.0);
-    let head = hit_for(2.0);
+    // 44 up; the first shot flies where the crosshair is (3.3). Aimed 6 degrees down the
+    // bolt enters the body low; aimed level it enters at the eye's height, in the band.
+    let body = hit_for(6.0);
+    let head = hit_for(0.0);
     assert!(body > 0, "the level shot lands: {body}");
     assert!(head >= body * 3, "the head band: {head} against {body}");
     // Running, a bolt action does not fire; walking, it does.

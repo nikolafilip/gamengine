@@ -1594,6 +1594,12 @@ v4): the scope's cone a quarter while it is up, tagging (a Slow of 0.5 for 1.5 s
 bullet marks on the world for 20 s, the hit's number and spark where the blow landed instead of over the head,
 a stack of rounds saying which gun it loads, the kit at 300. His "no way to use rounds from inventory" was
 the missing word, not a missing mechanism: the hub's logs show his rounds bought and spent within seconds.
+**He played it a third time the same night** (MODES.md 10.2; content v5): the mark always up and right of the
+scoped crosshair was two shifts, the kick applied to the shot that fired it (the musket's one ball 2.4° high
+every time) and the bolt flying parallel to the look from a muzzle beside the eye; now the first shot of a
+spray is turned by nothing and the bolt leaves the muzzle for the point the eye ray meets. The cone took the
+root's shape (3.4: `scoped` in content, a walk as good as standing, the spray's share squared, forgotten after
+`recover_ms`) and the crouch (Ctrl, as it was) drops the eye 10 u and halves the pace.
 
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute

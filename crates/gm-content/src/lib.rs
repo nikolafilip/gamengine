@@ -187,6 +187,8 @@ fn semi() -> String {
 struct FireConeToml {
     stand: f32,
     crouch: f32,
+    /// The base while the scope is up; a quarter of `stand` when absent (MODES.md 3.4).
+    scoped: Option<f32>,
     #[serde(rename = "move")]
     moving: f32,
     air: f32,
@@ -965,6 +967,10 @@ fn compile_ability(
                 cone: Cone {
                     stand: f.cone.stand,
                     crouch: f.cone.crouch,
+                    scoped: f
+                        .cone
+                        .scoped
+                        .unwrap_or(f.cone.stand * gm_core::sim::SCOPED_CONE),
                     moving: f.cone.moving,
                     air: f.cone.air,
                     shot: f.cone.shot,

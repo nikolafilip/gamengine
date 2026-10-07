@@ -258,7 +258,7 @@ that scales with level (there are no levels). No ability-specific server code.
 | `Firearm.reload`, `cycle` | a tick–6 s, 50 ms–3 s |
 | `Firearm.headshot`, `scope` | 1–5, one of 0, 2, 4 |
 | `Firearm.recoil` | at most 32 pairs, each within ±6° |
-| `Firearm.cone` | each 0–15°, `recover` 100 ms–2 s; a firearm's steps launch a bolt |
+| `Firearm.cone` | `stand`, `crouch`, `scoped`, `moving`, `air`, `shot` each 0–15°, `recover` 100 ms–2 s; a firearm's steps launch a bolt |
 
 ## 12. Open questions
 

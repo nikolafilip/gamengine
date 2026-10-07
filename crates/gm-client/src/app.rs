@@ -498,6 +498,8 @@ struct App {
     combo: (u32, Option<Instant>),
     /// The recoil's punch on the view (MODES.md 3.3), (yaw, pitch) degrees, decaying.
     view_punch: (f32, f32),
+    /// How far the eye has sunk into a crouch (MODES.md 3.4), units, eased.
+    eye_drop: f32,
     /// The scope's zoom this frame (1 without one): the field of view is divided by it
     /// and so is the mouse.
     zoom: f32,
@@ -850,6 +852,7 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         pops: Vec::new(),
         combo: (0, None),
         view_punch: (0.0, 0.0),
+        eye_drop: 0.0,
         zoom: 1.0,
         rpg: crate::rpg::Rpg::new(),
         last_vp: None,
@@ -3881,11 +3884,20 @@ impl App {
         self.effects.begin(frame_dt);
         let feet_under = Vec3::Z * Hull::Player.mins().z;
         let my_team = o.team;
+        // The crouch lowers the eye (MODES.md 3.4): the predicted mover's drop, eased over
+        // about a tenth of a second so the view does not jump.
+        let drop = if c.mover.crouched {
+            gm_core::sim::CROUCH_DROP
+        } else {
+            0.0
+        };
+        self.eye_drop += (drop - self.eye_drop) * (frame_dt * 12.0).min(1.0);
         let eye = {
             let alpha = (o.accumulator / o.rate.dt()).clamp(0.0, 1.0);
-            o.prev_origin.lerp(o.curr_origin, alpha) + Vec3::Z * c.mover.mv.hull.eye_height()
+            o.prev_origin.lerp(o.curr_origin, alpha)
+                + Vec3::Z * (c.mover.mv.hull.eye_height() - self.eye_drop)
         };
-        let centre = eye - Vec3::Z * c.mover.mv.hull.eye_height();
+        let centre = eye - Vec3::Z * (c.mover.mv.hull.eye_height() - self.eye_drop);
         // The recoil's punch (MODES.md 3.3): the firearm's kick for this shot lands on the
         // view at once and decays over 150 ms; the frames sent carry the mouse's aim,
         // the zone kicks the bolt by the same pair.

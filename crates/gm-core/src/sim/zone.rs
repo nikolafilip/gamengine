@@ -359,7 +359,8 @@ pub const HEAD_BAND: f32 = 12.0;
 /// What a firearm's shot adds to a bolt (MODES.md 3.3, 3.4), and the body it is aimed at.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Shot {
-    pub kick: (f32, f32),
+    /// Where the spray has turned the gun before this shot (MODES.md 3.3).
+    pub turn: (f32, f32),
     pub cone_deg: f32,
     pub headshot: f32,
     pub target: u32,
@@ -369,6 +370,10 @@ pub struct Shot {
 /// zone gives parties of people (gm-server's `PARTY_BASE`), and a party is told apart
 /// from a body by it.
 pub const MAX_ENTITY_ID: EntityId = 0x7FFF_FFFF;
+
+/// How far the eye ray is followed for the point a free-aimed bolt converges on
+/// (MODES.md 3.3); past it the bolt flies along the look.
+pub const CONVERGE_RANGE: f32 = 16_384.0;
 
 /// The authoritative simulation of one zone.
 pub struct Zone {
@@ -1011,10 +1016,11 @@ impl Zone {
                     Action::Fire {
                         ability,
                         step,
-                        kick,
+                        turn,
                         cone_deg,
                         headshot,
                         target,
+                        ..
                     } => {
                         fires.push((
                             id,
@@ -1023,7 +1029,7 @@ impl Zone {
                             t,
                             view_tick,
                             Shot {
-                                kick,
+                                turn,
                                 cone_deg,
                                 headshot,
                                 target,
@@ -1206,9 +1212,17 @@ impl Zone {
         let stats = p.attacker_stats();
         let eye = p.mover.eye();
         let origin = resolve_origin(p, def.spawn, None);
+        // Never spawn inside a wall: fall back to the eye when the muzzle is blocked.
+        let origin = if world.trace(Hull::Point, eye, origin).fraction < 1.0 {
+            eye
+        } else {
+            origin
+        };
         // Where the bolt goes: at a target, led as a mind leads (MODES.md 5.3), when the
-        // target is within the ability's range and in sight; else where the body looks,
-        // kicked by the firearm's pattern (3.3).
+        // target is within the ability's range and in sight; else at the point the eye
+        // ray meets, turned by the spray so far (3.3): the bolt leaves the muzzle, beside
+        // and below the eye, toward the crosshair's point, so it lands there and not a
+        // hand's width to its side (the director 2026-10-07, 10.2).
         let led = self.lead_at(
             world,
             p,
@@ -1221,15 +1235,17 @@ impl Zone {
         let dir = match led {
             Some(d) => d,
             None => {
-                let (ky, kp) = shot.kick;
-                crate::sim::view_dir(p.mover.yaw + ky, (p.mover.pitch - kp).clamp(-89.0, 89.0))
+                let (ky, kp) = shot.turn;
+                let look =
+                    crate::sim::view_dir(p.mover.yaw + ky, (p.mover.pitch - kp).clamp(-89.0, 89.0));
+                let point = self.eye_ray_point(world, p, eye, look, CONVERGE_RANGE);
+                (point - origin).normalize_or_zero()
             }
         };
-        // Never spawn inside a wall: fall back to the eye when the muzzle is blocked.
-        let origin = if world.trace(Hull::Point, eye, origin).fraction < 1.0 {
-            eye
+        let dir = if dir.length_squared() < 0.5 {
+            p.mover.view_dir()
         } else {
-            origin
+            dir
         };
         let owner_vel = p.mover.mv.velocity;
         let lag = tick_delta(self.tick, view_tick).clamp(0, p.max_rewind as i32) as Tick;
@@ -1552,6 +1568,29 @@ impl Zone {
     /// `Origin::Aim` (VOCABULARY.md 4): the first body or world surface along the actor's view
     /// ray within `range`, dropped to the ground; under a body, its feet. Current positions:
     /// what is placed is a spot on the floor, and it does not follow anyone.
+    /// The first point the ray from `eye` along `dir` meets within `range`: the world or
+    /// another living body; `range` out when it meets nothing (MODES.md 3.3).
+    fn eye_ray_point(
+        &self,
+        world: &dyn CollisionWorld,
+        p: &Player,
+        eye: Vec3,
+        dir: Vec3,
+        range: f32,
+    ) -> Vec3 {
+        let tr = world.trace(Hull::Point, eye, eye + dir * range);
+        let mut reach = range * tr.fraction;
+        for o in self.players.values() {
+            if o.id == p.id || !o.alive {
+                continue;
+            }
+            if let Some(t) = ray_capsule(eye, dir, reach, &o.capsule()) {
+                reach = t;
+            }
+        }
+        eye + dir * reach
+    }
+
     pub fn aim_point(&self, world: &dyn CollisionWorld, p: &Player, range: f32) -> Vec3 {
         let eye = p.mover.eye();
         let dir = p.mover.view_dir();

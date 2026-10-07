@@ -212,6 +212,9 @@ pub struct Mover {
     /// frame tick it ends at.
     pub kits: u16,
     pub kit_until: Option<Tick>,
+    /// Crouching (MODES.md 3.4, 10.2): the button held on the ground. The eye is lower by
+    /// `CROUCH_DROP` and the body walks at half speed; the hull does not change yet.
+    pub crouched: bool,
 }
 
 impl Mover {
@@ -238,6 +241,7 @@ impl Mover {
             guns: [GunState::default(); 2],
             kits: 0,
             kit_until: None,
+            crouched: false,
         }
     }
 
@@ -298,7 +302,12 @@ impl Mover {
     }
 
     pub fn eye(&self) -> Vec3 {
-        self.mv.eye_position()
+        let eye = self.mv.eye_position();
+        if self.crouched {
+            eye - Vec3::Z * CROUCH_DROP
+        } else {
+            eye
+        }
     }
 
     /// Unit view direction from yaw and pitch (positive pitch looks down).
@@ -381,7 +390,10 @@ pub enum Action {
     Fire {
         ability: u8,
         step: u8,
-        /// A firearm's kick for this shot, (yaw, pitch) degrees (MODES.md 3.3), and the
+        /// Where the spray has turned the gun before this shot, (yaw, pitch) degrees
+        /// (MODES.md 3.3): the zone turns the bolt by it.
+        turn: (f32, f32),
+        /// A firearm's kick after this shot, (yaw, pitch) degrees (MODES.md 3.3), and the
         /// cone it is rolled in (3.4); zero for anything but a firearm.
         kick: (f32, f32),
         cone_deg: f32,
@@ -572,6 +584,12 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
     }
     // A kit is used walking (MODES.md 11.3).
     if m.using_kit(now) {
+        scale *= 0.5;
+    }
+    // A crouch is a half-speed creep with the eye lowered (MODES.md 3.4); the button
+    // counts on the ground only.
+    m.crouched = input.buttons & buttons::CROUCH != 0 && m.mv.on_ground;
+    if m.crouched {
         scale *= 0.5;
     }
     let vars = MoveVars {
@@ -773,8 +791,9 @@ pub fn command_exit_ticks(dt: f32) -> Tick {
     (COMMAND_EXIT_MS as f32 / 1000.0 / dt).ceil() as Tick
 }
 
-/// The cone a firearm's bolt is rolled in now (MODES.md 3.4), in degrees: the stance's
-/// base, the movement's share, the air's, and the shots of the spray within `recover`
+/// The cone a firearm's bolt is rolled in now (MODES.md 3.4), in degrees, shaped as the
+/// root's: the stance's base (`scoped` while the scope is up), the move's share past a
+/// walk, the air's, and the spray's growing with the square of the shots within `recover`
 /// of the last. `shot` is the index of the shot in its spray (0 for the first).
 pub fn cone_deg(
     f: &crate::vocab::Firearm,
@@ -786,30 +805,43 @@ pub fn cone_deg(
     shot: u8,
     now: Tick,
 ) -> f32 {
-    let mut base = if crouched && m.mv.on_ground {
+    let base = if scoped && f.scope > 0 {
+        f.cone.scoped
+    } else if crouched && m.mv.on_ground {
         f.cone.crouch
     } else {
         f.cone.stand
     };
-    // The scope is what makes the shot (MODES.md 3.2, the director 2026-10-07): the
-    // standing cone shrinks to a fraction of itself while it is up; the move, the air and
-    // the spray open it as before.
-    if scoped && f.scope > 0 {
-        base *= SCOPED_CONE;
-    }
     let speed = m.mv.ground_speed() / max_speed.max(1.0);
-    let recent = if shot > 0 && tick_delta(now, g.last_shot) <= f.cone.recover as i32 {
-        shot as f32
+    let spray = if shot > 0 && tick_delta(now, g.last_shot) <= f.cone.recover as i32 {
+        (shot as f32 / 4.0).powi(2).min(4.0)
     } else {
         0.0
     };
-    base + f.cone.moving * speed.clamp(0.0, 1.2)
+    base + f.cone.moving * move_share(speed)
         + if m.mv.on_ground { 0.0 } else { f.cone.air }
-        + f.cone.shot * recent
+        + f.cone.shot * spray
 }
 
-/// What is left of the standing cone under the scope (MODES.md 10.2).
+/// The move's share of the cone at a fraction of the body's speed (MODES.md 3.4): a
+/// creep up to half speed is as good as standing, a run from four fifths is all of it,
+/// smooth between.
+pub fn move_share(speed: f32) -> f32 {
+    let t = ((speed - CREEP_SPEED) / (RUN_SPEED - CREEP_SPEED)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The fraction of the body's speed up to which the move opens no cone (Shift's walk is
+/// half), and the fraction from which it opens all of it (MODES.md 3.4).
+pub const CREEP_SPEED: f32 = 0.5;
+pub const RUN_SPEED: f32 = 0.8;
+
+/// The scoped cone content does not name: this fraction of the standing one
+/// (MODES.md 3.4).
 pub const SCOPED_CONE: f32 = 0.25;
+
+/// How far the eye drops in a crouch, in units (MODES.md 3.4).
+pub const CROUCH_DROP: f32 = 10.0;
 
 /// Line of sight from `eye` to a body's `centre` through the mover's world, which holds
 /// the other bodies as solids: the trace stops a little short of the body, so the body
@@ -913,7 +945,7 @@ fn try_activate<W: CollisionWorld + ?Sized>(
         if f.fire == FireMode::Bolt && m.mv.ground_speed() > sheet.derived.max_speed * 0.5 + 1.0 {
             return false;
         }
-        if tick_delta(now, g.last_shot) > (f.cone.recover * 2) as i32 {
+        if tick_delta(now, g.last_shot) > f.cone.recover as i32 {
             g.spray = 0;
         }
         shot = g.spray;
@@ -1012,7 +1044,7 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
         }
         Verb::Projectile(_) => {
             let ab = &sheet.kit.abilities[ability as usize];
-            let (kick, cone_deg, headshot) = match &ab.firearm {
+            let (turn, kick, cone_deg, headshot) = match &ab.firearm {
                 Some(f) => {
                     let g = &m.guns[m.held.min(1) as usize];
                     let crouched = input.buttons & buttons::CROUCH != 0;
@@ -1027,13 +1059,14 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
                         script.shot,
                         now,
                     );
-                    (f.kick(script.shot), cone, f.headshot)
+                    (f.turn(script.shot), f.kick(script.shot), cone, f.headshot)
                 }
-                None => ((0.0, 0.0), 0.0, 1.0),
+                None => ((0.0, 0.0), (0.0, 0.0), 0.0, 1.0),
             };
             actions.push(Action::Fire {
                 ability,
                 step,
+                turn,
                 kick,
                 cone_deg,
                 headshot,

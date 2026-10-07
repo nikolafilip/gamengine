@@ -800,6 +800,7 @@ mod tests {
             &[Action::Fire {
                 ability: 2,
                 step: 0,
+                turn: (0.0, 0.0),
                 kick: (0.0, 0.0),
                 cone_deg: 0.0,
                 headshot: 1.0,

@@ -100,27 +100,46 @@ projectile = { speed = 20000, gravity = 0.02, ... spread = 0 }
 | `fire` | `auto` (held), `semi` (a click a shot), `bolt` (a click a shot and the body works the action for the cycle; no shot while moving faster than a walk) | |
 | `headshot` | the multiplier for a hit in the head band (3.5) | 1–5 |
 | `scope` | 0 none; else the zoom (2 = FOV 45, 4 = FOV 20): the secondary mouse button toggles it, the view model is not drawn and the body walks at `move_scale` while scoped | 0, 2, 4 |
-| `recoil` | the pattern: the view's kick after the n-th shot of a spray as (yaw, pitch) in degrees; past the end it repeats the last; the index resets after `2 × recover_ms` without a shot | up to 32 pairs, each within ±6° |
-| `cone` | inaccuracy in degrees (3.4) | each 0–15; `recover_ms` 100–2,000 |
+| `recoil` | the pattern: the view's kick after the n-th shot of a spray as (yaw, pitch) in degrees, cumulative; past the end it repeats the last; the index resets after `recover_ms` without a shot | up to 32 pairs, each within ±6° |
+| `cone` | inaccuracy in degrees (3.4): `stand`, `crouch`, `scoped` (a quarter of `stand` when absent), `move`, `air`, `shot`, `recover_ms` | each 0–15; `recover_ms` 100–2,000 |
 
 ### 3.3 Recoil
 
 The pattern is applied twice, to the same effect: the **client** kicks the own view by the
-pair (a punch angle that decays over 150 ms, CS's `v_punchangle`), and the **zone** turns
-the bolt's direction by the same pair before it rolls the cone. The player who pulls the
-mouse against the pattern lands the spray; the pattern is in the content, so it can be
-learned from the file as it was learned from the game. A recoil is not spread: it is
-deterministic and shared, and it is what makes the gun a skill.
+n-th pair after the n-th shot (a punch angle that decays over 150 ms, CS's `v_punchangle`),
+and the **zone** turns the n-th bolt's direction by the pair *before* it, the pattern as
+it stands after the shots so far, before it rolls the cone. The first shot of a spray is
+turned by nothing: it flies where the crosshair is, as the root's does. The player who
+pulls the mouse against the pattern lands the spray; the pattern is in the content, so it
+can be learned from the file as it was learned from the game. A recoil is not spread: it
+is deterministic and shared, and it is what makes the gun a skill.
+
+The bolt leaves the muzzle (the projectile's `spawn`, beside and below the eye) **toward
+the point the eye ray meets** (the world or a body, within 16,384 u; `Zone::eye_ray_point`),
+not parallel to the look: what is under the crosshair is what is hit, at any distance.
+A bolt aimed at a target (5.3) is led to it from the muzzle as before.
 
 ### 3.4 The cone
 
-The bolt's direction, after the recoil, is rolled uniformly inside a cone of
+The bolt's direction, after the recoil, is rolled uniformly inside a cone shaped as the
+root's (its `m_flAccuracy`: still is nearly exact, a run is a lottery, a spray grows with
+the square of its count, a pause forgets it):
 
 ```
-stand  +  move × (speed / max speed)  +  air (while airborne)  +  shot × (shots in the last recover_ms)
+base  +  move × share(speed / max speed)  +  air (while airborne)  +  shot × min((n / 4)², 4)
 ```
 
-with `crouch` in place of `stand` while crouched. Today's `spread_deg` on a projectile
+- `base` is `stand`; `crouch` while the crouch button is held on the ground; `scoped`
+  while the scope is up (the scope is what makes the shot: the musket's is 0.05°, its
+  `stand` 6°, so a shot without the scope is the root's no-scope).
+- `share(s)` is 0 up to half the body's speed (Shift's walk, a crouched creep), 1 from
+  four fifths, smooth between (`sim::move_share`): a walk is as good as standing, a run
+  opens the whole of `move`.
+- `n` is the index of the shot in its spray (0 for the first, so the first adds nothing);
+  the spray is forgotten `recover_ms` after a shot, so click, pause, click is three first
+  shots. By the fourth shot the spray adds `shot`, by the eighth four times it.
+
+Today's `spread_deg` on a projectile
 (zone.rs, the uniform roll in a cone) is this with a constant cone; a firearm's bolt sets
 `spread = 0` and takes the cone from here. The client draws the cone as the crosshair that
 opens: four lines whose gap is the cone at 1,024 units. The zone's roll is the only roll;
@@ -354,12 +373,15 @@ Built as section 3 says, with these readings:
   director played it (2026-10-07: `gm-tools content synth pistol`, LOOK.md 13.10), the
   carbine is drawn as the musket until it has one.
 - **The kick** is applied twice, as 3.3 says: the client's view is punched by the pair
-  and the punch falls to a third in 60 ms; the zone turns the bolt by the pair before
-  it rolls the cone. The frames sent carry the mouse's aim, never the punch.
+  after the shot (`Action::Fire.kick`) and the punch falls to a third in 60 ms; the zone
+  turns the bolt by the pattern before the shot (`Action::Fire.turn`, `Firearm::turn`)
+  before it rolls the cone. The frames sent carry the mouse's aim, never the punch.
 - **The cone** (`gm_core::sim::cone_deg`) is the same function on both sides: the HUD's
   crosshair opens by it, the zone rolls in it, added to the bolt's own spread. A crouch
-  is the button held on the ground (there is no crouching hull yet), so the head band
-  does not move with it. Walking is Shift at half the axes.
+  is the button held on the ground (Ctrl or C): the eye drops 10 u (`CROUCH_DROP`,
+  `Mover::crouched`, the own camera eases to it) and the body creeps at half speed;
+  there is no crouching hull yet, so the head band does not move with it and a stranger
+  is drawn standing. Walking is Shift at half the axes.
 - **The head band** (`HEAD_BAND` = 12 u, ×`headshot`, before armour) is read where the
   bolt's sweep meets the capsule, against the rewound capsule as the hit itself is.
 - **The reload**: `R`, or the trigger on an empty magazine (and the trigger held, on an
@@ -410,6 +432,31 @@ Built as section 3 says, with these readings:
     inventory and at the stall. A stack of rounds for a gun that is not in the build
     loads nothing, and says so. The kit heals 300 (a third of a body of about 1,000;
     50 was nothing).
+- **The director played it a third time (2026-10-07, night)**: "using scope, from not
+  that far, I always see the bullet mark to the upper right of crosshair ... CS 1.6 was
+  great at this, spread was very dependant of fire rate and movement, when very still,
+  it would be like 99.9% precise ... I'd even say this was not as much of spread issue
+  as it is inaccuracy caused by some other shift bug. Also make CTRL crouch". It was a
+  shift, twice (content v5):
+  - **The kick was on the shot that fired it**: the zone turned the n-th bolt by the
+    n-th pair, so the musket's one ball flew 2.4° *above* the crosshair every time (at
+    500 u, 21 u up). Now the bolt is turned by the pattern before the shot (3.3): the
+    first shot of a spray flies true, the second is where the first's kick put the gun.
+  - **The bolt flew parallel to the look** from a muzzle 4 u right and 2 u below the
+    eye, so the mark was 4 right and 2 down of the crosshair at any range (under a 2×
+    scope, a hand's width). Now the bolt leaves the muzzle for the point the eye ray
+    meets (3.3): the mark is under the crosshair.
+  - **The cone has the root's shape** (3.4): `scoped` in content (the musket 0.05°, its
+    `stand` 6° so a no-scope is a no-scope), a run opens the move's share and a walk or
+    a creep none, the spray's share grows with the square of its count instead of its
+    count, and the spray is forgotten after `recover_ms` (not twice it): click, pause,
+    click. The pistol's `stand` 0.8 (was 1.0), the carbine's 0.45 (0.5), the moves 3–4,
+    the airs 8–10.
+  - **Ctrl crouches** as it did (and C); what was missing was anything to see or feel:
+    the eye now drops 10 u and the body creeps at half speed while the button is held
+    on the ground, on both sides (`Mover::crouched`); the own camera eases the drop
+    over about a tenth of a second. The hull does not change (the head band stays), a
+    stranger is drawn standing.
 
 ### 10.3 The RPG mode (15c, 2026-10-07)
 

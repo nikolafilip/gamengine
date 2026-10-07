@@ -541,7 +541,7 @@ move_scale = 0.5
 interrupt = "never"
 prop = "musket"
 range = 1500
-firearm = { magazine = 1, ammo = "ball", reload_ms = 2800, cycle_ms = 1200, fire = "bolt", headshot = 4.0, scope = 2, recoil = [[0.0, 2.4]], cone = { stand = 0.6, crouch = 0.3, move = 3.0, air = 8.0, shot = 1.2, recover_ms = 400 } }
+firearm = { magazine = 1, ammo = "ball", reload_ms = 2800, cycle_ms = 1200, fire = "bolt", headshot = 4.0, scope = 2, recoil = [[0.0, 2.4]], cone = { stand = 6.0, crouch = 5.0, scoped = 0.05, move = 4.0, air = 10.0, shot = 1.2, recover_ms = 400 } }
 [[ability.step]]
 at_ms = 0
 projectile = { speed = 20000, gravity = 0.02, radius = 2, lifetime_ms = 400, damage = { amount = 110, type = "pierce", knockback = 160, stagger = 15 }, spawn = { weapon = [20, 4, -2] }, spread = 0, count = 1, on_hit = [ { status = { status = "slow", duration_ms = 1500, magnitude = 0.5, max_stacks = 1, stacking = "refresh", target = "hit" } } ] }
@@ -678,7 +678,7 @@ move_scale = 0.9
 interrupt = "never"
 prop = "pistol"
 range = 700
-firearm = { magazine = 8, ammo = "pistol_round", reload_ms = 1600, cycle_ms = 180, fire = "semi", headshot = 4.0, scope = 0, recoil = [[0.0, 0.8], [0.3, 1.5], [-0.4, 2.1], [0.5, 2.6], [-0.3, 3.0], [0.2, 3.3]], cone = { stand = 1.0, crouch = 0.6, move = 2.5, air = 7.0, shot = 0.8, recover_ms = 350 } }
+firearm = { magazine = 8, ammo = "pistol_round", reload_ms = 1600, cycle_ms = 180, fire = "semi", headshot = 4.0, scope = 0, recoil = [[0.0, 0.8], [0.3, 1.5], [-0.4, 2.1], [0.5, 2.6], [-0.3, 3.0], [0.2, 3.3]], cone = { stand = 0.8, crouch = 0.5, move = 3.0, air = 8.0, shot = 0.8, recover_ms = 350 } }
 [[ability.step]]
 at_ms = 0
 projectile = { speed = 20000, gravity = 0.02, radius = 2, lifetime_ms = 400, damage = { amount = 32, type = "pierce", knockback = 40, stagger = 6 }, spawn = { weapon = [16, 4, -2] }, spread = 0, count = 1, on_hit = [ { status = { status = "slow", duration_ms = 1500, magnitude = 0.5, max_stacks = 1, stacking = "refresh", target = "hit" } } ] }
@@ -694,7 +694,7 @@ move_scale = 0.7
 interrupt = "never"
 prop = "musket"
 range = 1200
-firearm = { magazine = 25, ammo = "carbine_round", reload_ms = 2400, cycle_ms = 100, fire = "auto", headshot = 4.0, scope = 0, recoil = [[0.0, 0.4], [0.0, 0.9], [0.1, 1.4], [0.1, 2.0], [0.2, 2.6], [0.3, 3.1], [0.5, 3.5], [0.8, 3.8], [1.1, 4.0], [1.3, 4.1], [1.2, 4.2], [0.8, 4.3], [0.3, 4.4], [-0.3, 4.4], [-0.9, 4.4], [-1.4, 4.3], [-1.7, 4.2], [-1.6, 4.2], [-1.2, 4.3], [-0.6, 4.4], [0.0, 4.5], [0.6, 4.5], [1.1, 4.5], [1.4, 4.5], [1.4, 4.5]], cone = { stand = 0.5, crouch = 0.3, move = 3.5, air = 9.0, shot = 0.35, recover_ms = 300 } }
+firearm = { magazine = 25, ammo = "carbine_round", reload_ms = 2400, cycle_ms = 100, fire = "auto", headshot = 4.0, scope = 0, recoil = [[0.0, 0.4], [0.0, 0.9], [0.1, 1.4], [0.1, 2.0], [0.2, 2.6], [0.3, 3.1], [0.5, 3.5], [0.8, 3.8], [1.1, 4.0], [1.3, 4.1], [1.2, 4.2], [0.8, 4.3], [0.3, 4.4], [-0.3, 4.4], [-0.9, 4.4], [-1.4, 4.3], [-1.7, 4.2], [-1.6, 4.2], [-1.2, 4.3], [-0.6, 4.4], [0.0, 4.5], [0.6, 4.5], [1.1, 4.5], [1.4, 4.5], [1.4, 4.5]], cone = { stand = 0.45, crouch = 0.3, move = 4.0, air = 10.0, shot = 0.35, recover_ms = 300 } }
 [[ability.step]]
 at_ms = 0
 projectile = { speed = 20000, gravity = 0.02, radius = 2, lifetime_ms = 400, damage = { amount = 26, type = "pierce", knockback = 30, stagger = 4 }, spawn = { weapon = [20, 4, -2] }, spread = 0, count = 1, on_hit = [ { status = { status = "slow", duration_ms = 1500, magnitude = 0.5, max_stacks = 1, stacking = "refresh", target = "hit" } } ] }

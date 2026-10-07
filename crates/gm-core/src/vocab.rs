@@ -578,11 +578,17 @@ pub enum FireMode {
 pub struct Cone {
     pub stand: f32,
     pub crouch: f32,
-    /// At full speed; scaled by the body's speed over its maximum.
+    /// The stance's base while the scope is up (MODES.md 3.4): content gives it, or a
+    /// quarter of `stand` (`sim::SCOPED_CONE`).
+    pub scoped: f32,
+    /// The move's share past a walk (MODES.md 3.4): nothing up to half the body's speed,
+    /// all of it from four fifths.
     pub moving: f32,
     pub air: f32,
-    /// Per shot in the last `recover` ticks.
+    /// The spray's share: this much on the fourth shot within `recover` of the last,
+    /// growing with the square of the count to four times it by the eighth.
     pub shot: f32,
+    /// The spray forgets itself this long after a shot.
     pub recover: Tick,
 }
 
@@ -604,18 +610,28 @@ pub struct Firearm {
     pub headshot: f32,
     /// 0: no scope; else the zoom (2 or 4).
     pub scope: u8,
-    /// The kick of the n-th shot of a spray, (yaw, pitch) in degrees, cumulative; past
-    /// the end the last repeats; the index resets after twice `cone.recover` without a shot.
+    /// The kick after the n-th shot of a spray, (yaw, pitch) in degrees, cumulative; past
+    /// the end the last repeats; the index resets after `cone.recover` without a shot.
     pub recoil: Vec<(f32, f32)>,
     pub cone: Cone,
 }
 
 impl Firearm {
-    /// The pattern's pair for the n-th shot (0-based) of a spray.
+    /// The pattern's pair after the n-th shot (0-based) of a spray: the view's punch.
     pub fn kick(&self, index: u8) -> (f32, f32) {
         match self.recoil.last() {
             None => (0.0, 0.0),
             Some(last) => *self.recoil.get(index as usize).unwrap_or(last),
+        }
+    }
+
+    /// Where the pattern has turned the gun before the n-th shot (MODES.md 3.3): nothing
+    /// for the first shot of a spray, which flies where the crosshair is; the pair after
+    /// the shot before for the rest.
+    pub fn turn(&self, index: u8) -> (f32, f32) {
+        match index {
+            0 => (0.0, 0.0),
+            n => self.kick(n - 1),
         }
     }
 }
@@ -743,7 +759,7 @@ impl Ability {
                 return Err(err("recoil: at most 32 pairs within 6 degrees"));
             }
             let c = &f.cone;
-            if [c.stand, c.crouch, c.moving, c.air, c.shot]
+            if [c.stand, c.crouch, c.scoped, c.moving, c.air, c.shot]
                 .iter()
                 .any(|d| !(0.0..=limits::MAX_CONE_DEG).contains(d))
             {
