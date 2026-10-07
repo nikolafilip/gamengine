@@ -15,10 +15,11 @@ use crate::matrix::{
 use crate::movement::{MoveVars, yaw_vectors};
 use crate::rng::Rng;
 use crate::sim::mover::{
-    Action, GuardState, Input, Mover, anim, capsule_at, melee_hit_point, step_mover,
+    Action, Company, GuardState, Input, Mover, Nearby, anim, capsule_at, melee_hit_point,
+    step_mover,
 };
 use crate::sim::{
-    CREDIT_BURST, DRAIN_DEPTH, HISTORY_TICKS, MAX_FRAMES_PER_TICK, MAX_QUEUED_FRAMES,
+    CONTROL_WINDOW_MS, CREDIT_BURST, DRAIN_DEPTH, HISTORY_TICKS, MAX_FRAMES_PER_TICK, MAX_QUEUED_FRAMES,
     MAX_REWIND_TICKS, PROJECTILE_OWNER_GRACE, RESERVE_FRAMES, RESPAWN_MS, REWIND_ALLOWANCE_TICKS,
     tick_delta,
 };
@@ -119,6 +120,12 @@ pub struct Player {
     pub unhurt: bool,
     /// A mind's frame for the next tick.
     next: Option<Input>,
+    /// Diminishing returns on controls (MODES.md 4.5), per kind (knockdown, launched,
+    /// root): how many landed in a row, and the server tick of the last.
+    pub controls: [(u8, Tick); 3],
+    /// The body the last executed frame aimed at (MODES.md 5.2): its health goes on the
+    /// wire to this one.
+    pub target: EntityId,
 }
 
 impl Player {
@@ -193,6 +200,8 @@ pub struct Projectile {
     pub pierce_left: u8,
     pub bounces_left: u8,
     pub hit: Vec<EntityId>,
+    /// The multiplier in the head band (MODES.md 3.5): a firearm's, 1 for anything else.
+    pub headshot: f32,
 }
 
 /// How long an instant area (one pulse, no duration) stays on the wire after its pulse,
@@ -317,6 +326,19 @@ pub enum ZoneEvent {
         status: Status,
         source: EntityId,
     },
+}
+
+/// The head band (MODES.md 3.5): a bolt entering the hull within this many units of its top
+/// is a headshot.
+pub const HEAD_BAND: f32 = 12.0;
+
+/// What a firearm's shot adds to a bolt (MODES.md 3.3, 3.4), and the body it is aimed at.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Shot {
+    pub kick: (f32, f32),
+    pub cone_deg: f32,
+    pub headshot: f32,
+    pub target: u32,
 }
 
 /// The largest id a body, a projectile or an area gets: ids above it are the numbers a
@@ -468,6 +490,8 @@ impl Zone {
             hold: false,
             unhurt: false,
             next: None,
+            controls: [(0, 0); 3],
+            target: 0,
         };
         self.players.insert(id, p);
         id
@@ -721,8 +745,8 @@ impl Zone {
 
         // 1 + 2: inputs and movement, players blocking each other. One shared box list per
         // tick; each mover ignores its own entry.
-        let mut fires: Vec<(EntityId, u8, u8, u32, Tick)> = Vec::new();
-        let mut area_spawns: Vec<(EntityId, u8, u8)> = Vec::new();
+        let mut fires: Vec<(EntityId, u8, u8, u32, Tick, Shot)> = Vec::new();
+        let mut area_spawns: Vec<(EntityId, u8, u8, u32)> = Vec::new();
         let mut solids: Vec<(EntityId, Aabb)> = self
             .players
             .values()
@@ -732,6 +756,20 @@ impl Zone {
         // With a crowd, a grid over the boxes: each sweep looks at its neighbours only.
         let mut grid = (solids.len() >= GRID_FROM && solids.len() <= u16::MAX as usize)
             .then(|| BodyGrid::build(&solids));
+        // What every mover sees of the others this tick (MODES.md 4.2, 5.3): where the
+        // tick began; a swing's own rewind is the zone's.
+        let nearby: Vec<Nearby> = self
+            .players
+            .values()
+            .filter(|o| o.alive)
+            .map(|o| Nearby {
+                id: o.id,
+                centre: o.capsule().center(),
+                velocity: o.mover.mv.velocity,
+                team: o.team(),
+                party: o.party,
+            })
+            .collect();
         for &id in &ids {
             let p = self.players.get_mut(&id).expect("id from keys");
             p.credits = (p.credits + 1.0).min(CREDIT_BURST);
@@ -767,7 +805,22 @@ impl Zone {
                             own: Some(p.mover.aabb()),
                             grid: grid.as_ref(),
                         };
-                        step_mover(&composite, sheet, &mut p.mover, &input, t, dt, &mut sink);
+                        let company = Company {
+                            bodies: &nearby,
+                            team: p.team(),
+                            party: p.party,
+                        };
+                        p.target = input.target;
+                        step_mover(
+                            &composite,
+                            sheet,
+                            &mut p.mover,
+                            &input,
+                            t,
+                            dt,
+                            company,
+                            &mut sink,
+                        );
                         actions.extend(sink.drain(..).map(|a| (t, now, a)));
                     }
                 }
@@ -791,7 +844,22 @@ impl Zone {
                         own: Some(p.mover.aabb()),
                         grid: grid.as_ref(),
                     };
-                    step_mover(&composite, sheet, &mut p.mover, &input, t, dt, &mut sink);
+                    let company = Company {
+                        bodies: &nearby,
+                        team: p.team(),
+                        party: p.party,
+                    };
+                    p.target = input.target;
+                    step_mover(
+                        &composite,
+                        sheet,
+                        &mut p.mover,
+                        &input,
+                        t,
+                        dt,
+                        company,
+                        &mut sink,
+                    );
                     actions.extend(sink.drain(..).map(|a| (t, view, a)));
                 } else {
                     p.mover.yaw = input.yaw;
@@ -841,10 +909,33 @@ impl Zone {
                             riposte: false,
                         });
                     }
-                    Action::Fire { ability, step } => {
-                        fires.push((id, ability, step, t, view_tick));
+                    Action::Fire {
+                        ability,
+                        step,
+                        kick,
+                        cone_deg,
+                        headshot,
+                        target,
+                    } => {
+                        fires.push((
+                            id,
+                            ability,
+                            step,
+                            t,
+                            view_tick,
+                            Shot {
+                                kick,
+                                cone_deg,
+                                headshot,
+                                target,
+                            },
+                        ));
                     }
-                    Action::Area { ability, step } => area_spawns.push((id, ability, step)),
+                    Action::Area {
+                        ability,
+                        step,
+                        target,
+                    } => area_spawns.push((id, ability, step, target)),
                     Action::ParryOpened => {}
                 }
             }
@@ -860,11 +951,11 @@ impl Zone {
 
         // 3: melee resolution with lag compensation, then projectile and area spawns.
         self.resolve_swings(world);
-        for (owner, ability, step, input_tick, view_tick) in fires {
-            self.fire(world, owner, ability, step, input_tick, view_tick);
+        for (owner, ability, step, input_tick, view_tick, shot) in fires {
+            self.fire(world, owner, ability, step, input_tick, view_tick, shot);
         }
-        for (owner, ability, step) in area_spawns {
-            self.spawn_area_from_step(world, owner, ability, step);
+        for (owner, ability, step, target) in area_spawns {
+            self.spawn_area_from_step(world, owner, ability, step, target);
         }
 
         // 4: projectiles.
@@ -988,6 +1079,7 @@ impl Zone {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fire(
         &mut self,
         world: &dyn CollisionWorld,
@@ -996,6 +1088,7 @@ impl Zone {
         step: u8,
         input_tick: u32,
         view_tick: Tick,
+        shot: Shot,
     ) {
         let Some(p) = self.players.get(&owner) else {
             return;
@@ -1003,16 +1096,25 @@ impl Zone {
         if !p.alive {
             return;
         }
-        let Verb::Projectile(def) =
-            &p.sheet.kit.abilities[ability as usize].steps[step as usize].verb
-        else {
+        let ab = &p.sheet.kit.abilities[ability as usize];
+        let Verb::Projectile(def) = &ab.steps[step as usize].verb else {
             return;
         };
         let def = def.clone();
         let stats = p.attacker_stats();
         let eye = p.mover.eye();
-        let dir = p.mover.view_dir();
         let origin = resolve_origin(p, def.spawn, None);
+        // Where the bolt goes: at a target, led as a mind leads (MODES.md 5.3), when the
+        // target is within the ability's range and in sight; else where the body looks,
+        // kicked by the firearm's pattern (3.3).
+        let led = self.lead_at(world, p, shot.target, ab.range, origin, def.speed, def.gravity_scale);
+        let dir = match led {
+            Some(d) => d,
+            None => {
+                let (ky, kp) = shot.kick;
+                crate::sim::view_dir(p.mover.yaw + ky, (p.mover.pitch - kp).clamp(-89.0, 89.0))
+            }
+        };
         // Never spawn inside a wall: fall back to the eye when the muzzle is blocked.
         let origin = if world.trace(Hull::Point, eye, origin).fraction < 1.0 {
             eye
@@ -1023,10 +1125,11 @@ impl Zone {
         let lag = tick_delta(self.tick, view_tick).clamp(0, p.max_rewind as i32) as Tick;
         let view_lag =
             tick_delta(self.tick, p.view_claimed).clamp(0, MAX_CLAIMED_VIEW_LAG as i32) as Tick;
+        let spread_deg = def.spread_deg + shot.cone_deg;
         for _ in 0..def.count.max(1) {
-            let shot_dir = if def.spread_deg > 0.0 {
+            let shot_dir = if spread_deg > 0.0 {
                 let a = self.rng.range_f32(0.0, core::f32::consts::TAU);
-                let r = self.rng.next_f32().sqrt() * def.spread_deg.to_radians();
+                let r = self.rng.next_f32().sqrt() * spread_deg.to_radians();
                 let side = dir.cross(Vec3::Z).normalize_or_zero();
                 let side = if side.length_squared() < 0.5 {
                     Vec3::X
@@ -1055,6 +1158,7 @@ impl Zone {
                 pierce_left: def.pierce,
                 bounces_left: def.bounce.count,
                 hit: Vec::new(),
+                headshot: shot.headshot,
                 def: def.clone(),
             };
             self.events.push(ZoneEvent::ProjectileSpawned {
@@ -1152,10 +1256,25 @@ impl Zone {
                 let owner = proj.owner;
                 let stats = proj.stats;
                 let def = proj.def.clone();
+                // The head band (MODES.md 3.5): a bolt that enters the hull within the top
+                // of it is multiplied before armour.
+                let mut packet = def.damage;
+                if proj.headshot > 1.0
+                    && let Some(tp) = self.players.get(&target)
+                {
+                    let cap = match rewind_to.and_then(|at| self.history.origin_at(at, target)) {
+                        Some(origin) => capsule_at(origin, tp.mover.mv.hull, tp.frame()),
+                        None => tp.capsule(),
+                    };
+                    let top = cap.b.z.max(cap.a.z) + cap.radius;
+                    if proj.pos.z >= top - HEAD_BAND {
+                        packet.amount = ((packet.amount as f32) * proj.headshot).round().min(u16::MAX as f32) as u16;
+                    }
+                }
                 let landed = self.apply_damage(
                     target,
                     owner,
-                    &def.damage,
+                    &packet,
                     stats,
                     dir,
                     HitKind::Projectile,
@@ -1235,6 +1354,7 @@ impl Zone {
         owner: EntityId,
         ability: u8,
         step: u8,
+        target: u32,
     ) {
         let Some(p) = self.players.get(&owner) else {
             return;
@@ -1242,19 +1362,72 @@ impl Zone {
         if !p.alive {
             return;
         }
-        let Verb::AreaEffect(ae) =
-            &p.sheet.kit.abilities[ability as usize].steps[step as usize].verb
-        else {
+        let ab = &p.sheet.kit.abilities[ability as usize];
+        let Verb::AreaEffect(ae) = &ab.steps[step as usize].verb else {
             return;
         };
         let ae = ae.clone();
         let stats = p.attacker_stats();
-        let origin = match ae.origin {
-            Origin::Aim { range } => self.aim_point(world, p, range),
-            other => resolve_origin(p, other, None),
+        // An aimed area goes under its target (MODES.md 5.3) when the target is within
+        // the ability's range and in sight; else where the actor looks.
+        let under = match (ae.origin, self.target_in_range(world, p, target, ab.range)) {
+            (Origin::Aim { .. }, Some(t)) => {
+                let feet = t.mover.mv.origin + Vec3::new(0.0, 0.0, t.mover.mv.hull.mins().z);
+                let down = world.trace(Hull::Point, feet + Vec3::Z * 8.0, feet - Vec3::Z * 1024.0);
+                Some(if down.start_solid { feet } else { down.end })
+            }
+            _ => None,
+        };
+        let origin = match (ae.origin, under) {
+            (_, Some(at)) => at,
+            (Origin::Aim { range }, None) => self.aim_point(world, p, range),
+            (other, None) => resolve_origin(p, other, None),
         };
         let dir = p.mover.view_dir();
         self.spawn_area(owner, ability, ae, stats, origin, dir);
+    }
+
+    /// The body `target` if it is alive, another than `p`, within `range` of `p` and in
+    /// `p`'s sight (MODES.md 5.3).
+    fn target_in_range(
+        &self,
+        world: &dyn CollisionWorld,
+        p: &Player,
+        target: EntityId,
+        range: f32,
+    ) -> Option<&Player> {
+        if target == 0 || target == p.id || range <= 0.0 {
+            return None;
+        }
+        let t = self.players.get(&target)?;
+        if !t.alive {
+            return None;
+        }
+        let centre = t.capsule().center();
+        if (centre - p.mover.mv.origin).truncate().length() > range {
+            return None;
+        }
+        (world.trace(Hull::Point, p.mover.eye(), centre).fraction >= 1.0).then_some(t)
+    }
+
+    /// The direction from `origin` to where `target` will be when a bolt of `speed` and
+    /// `gravity` gets there (MODES.md 5.3: the lead a mind takes), or `None` without a
+    /// target in range.
+    #[allow(clippy::too_many_arguments)]
+    fn lead_at(
+        &self,
+        world: &dyn CollisionWorld,
+        p: &Player,
+        target: EntityId,
+        range: f32,
+        origin: Vec3,
+        speed: f32,
+        gravity: f32,
+    ) -> Option<Vec3> {
+        let t = self.target_in_range(world, p, target, range)?;
+        let centre = t.capsule().center();
+        let point = crate::sim::aim::lead(origin, centre, t.mover.mv.velocity, speed, gravity);
+        Some((point - origin).normalize_or_zero())
     }
 
     /// `Origin::Aim` (VOCABULARY.md 4): the first body or world surface along the actor's view
@@ -1480,8 +1653,33 @@ impl Zone {
         } else {
             t.sheet.derived.status_duration
         };
-        let duration = ((s.duration as f32) * factor).round().max(1.0) as Tick;
+        let mut duration = ((s.duration as f32) * factor).round().max(1.0) as Tick;
         let now = t.last_input_tick;
+        // Diminishing returns on controls (MODES.md 4.5): the second within ten seconds
+        // lasts half, the third does nothing and the body is immune for ten seconds.
+        if s.status.is_control() {
+            let kind = match s.status {
+                Status::Knockdown => 0,
+                Status::Launched => 1,
+                _ => 2,
+            };
+            let window = self.rate.ms_to_ticks(CONTROL_WINDOW_MS);
+            let (count, last) = t.controls[kind];
+            let count = if tick_delta(self.tick, last) > window as i32 {
+                0
+            } else {
+                count
+            };
+            match count {
+                0 => {}
+                1 => duration = (duration / 2).max(1),
+                _ => {
+                    t.controls[kind] = (count, self.tick);
+                    return;
+                }
+            }
+            t.controls[kind] = (count + 1, self.tick);
+        }
         let outcome = t.mover.statuses.apply(s, duration, now, source);
         if matches!(
             outcome,
@@ -1489,11 +1687,18 @@ impl Zone {
         ) {
             return;
         }
-        if s.status == Status::Stagger || s.status == Status::Shock {
+        if s.status == Status::Stagger || s.status == Status::Shock || s.status.downs() {
             t.mover.script = None;
             t.mover.dash = None;
             t.mover.guard = GuardState::None;
+            t.mover.lock_yaw = None;
+            t.mover.chain = None;
             self.swings.retain(|sw| sw.attacker != target || sw.riposte);
+            if s.status == Status::Launched {
+                // The lift (MODES.md 4.5): the magnitude is the velocity up.
+                t.mover.mv.velocity.z += s.magnitude.max(0.0);
+                t.mover.mv.on_ground = false;
+            }
         } else if t.mover.script.is_some_and(|sc| {
             t.sheet.kit.abilities[sc.ability as usize].interrupt == Interrupt::OnStagger
         }) && s.status == Status::Stagger
@@ -1921,8 +2126,14 @@ fn compute_anim(p: &Player) -> u8 {
     if !p.alive {
         return anim::DEAD;
     }
+    if p.mover.statuses.downed() {
+        return anim::DOWN;
+    }
     if p.mover.statuses.staggered() {
         return anim::STAGGER;
+    }
+    if p.mover.reloading(p.last_input_tick) {
+        return anim::RELOAD;
     }
     if p.mover.commanding(p.last_input_tick) {
         return anim::COMMAND;

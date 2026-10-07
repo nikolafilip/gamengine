@@ -74,6 +74,8 @@ const BENCH_YAW_DEG_PER_S: f32 = 20.0;
 /// With a crowd the bench camera swings across it instead of turning away from it.
 const BENCH_CROWD_SWING_DEG: f32 = 22.0;
 /// Third-person camera: behind, slightly right and above the eyes (VOCABULARY.md 9).
+/// A blow within this many seconds of the last keeps the combo counter going (MODES.md 4.6).
+const COMBO_SECS: f32 = 2.0;
 const CAMERA_BACK: f32 = 110.0;
 const CAMERA_RIGHT: f32 = 24.0;
 const CAMERA_UP: f32 = 12.0;
@@ -266,11 +268,17 @@ impl Input {
         }
     }
 
-    fn sim_input(&mut self, yaw: f32, pitch: f32) -> SimInput {
+    /// The frame's input. `dodge` is the active slot (1-based) Space plays instead of a
+    /// jump (MODES.md 4.6): the kit's dash, while it is ready.
+    fn sim_input(&mut self, yaw: f32, pitch: f32, dodge: Option<u8>) -> SimInput {
         let (forward, side) = self.axes();
         let mut b = 0u16;
-        if self.down(KeyCode::Space) {
+        let dodged = dodge.is_some() && self.just_pressed.contains(&KeyCode::Space);
+        if self.down(KeyCode::Space) && dodge.is_none() {
             b |= buttons::JUMP;
+        }
+        if self.just_pressed.contains(&KeyCode::KeyR) {
+            b |= buttons::RELOAD;
         }
         if self.mouse.contains(&MouseButton::Left) {
             b |= buttons::PRIMARY;
@@ -288,10 +296,7 @@ impl Input {
         if self.down(KeyCode::ShiftLeft) || self.down(KeyCode::ShiftRight) {
             b |= buttons::ABILITY1;
         }
-        if self.just_pressed.contains(&KeyCode::KeyV) {
-            b |= buttons::VIEWPORT;
-        }
-        let ability = [
+        let mut ability = [
             KeyCode::Digit1,
             KeyCode::Digit2,
             KeyCode::Digit3,
@@ -300,6 +305,9 @@ impl Input {
         .iter()
         .position(|k| self.just_pressed.contains(k))
         .map_or(0, |i| i as u8 + 1);
+        if dodged && let Some(d) = dodge {
+            ability = d;
+        }
         self.just_pressed.clear();
         SimInput {
             buttons: b,
@@ -308,6 +316,8 @@ impl Input {
             forward,
             side,
             ability,
+            held: 0,
+            target: 0,
         }
     }
 }
@@ -406,6 +416,9 @@ struct App {
     tags: Vec<Tag>,
     /// The numbers over the bodies this frame (LOOK.md 13.8).
     pops: Vec<crate::fx::Pop>,
+    /// The combo counter (MODES.md 4.6): blows the own hand landed within two seconds of
+    /// each other, and when the last landed.
+    combo: (u32, Option<Instant>),
     /// The yaw each body was drawn facing last frame (LOOK.md 13.9), by its key.
     facings: HashMap<u32, f32>,
     /// Per squad slot: the companion's health as last sent, and whether it lives.
@@ -589,7 +602,7 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         .iter()
         .filter(|r| r.index_count > 0)
         .count();
-    let viewport = if opts.third_person || start.settings.third_person {
+    let viewport = if opts.third_person {
         Viewport::Third
     } else {
         Viewport::First
@@ -685,6 +698,7 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         fx: Default::default(),
         tags: Vec::new(),
         pops: Vec::new(),
+        combo: (0, None),
         facings: HashMap::new(),
         squad_view: Vec::new(),
         target_view: None,
@@ -1196,6 +1210,8 @@ fn fight_input(eye: Vec3, target: Option<(Vec3, Vec3)>, sim: &mut Sim, tick: u32
         forward: 1.0,
         side: 0.0,
         ability: 0,
+        held: 0,
+        target: 0,
     };
     match target {
         Some((at, velocity)) => {
@@ -1279,6 +1295,8 @@ pub(crate) struct HudView<'a> {
     pub time: f32,
     /// The own name, for the portrait frame.
     pub own_name: &'a str,
+    /// The combo counter (MODES.md 4.6): hits in the chain, and seconds since the last.
+    pub combo: (u32, f32),
 }
 
 /// A name over a body (LOOK.md 13): where its head is, what it is called, the colour of
@@ -1370,6 +1388,23 @@ pub(crate) struct HotbarCell {
     pub ready: f32,
     /// Seconds until ready, while cooling.
     pub left_secs: f32,
+    /// The stage a chain's window has reached (MODES.md 4.3): 0 outside one, else 2, 3...
+    pub stage: u8,
+}
+
+/// The active slot (1-based) that is a dash with an untouchable window (MODES.md 4.4),
+/// while it is ready: what Space plays in the action mode.
+pub(crate) fn dodge_slot(kit: &gm_core::build::Kit, mover: &gm_core::sim::Mover, now: u32) -> Option<u8> {
+    kit.actives.iter().enumerate().find_map(|(i, slot)| {
+        let slot = (*slot)? as usize;
+        let ab = kit.abilities.get(slot)?;
+        let dash = matches!(
+            ab.steps.first().map(|s| &s.verb),
+            Some(gm_core::vocab::Verb::MoveSelf(ms))
+                if matches!(ms.kind, gm_core::vocab::MoveKind::Dash { .. }) && ms.iframes > 0
+        );
+        (dash && gm_core::sim::tick_delta(now, mover.cooldowns[slot]) >= 0).then_some(i as u8 + 1)
+    })
 }
 
 /// The hotbar's cells for the own body: what each key does and its state now.
@@ -1385,7 +1420,27 @@ pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
         let (Some(slot), Some(def)) = (slot, def) else {
             return;
         };
-        let (slot, def) = (slot as usize, def as usize);
+        let (mut slot, mut def) = (slot as usize, def as usize);
+        // A chain's window (MODES.md 4.3): the cell is the next stage's.
+        let mut stage = 0;
+        if let Some((from, next, _)) = c.mover.chain
+            && from as usize == slot
+        {
+            let mut at = from;
+            let mut n = 1u8;
+            while at != next && n < 12 {
+                match kit.chain_next.get(at as usize).copied().flatten() {
+                    Some(k) => {
+                        at = k;
+                        n += 1;
+                    }
+                    None => break,
+                }
+            }
+            stage = n;
+            slot = next as usize;
+            def = kit.abilities[slot].id.0.saturating_sub(1) as usize;
+        }
         let (Some(ab), Some(d)) = (kit.abilities.get(slot), pack.abilities.get(def)) else {
             return;
         };
@@ -1416,6 +1471,7 @@ pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
             state,
             ready,
             left_secs: left * c.rate.dt(),
+            stage,
         });
     };
     cell("LMB", kit.primary, Some(build.primary));
@@ -1454,6 +1510,7 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
         manifest,
         time,
         own_name,
+        combo,
     } = view;
     let (w, h) = hud.size;
     // The HUD's words: the text face of the bundle, the small one without it.
@@ -1548,6 +1605,16 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
     // The aim: a dot in the middle.
     hud.rect(w * 0.5 - 2.0, h * 0.5 - 2.0, 4.0, 4.0, hud::SHADE);
     hud.rect(w * 0.5 - 1.0, h * 0.5 - 1.0, 2.0, 2.0, hud::WHITE);
+    // The combo counter (MODES.md 4.6), right of the aim: two hits or more within two
+    // seconds of each other, fading over the two seconds after the last.
+    if combo.0 >= 2 && combo.1 < COMBO_SECS {
+        let fade = 1.0 - combo.1 / COMBO_SECS;
+        let text = format!("{} hits", combo.0);
+        let print = s * 1.2;
+        let ink = [1.0, 0.85, 0.3, fade];
+        hud.text(w * 0.5 + 18.0 * s + 1.0, h * 0.5 - 8.0 * s + 1.0, print, [0.0, 0.0, 0.0, 0.8 * fade], &text);
+        hud.text(w * 0.5 + 18.0 * s, h * 0.5 - 8.0 * s, print, ink, &text);
+    }
     let Some(o) = online else { return };
     let Some(c) = &o.client else { return };
 
@@ -1733,6 +1800,21 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
                     hud.rect(x + side - s, y0, s, side, rim);
                 }
                 _ => {}
+            }
+            // A chain's stage (MODES.md 4.3), bottom right of the cell.
+            if cell.stage >= 2 {
+                let numeral = ["", "I", "II", "III", "IV", "V"]
+                    .get(cell.stage as usize)
+                    .copied()
+                    .unwrap_or("V+");
+                let tw = hud.width(s, numeral);
+                hud.print(
+                    x + side - tw - 3.0 * s,
+                    y0 + side - (cap + 2.0) * s,
+                    s,
+                    [1.0, 0.85, 0.3, 1.0],
+                    numeral,
+                );
             }
             // The key, in its tab at the top left of the cell.
             let kw = hud.width(s, cell.key) + 4.0 * s;
@@ -2760,6 +2842,14 @@ impl App {
     ) -> Option<(Vec3, f32, f32)> {
         self.respec_hotkeys();
         let returns = self.returns_to_screens();
+        // The camera is the character's mode's (MODES.md 2).
+        if let Some(c) = self.online.as_ref().and_then(|o| o.client.as_ref()) {
+            self.viewport = if c.sheet.kit.mode.third_person() {
+                Viewport::Third
+            } else {
+                Viewport::First
+            };
+        }
         let bsp = &self.bsp;
         let viewport = self.viewport;
         let o = self.online.as_mut()?;
@@ -3236,7 +3326,16 @@ impl App {
                         target,
                         amount,
                         absorbed,
-                    } => o.hits.push((target, amount, absorbed)),
+                    } => {
+                        o.hits.push((target, amount, absorbed));
+                        let now = Instant::now();
+                        self.combo = match self.combo {
+                            (n, Some(last)) if now.duration_since(last).as_secs_f32() < COMBO_SECS => {
+                                (n + 1, Some(now))
+                            }
+                            _ => (1, Some(now)),
+                        };
+                    }
                     FromZone::Healed { target, amount } => o.heals.push((target, amount)),
                     FromZone::Killed { victim, killer } => {
                         let me = o.client.as_ref().map(|c| c.my_id);
@@ -3340,6 +3439,10 @@ impl App {
         // the ground it covered by its own ticks (SOUND.md 3).
         let mut own_actions: Vec<gm_core::sim::Action> = Vec::new();
         let mut own_travel = 0.0_f32;
+        // Space dodges in the action mode (MODES.md 4.6): the kit's dash, while ready.
+        let dodge = (c.sheet.kit.mode == gm_core::vocab::Mode::Action)
+            .then(|| dodge_slot(&c.sheet.kit, &c.mover, c.tick))
+            .flatten();
         while o.accumulator >= dt && steps < MAX_STEPS_PER_FRAME {
             let (yaw, pitch) = match viewport {
                 Viewport::First => (self.sim.yaw, self.sim.pitch),
@@ -3358,7 +3461,7 @@ impl App {
                 self.aim = (input.yaw, input.pitch);
                 input
             } else {
-                self.input.sim_input(yaw, pitch)
+                self.input.sim_input(yaw, pitch, dodge)
             };
             let before = c.mover.mv.origin;
             let datagram = c.local_tick(bsp, input);
@@ -3755,7 +3858,7 @@ impl App {
         // A bolt the own body let go this frame flies from the hand at once (the zone's
         // bolt shows a round trip later, well on its way).
         for action in &own_actions {
-            if let gm_core::sim::Action::Fire { ability, step } = action
+            if let gm_core::sim::Action::Fire { ability, step, .. } = action
                 && let Some(gm_core::vocab::Verb::Projectile(p)) = c
                     .sheet
                     .kit
@@ -4403,6 +4506,10 @@ impl App {
                     manifest: self.content.manifest.as_ref(),
                     time: self.started.elapsed().as_secs_f32(),
                     own_name: &self.opts.character,
+                    combo: (
+                        self.combo.0,
+                        self.combo.1.map_or(f32::MAX, |t| t.elapsed().as_secs_f32()),
+                    ),
                 },
             );
         }
@@ -4697,9 +4804,17 @@ impl App {
 
         if self.last_title.elapsed().as_secs_f32() >= 1.0 {
             let r = self.stats.report_since(self.title_frame);
-            let vp = match self.viewport {
-                Viewport::First => "1st",
-                Viewport::Third => "3rd",
+            let vp = match self
+                .online
+                .as_ref()
+                .and_then(|o| o.client.as_ref())
+                .map(|c| c.sheet.kit.mode)
+            {
+                Some(mode) => mode.name(),
+                None => match self.viewport {
+                    Viewport::First => "1st",
+                    Viewport::Third => "3rd",
+                },
             };
             let title = match &self.online {
                 Some(o) => {
@@ -5000,7 +5115,9 @@ impl ApplicationHandler for App {
                             KeyCode::KeyP if !event.repeat => self.ui_key(Key::People),
                             KeyCode::KeyG if !event.repeat => self.ui_key(Key::Gm),
                             KeyCode::KeyK if !event.repeat => self.ui_key(Key::Character),
-                            KeyCode::KeyV if !event.repeat => {
+                            // Outside a zone only (the fitting room, a replay): in one
+                            // the character's mode is the camera (MODES.md 2).
+                            KeyCode::KeyV if !event.repeat && self.online.is_none() => {
                                 self.viewport = match self.viewport {
                                     Viewport::First => Viewport::Third,
                                     Viewport::Third => Viewport::First,

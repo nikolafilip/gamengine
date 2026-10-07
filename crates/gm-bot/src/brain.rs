@@ -487,6 +487,8 @@ impl Brain {
             forward,
             side,
             ability,
+            held: 0,
+            target: 0,
         }
     }
 }

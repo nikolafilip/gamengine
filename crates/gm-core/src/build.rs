@@ -4,7 +4,7 @@
 use crate::matrix::{ArmourClass, Aspects, Attributes, Derived, Element};
 use crate::tick::{Tick, TickRate};
 use crate::vocab::{
-    Ability, ArchetypeFrame, DamageType, Guard, MoveKind, MoveSelf, Riposte, Trigger, Verb,
+    Ability, ArchetypeFrame, Mode, DamageType, Guard, MoveKind, MoveSelf, Riposte, Trigger, Verb,
 };
 
 /// The kit's budget (MATRIX.md 9): armour, a second aspect and the abilities may cost at
@@ -30,6 +30,9 @@ pub enum Slot {
     Secondary = 1,
     Guard = 2,
     Active = 3,
+    /// Never slotted by a build: it comes with another ability (the stages of a chain,
+    /// MODES.md 4.3) or with a mode (the knife of a gun build, MODES.md 3.7).
+    Extra = 4,
 }
 
 /// An ability as content ships it: the verb script plus its price and gating.
@@ -95,6 +98,10 @@ pub struct CreatureDef {
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Build {
+    /// The game the character plays (MODES.md 2). Builds stored before it was there are
+    /// read as `Action`, today's play.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mode: Mode,
     pub frame: ArchetypeFrame,
     pub attributes: Attributes,
     pub armour: ArmourClass,
@@ -138,6 +145,14 @@ pub enum BuildError {
     TooManyActives,
     Budget { spent: u32 },
     CreatureOnly(u16),
+    /// A chain stage or a mode's extra, slotted by hand (MODES.md 4.3).
+    NotSlottable(u16),
+    /// A gun build's primary carries no firearm (MODES.md 2).
+    GunNeedsFirearm,
+    /// A firearm in a build of another mode.
+    FirearmNeedsGun(u16),
+    /// A gun build with a guard (MODES.md 3.7).
+    GunHasNoGuard,
 }
 
 impl core::fmt::Display for BuildError {
@@ -156,6 +171,14 @@ impl core::fmt::Display for BuildError {
                 write!(f, "ability {index} does not fit the {expected:?} slot")
             }
             BuildError::DuplicateAbility(i) => write!(f, "ability {i} slotted twice"),
+            BuildError::NotSlottable(i) => {
+                write!(f, "ability {i} comes with another and is not slotted by hand")
+            }
+            BuildError::GunNeedsFirearm => write!(f, "a gun build's primary is a firearm"),
+            BuildError::FirearmNeedsGun(i) => {
+                write!(f, "ability {i} is a firearm: only a gun build holds one")
+            }
+            BuildError::GunHasNoGuard => write!(f, "a gun build has no guard"),
             BuildError::MissingAspect { index, needs } => {
                 write!(f, "ability {index} needs the {} aspect", needs.name())
             }
@@ -327,6 +350,9 @@ impl Build {
                 .abilities
                 .get(index as usize)
                 .ok_or(BuildError::UnknownAbility(index))?;
+            if def.slot == Slot::Extra {
+                return Err(BuildError::NotSlottable(index));
+            }
             // A creature may hold a second primary (a bow beside its blade) where a
             // player holds a utility: the range rule of MATRIX.md 10 is for players.
             let allowed = def.slot == expected
@@ -336,6 +362,21 @@ impl Build {
             }
             if def.creature && !creature {
                 return Err(BuildError::CreatureOnly(index));
+            }
+            // The mode and the firearm go together (MODES.md 2); a creature's mind holds
+            // what content gives it.
+            if !creature {
+                let firearm = def.ability.firearm.is_some();
+                match (self.mode, expected) {
+                    (Mode::Gun, Slot::Primary) if !firearm => {
+                        return Err(BuildError::GunNeedsFirearm);
+                    }
+                    (Mode::Gun, Slot::Guard) => return Err(BuildError::GunHasNoGuard),
+                    (Mode::Action | Mode::Rpg, _) if firearm => {
+                        return Err(BuildError::FirearmNeedsGun(index));
+                    }
+                    _ => {}
+                }
             }
             if seen.contains(&index) {
                 return Err(BuildError::DuplicateAbility(index));
@@ -397,6 +438,26 @@ impl ContentPack {
                 return Err(err(
                     "guard slot abilities are exactly one Guard step, and only those".into(),
                 ));
+            }
+            // A chain (MODES.md 4.3) names a stage that exists, and never comes round.
+            let mut at = i;
+            let mut hops = 0;
+            while let Some(c) = self.abilities[at].ability.chain {
+                let next = c.next as usize;
+                if next >= self.abilities.len() {
+                    return Err(err(format!("chain names ability {next}, which is not there")));
+                }
+                if self.abilities[next].slot != Slot::Extra {
+                    return Err(err("a chain's next stage is an extra".into()));
+                }
+                hops += 1;
+                if hops > crate::sim::MAX_ABILITIES || next == i {
+                    return Err(err("a chain comes round to itself".into()));
+                }
+                at = next;
+            }
+            if def.ability.firearm.is_some() && !matches!(def.slot, Slot::Primary | Slot::Secondary) {
+                return Err(err("a firearm is a primary or a secondary".into()));
             }
             let mut types = Vec::new();
             collect_types(&def.ability, &mut types);
@@ -517,6 +578,8 @@ fn collect_types(a: &Ability, out: &mut Vec<DamageType>) {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Kit {
     pub abilities: Vec<Ability>,
+    /// The mode the kit is played in (MODES.md 2).
+    pub mode: Mode,
     /// Ticks a script occupies the actor (windup + active + recovery of its verbs).
     pub durations: Vec<Tick>,
     /// Elemental abilities are refused under `Silence`.
@@ -525,15 +588,23 @@ pub struct Kit {
     pub secondary: Option<u8>,
     pub actives: [Option<u8>; MAX_ACTIVES],
     pub guard: Option<u8>,
+    /// Per kit ability, the kit index of its chain's next stage (MODES.md 4.3).
+    pub chain_next: Vec<Option<u8>>,
+    /// The knife of a gun build (MODES.md 3.7): the pack's `knife`, when it has one.
+    pub knife: Option<u8>,
 }
 
 impl Kit {
     /// Compile a validated build against its pack.
     pub fn from_build(build: &Build, pack: &ContentPack) -> Kit {
         let mut kit = Kit::empty();
+        kit.mode = build.mode;
+        // (pack index, kit index) of everything pushed: a chain's stages are shared.
+        let mut pushed: Vec<(u16, u8)> = Vec::new();
         for (index, slot) in build.slots() {
             let def = &pack.abilities[index as usize];
             let i = kit.push(def.ability.clone(), def.aspect.is_some());
+            pushed.push((index, i));
             match slot {
                 Slot::Primary => kit.primary = Some(i),
                 Slot::Secondary => kit.secondary = Some(i),
@@ -543,7 +614,34 @@ impl Kit {
                         *free = Some(i);
                     }
                 }
+                Slot::Extra => {}
             }
+        }
+        // The stages of every chain (MODES.md 4.3), then the knife of a gun (3.7): they
+        // come with what was slotted and cost nothing.
+        let mut k = 0;
+        while k < kit.abilities.len() && kit.abilities.len() < crate::sim::MAX_ABILITIES {
+            if let Some(chain) = kit.abilities[k].chain
+                && let Some(def) = pack.abilities.get(chain.next as usize)
+            {
+                let next = match pushed.iter().find(|(p, _)| *p == chain.next) {
+                    Some((_, i)) => *i,
+                    None => {
+                        let i = kit.push(def.ability.clone(), def.aspect.is_some());
+                        pushed.push((chain.next, i));
+                        i
+                    }
+                };
+                kit.chain_next[k] = Some(next);
+            }
+            k += 1;
+        }
+        if build.mode == Mode::Gun
+            && kit.abilities.len() < crate::sim::MAX_ABILITIES
+            && let Some(index) = pack.find("knife")
+            && let Some(def) = pack.abilities.get(index as usize)
+        {
+            kit.knife = Some(kit.push(def.ability.clone(), def.aspect.is_some()));
         }
         kit
     }
@@ -551,12 +649,15 @@ impl Kit {
     pub fn empty() -> Kit {
         Kit {
             abilities: Vec::new(),
+            mode: Mode::default(),
             durations: Vec::new(),
             elemental: Vec::new(),
             primary: None,
             secondary: None,
             actives: [None; MAX_ACTIVES],
             guard: None,
+            chain_next: Vec::new(),
+            knife: None,
         }
     }
 
@@ -564,6 +665,7 @@ impl Kit {
     pub fn push(&mut self, ability: Ability, elemental: bool) -> u8 {
         self.durations.push(script_duration(&ability));
         self.elemental.push(elemental);
+        self.chain_next.push(None);
         self.abilities.push(ability);
         (self.abilities.len() - 1) as u8
     }
@@ -587,6 +689,19 @@ fn verb_duration(v: &Verb) -> Tick {
         }) => *duration,
         _ => 0,
     }
+}
+
+/// The tick of a script after which it is in its recovery (MODES.md 4.3, 4.4): the end of
+/// the last active window of its arcs, or the moment of its last step.
+pub fn script_commit(a: &Ability) -> Tick {
+    a.steps
+        .iter()
+        .map(|s| match &s.verb {
+            Verb::MeleeArc(m) => s.at + m.timing.windup + m.timing.active,
+            other => s.at + verb_duration(other),
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 pub fn script_duration(a: &Ability) -> Tick {

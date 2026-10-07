@@ -242,7 +242,7 @@ day past its last use, 7) is still there when the zone is left.
 Mouse sensitivity (a slider, 0.01 to 0.20 degrees per count), the sound's volume (a
 slider, 0 to 100) and "no sound" (a box; SOUND.md 3.2), the size of text (by the window,
 or one of 1 to 4; a size the window has no room for gives way, 3), invert the mouse's up
-and down, start in third person, fullscreen (not in a browser: the page has its own
+and down, fullscreen (not in a browser: the page has its own
 button). Applied at once and saved within a second. Every button pressed on any screen
 clicks (SOUND.md 3).
 
@@ -299,10 +299,10 @@ Decided once per frame, in this order:
 2. A screen (login, characters, new character, entering, the menu and its pages, the
    screen for no hub): `Tab`, arrows, `Enter`, `Escape`; the game gets nothing, keys that
    were held are let go, and the frames sent to the zone hold no keys.
-3. The game, as before (`W A S D`, the mouse, `1`–`4`, `V`, `F9` to report, and the rest
+3. The game, as before (`W A S D`, the mouse, `1`–`4`, `F9` to report, and the rest
    of the Keys page), plus `Enter` and `Escape`, and since Phase 11 `I` and `E`, and since
    Phase 12 `P`, and since 2026-10-06 `K`, which open a screen. They are keys only here:
-   under rules 1 and 2 they are letters. (`Tab` for the tactical view was removed on 2026-10-06, COMPANIONS.md 6.)
+   under rules 1 and 2 they are letters. (`Tab` for the tactical view was removed on 2026-10-06, COMPANIONS.md 6; `V` on 2026-10-07: the camera is the mode's, MODES.md 2. `Space` dodges in the action mode while the kit's dash is ready, `R` reloads in the gun mode.)
 
 `Q` no longer quits (it is a letter one types): Quit
 is in the menu, and closing the window still works. In benchmarks nothing changes: no
@@ -367,7 +367,7 @@ client itself:
 |---|---|
 | `hub`, `hub_cert` | the hub's `host:port` and the file its certificate is in (the desktop) |
 | `email`, `character` | the last successful login and the character played last: remembered only when a person went through the screens |
-| `sensitivity`, `invert`, `third_person`, `fullscreen`, `ui_scale` | 4.6 |
+| `sensitivity`, `invert`, `fullscreen`, `ui_scale` | 4.6 (`third_person` is read and dropped since 2026-10-07: the camera is the character's mode's, MODES.md 2) |
 | `volume`, `mute` | the sound (4.6, SOUND.md 3.2): 0 to 100 (70 to begin with), and off altogether |
 | `ignored` | the players not heard (5), comma separated; their lines make no sound either |
 

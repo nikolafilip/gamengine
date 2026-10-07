@@ -220,13 +220,17 @@ of spawning or blinking, never a prison.
 
 ## 9. Genre compilation
 
-| Viewport | Aim source | Movement | Verbs available |
-|---|---|---|---|
-| FPS | eye ray from view yaw/pitch | full | all; precision `Projectile` kits shine |
-| Third-person | camera ray resolved to a world point, re-aimed from the eyes ("camera-to-muzzle re-aim") | full, 360° awareness | all; `MeleeArc`, `Guard`, `MoveSelf` kits shine |
-| Tactical | none (the body is in the command stance, section 15) | none: the officer's body is exposed | issues intents (`Follow`, `Hold`, `MoveTo`, `Attack`) to **its own companions only**; their minds turn intents into ordinary inputs (COMPANIONS.md 5) |
+Since 2026-10-07 the genres are the **modes** of MODES.md: three games on this one
+vocabulary, each chosen with the character's build (`Build.mode`), never switched in play.
 
-The tactical view never commands humans (PLAN.md 4.3).
+| Mode | Aim source | Movement | What this document adds for it |
+|---|---|---|---|
+| Gun | the eye ray, kicked by the firearm's pattern and rolled in its cone (MODES.md 3.3, 3.4) | full, crouch, jump; a walk | `Firearm` on a primary or secondary (magazine, reload, cycle, fire mode, recoil, cone, headshot, scope); the head band (MODES.md 3.5) |
+| Action | the camera ray resolved to a world point and re-aimed from the eyes, plus the magnet of a melee arc (`assist_deg`) | full; a dash that is untouchable (`iframes`) and cuts a recovery (`cancel_recovery`) | `Chain` on an ability (the next stage within a window); the statuses `Knockdown` and `Launched` under diminishing returns (MODES.md 4.5) |
+| RPG | the zone's, at the frame's `target`, when it is within the ability's `range` and in sight; else as the action mode without the magnet | full about the camera, or a walk the client makes of a click | `range` on every ability (a melee arc's reach, an aimed area's, a bolt's as content names it) |
+
+The tactical viewport was removed on 2026-10-06 (COMPANIONS.md 6); the command stance
+(section 15) keeps its key in every mode.
 
 ## 10. Deliberately absent
 
@@ -239,7 +243,7 @@ that scales with level (there are no levels). No ability-specific server code.
 |---|---|
 | `MeleeArc.reach` | 0–160 u |
 | `MeleeArc.arc`, `Guard.arc` | 0–360° |
-| `Projectile.speed` | 1–4000 u/s (a 200 m shot takes at least 1.6 s at max speed) |
+| `Projectile.speed` | 1–20,000 u/s (a bolt; a bullet at the top, MODES.md 3.6) |
 | `Projectile.lifetime` | 1 tick – 20 s |
 | `AreaEffect` radius / length | 0–512 u |
 | `Dash`/`Charge` speed | 0–1600 u/s |
@@ -247,6 +251,14 @@ that scales with level (there are no levels). No ability-specific server code.
 | `Ability.steps[].at` | 0–10 s |
 | `Ability.move_scale`, `Block.mitigation` | 0–1 |
 | `ApplyStatus.duration`, `max_stacks`, `Parry.window` | ≥ 1 |
+| `MeleeArc.assist_deg` | 0–90° |
+| `Ability.range` | 0–4096 u |
+| `Chain.window` | ≤ 2 s; the next stage exists, is an `extra`, and the chain never comes round |
+| `Firearm.magazine`, `reserve` | 1–100, 0–400 |
+| `Firearm.reload`, `cycle` | a tick–6 s, 50 ms–3 s |
+| `Firearm.headshot`, `scope` | 1–5, one of 0, 2, 4 |
+| `Firearm.recoil` | at most 32 pairs, each within ±6° |
+| `Firearm.cone` | each 0–15°, `recover` 100 ms–2 s; a firearm's steps launch a bolt |
 
 ## 12. Open questions
 

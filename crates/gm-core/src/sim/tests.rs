@@ -79,6 +79,8 @@ fn input(yaw: f32, forward: f32, buttons: u16) -> Input {
         forward,
         side: 0.0,
         ability: 0,
+        held: 0,
+        target: 0,
     }
 }
 
@@ -119,7 +121,8 @@ fn hits(zone: &Zone, kind: HitKind) -> usize {
 fn phase2_kit_validates_and_has_durations() {
     let sheet = test_content::phase2_sheet(RATE);
     let kit = &sheet.kit;
-    assert_eq!(kit.abilities.len(), 3);
+    // The sword's two further stages come with it (MODES.md 4.3).
+    assert_eq!(kit.abilities.len(), 5);
     let (sword, crossbow, dash) = (
         kit.primary.unwrap() as usize,
         kit.secondary.unwrap() as usize,
@@ -1772,4 +1775,257 @@ fn a_status_pulses_four_times_a_second_at_any_rate() {
         );
         assert!(lost >= 20, "{hz} Hz: {lost}");
     }
+}
+
+
+// ---------- MODES.md: the action mode (15a) ----------
+
+/// Two bodies on different teams, `apart` units apart on the x axis, the first facing
+/// `yaw`, the second facing it.
+fn duel(yaw: f32, apart: f32) -> (BoxWorld, Zone, EntityId, EntityId) {
+    let world = BoxWorld::floor();
+    let mut zone = zone_with(vec![
+        (Vec3::new(0.0, 0.0, REST_Z), yaw),
+        (Vec3::new(apart, 0.0, REST_Z), 180.0),
+    ]);
+    let build = phase2_build(&zone.content);
+    let a = zone.add_player_at(build.clone(), 1, Vec3::new(0.0, 0.0, REST_Z), yaw);
+    let b = zone.add_player_at(build, 2, Vec3::new(apart, 0.0, REST_Z), 180.0);
+    (world, zone, a, b)
+}
+
+fn kit_index(zone: &Zone, id: EntityId, key: &str) -> u8 {
+    let p = zone.player(id).unwrap();
+    let pack_index = zone.content.find(key).expect(key);
+    let ability_id = zone.content.abilities[pack_index as usize].ability.id;
+    p.sheet
+        .kit
+        .abilities
+        .iter()
+        .position(|a| a.id == ability_id)
+        .map(|i| i as u8)
+        .unwrap_or_else(|| panic!("{key} is not in the kit"))
+}
+
+fn running(zone: &Zone, id: EntityId) -> Option<u8> {
+    zone.player(id).unwrap().mover.script.map(|s| s.ability)
+}
+
+#[test]
+fn a_chain_plays_its_stages_in_the_window_and_the_third_knocks_down() {
+    let (world, mut zone, a, b) = duel(0.0, 48.0);
+    let (s1, s2, s3) = (
+        kit_index(&zone, a, "sword"),
+        kit_index(&zone, a, "sword_2"),
+        kit_index(&zone, a, "sword_3"),
+    );
+    // The target presses toward the attacker, as a fighter does: the knockback of the
+    // first blows would otherwise carry it out of the third's reach.
+    let idle = |zone: &mut Zone, world: &BoxWorld, n: usize| {
+        run(zone, world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 1.0, 0))], n)
+    };
+    let press = |zone: &mut Zone, world: &BoxWorld| {
+        tick(
+            zone,
+            world,
+            &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, input(180.0, 1.0, 0))],
+            0,
+        )
+    };
+    press(&mut zone, &world);
+    idle(&mut zone, &world, 1);
+    assert_eq!(running(&zone, a), Some(s1));
+    // Pressed again in the recovery (the sword commits at windup + active = 14 ticks):
+    // the recovery is cut and the second stage plays.
+    idle(&mut zone, &world, 16);
+    assert_eq!(running(&zone, a), Some(s1), "still in its recovery");
+    press(&mut zone, &world);
+    idle(&mut zone, &world, 1);
+    assert_eq!(running(&zone, a), Some(s2), "the second stage");
+    // Let the second stage end; within its window the slot still plays the third.
+    idle(&mut zone, &world, 40);
+    assert_eq!(running(&zone, a), None);
+    assert!(zone.player(a).unwrap().mover.chain.is_some(), "the window is open");
+    press(&mut zone, &world);
+    idle(&mut zone, &world, 1);
+    assert_eq!(running(&zone, a), Some(s3), "the third stage");
+    // The third lands and puts the target on the ground.
+    idle(&mut zone, &world, 30);
+    let t = zone.player(b).unwrap();
+    assert!(t.mover.statuses.has(Status::Knockdown), "{:?}", t.mover.statuses);
+    assert_eq!(t.anim, anim::DOWN);
+    assert_eq!(hits(&zone, HitKind::Melee), 3);
+    // Down, the body goes nowhere of its own (the knockback's last push aside) and
+    // swings nothing.
+    idle(&mut zone, &world, 12);
+    let before = zone.player(b).unwrap().mover.mv.origin;
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 1.0, buttons::PRIMARY))],
+        8,
+    );
+    let t = zone.player(b).unwrap();
+    assert!((t.mover.mv.origin - before).length() < 4.0, "{:?} from {before:?}", t.mover.mv.origin);
+    assert_eq!(t.mover.script, None);
+    // After the chain the window closes by itself: the slot is the first stage again.
+    idle(&mut zone, &world, 80);
+    assert!(zone.player(a).unwrap().mover.chain.is_none());
+    press(&mut zone, &world);
+    idle(&mut zone, &world, 1);
+    assert_eq!(running(&zone, a), Some(s1));
+}
+
+#[test]
+fn the_chains_window_closes_and_a_press_too_late_is_the_first_stage() {
+    let (world, mut zone, a, b) = duel(0.0, 400.0);
+    let s1 = kit_index(&zone, a, "sword");
+    let press = |zone: &mut Zone, world: &BoxWorld| {
+        tick(
+            zone,
+            world,
+            &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, input(180.0, 0.0, 0))],
+            0,
+        )
+    };
+    press(&mut zone, &world);
+    // The script (34 ticks) and the window (400 ms = 26 ticks) both over.
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0))], 70);
+    assert!(zone.player(a).unwrap().mover.chain.is_none());
+    press(&mut zone, &world);
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0))], 1);
+    assert_eq!(running(&zone, a), Some(s1));
+}
+
+#[test]
+fn a_dash_cuts_a_recovery_and_cannot_be_hit_in_its_first_150_ms() {
+    let (world, mut zone, a, b) = duel(0.0, 48.0);
+    let dash = kit_index(&zone, a, "dash");
+    tick(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, input(180.0, 0.0, 0))],
+        0,
+    );
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 13);
+    // The other starts a swing (it lands ten ticks on)...
+    tick(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, buttons::PRIMARY))],
+        0,
+    );
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 3);
+    assert!(running(&zone, a).is_some_and(|s| s != dash), "the sword in its recovery");
+    // ...and Space (active 1) in the recovery: the dash starts at once, untouchable.
+    tick(
+        &mut zone,
+        &world,
+        &[(a, active(0.0, 0.0, 1)), (b, input(180.0, 0.0, 0))],
+        0,
+    );
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 1);
+    assert_eq!(running(&zone, a), Some(dash));
+    let p = zone.player(a).unwrap();
+    assert!(p.mover.invulnerable(p.last_input_tick));
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 12);
+    let on_a = zone
+        .events
+        .iter()
+        .filter(|e| matches!(e, ZoneEvent::Hit { target, .. } if *target == a))
+        .count();
+    assert_eq!(on_a, 0, "the blow passed through the dodge");
+    assert_eq!(zone.player(a).unwrap().health, 900);
+    assert_eq!(
+        hits(&zone, HitKind::Melee),
+        1,
+        "the one blow that landed is the first sword's, on the other"
+    );
+}
+
+#[test]
+fn the_magnet_turns_a_swing_toward_the_nearest_enemy_but_not_an_ally() {
+    // Facing 70 degrees off a body 48 units away: a 90-degree arc misses it; the
+    // magnet's 30 degrees bring it within the arc.
+    for (team, expect) in [(2u8, true), (1u8, false)] {
+        let world = BoxWorld::floor();
+        let mut zone = zone_with(vec![
+            (Vec3::new(0.0, 0.0, REST_Z), 70.0),
+            (Vec3::new(48.0, 0.0, REST_Z), 180.0),
+        ]);
+        let build = phase2_build(&zone.content);
+        let a = zone.add_player_at(build.clone(), 1, Vec3::new(0.0, 0.0, REST_Z), 70.0);
+        let b = zone.add_player_at(build, team, Vec3::new(48.0, 0.0, REST_Z), 180.0);
+        run(
+            &mut zone,
+            &world,
+            &[(a, input(70.0, 0.0, buttons::PRIMARY)), (b, input(180.0, 0.0, 0))],
+            13,
+        );
+        assert_eq!(hits(&zone, HitKind::Melee), expect as usize, "team {team}");
+        let yaw = zone.player(a).unwrap().mover.yaw;
+        if expect {
+            assert!((yaw - 40.0).abs() < 1.0, "turned 30 toward it: {yaw}");
+        } else {
+            assert!((yaw - 70.0).abs() < 1e-3, "left alone: {yaw}");
+        }
+    }
+}
+
+#[test]
+fn controls_diminish_the_second_lasts_half_the_third_does_nothing() {
+    let (world, mut zone, a, b) = duel(0.0, 400.0);
+    let down = crate::vocab::ApplyStatus {
+        status: Status::Knockdown,
+        duration: 64,
+        magnitude: 1.0,
+        max_stacks: 1,
+        stacking: crate::vocab::StackRule::Refresh,
+        target: crate::vocab::StatusTarget::Hit,
+        dispellable: true,
+    };
+    let left = |zone: &Zone| {
+        let p = zone.player(b).unwrap();
+        p.mover
+            .statuses
+            .get(Status::Knockdown)
+            .map(|s| tick_delta(s.until, p.last_input_tick))
+    };
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 2);
+    zone.apply_status(b, a, &down);
+    assert_eq!(left(&zone), Some(64));
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 70);
+    assert_eq!(left(&zone), None, "it ran out");
+    zone.apply_status(b, a, &down);
+    assert_eq!(left(&zone), Some(32), "the second lasts half");
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 40);
+    zone.apply_status(b, a, &down);
+    assert_eq!(left(&zone), None, "the third does nothing");
+    // Ten seconds later the count is forgotten.
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 64 * 11);
+    zone.apply_status(b, a, &down);
+    assert_eq!(left(&zone), Some(64));
+}
+
+#[test]
+fn launched_lifts_the_body_and_it_is_down_until_it_lands() {
+    let (world, mut zone, a, b) = duel(0.0, 400.0);
+    let up = crate::vocab::ApplyStatus {
+        status: Status::Launched,
+        duration: 40,
+        magnitude: 300.0,
+        max_stacks: 1,
+        stacking: crate::vocab::StackRule::Refresh,
+        target: crate::vocab::StatusTarget::Hit,
+        dispellable: true,
+    };
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 2);
+    zone.apply_status(b, a, &up);
+    let t = zone.player(b).unwrap();
+    assert!(t.mover.mv.velocity.z >= 300.0 && !t.mover.mv.on_ground);
+    run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, input(180.0, 1.0, buttons::PRIMARY))], 6);
+    let t = zone.player(b).unwrap();
+    assert!(t.mover.mv.origin.z > REST_Z + 10.0, "in the air: {:?}", t.mover.mv.origin);
+    assert_eq!(t.anim, anim::DOWN);
+    assert_eq!(t.mover.script, None, "nothing is swung from the air");
 }

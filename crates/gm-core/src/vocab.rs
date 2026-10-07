@@ -73,10 +73,14 @@ pub enum Status {
     Expose = 11,
     Regen = 12,
     Stealth = 13,
+    /// On the ground (MODES.md 4.5): no action, no guard, no movement; hits land in full.
+    Knockdown = 14,
+    /// Thrown into the air, then down: a knockdown with a lift at its start.
+    Launched = 15,
 }
 
 impl Status {
-    pub const ALL: [Status; 14] = [
+    pub const ALL: [Status; 16] = [
         Status::Slow,
         Status::Haste,
         Status::Root,
@@ -91,6 +95,8 @@ impl Status {
         Status::Expose,
         Status::Regen,
         Status::Stealth,
+        Status::Knockdown,
+        Status::Launched,
     ];
 
     pub const fn from_index(i: u8) -> Option<Status> {
@@ -121,12 +127,25 @@ impl Status {
             Status::Expose => "expose",
             Status::Regen => "regen",
             Status::Stealth => "stealth",
+            Status::Knockdown => "knockdown",
+            Status::Launched => "launched",
         }
     }
 
     /// Stagger and Shock durations are not scaled by the defender (MATRIX.md 8).
     pub const fn fixed_duration(self) -> bool {
         matches!(self, Status::Stagger | Status::Shock)
+    }
+
+    /// A control (MODES.md 4.5): the second within ten seconds lasts half, the third does
+    /// nothing, and the body is then immune to this kind for ten seconds.
+    pub const fn is_control(self) -> bool {
+        matches!(self, Status::Knockdown | Status::Launched | Status::Root)
+    }
+
+    /// The body is on the ground: it cannot act, guard or move (MODES.md 4.5).
+    pub const fn downs(self) -> bool {
+        matches!(self, Status::Knockdown | Status::Launched)
     }
 }
 
@@ -155,6 +174,42 @@ impl ArchetypeFrame {
             ArchetypeFrame::Caster => (13.0, 56.0),
             ArchetypeFrame::Infiltrator => (12.0, 52.0),
         }
+    }
+}
+
+/// The game a character plays (MODES.md 2): chosen with the build, never switched in play.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]
+pub enum Mode {
+    /// First person, a firearm in hand (MODES.md 3).
+    Gun,
+    /// Over the shoulder, free aim, chains and the dodge (MODES.md 4).
+    #[default]
+    Action,
+    /// The orbit camera, a target, actions that walk into range (MODES.md 5).
+    Rpg,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 3] = [Mode::Gun, Mode::Action, Mode::Rpg];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Mode::Gun => "gun",
+            Mode::Action => "action",
+            Mode::Rpg => "rpg",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Mode> {
+        Mode::ALL.into_iter().find(|m| m.name() == s)
+    }
+
+    /// Seen from behind the body (the action and RPG modes) or from its eyes (the gun).
+    pub const fn third_person(self) -> bool {
+        !matches!(self, Mode::Gun)
     }
 }
 
@@ -274,6 +329,9 @@ pub struct MeleeArc {
     pub parryable: bool,
     /// Ticks the attacker's animation freezes on hit.
     pub hit_stop: Tick,
+    /// The magnet (MODES.md 4.2): at the swing's start the body turns up to this many
+    /// degrees toward the nearest enemy within `reach × 1.5` that it can see. 0: none.
+    pub assist_deg: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -418,6 +476,9 @@ pub struct MoveSelf {
     pub keep_friction: bool,
     /// Invulnerability ticks. Default 0: dodging is positional, not a free pass.
     pub iframes: Tick,
+    /// May cut another ability's recovery short (MODES.md 4.4): pressed while a script is
+    /// past its active window, it ends that script and starts.
+    pub cancel_recovery: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -488,6 +549,74 @@ pub struct Step {
     pub verb: Verb,
 }
 
+/// The next stage of a chain (MODES.md 4.3): while this ability's recovery runs and for
+/// `window` ticks after it ends, the same slot plays `next` instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub struct Chain {
+    /// The pack's index of the next stage.
+    pub next: u16,
+    pub window: Tick,
+}
+
+/// How a firearm fires (MODES.md 3.2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub enum FireMode {
+    /// Held: a shot every cycle.
+    Auto,
+    /// A click a shot.
+    #[default]
+    Semi,
+    /// A click a shot, the action worked for the cycle; no shot faster than a walk.
+    Bolt,
+}
+
+/// The cone a firearm's bolt is rolled in, in degrees (MODES.md 3.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub struct Cone {
+    pub stand: f32,
+    pub crouch: f32,
+    /// At full speed; scaled by the body's speed over its maximum.
+    pub moving: f32,
+    pub air: f32,
+    /// Per shot in the last `recover` ticks.
+    pub shot: f32,
+    pub recover: Tick,
+}
+
+/// A firearm (MODES.md 3.2): the magazine, the reload, the cycle, the recoil pattern and
+/// the cone of the primary that carries it. Its steps launch bolts as any ranged ability's.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
+pub struct Firearm {
+    pub magazine: u8,
+    pub reserve: u16,
+    pub reload: Tick,
+    /// Ticks between two shots; the ability's cooldown is this.
+    pub cycle: Tick,
+    pub fire: FireMode,
+    /// The multiplier for a bolt that enters the head band (MODES.md 3.5).
+    pub headshot: f32,
+    /// 0: no scope; else the zoom (2 or 4).
+    pub scope: u8,
+    /// The kick of the n-th shot of a spray, (yaw, pitch) in degrees, cumulative; past
+    /// the end the last repeats; the index resets after twice `cone.recover` without a shot.
+    pub recoil: Vec<(f32, f32)>,
+    pub cone: Cone,
+}
+
+impl Firearm {
+    /// The pattern's pair for the n-th shot (0-based) of a spray.
+    pub fn kick(&self, index: u8) -> (f32, f32) {
+        match self.recoil.last() {
+            None => (0.0, 0.0),
+            Some(last) => *self.recoil.get(index as usize).unwrap_or(last),
+        }
+    }
+}
+
 /// An ability is a timed script of verbs. There is no ability-specific server code.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
@@ -500,18 +629,41 @@ pub struct Ability {
     /// Movement speed multiplier while the script runs.
     pub move_scale: f32,
     pub interrupt: Interrupt,
+    /// The next stage (MODES.md 4.3), if the ability is the start or a middle of a chain.
+    pub chain: Option<Chain>,
+    /// A firearm's numbers (MODES.md 3.2), on a gun.
+    pub firearm: Option<Firearm>,
+    /// How far a target-action reaches (MODES.md 5.3): a melee arc's reach, a bolt's
+    /// range as content gives it, an aimed area's; 0 when nothing of this ability aims.
+    pub range: f32,
 }
 
 /// Validation limits (VOCABULARY.md section 11). Content outside these ranges fails to load.
 pub mod limits {
     pub const MAX_MELEE_REACH: f32 = 160.0;
-    pub const MAX_PROJECTILE_SPEED: f32 = 4000.0;
+    /// A bullet (MODES.md 3.6) is a bolt at 20,000 u/s: swept per tick as every bolt is.
+    pub const MAX_PROJECTILE_SPEED: f32 = 20000.0;
     pub const MAX_PROJECTILE_LIFETIME_S: f32 = 20.0;
     pub const MAX_AREA_RADIUS: f32 = 512.0;
     pub const MAX_DASH_SPEED: f32 = 1600.0;
     pub const MAX_BLINK_DISTANCE: f32 = 384.0;
     pub const MAX_SCRIPT_S: f32 = 10.0;
     pub const MAX_AIM_RANGE: f32 = 1024.0;
+    /// A target-action's reach (MODES.md 5.3).
+    pub const MAX_RANGE: f32 = 4096.0;
+    pub const MAX_ASSIST_DEG: f32 = 90.0;
+    pub const MAX_CHAIN_WINDOW_S: f32 = 2.0;
+    pub const MAX_MAGAZINE: u8 = 100;
+    pub const MAX_RESERVE: u16 = 400;
+    pub const MAX_RELOAD_S: f32 = 6.0;
+    pub const MIN_CYCLE_S: f32 = 0.05;
+    pub const MAX_CYCLE_S: f32 = 3.0;
+    pub const MAX_HEADSHOT: f32 = 5.0;
+    pub const MAX_RECOIL_PAIRS: usize = 32;
+    pub const MAX_KICK_DEG: f32 = 6.0;
+    pub const MAX_CONE_DEG: f32 = 15.0;
+    pub const MIN_RECOVER_S: f32 = 0.1;
+    pub const MAX_RECOVER_S: f32 = 2.0;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -549,6 +701,62 @@ impl Ability {
         if !(0.0..=1.0).contains(&self.move_scale) {
             return Err(err("move_scale outside 0..=1"));
         }
+        if !(0.0..=limits::MAX_RANGE).contains(&self.range) {
+            return Err(err("range outside 0..=4096"));
+        }
+        if let Some(c) = self.chain
+            && c.window > max_ticks(limits::MAX_CHAIN_WINDOW_S)
+        {
+            return Err(err("chain window past 2 s"));
+        }
+        if let Some(f) = &self.firearm {
+            if !(1..=limits::MAX_MAGAZINE).contains(&f.magazine) {
+                return Err(err("magazine outside 1..=100"));
+            }
+            if f.reserve > limits::MAX_RESERVE {
+                return Err(err("reserve past 400"));
+            }
+            if f.reload == 0 || f.reload > max_ticks(limits::MAX_RELOAD_S) {
+                return Err(err("reload outside a tick..=6 s"));
+            }
+            if f.cycle < max_ticks(limits::MIN_CYCLE_S).max(1)
+                || f.cycle > max_ticks(limits::MAX_CYCLE_S)
+            {
+                return Err(err("cycle outside 50 ms..=3 s"));
+            }
+            if !(1.0..=limits::MAX_HEADSHOT).contains(&f.headshot) {
+                return Err(err("headshot outside 1..=5"));
+            }
+            if !matches!(f.scope, 0 | 2 | 4) {
+                return Err(err("scope is 0, 2 or 4"));
+            }
+            if f.recoil.len() > limits::MAX_RECOIL_PAIRS
+                || f.recoil
+                    .iter()
+                    .any(|(y, p)| y.abs() > limits::MAX_KICK_DEG || p.abs() > limits::MAX_KICK_DEG)
+            {
+                return Err(err("recoil: at most 32 pairs within 6 degrees"));
+            }
+            let c = &f.cone;
+            if [c.stand, c.crouch, c.moving, c.air, c.shot]
+                .iter()
+                .any(|d| !(0.0..=limits::MAX_CONE_DEG).contains(d))
+            {
+                return Err(err("cone outside 0..=15 degrees"));
+            }
+            if c.recover < max_ticks(limits::MIN_RECOVER_S).max(1)
+                || c.recover > max_ticks(limits::MAX_RECOVER_S)
+            {
+                return Err(err("cone recover outside 100 ms..=2 s"));
+            }
+            if !self
+                .steps
+                .iter()
+                .any(|s| matches!(s.verb, Verb::Projectile(_)))
+            {
+                return Err(err("a firearm's steps launch a bolt"));
+            }
+        }
         for step in &self.steps {
             validate_verb(&step.verb, rate, &err)?;
         }
@@ -566,6 +774,9 @@ fn validate_verb(
         Verb::MeleeArc(m) => {
             if !(0.0..=limits::MAX_MELEE_REACH).contains(&m.reach) {
                 return Err(err("melee reach out of range"));
+            }
+            if !(0.0..=limits::MAX_ASSIST_DEG).contains(&m.assist_deg) {
+                return Err(err("assist outside 0..=90 degrees"));
             }
             if !(0.0..=360.0).contains(&m.arc_deg) {
                 return Err(err("melee arc out of range"));
@@ -730,6 +941,9 @@ mod tests {
             }],
             move_scale: 0.6,
             interrupt: Interrupt::OnStagger,
+            chain: None,
+            firearm: None,
+            range: 0.0,
         };
         assert_eq!(ability.validate(rate), Ok(()));
     }
@@ -752,6 +966,9 @@ mod tests {
             }],
             move_scale: 1.0,
             interrupt: Interrupt::Never,
+            chain: None,
+            firearm: None,
+            range: 0.0,
         };
         assert_eq!(
             ability.validate(rate),
@@ -789,6 +1006,9 @@ mod tests {
             }],
             move_scale: 1.0,
             interrupt: Interrupt::Never,
+            chain: None,
+            firearm: None,
+            range: 0.0,
         };
         assert!(ability.validate(rate).is_err());
     }

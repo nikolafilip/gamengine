@@ -15,10 +15,10 @@ use gm_core::matrix::{ArmourClass, Aspects, Attributes, Element};
 use gm_core::tick::{Tick, TickRate};
 use gm_core::trial::{Lens, TrialDef};
 use gm_core::vocab::{
-    Ability, AbilityId, ApplyStatus, ArchetypeFrame, AreaEffect, Block, Bounce, Bypass, Cooldown,
-    Cost, DamagePacket, DamageType, Falloff, Guard, Interrupt, MeleeArc, MoveKind, MoveSelf,
-    Origin, Parry, Projectile, Riposte, Shape, StackRule, Status, StatusTarget, Step, Timing,
-    Trigger, Verb,
+    Ability, AbilityId, ApplyStatus, ArchetypeFrame, AreaEffect, Block, Bounce, Bypass, Chain,
+    Cone, Cooldown, Cost, DamagePacket, DamageType, Falloff, FireMode, Firearm, Guard, Interrupt,
+    MeleeArc, Mode, MoveKind, MoveSelf, Origin, Parry, Projectile, Riposte, Shape, StackRule,
+    Status, StatusTarget, Step, Timing, Trigger, Verb,
 };
 use serde::Deserialize;
 
@@ -140,9 +140,60 @@ pub(crate) struct AbilityToml {
     move_scale: f32,
     #[serde(default = "never")]
     interrupt: String,
+    /// The next stage of a chain (MODES.md 4.3).
+    chain: Option<ChainToml>,
+    /// A firearm's numbers (MODES.md 3.2).
+    firearm: Option<FirearmToml>,
+    /// How far a target-action reaches (MODES.md 5.3); without it, a melee arc's reach,
+    /// an aimed area's range, or 600 for a bolt.
+    range: Option<f32>,
     #[serde(default)]
     step: Vec<StepToml>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChainToml {
+    next: String,
+    window_ms: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FirearmToml {
+    magazine: u8,
+    reserve: u16,
+    reload_ms: u32,
+    cycle_ms: u32,
+    #[serde(default = "semi")]
+    fire: String,
+    #[serde(default = "one")]
+    headshot: f32,
+    #[serde(default)]
+    scope: u8,
+    #[serde(default)]
+    recoil: Vec<[f32; 2]>,
+    cone: FireConeToml,
+}
+
+fn semi() -> String {
+    "semi".into()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FireConeToml {
+    stand: f32,
+    crouch: f32,
+    #[serde(rename = "move")]
+    moving: f32,
+    air: f32,
+    shot: f32,
+    recover_ms: u32,
+}
+
+/// The bolt's reach when content names none (MODES.md 5.3).
+const DEFAULT_BOLT_RANGE: f32 = 600.0;
 
 fn one() -> f32 {
     1.0
@@ -198,6 +249,9 @@ struct MeleeToml {
     parryable: bool,
     #[serde(default)]
     hit_stop_ms: u32,
+    /// The magnet's turn in degrees (MODES.md 4.2).
+    #[serde(default)]
+    assist: f32,
 }
 
 fn forty() -> f32 {
@@ -366,6 +420,8 @@ struct MoveToml {
     keep_friction: bool,
     #[serde(default)]
     iframes_ms: u32,
+    /// `"recovery"`: may cut another ability's recovery short (MODES.md 4.4).
+    cancel: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -441,6 +497,9 @@ pub(crate) struct BuildToml {
     /// The archetype's picture (CONTENT.md 3).
     #[serde(default)]
     pub(crate) icon: Option<String>,
+    /// The game the archetype plays (MODES.md 2): `gun`, `action` or `rpg`.
+    #[serde(default = "action")]
+    pub(crate) mode: String,
     frame: String,
     attributes: AttributesToml,
     armour: String,
@@ -450,6 +509,10 @@ pub(crate) struct BuildToml {
     guard: Option<String>,
     #[serde(default)]
     actives: Vec<String>,
+}
+
+fn action() -> String {
+    "action".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -613,6 +676,7 @@ impl Ctx {
             cleave_falloff: m.cleave_falloff,
             parryable: m.parryable,
             hit_stop: self.ticks(m.hit_stop_ms),
+            assist_deg: m.assist,
         })
     }
 
@@ -772,11 +836,17 @@ impl Ctx {
                 distance: m.blink.as_ref().expect("counted").distance,
             }
         };
+        let cancel_recovery = match m.cancel.as_deref() {
+            None => false,
+            Some("recovery") => true,
+            Some(other) => return self.err(format!("unknown cancel {other:?}")),
+        };
         Ok(MoveSelf {
             kind,
             cancelable: m.cancelable,
             keep_friction: m.keep_friction,
             iframes: self.ticks(m.iframes_ms),
+            cancel_recovery,
         })
     }
 
@@ -840,6 +910,7 @@ impl Ctx {
 fn compile_ability(
     a: &AbilityToml,
     index: usize,
+    keys: &[String],
     rate: TickRate,
 ) -> Result<AbilityDef, ContentError> {
     let ctx = Ctx {
@@ -851,8 +922,55 @@ fn compile_ability(
         "secondary" => Slot::Secondary,
         "guard" => Slot::Guard,
         "active" => Slot::Active,
+        "extra" => Slot::Extra,
         other => return ctx.err(format!("unknown slot {other:?}")),
     };
+    let chain = a
+        .chain
+        .as_ref()
+        .map(|c| {
+            let next = keys
+                .iter()
+                .position(|k| *k == c.next)
+                .ok_or_else(|| {
+                    ContentError::Invalid(format!("{}: chain names unknown ability {:?}", a.key, c.next))
+                })?;
+            Ok::<_, ContentError>(Chain {
+                next: next as u16,
+                window: ctx.ticks(c.window_ms),
+            })
+        })
+        .transpose()?;
+    let firearm = a
+        .firearm
+        .as_ref()
+        .map(|f| {
+            let fire = match f.fire.as_str() {
+                "auto" => FireMode::Auto,
+                "semi" => FireMode::Semi,
+                "bolt" => FireMode::Bolt,
+                other => return ctx.err(format!("unknown fire {other:?}")),
+            };
+            Ok(Firearm {
+                magazine: f.magazine,
+                reserve: f.reserve,
+                reload: ctx.ticks(f.reload_ms),
+                cycle: ctx.ticks(f.cycle_ms),
+                fire,
+                headshot: f.headshot,
+                scope: f.scope,
+                recoil: f.recoil.iter().map(|p| (p[0], p[1])).collect(),
+                cone: Cone {
+                    stand: f.cone.stand,
+                    crouch: f.cone.crouch,
+                    moving: f.cone.moving,
+                    air: f.cone.air,
+                    shot: f.cone.shot,
+                    recover: ctx.ticks(f.cone.recover_ms),
+                },
+            })
+        })
+        .transpose()?;
     let interrupt = match a.interrupt.as_str() {
         "never" => Interrupt::Never,
         "on_damage" => Interrupt::OnDamage,
@@ -865,6 +983,26 @@ fn compile_ability(
         .iter()
         .map(|s| ctx.step(s))
         .collect::<Result<Vec<_>, _>>()?;
+    // The reach of a target-action (MODES.md 5.3), when content leaves it to the verbs.
+    let range = a.range.unwrap_or_else(|| {
+        steps
+            .iter()
+            .find_map(|s| match &s.verb {
+                Verb::MeleeArc(m) => Some(m.reach),
+                Verb::Projectile(_) => Some(DEFAULT_BOLT_RANGE),
+                Verb::AreaEffect(ae) => match ae.origin {
+                    Origin::Aim { range } => Some(range),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or(0.0)
+    });
+    // A firearm's cycle is its cooldown (MODES.md 3.2).
+    let cooldown_ticks = match &firearm {
+        Some(f) => f.cycle,
+        None => ctx.ticks(a.cooldown_ms),
+    };
     Ok(AbilityDef {
         key: a.key.clone(),
         ability: Ability {
@@ -875,12 +1013,15 @@ fn compile_ability(
                 focus: a.focus,
             },
             cooldown: Cooldown {
-                ticks: ctx.ticks(a.cooldown_ms),
+                ticks: cooldown_ticks,
                 group: a.cooldown_group,
             },
             steps,
             move_scale: a.move_scale,
             interrupt,
+            chain,
+            firearm,
+            range,
         },
         slot,
         cost: a.cost,
@@ -895,6 +1036,8 @@ fn compile_ability(
 struct BodyToml<'a> {
     what: &'a str,
     name: &'a str,
+    /// The mode (MODES.md 2); a creature plays none.
+    mode: Option<&'a str>,
     frame: &'a str,
     armour: &'a str,
     aspects: &'a [String],
@@ -930,7 +1073,12 @@ fn compile_body(b: &BodyToml<'_>, pack: &ContentPack) -> Result<Build, ContentEr
             .ok_or_else(|| err(format!("unknown aspect {a:?}")))?;
         aspects.0 |= Aspects::one(e).0;
     }
+    let mode = match b.mode {
+        None => Mode::Action,
+        Some(m) => Mode::from_name(m).ok_or_else(|| err(format!("unknown mode {m:?}")))?,
+    };
     Ok(Build {
+        mode,
         frame,
         attributes: Attributes::new(
             b.attributes.str,
@@ -959,6 +1107,7 @@ fn compile_build(b: &BuildToml, pack: &ContentPack) -> Result<NamedBuild, Conten
             &BodyToml {
                 what: "build",
                 name: &b.name,
+                mode: Some(&b.mode),
                 frame: &b.frame,
                 armour: &b.armour,
                 aspects: &b.aspects,
@@ -981,6 +1130,7 @@ fn compile_creature(c: &CreatureToml, pack: &ContentPack) -> Result<CreatureDef,
             &BodyToml {
                 what: "creature",
                 name: &c.key,
+                mode: None,
                 frame: &c.frame,
                 armour: &c.armour,
                 aspects: &c.aspects,
@@ -1056,8 +1206,9 @@ pub fn load_all(
     let cf: CreaturesFile = parse(creatures, "creatures.toml")?;
     let tf: TrialsFile = parse(trials, "trials.toml")?;
     let mut pack = ContentPack::default();
+    let keys: Vec<String> = af.ability.iter().map(|a| a.key.clone()).collect();
     for (i, a) in af.ability.iter().enumerate() {
-        pack.abilities.push(compile_ability(a, i, rate)?);
+        pack.abilities.push(compile_ability(a, i, &keys, rate)?);
     }
     for b in &bf.build {
         let nb = compile_build(b, &pack)?;
@@ -1134,6 +1285,9 @@ mod tests {
             assert_eq!(a.ability.cooldown, b.ability.cooldown, "{}", a.key);
             assert_eq!(a.ability.move_scale, b.ability.move_scale, "{}", a.key);
             assert_eq!(a.ability.interrupt, b.ability.interrupt, "{}", a.key);
+            assert_eq!(a.ability.chain, b.ability.chain, "{}", a.key);
+            assert_eq!(a.ability.firearm, b.ability.firearm, "{}", a.key);
+            assert_eq!(a.ability.range, b.ability.range, "{}", a.key);
         }
         assert_eq!(pack.builds, fixture.builds);
         assert_eq!(pack.creatures, fixture.creatures);

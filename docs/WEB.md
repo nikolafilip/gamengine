@@ -265,7 +265,7 @@ canvas. The page asks before it is left (`beforeunload`) only while something is
 not at the login form, and not in a scripted run. `say` carries a UI script's word to whoever drives the
 browser (`GM-SAY ...` on the console, CLIENT.md 9).
 
-A link may set what a visitor *sees* and nothing that acts for them: `third-person`,
+A link may set what a visitor *sees* and nothing that acts for them: `third-person` (offline only since 2026-10-07: in a zone the mode is the camera, MODES.md 2),
 `map` (the offline map) and `gl` (force the WebGL2 build). **Only on a
 site whose `config.json` says `"dev": true`** a link may also carry the rest of the native
 flags: `connect=https://host:port&cert=<hex>` (a zone directly, without a hub), a login

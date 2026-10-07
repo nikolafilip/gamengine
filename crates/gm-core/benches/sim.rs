@@ -56,6 +56,8 @@ fn bench(c: &mut Criterion) {
                     forward: 1.0,
                     side: 0.0,
                     ability: 0,
+                    held: 0,
+                    target: 0,
                 };
                 zone.queue_input(id, t, input, 0);
             }

@@ -97,14 +97,7 @@ fn angle_diff(a: f32, b: f32) -> f32 {
 
 /// Where to aim a projectile of `speed` and `gravity` scale to meet a moving body.
 pub fn lead(eye: Vec3, target: &Body, speed: f32, gravity: f32) -> Vec3 {
-    let mut p = target.centre();
-    let mut t = 0.0;
-    for _ in 0..2 {
-        t = (p - eye).length() / speed.max(1.0);
-        p = target.centre() + target.vel * t;
-    }
-    p.z += 0.5 * gm_core::movement::MoveVars::QUAKE.gravity * gravity * t * t;
-    p
+    gm_core::sim::aim::lead(eye, target.centre(), target.vel, speed, gravity)
 }
 
 impl Fighter {
@@ -386,6 +379,8 @@ impl Fighter {
             forward: f.wish.dot(fwd).clamp(-1.0, 1.0),
             side: f.wish.dot(right).clamp(-1.0, 1.0),
             ability: f.ability,
+            held: 0,
+            target: 0,
         }
     }
 

@@ -57,7 +57,7 @@ two turns, the gate room with two sentinels, a stair, the Warden's hall).
 | `--name NAME` | player name for the zone (default `$USER`) |
 | `--build NAME` | preset build to ask the zone for: `ironclad`, `blade`, `frostweaver`, `shade` (default: the zone's default) |
 | `--team N` | team 1 or 2 (default 0: the zone balances) |
-| `--third-person` | start in the third-person viewport (`V` toggles at any time) |
+| `--third-person` | offline and in a replay: start in the third-person viewport (`V` toggles there). In a zone the character's mode is the camera (MODES.md 2) |
 | `--seconds N` | exit after N seconds and print the network statistics (scripted runs) |
 | `--avatar FILE.gmm` | offline: wear this ingested model (how a creator previews one before uploading) |
 | `--crowd N` | offline: N characters standing and walking around the start (benchmarks, `check-avatars.sh`) |
@@ -118,10 +118,13 @@ cargo run --release -p gm-client -- --map assets/maps/built/arena.bsp --connect 
 
 Controls online: mouse look, `WASD`, `Space` jump, **left click** primary, **right click**
 secondary, **Ctrl** guard (hold to block, press to parry, whichever the build has), **1–4** the
-actives (**Shift** is also active 1), **V** switches first/third person, **F1–F4** ask the zone
-for preset 1–4 (applied at your next respawn), `Esc` releases the cursor, `Q` quits. In third
-person the camera sits behind and above you and your shots go where the crosshair points
-(VOCABULARY.md 9). Players are boxes coloured by team (blue own side, red the other), a white
+actives (**Shift** is also active 1), **F1–F4** ask the zone
+for preset 1–4 (applied at your next respawn), `Esc` releases the cursor, `Q` quits. The
+camera is the character's mode's (MODES.md 2): a gun build looks from its eyes, the others
+from behind the shoulder, where the shots go where the crosshair points (VOCABULARY.md 9).
+In the action mode **Space** dodges while the kit's dash is ready and the primary pressed
+again plays the next stage of its chain; in the gun mode **R** reloads and **1 2 3** take
+the gun, the pistol and the knife in hand. Players are boxes coloured by team (blue own side, red the other), a white
 nose box shows their facing, blocking bodies turn blue-ish, staggered or frozen bodies darken,
 hasted ones brighten; corpses are flat grey, bolts small yellow boxes, area effects flat orange
 discs. The window title shows the build, team and viewport, health, stamina, focus, kills,

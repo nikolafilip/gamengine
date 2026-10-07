@@ -165,7 +165,9 @@ guard  = D guarding toward A && (melee || stops_projectiles) ? 1 − block.mitig
 gear   = (2000 + A.dealt[t]) / (2000 + D.taken[t])              ITEMS.md 3.1: the edge of
          A's worn weapon and of D's worn armour on the packet's type, per mille, at most 250
          each; 1 for the pulses of a status, and for two bodies in nothing
-damage = max(1, round(base × type × layer × guard × gear))
+zone   = the bolt is a firearm's and entered the hull within its top 12 u ? headshot : 1
+         (the head band, MODES.md 3.5: before armour, on the amount)
+damage = max(1, round(base × type × layer × guard × gear × zone))
 ```
 
 `Expose` on the defender grants every attacker `bypass ARMOR`. A parry inside its window
@@ -220,6 +222,14 @@ The initial set of VOCABULARY.md 5.4 with resolved semantics. `m` is the magnitu
 | Expose | attackers gain bypass ARMOR | Refresh |
 | Regen | heals m health per second, 4 pulses/s; heals enemies too | Refresh |
 | Stealth | included in snapshots only within `m` units (never past PVS) | Refresh |
+| Knockdown | on the ground (MODES.md 4.5): interrupts; no activation, guard or movement; hits land in full | Refresh |
+| Launched | as Knockdown, with a lift of `m` u/s straight up when it lands | Refresh |
+
+**Diminishing returns on controls** (MODES.md 4.5, `gm_core::sim::CONTROL_WINDOW_MS`):
+Knockdown, Launched and an explicit Root are controls. The second of a kind within ten
+seconds of the last lasts half, the third does nothing; ten seconds after the last, the
+count is forgotten. Freeze's Root (Chill at its stacks) is not under them: Chill has its own
+immunity.
 
 Dispellable statuses are removed by `ApplyStatus { status: Cleanse }`-style content later;
 Phase 3 content has no dispel. A status with `max_stacks` 1 and `Refresh` restarts its

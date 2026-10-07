@@ -121,6 +121,8 @@ impl Hand {
                                 forward: 0.0,
                                 side: 0.0,
                                 ability: 0,
+                                held: 0,
+                                target: 0,
                             };
                             (input, std::mem::take(&mut s.say))
                         };

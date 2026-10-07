@@ -22,6 +22,7 @@ pub fn fade_secs(state: u8) -> f32 {
         anim::SWING => 0.05,
         anim::RECOVER => 0.16,
         anim::PARRY | anim::STAGGER => 0.06,
+        anim::DOWN => 0.09,
         _ => FADE_SECS,
     }
 }
@@ -219,6 +220,28 @@ pub fn pose(i: &AnimInput) -> Pose {
             torso(&mut p, 8.0, 0.0);
             p.rot[HEAD] = ry(-6.0);
             p.offset.z = -i.hips_z * 0.44;
+        }
+        anim::DOWN => {
+            // Knocked down (MODES.md 4.5): on the back at once, arms up a little, as
+            // though to rise; the fall is the fade.
+            p.rot[HIPS] = ry(-84.0);
+            p.offset.z = -(i.hips_z - 6.0).max(0.0);
+            arms(&mut p, 40.0, -20.0, -20.0, 50.0, 50.0);
+            legs(&mut p, -14.0, 30.0, 6.0, 12.0);
+            p.rot[HEAD] = ry(18.0);
+            return p;
+        }
+        anim::RELOAD => {
+            // Working the reload (MODES.md 3.2): the weapon held low and looked at, the
+            // off hand busy at it.
+            let busy = 10.0 * (t * 7.0).sin();
+            p.rot[UPPER_ARM_L] = ry(-55.0 + busy) * rx(-70.0);
+            p.rot[UPPER_ARM_R] = ry(-45.0) * rx(72.0);
+            p.rot[FOREARM_L] = rz(-70.0 + busy);
+            p.rot[FOREARM_R] = rz(45.0);
+            torso(&mut p, 10.0, -6.0);
+            p.rot[HEAD] = ry(22.0);
+            legs(&mut p, -6.0, 10.0, 6.0, 10.0);
         }
         anim::STAGGER => {
             let wobble = 5.0 * (t * 14.0).sin();

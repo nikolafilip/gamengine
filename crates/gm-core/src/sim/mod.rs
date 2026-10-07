@@ -6,6 +6,7 @@
 //! the server runs it for everyone. [`Zone`] is the authoritative container the server drives;
 //! it also runs in tests without any networking.
 
+pub mod aim;
 mod mover;
 pub mod test_content;
 mod zone;
@@ -14,13 +15,19 @@ mod zone;
 mod tests;
 
 pub use mover::{
-    Action, CAST_ANIM_NONE, Dash, GuardState, Input, Mover, Script, anim, buttons, capsule_at,
-    command_exit_ticks, melee_hit_point, step_mover, view_dir,
+    Action, CAST_ANIM_NONE, Company, Dash, GuardState, GunState, Input, Mover, Nearby, Script,
+    anim, buttons, capsule_at, command_exit_ticks, melee_hit_point, step_mover, view_dir,
+    yaw_toward,
 };
 pub use zone::{
-    Area, DOT_INTERVAL_TICKS, Driver, History, HitKind, INSTANT_AREA_ECHO_MS, MAX_CLAIMED_VIEW_LAG,
-    MAX_ENTITY_ID, Player, Projectile, Spawn, Swing, Zone, ZoneEvent, script_anim,
+    Area, DOT_INTERVAL_TICKS, Driver, HEAD_BAND, History, HitKind, INSTANT_AREA_ECHO_MS,
+    MAX_CLAIMED_VIEW_LAG, MAX_ENTITY_ID, Player, Projectile, Shot, Spawn, Swing, Zone, ZoneEvent,
+    script_anim,
 };
+
+/// Diminishing returns on controls (MODES.md 4.5): the window within which the second of a
+/// kind lasts half and the third does nothing.
+pub const CONTROL_WINDOW_MS: u32 = 10_000;
 
 use crate::tick::Tick;
 
@@ -42,7 +49,9 @@ pub const DRAIN_DEPTH: usize = 4;
 /// A projectile ignores its owner's capsule this long after spawning (VOCABULARY.md 5.2).
 pub const PROJECTILE_OWNER_GRACE: Tick = 2;
 pub const RESPAWN_MS: u32 = 3000;
-pub const MAX_ABILITIES: usize = 8;
+/// Seven slotted (MATRIX.md 9) and what comes with them: a chain's stages, a knife
+/// (MODES.md 4.3, 3.7).
+pub const MAX_ABILITIES: usize = 12;
 /// Stamina regeneration pauses this long after a spend (MATRIX.md 6).
 pub const REGEN_PAUSE_MS: u32 = 1000;
 /// Standing up from the command stance takes this long (COMPANIONS.md 5.1).

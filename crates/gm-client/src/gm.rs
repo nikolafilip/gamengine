@@ -224,7 +224,7 @@ impl GmPage {
         let label = "tempo  (every windup, window and cast time; 1 = as authored)";
         ui.slider(
             col.take(ui.field_height()),
-            &label,
+            label,
             &mut self.tempo,
             TEMPO_RANGE,
         );

@@ -12,7 +12,7 @@ use crate::sim::{COMMAND_EXIT_MS, MAX_ABILITIES, REGEN_PAUSE_MS, tick_delta};
 use crate::status::Statuses;
 use crate::tick::{Tick, TickRate};
 use crate::trace::{CollisionWorld, Hull};
-use crate::vocab::{ArchetypeFrame, Guard, MeleeArc, MoveKind, StatusTarget, Verb};
+use crate::vocab::{ArchetypeFrame, FireMode, Guard, MeleeArc, Mode, MoveKind, StatusTarget, Verb};
 
 /// Button bits (PROTOCOL.md 4). Movement direction is in the axes, not here.
 pub mod buttons {
@@ -29,8 +29,12 @@ pub mod buttons {
     pub const VIEWPORT: u16 = 1 << 10;
     /// Held: the command stance (COMPANIONS.md 5.1).
     pub const COMMAND: u16 = 1 << 11;
-    /// Bits 12–15 must be zero on the wire.
-    pub const RESERVED: u16 = 0xF000;
+    /// Pressed: reload the firearm in hand (MODES.md 3.2).
+    pub const RELOAD: u16 = 1 << 12;
+    /// Held: the scope is up (MODES.md 3.2), on a firearm that has one.
+    pub const SCOPE: u16 = 1 << 13;
+    /// Bits 14–15 must be zero on the wire.
+    pub const RESERVED: u16 = 0xC000;
 }
 
 /// Animation states carried in snapshots (`anim`). Cosmetic; the client never simulates them.
@@ -49,6 +53,10 @@ pub mod anim {
     pub const STAGGER: u8 = 11;
     /// In the command stance: everyone sees a commander is at it (COMPANIONS.md 5.1).
     pub const COMMAND: u8 = 12;
+    /// On the ground, knocked down or launched (MODES.md 4.5).
+    pub const DOWN: u8 = 13;
+    /// Working the firearm's reload (MODES.md 3.2).
+    pub const RELOAD: u8 = 14;
 
     /// The stances of a running script: the ones a body's `acting` ability goes with.
     pub fn acts(state: u8) -> bool {
@@ -69,6 +77,59 @@ pub struct Input {
     pub side: f32,
     /// Ability slot activated this tick (1-based), 0 = none.
     pub ability: u8,
+    /// The weapon in hand of a gun build (MODES.md 3.7): 0 the primary, 1 the secondary,
+    /// 2 the knife. Other modes ignore it.
+    pub held: u8,
+    /// The body an activation this tick is aimed at (MODES.md 5.3); 0 = none.
+    pub target: u32,
+}
+
+/// A body near the mover, as the magnet (MODES.md 4.2) and a target-action (5.3) read it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Nearby {
+    pub id: u32,
+    pub centre: Vec3,
+    pub velocity: Vec3,
+    pub team: u8,
+    pub party: u32,
+}
+
+/// What the mover sees of the others this tick: the living bodies, and the mover's own
+/// team and party to tell an enemy from a friend (an enemy is on another team, or, in the
+/// wild where everybody is on one, in another party).
+#[derive(Clone, Copy, Debug)]
+pub struct Company<'a> {
+    pub bodies: &'a [Nearby],
+    pub team: u8,
+    pub party: u32,
+}
+
+impl Company<'_> {
+    pub const NONE: Company<'static> = Company {
+        bodies: &[],
+        team: 0,
+        party: 0,
+    };
+
+    pub fn is_enemy(&self, b: &Nearby) -> bool {
+        b.team != self.team || (b.team == crate::sim::TEAM_WILD && b.party != self.party)
+    }
+
+    pub fn find(&self, id: u32) -> Option<&Nearby> {
+        self.bodies.iter().find(|b| b.id == id)
+    }
+}
+
+/// A firearm's state in a hand (MODES.md 3.2), predicted like everything of the mover.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GunState {
+    pub magazine: u8,
+    pub reserve: u16,
+    /// A reload under way ends at this frame tick.
+    pub reload_until: Option<Tick>,
+    /// The last shot's frame tick, and the index of the next shot in the spray.
+    pub last_shot: Tick,
+    pub spray: u8,
 }
 
 /// A running ability script.
@@ -78,6 +139,10 @@ pub struct Script {
     pub started: Tick,
     pub next_step: u8,
     pub ends: Tick,
+    /// A firearm's: the index of this shot in its spray (MODES.md 3.3).
+    pub shot: u8,
+    /// The body the activation was aimed at (MODES.md 5.3); 0 = none.
+    pub target: u32,
 }
 
 /// An active `MoveSelf::Dash` or `Charge`.
@@ -128,6 +193,16 @@ pub struct Mover {
     /// In the command stance until this frame tick: it is pushed ahead on every frame that
     /// holds the `command` button, so it also covers standing up after the release.
     pub command_until: Tick,
+    /// The yaw the body is held at until a frame tick: the magnet's turn (MODES.md 4.2)
+    /// or the turn toward a target (5.3); the frame's yaw is the view meanwhile.
+    pub lock_yaw: Option<(f32, Tick)>,
+    /// A chain's window (MODES.md 4.3): the slot that was pressed, the kit index of the
+    /// next stage, the frame tick the window closes.
+    pub chain: Option<(u8, u8, Tick)>,
+    /// The weapon in hand (MODES.md 3.7) and the firearms' state: the primary's, the
+    /// secondary's.
+    pub held: u8,
+    pub guns: [GunState; 2],
 }
 
 impl Mover {
@@ -148,6 +223,10 @@ impl Mover {
             iframes_until: 0,
             regen_pause_until: 0,
             command_until: 0,
+            lock_yaw: None,
+            chain: None,
+            held: 0,
+            guns: [GunState::default(); 2],
         }
     }
 
@@ -156,7 +235,46 @@ impl Mover {
         let mut m = Mover::new(origin, yaw);
         m.stamina = sheet.derived.stamina;
         m.focus = sheet.derived.focus;
+        m.fill_guns(sheet);
         m
+    }
+
+    /// Every firearm loaded and its reserve full (a spawn, a respawn: MODES.md 3.2).
+    pub fn fill_guns(&mut self, sheet: &Sheet) {
+        let kit = &sheet.kit;
+        for (g, slot) in self.guns.iter_mut().zip([kit.primary, kit.secondary]) {
+            *g = GunState::default();
+            if let Some(f) = slot.and_then(|i| kit.abilities[i as usize].firearm.as_ref()) {
+                g.magazine = f.magazine;
+                g.reserve = f.reserve;
+            }
+        }
+    }
+
+    /// The ability the primary mouse button fires (MODES.md 3.7): the weapon in hand in
+    /// the gun mode, the primary elsewhere.
+    pub fn in_hand(&self, kit: &crate::build::Kit) -> Option<u8> {
+        if kit.mode != crate::vocab::Mode::Gun {
+            return kit.primary;
+        }
+        match self.held {
+            1 => kit.secondary,
+            2 => kit.knife,
+            _ => kit.primary,
+        }
+    }
+
+    /// The firearm in hand and its state, if the weapon in hand is one.
+    pub fn gun_in_hand<'a>(&self, kit: &'a crate::build::Kit) -> Option<(&'a crate::vocab::Firearm, &GunState)> {
+        let slot = self.in_hand(kit)?;
+        let f = kit.abilities[slot as usize].firearm.as_ref()?;
+        Some((f, &self.guns[self.held.min(1) as usize]))
+    }
+
+    pub fn reloading(&self, now: Tick) -> bool {
+        self.guns[self.held.min(1) as usize]
+            .reload_until
+            .is_some_and(|u| tick_delta(now, u) < 0)
     }
 
     pub fn eye(&self) -> Vec3 {
@@ -209,6 +327,12 @@ impl Mover {
         self.evade_until = 0;
         self.iframes_until = 0;
         self.command_until = 0;
+        self.lock_yaw = None;
+        self.chain = None;
+        for g in &mut self.guns {
+            g.reload_until = None;
+            g.spray = 0;
+        }
     }
 }
 
@@ -225,7 +349,7 @@ pub fn capsule_at(origin: Vec3, hull: Hull, frame: ArchetypeFrame) -> Capsule {
 
 /// What a mover asked the authoritative side to do this tick. The client ignores these (or
 /// spawns cosmetic previews); the server resolves them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     Swing {
         ability: u8,
@@ -236,10 +360,19 @@ pub enum Action {
     Fire {
         ability: u8,
         step: u8,
+        /// A firearm's kick for this shot, (yaw, pitch) degrees (MODES.md 3.3), and the
+        /// cone it is rolled in (3.4); zero for anything but a firearm.
+        kick: (f32, f32),
+        cone_deg: f32,
+        /// The bolt's multiplier in the head band (MODES.md 3.5); 1 for anything else.
+        headshot: f32,
+        /// The body it is aimed at (MODES.md 5.3); 0 = where the body looks.
+        target: u32,
     },
     Area {
         ability: u8,
         step: u8,
+        target: u32,
     },
     /// A parry window opened (the server resolves hits against it).
     ParryOpened,
@@ -256,7 +389,9 @@ const DASH_VARS: MoveVars = MoveVars {
 /// Advance one mover by one tick: statuses, guard, ability activation, script steps, movement,
 /// regeneration. `now` is the **client tick of the frame** on both sides (the server passes the
 /// frame's tick, never its own), so cooldowns, scripts, statuses and dashes elapse identically
-/// even when the server runs two frames in one tick.
+/// even when the server runs two frames in one tick. `company` is what the mover sees of the
+/// others: the magnet (MODES.md 4.2) and a target-action (5.3) read it.
+#[allow(clippy::too_many_arguments)]
 pub fn step_mover<W: CollisionWorld + ?Sized>(
     world: &W,
     sheet: &Sheet,
@@ -264,6 +399,7 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
     input: &Input,
     now: Tick,
     dt: f32,
+    company: Company<'_>,
     actions: &mut Vec<Action>,
 ) {
     let kit = &sheet.kit;
@@ -272,13 +408,26 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
     m.buttons_prev = input.buttons;
     m.yaw = input.yaw;
     m.pitch = input.pitch;
+    // A held yaw (the magnet's turn, the turn toward a target) stands in for the frame's
+    // while it lasts; the view is the frame's still.
+    match m.lock_yaw {
+        Some((yaw, until)) if tick_delta(now, until) < 0 => m.yaw = yaw,
+        Some(_) => m.lock_yaw = None,
+        None => {}
+    }
     m.statuses.expire(now);
-    let staggered = m.statuses.staggered();
+    // Stagger interrupts everything (MATRIX.md 8); the server already cleared the script
+    // when it applied the status, the client follows at reconciliation. A body on the
+    // ground (MODES.md 4.5) is as helpless.
+    let staggered = m.statuses.staggered() || m.statuses.downed();
     if staggered {
-        // Stagger interrupts everything (MATRIX.md 8); the server already cleared the script
-        // when it applied the status, the client follows at reconciliation.
         m.script = None;
         m.guard = GuardState::None;
+        m.lock_yaw = None;
+        m.chain = None;
+        for g in &mut m.guns {
+            g.reload_until = None;
+        }
     }
 
     // The command stance (COMPANIONS.md 5.1): it begins on a frame that holds the button
@@ -309,11 +458,20 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
 
     guard_step(sheet, m, input, pressed, now, staggered, actions);
 
+    // The weapon in hand (MODES.md 3.7): a switch cancels a reload under way.
+    if kit.mode == Mode::Gun && input.held != m.held && input.held <= 2 && !staggered {
+        m.guns[m.held.min(1) as usize].reload_until = None;
+        m.held = input.held;
+    }
+    let primary = m.in_hand(kit);
+    let auto = primary
+        .and_then(|i| kit.abilities[i as usize].firearm.as_ref())
+        .is_some_and(|f| f.fire == FireMode::Auto);
     let slot = if input.ability > 0 && (input.ability as usize) <= kit.actives.len() {
         kit.actives[input.ability as usize - 1]
-    } else if pressed & buttons::PRIMARY != 0 {
-        kit.primary
-    } else if pressed & buttons::SECONDARY != 0 {
+    } else if pressed & buttons::PRIMARY != 0 || (auto && input.buttons & buttons::PRIMARY != 0) {
+        primary
+    } else if pressed & buttons::SECONDARY != 0 && kit.mode != Mode::Gun {
         kit.secondary
     } else if pressed & buttons::ABILITY1 != 0 {
         kit.actives[0]
@@ -329,8 +487,9 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
     if let Some(slot) = slot
         && !staggered
     {
-        try_activate(sheet, m, slot as usize, now);
+        try_activate(world, sheet, m, slot as usize, now, input, company);
     }
+    reload_step(sheet, m, input, pressed, now, staggered);
 
     if let Some(mut s) = m.script {
         let ab = &kit.abilities[s.ability as usize];
@@ -344,9 +503,10 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
                 m,
                 input,
                 &ab.steps[s.next_step as usize].verb,
-                s.ability,
+                &s,
                 s.next_step,
                 now,
+                company,
                 actions,
             );
             s.next_step += 1;
@@ -357,8 +517,13 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
             Some(s)
         };
     }
+    // A chain's window closes by itself (MODES.md 4.3).
+    if m.chain.is_some_and(|(_, _, until)| tick_delta(now, until) >= 0) {
+        m.chain = None;
+    }
 
-    // Movement scale: the script, the guard, then statuses on top of the sheet's speed.
+    // Movement scale: the script, the guard, the scope, then statuses on top of the
+    // sheet's speed.
     let mut scale = m
         .script
         .map_or(1.0, |s| kit.abilities[s.ability as usize].move_scale);
@@ -367,11 +532,21 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
         (GuardState::Parry { .. } | GuardState::Whiff { .. }, _) => scale *= 0.5,
         _ => {}
     }
+    if input.buttons & buttons::SCOPE != 0
+        && let Some((f, _)) = m.gun_in_hand(kit)
+        && f.scope > 0
+        && let Some(i) = primary
+    {
+        scale *= kit.abilities[i as usize].move_scale;
+    }
+    if m.reloading(now) && let Some(i) = primary {
+        scale *= kit.abilities[i as usize].move_scale.max(0.5);
+    }
     let vars = MoveVars {
         max_speed: d.max_speed * m.statuses.speed_scale(),
         ..MoveVars::QUAKE
     };
-    let jump = input.buttons & buttons::JUMP != 0 && !m.statuses.staggered();
+    let jump = input.buttons & buttons::JUMP != 0 && !staggered;
     match m.dash {
         Some(dsh)
             if tick_delta(dsh.until, now) > 0 && !m.statuses.has(crate::vocab::Status::Root) =>
@@ -392,7 +567,7 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
         _ => {
             m.dash = None;
             let mi = MoveInput {
-                yaw: m.yaw,
+                yaw: input.yaw,
                 forward: input.forward.clamp(-1.0, 1.0) * scale,
                 side: input.side.clamp(-1.0, 1.0) * scale,
                 jump,
@@ -480,6 +655,47 @@ fn guard_step(
     }
 }
 
+/// The reload of the firearm in hand (MODES.md 3.2): `R`, or the trigger on an empty
+/// magazine; it ends by itself, a stagger drops it and the rounds are kept.
+fn reload_step(sheet: &Sheet, m: &mut Mover, input: &Input, pressed: u16, now: Tick, staggered: bool) {
+    let kit = &sheet.kit;
+    if kit.mode != Mode::Gun || m.held > 1 {
+        return;
+    }
+    let Some(f) = m
+        .in_hand(kit)
+        .and_then(|i| kit.abilities[i as usize].firearm.as_ref())
+    else {
+        return;
+    };
+    let g = &mut m.guns[m.held as usize];
+    match g.reload_until {
+        Some(until) if tick_delta(now, until) >= 0 => {
+            let take = (f.magazine - g.magazine.min(f.magazine)).min(g.reserve.min(u8::MAX as u16) as u8);
+            g.magazine += take;
+            g.reserve -= take as u16;
+            g.reload_until = None;
+        }
+        Some(_) => {}
+        None => {
+            let asked = pressed & buttons::RELOAD != 0
+                || (pressed & buttons::PRIMARY != 0 && g.magazine == 0)
+                || (input.buttons & buttons::PRIMARY != 0
+                    && g.magazine == 0
+                    && f.fire == FireMode::Auto);
+            if asked
+                && !staggered
+                && g.magazine < f.magazine
+                && g.reserve > 0
+                && m.script.is_none()
+            {
+                g.reload_until = Some(now.wrapping_add(f.reload.max(1)));
+                g.spray = 0;
+            }
+        }
+    }
+}
+
 fn regen_pause_ticks() -> Tick {
     TickRate::COMBAT.ms_to_ticks(REGEN_PAUSE_MS)
 }
@@ -489,10 +705,81 @@ pub fn command_exit_ticks(dt: f32) -> Tick {
     (COMMAND_EXIT_MS as f32 / 1000.0 / dt).ceil() as Tick
 }
 
-fn try_activate(sheet: &Sheet, m: &mut Mover, slot: usize, now: Tick) -> bool {
+/// Line of sight from `eye` to a body's `centre` through the mover's world, which holds
+/// the other bodies as solids: the trace stops a little short of the body, so the body
+/// itself is not in its own way.
+pub fn sees<W: CollisionWorld + ?Sized>(world: &W, eye: Vec3, centre: Vec3) -> bool {
+    let to = centre - eye;
+    let len = to.length();
+    if len <= BODY_CLEARANCE {
+        return true;
+    }
+    let end = eye + to * ((len - BODY_CLEARANCE) / len);
+    world.trace(Hull::Point, eye, end).fraction >= 1.0
+}
+
+/// How far short of a body's centre a sight line stops: past the player hull's half
+/// width, within a frame's reach.
+const BODY_CLEARANCE: f32 = 20.0;
+
+/// The yaw from `from` to `to`, in degrees, as the mover's yaw is.
+pub fn yaw_toward(from: Vec3, to: Vec3) -> f32 {
+    let d = to - from;
+    d.y.atan2(d.x).to_degrees()
+}
+
+/// The shortest turn from `a` to `b`, degrees in `-180..=180`.
+fn turn_between(a: f32, b: f32) -> f32 {
+    let mut d = (b - a) % 360.0;
+    if d > 180.0 {
+        d -= 360.0;
+    } else if d < -180.0 {
+        d += 360.0;
+    }
+    d
+}
+
+/// Start the pressed slot's ability, or what its chain or its target make of it.
+fn try_activate<W: CollisionWorld + ?Sized>(
+    world: &W,
+    sheet: &Sheet,
+    m: &mut Mover,
+    pressed_slot: usize,
+    now: Tick,
+    input: &Input,
+    company: Company<'_>,
+) -> bool {
     let kit = &sheet.kit;
-    if slot >= kit.abilities.len().min(MAX_ABILITIES) || m.script.is_some() {
+    // A chain's window (MODES.md 4.3): the pressed slot plays the next stage.
+    let mut slot = pressed_slot;
+    let mut chained = false;
+    if let Some((from, next, until)) = m.chain
+        && from as usize == pressed_slot
+        && tick_delta(now, until) < 0
+    {
+        slot = next as usize;
+        chained = true;
+    }
+    if slot >= kit.abilities.len().min(MAX_ABILITIES) {
         return false;
+    }
+    let ab = &kit.abilities[slot];
+    if let Some(s) = m.script {
+        // A script in its recovery is cut short by its chain's next stage or by a dash
+        // that cancels (MODES.md 4.4); nothing else starts while one runs.
+        let elapsed = tick_delta(now, s.started).max(0) as Tick;
+        let running = &kit.abilities[s.ability as usize];
+        let in_recovery = elapsed >= crate::build::script_commit(running);
+        let cancels = matches!(
+            ab.steps.first().map(|st| &st.verb),
+            Some(Verb::MoveSelf(ms)) if ms.cancel_recovery
+        );
+        if in_recovery && (chained || cancels) {
+            m.script = None;
+            m.lock_yaw = None;
+        } else {
+            return false;
+        }
     }
     if matches!(m.guard, GuardState::Parry { .. } | GuardState::Whiff { .. }) {
         return false;
@@ -503,9 +790,30 @@ fn try_activate(sheet: &Sheet, m: &mut Mover, slot: usize, now: Tick) -> bool {
     if kit.elemental[slot] && m.statuses.silenced() {
         return false;
     }
-    let ab = &kit.abilities[slot];
     if m.stamina < ab.cost.stamina as f32 || m.focus < ab.cost.focus as f32 {
         return false;
+    }
+    // A firearm (MODES.md 3.2): a round in the magazine, no reload under way, and a
+    // bolt-action worked standing or walking.
+    let mut shot = 0;
+    if let Some(f) = &ab.firearm {
+        if m.held > 1 || m.in_hand(kit) != Some(slot as u8) {
+            return false;
+        }
+        let g = &mut m.guns[m.held as usize];
+        if g.magazine == 0 || g.reload_until.is_some() {
+            return false;
+        }
+        if f.fire == FireMode::Bolt && m.mv.ground_speed() > sheet.derived.max_speed * 0.5 + 1.0 {
+            return false;
+        }
+        if tick_delta(now, g.last_shot) > (f.cone.recover * 2) as i32 {
+            g.spray = 0;
+        }
+        shot = g.spray;
+        g.spray = g.spray.saturating_add(1);
+        g.last_shot = now;
+        g.magazine -= 1;
     }
     m.stamina -= ab.cost.stamina as f32;
     m.focus -= ab.cost.focus as f32;
@@ -525,12 +833,31 @@ fn try_activate(sheet: &Sheet, m: &mut Mover, slot: usize, now: Tick) -> bool {
             }
         }
     }
+    let ends = now.wrapping_add(kit.durations[slot]);
     m.script = Some(Script {
         ability: slot as u8,
         started: now,
         next_step: 0,
-        ends: now.wrapping_add(kit.durations[slot]),
+        ends,
+        shot,
+        target: input.target,
     });
+    m.chain = match (ab.chain, kit.chain_next.get(slot).copied().flatten()) {
+        (Some(c), Some(next)) => Some((pressed_slot as u8, next, ends.wrapping_add(c.window))),
+        _ => None,
+    };
+    // A target-action (MODES.md 5.3): the body turns to its target for the script, when
+    // the target is within the ability's range and in sight.
+    if input.target != 0
+        && ab.range > 0.0
+        && let Some(b) = company.find(input.target)
+        && (b.centre - m.mv.origin).truncate().length() <= ab.range
+        && sees(world, m.eye(), b.centre)
+    {
+        let yaw = yaw_toward(m.mv.origin, b.centre);
+        m.lock_yaw = Some((yaw, ends));
+        m.yaw = yaw;
+    }
     true
 }
 
@@ -541,20 +868,76 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
     m: &mut Mover,
     input: &Input,
     verb: &Verb,
-    ability: u8,
+    script: &Script,
     step: u8,
     now: Tick,
+    company: Company<'_>,
     actions: &mut Vec<Action>,
 ) {
+    let ability = script.ability;
     match verb {
-        Verb::MeleeArc(arc) => actions.push(Action::Swing {
+        Verb::MeleeArc(arc) => {
+            // The magnet (MODES.md 4.2): at the swing's start the body turns, up to the
+            // arc's assist, toward the nearest enemy within reach and a half that it sees.
+            if arc.assist_deg > 0.0 && m.lock_yaw.is_none() {
+                let eye = m.eye();
+                let near = company
+                    .bodies
+                    .iter()
+                    .filter(|b| company.is_enemy(b))
+                    .map(|b| (b, (b.centre - m.mv.origin).truncate().length()))
+                    .filter(|(b, dist)| *dist <= arc.reach * 1.5 && sees(world, eye, b.centre))
+                    .min_by(|a, b| a.1.total_cmp(&b.1));
+                if let Some((b, _)) = near {
+                    let want = yaw_toward(m.mv.origin, b.centre);
+                    let turn = turn_between(m.yaw, want).clamp(-arc.assist_deg, arc.assist_deg);
+                    let yaw = m.yaw + turn;
+                    m.lock_yaw = Some((yaw, now.wrapping_add(arc.timing.windup + arc.timing.active)));
+                    m.yaw = yaw;
+                }
+            }
+            actions.push(Action::Swing {
+                ability,
+                step,
+                active_from: now.wrapping_add(arc.timing.windup),
+                active_until: now.wrapping_add(arc.timing.windup + arc.timing.active),
+            })
+        }
+        Verb::Projectile(_) => {
+            let ab = &sheet.kit.abilities[ability as usize];
+            let (kick, cone_deg, headshot) = match &ab.firearm {
+                Some(f) => {
+                    let g = &m.guns[m.held.min(1) as usize];
+                    let crouched = input.buttons & buttons::CROUCH != 0 && m.mv.on_ground;
+                    let base = if crouched { f.cone.crouch } else { f.cone.stand };
+                    let speed = m.mv.ground_speed() / sheet.derived.max_speed.max(1.0);
+                    let recent = if script.shot > 0 && tick_delta(now, g.last_shot) <= f.cone.recover as i32 {
+                        script.shot as f32
+                    } else {
+                        0.0
+                    };
+                    let cone = base
+                        + f.cone.moving * speed.clamp(0.0, 1.2)
+                        + if m.mv.on_ground { 0.0 } else { f.cone.air }
+                        + f.cone.shot * recent;
+                    (f.kick(script.shot), cone, f.headshot)
+                }
+                None => ((0.0, 0.0), 0.0, 1.0),
+            };
+            actions.push(Action::Fire {
+                ability,
+                step,
+                kick,
+                cone_deg,
+                headshot,
+                target: script.target,
+            })
+        }
+        Verb::AreaEffect(_) => actions.push(Action::Area {
             ability,
             step,
-            active_from: now.wrapping_add(arc.timing.windup),
-            active_until: now.wrapping_add(arc.timing.windup + arc.timing.active),
+            target: script.target,
         }),
-        Verb::Projectile(_) => actions.push(Action::Fire { ability, step }),
-        Verb::AreaEffect(_) => actions.push(Action::Area { ability, step }),
         Verb::ApplyStatus(s) => {
             // Self-targeted statuses are predicted; hit/area targets are the server's.
             if s.target == StatusTarget::Actor {
@@ -562,13 +945,14 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
             }
         }
         Verb::MoveSelf(ms) => {
-            let (fwd, right) = yaw_vectors(m.yaw);
+            let (fwd, right) = yaw_vectors(input.yaw);
             let wish = fwd * input.forward + right * input.side;
             let dir = if wish.length_squared() > 1e-4 {
                 wish.normalize()
             } else {
-                fwd
+                yaw_vectors(m.yaw).0
             };
+            let fwd = yaw_vectors(m.yaw).0;
             let duration = match ms.kind {
                 MoveKind::Dash { speed, duration } => {
                     m.dash = Some(Dash {
@@ -613,7 +997,6 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
             if ms.iframes > 0 {
                 m.iframes_until = now.wrapping_add(ms.iframes);
             }
-            let _ = sheet;
         }
         // Guard verbs live in the guard slot, never in a script.
         Verb::Guard(_) => {}

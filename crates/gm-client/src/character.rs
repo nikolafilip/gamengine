@@ -474,7 +474,7 @@ fn kit_columns<C: Canvas>(
 /// Seconds from ticks, short: `14 s`, `0.6 s`.
 fn secs(rate: TickRate, ticks: u32) -> String {
     let ms = rate.ticks_to_ms(ticks);
-    if ms % 1000 == 0 {
+    if ms.is_multiple_of(1000) {
         format!("{} s", ms / 1000)
     } else {
         format!("{:.1} s", ms as f32 / 1000.0)

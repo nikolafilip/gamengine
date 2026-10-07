@@ -174,7 +174,9 @@ impl GameMenu {
             ("right button", "the secondary"),
             ("C or Ctrl", "guard"),
             ("1 2 3 4", "the actives (Shift is 1)"),
-            ("V", "first or third person"),
+            ("Space", "dodge, while the dash is ready"),
+            ("R", "reload (gun)"),
+            ("1 2 3", "gun, pistol, knife in hand"),
             ("Enter", "say something"),
             ("F9", "report the player you look at"),
             ("I", "the inventory"),
@@ -330,11 +332,6 @@ impl GameMenu {
             col.take(h),
             "invert the mouse's up and down",
             &mut settings.invert,
-        );
-        changed |= ui.checkbox(
-            col.take(h),
-            "start in third person",
-            &mut settings.third_person,
         );
         if offers.fullscreen {
             changed |= ui.checkbox(col.take(h), "fullscreen", &mut settings.fullscreen);

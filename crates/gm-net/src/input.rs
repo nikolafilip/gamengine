@@ -20,10 +20,14 @@ pub struct InputFrame {
     pub side: i8,
     /// Ability slot activated this tick (1-based), 0 = none.
     pub ability: u8,
+    /// The weapon in hand (MODES.md 3.7): 0 the primary, 1 the secondary, 2 the knife.
+    pub held: u8,
+    /// The body the frame's activation is aimed at (MODES.md 5.3); 0 = none.
+    pub target: u32,
 }
 
 impl InputFrame {
-    pub const BITS: usize = 16 + 12 + 11 + 8 + 8 + 8;
+    pub const BITS: usize = 16 + 12 + 11 + 8 + 8 + 8 + 2 + 32;
 
     fn write(&self, w: &mut BitWriter) {
         w.write_bits(self.buttons as u64, 16);
@@ -32,6 +36,8 @@ impl InputFrame {
         w.write_bits(self.forward as u8 as u64, 8);
         w.write_bits(self.side as u8 as u64, 8);
         w.write_bits(self.ability as u64, 8);
+        w.write_bits(self.held as u64, 2);
+        w.write_bits(self.target as u64, 32);
     }
 
     fn read(r: &mut BitReader<'_>) -> Result<InputFrame, NetError> {
@@ -42,9 +48,14 @@ impl InputFrame {
             forward: r.read_bits(8)? as u8 as i8,
             side: r.read_bits(8)? as u8 as i8,
             ability: r.read_bits(8)? as u8,
+            held: r.read_bits(2)? as u8,
+            target: r.read_bits(32)? as u32,
         };
         if f.buttons & buttons::RESERVED != 0 {
             return Err(NetError::Malformed("reserved button bits set"));
+        }
+        if f.held > 2 {
+            return Err(NetError::Malformed("held out of range"));
         }
         if f.yaw >= 3600 {
             return Err(NetError::Malformed("yaw out of range"));
@@ -64,6 +75,8 @@ impl InputFrame {
             forward: quant::axis_to_wire(input.forward),
             side: quant::axis_to_wire(input.side),
             ability: input.ability,
+            held: input.held.min(2),
+            target: input.target,
         }
     }
 
@@ -76,6 +89,8 @@ impl InputFrame {
             forward: quant::wire_to_axis(self.forward),
             side: quant::wire_to_axis(self.side),
             ability: self.ability,
+            held: self.held,
+            target: self.target,
         }
     }
 }
@@ -173,6 +188,8 @@ mod tests {
             forward: 127,
             side: -64,
             ability: i,
+            held: 1,
+            target: 70_000 + i as u32,
         }
     }
 
@@ -183,8 +200,8 @@ mod tests {
             d.push(frame(i));
         }
         let bytes = d.encode();
-        // header 16 + ack 32 + view 32 + count 2 + first 32 + 4 * 63 = 366 bits = 46 bytes.
-        assert_eq!(bytes.len(), 46);
+        // header 16 + ack 32 + view 32 + count 2 + first 32 + 4 * 97 = 502 bits = 63 bytes.
+        assert_eq!(bytes.len(), 63);
         let back = InputDatagram::decode(&bytes).unwrap();
         assert_eq!(back, d);
         let ticks: Vec<u32> = back.frames().map(|(t, _)| t).collect();
@@ -196,8 +213,8 @@ mod tests {
     fn single_frame_is_small() {
         let mut d = InputDatagram::new(0, 0, 1);
         d.push(InputFrame::default());
-        // header 16 + ack 32 + view 32 + count 2 + first 32 + 63 = 177 bits = 23 bytes.
-        assert_eq!(d.encode().len(), 23);
+        // header 16 + ack 32 + view 32 + count 2 + first 32 + 97 = 211 bits = 27 bytes.
+        assert_eq!(d.encode().len(), 27);
     }
 
     #[test]
@@ -238,6 +255,8 @@ mod tests {
             forward: 0.5,
             side: -1.0,
             ability: 2,
+            held: 2,
+            target: 9,
         };
         let wire = InputFrame::from_sim(&sim);
         let back = wire.to_sim();

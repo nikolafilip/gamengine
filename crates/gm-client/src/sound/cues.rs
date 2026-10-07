@@ -800,6 +800,10 @@ mod tests {
             &[Action::Fire {
                 ability: 2,
                 step: 0,
+                kick: (0.0, 0.0),
+                cone_deg: 0.0,
+                headshot: 1.0,
+                target: 0,
             }],
         );
         assert_eq!(cues(&s.take(o)), [Cue::Cast]);

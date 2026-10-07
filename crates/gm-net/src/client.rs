@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, VecDeque};
 use glam::Vec3;
 use gm_core::build::Sheet;
 use gm_core::collide::{Aabb, Composite};
-use gm_core::sim::{Action, GuardState, Input, Mover, step_mover, tick_delta};
+use gm_core::sim::{Action, Company, GuardState, Input, Mover, Nearby, step_mover, tick_delta};
 use gm_core::status::{StatusSlot, Statuses};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Hull};
@@ -224,6 +224,7 @@ impl ClientState {
         };
         self.actions.clear();
         if self.own_alive || !self.synced {
+            let nearby = self.latest_nearby();
             step_mover(
                 &composite,
                 &self.sheet,
@@ -231,6 +232,11 @@ impl ClientState {
                 &input,
                 self.tick,
                 dt,
+                Company {
+                    bodies: &nearby,
+                    team: self.sheet.team,
+                    party: 0,
+                },
                 &mut self.actions,
             );
         } else {
@@ -591,6 +597,7 @@ impl ClientState {
     /// Re-run the ring from index `from` starting at state `m`; the result is the new mover.
     fn replay_from(&mut self, world: &dyn CollisionWorld, from: usize, mut m: Mover) {
         let solids = self.latest_boxes();
+        let nearby = self.latest_nearby();
         let dt = self.rate.dt();
         let mut sink = Vec::new();
         for j in from..self.ring.len() {
@@ -600,7 +607,20 @@ impl ClientState {
                 solids: &solids,
                 own: Some(m.aabb()),
             };
-            step_mover(&composite, &self.sheet, &mut m, &input, tick, dt, &mut sink);
+            step_mover(
+                &composite,
+                &self.sheet,
+                &mut m,
+                &input,
+                tick,
+                dt,
+                Company {
+                    bodies: &nearby,
+                    team: self.sheet.team,
+                    party: 0,
+                },
+                &mut sink,
+            );
             self.ring[j].2 = m;
             self.stats.replayed_ticks += 1;
         }
@@ -721,6 +741,32 @@ impl ClientState {
             .filter_map(|t| t.samples.back())
             .filter(|(_, e)| e.spawn.kind() == EntityKind::Player && e.flags & flags::ALIVE != 0)
             .map(|(_, e)| Aabb::around(Vec3::from(quant::dequantize_pos3(e.pos)), Hull::Player))
+            .collect()
+    }
+
+    /// The living other bodies at their newest known positions, as the magnet and a
+    /// target-action read them (MODES.md 4.2, 5.3). The party is not on the wire: in the
+    /// wild everybody is read as an enemy here, and the zone's own reading decides.
+    pub fn latest_nearby(&self) -> Vec<Nearby> {
+        self.tracks
+            .iter()
+            .filter(|(_, t)| t.removed_at.is_none())
+            .filter_map(|(id, t)| t.samples.back().map(|(_, e)| (*id, e)))
+            .filter(|(_, e)| e.spawn.kind() == EntityKind::Player && e.flags & flags::ALIVE != 0)
+            .map(|(id, e)| {
+                let team = match e.spawn {
+                    SpawnInfo::Player { team, .. } => team,
+                    _ => 0,
+                };
+                let pos = Vec3::from(quant::dequantize_pos3(e.pos));
+                Nearby {
+                    id,
+                    centre: pos + Vec3::Z * (Hull::Player.mins().z + Hull::Player.maxs().z) * 0.5,
+                    velocity: Vec3::ZERO,
+                    team,
+                    party: 0,
+                }
+            })
             .collect()
     }
 

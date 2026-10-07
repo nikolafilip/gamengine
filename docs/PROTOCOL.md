@@ -115,18 +115,20 @@ a few hours at 64 Hz) cost one tick of movement, anything less costs nothing (PL
 | view_tick | 32 | server tick the client is displaying for other entities (its interpolation time); 0 = none. Used for melee lag compensation (section 7.4) |
 | frame_count − 1 | 2 | 1..=4 frames |
 | first_tick | 32 | client tick of the oldest frame; frame `i` is tick `first_tick + i` |
-| frames | 63 each | oldest first |
+| frames | 97 each | oldest first |
 
 Frame:
 
 | Field | Bits | Notes |
 |---|---|---|
-| buttons | 16 | bit 0 jump, 1 crouch, 2 primary, 3 secondary, 4 guard, 5–8 ability 1–4, 9 interact, 10 viewport switch, 11 command (the command stance, COMPANIONS.md 5.1), 12–15 reserved (must be 0) |
+| buttons | 16 | bit 0 jump, 1 crouch, 2 primary, 3 secondary, 4 guard, 5–8 ability 1–4, 9 interact, 10 unused (the viewport switch until v11: the camera is the mode's, MODES.md 2), 11 command (the command stance, COMPANIONS.md 5.1), 12 reload, 13 scope held (MODES.md 3.2), 14–15 reserved (must be 0) |
 | yaw | 12 | 0.1° |
 | pitch | 11 | 0.1° |
 | forward | 8 | i8, −127..=127 → −1..=1 |
 | side | 8 | i8, right positive |
 | ability | 8 | slot activated this tick (1-based), 0 = none |
+| held | 2 | the weapon in hand of a gun build (MODES.md 3.7): 0 the primary, 1 the secondary, 2 the knife; 3 is malformed |
+| target | 32 | the body an activation this tick is aimed at (MODES.md 5.3); 0 = none |
 
 Movement direction lives in `forward`/`side` only; there are no forward/back/left/right buttons
 (the Phase 0 skeleton listed both, which was redundant).
@@ -775,3 +777,21 @@ in the simulation's snapshots:
   pulse of a Regen its hand put on another body, with what the pulse gave back (nothing
   for a pulse at full health). Not sent when the healer is the target: the own health
   says it. Four a second a body healed, for the Regen's seconds.
+
+## 23. Changes in v11 (the three modes)
+
+`PROTOCOL_VERSION` 11 (MODES.md). The input frame grows from 63 to 97 bits (section 4):
+
+- `held` (2 bits): the weapon in hand of a gun build; `target` (32 bits): the body an
+  activation is aimed at. Every mode sends both; a mode that has no use for one sends 0.
+- buttons 12 (`reload`) and 13 (`scope`); bit 10 (the viewport switch) is no longer read:
+  the camera is the character's mode's, never a key's.
+- `Build.mode` rides in `Content` and `BuildApplied` with the build (a build stored
+  before v11 is read as `action`); `Ability` carries `chain`, `firearm` and `range`,
+  `MeleeArc.assist_deg`, `MoveSelf.cancel_recovery`; the statuses `Knockdown` (14) and
+  `Launched` (15) take the last two bits of the entity's status mask.
+- `Projectile.speed` may be 20,000 u/s (a bullet, MODES.md 3.6); the sweep per tick is
+  unchanged.
+- The own block carries the firearm in hand's `magazine`, `reserve` and `reloading`
+  (section 5, MODES.md 3.8), added with the gun mode.
+- The animation states `DOWN` (13) and `RELOAD` (14).

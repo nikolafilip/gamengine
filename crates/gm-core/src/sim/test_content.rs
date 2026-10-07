@@ -8,10 +8,10 @@ use crate::matrix::{ArmourClass, Aspects, Attributes, Element};
 use crate::tick::TickRate;
 use crate::trial::{Lens, TrialDef};
 use crate::vocab::{
-    Ability, AbilityId, ApplyStatus, ArchetypeFrame, AreaEffect, Block, Bounce, Bypass, Cooldown,
-    Cost, DamagePacket, DamageType, Falloff, Interrupt, MeleeArc, MoveKind, MoveSelf, Origin,
-    Parry, Projectile, Riposte, Shape, StackRule, Status, StatusTarget, Step, Timing, Trigger,
-    Verb,
+    Ability, AbilityId, ApplyStatus, ArchetypeFrame, AreaEffect, Block, Bounce, Bypass, Chain,
+    Cone, Cooldown, Cost, DamagePacket, DamageType, Falloff, FireMode, Firearm, Interrupt,
+    MeleeArc, Mode, MoveKind, MoveSelf, Origin, Parry, Projectile, Riposte, Shape, StackRule,
+    Status, StatusTarget, Step, Timing, Trigger, Verb,
 };
 
 pub fn packet(amount: u16, dtype: DamageType, knockback: f32, stagger: u8) -> DamagePacket {
@@ -70,7 +70,75 @@ fn melee(
         cleave_falloff: cleave,
         parryable: true,
         hit_stop: rate.ms_to_ticks(30),
+        assist_deg: 0.0,
     })
+}
+
+/// An arc with the magnet (MODES.md 4.2).
+fn assisted(verb: Verb, deg: f32) -> Verb {
+    match verb {
+        Verb::MeleeArc(m) => Verb::MeleeArc(MeleeArc {
+            assist_deg: deg,
+            ..m
+        }),
+        v => v,
+    }
+}
+
+/// A bullet (MODES.md 3.6): 20,000 u/s, flat, gone within 400 ms, no spread of its own.
+fn bullet(rate: TickRate, damage: DamagePacket, offset: [f32; 3]) -> Verb {
+    Verb::Projectile(Projectile {
+        speed: 20000.0,
+        gravity_scale: 0.02,
+        radius: 2.0,
+        lifetime: rate.ms_to_ticks(400),
+        damage,
+        pierce: 0,
+        bounce: Bounce::default(),
+        drag: 0.0,
+        spawn: Origin::Weapon { offset },
+        inherit_velocity: 0.0,
+        spread_deg: 0.0,
+        count: 1,
+        on_hit: vec![],
+        on_expire: vec![],
+    })
+}
+
+/// A firearm's numbers (MODES.md 3.2) on an ability; its cooldown becomes the cycle.
+#[allow(clippy::too_many_arguments)]
+fn firearm(
+    rate: TickRate,
+    mut ability: Ability,
+    magazine: u8,
+    reserve: u16,
+    reload_ms: u32,
+    cycle_ms: u32,
+    fire: FireMode,
+    recoil: &[(f32, f32)],
+    cone: [f32; 5],
+    recover_ms: u32,
+) -> Ability {
+    ability.cooldown.ticks = rate.ms_to_ticks(cycle_ms);
+    ability.firearm = Some(Firearm {
+        magazine,
+        reserve,
+        reload: rate.ms_to_ticks(reload_ms),
+        cycle: rate.ms_to_ticks(cycle_ms),
+        fire,
+        headshot: 4.0,
+        scope: 0,
+        recoil: recoil.to_vec(),
+        cone: Cone {
+            stand: cone[0],
+            crouch: cone[1],
+            moving: cone[2],
+            air: cone[3],
+            shot: cone[4],
+            recover: rate.ms_to_ticks(recover_ms),
+        },
+    });
+    ability
 }
 
 fn projectile(
@@ -130,6 +198,9 @@ fn ability(
             .collect(),
         move_scale,
         interrupt,
+        chain: None,
+        firearm: None,
+        range: 0.0,
     }
 }
 
@@ -167,16 +238,19 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 Interrupt::OnStagger,
                 vec![(
                     0,
-                    melee(
-                        r,
-                        72.0,
-                        90.0,
-                        150,
-                        60,
-                        300,
-                        packet(60, Slash, 150.0, 20),
-                        3,
-                        0.7,
+                    assisted(
+                        melee(
+                            r,
+                            72.0,
+                            90.0,
+                            150,
+                            60,
+                            300,
+                            packet(60, Slash, 150.0, 20),
+                            3,
+                            0.7,
+                        ),
+                        30.0,
                     ),
                 )],
                 r,
@@ -260,16 +334,19 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 Interrupt::OnStagger,
                 vec![(
                     0,
-                    melee(
-                        r,
-                        56.0,
-                        70.0,
-                        100,
-                        40,
-                        200,
-                        packet(35, Slash, 60.0, 10),
-                        1,
-                        1.0,
+                    assisted(
+                        melee(
+                            r,
+                            56.0,
+                            70.0,
+                            100,
+                            40,
+                            200,
+                            packet(35, Slash, 60.0, 10),
+                            1,
+                            1.0,
+                        ),
+                        30.0,
                     ),
                 )],
                 r,
@@ -521,6 +598,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                                 cleave_falloff: 1.0,
                                 parryable: false,
                                 hit_stop: 0,
+                                assist_deg: 0.0,
                             }),
                         ],
                     })),
@@ -570,6 +648,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 Interrupt::Never,
                 vec![(
                     0,
+                    // The dodge (MODES.md 4.4): untouchable for 150 ms, cuts a recovery.
                     Verb::MoveSelf(MoveSelf {
                         kind: MoveKind::Dash {
                             speed: 900.0,
@@ -577,7 +656,8 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         },
                         cancelable: false,
                         keep_friction: false,
-                        iframes: 0,
+                        iframes: r.ms_to_ticks(150),
+                        cancel_recovery: true,
                     }),
                 )],
                 r,
@@ -606,6 +686,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         cancelable: false,
                         keep_friction: false,
                         iframes: 0,
+                        cancel_recovery: false,
                     }),
                 )],
                 r,
@@ -635,6 +716,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         cancelable: false,
                         keep_friction: false,
                         iframes: 0,
+                        cancel_recovery: false,
                     }),
                 )],
                 r,
@@ -660,6 +742,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         cancelable: false,
                         keep_friction: false,
                         iframes: 0,
+                        cancel_recovery: false,
                     }),
                 )],
                 r,
@@ -1186,6 +1269,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                             cleave_falloff: 1.0,
                             parryable: true,
                             hit_stop: r.ms_to_ticks(40),
+                            assist_deg: 0.0,
                         }),
                     )],
                     r,
@@ -1237,36 +1321,27 @@ pub fn pack(rate: TickRate) -> ContentPack {
             Primary,
             2,
             None,
-            ability(
-                48,
-                "Musket",
-                3000,
-                0,
-                0,
-                0.5,
-                Interrupt::Never,
-                vec![(
-                    150,
-                    Verb::Projectile(Projectile {
-                        speed: 2600.0,
-                        gravity_scale: 0.15,
-                        radius: 2.0,
-                        lifetime: r.ms_to_ticks(2500),
-                        damage: packet(110, Pierce, 160.0, 15),
-                        pierce: 0,
-                        bounce: Bounce::default(),
-                        drag: 0.0,
-                        spawn: Origin::Weapon {
-                            offset: [20.0, 4.0, -2.0],
-                        },
-                        inherit_velocity: 0.0,
-                        spread_deg: 0.2,
-                        count: 1,
-                        on_hit: vec![],
-                        on_expire: vec![],
-                    }),
-                )],
+            firearm(
                 r,
+                ability(
+                    48,
+                    "Musket",
+                    1200,
+                    0,
+                    0,
+                    0.5,
+                    Interrupt::Never,
+                    vec![(0, bullet(r, packet(110, Pierce, 160.0, 15), [20.0, 4.0, -2.0]))],
+                    r,
+                ),
+                1,
+                24,
+                2800,
+                1200,
+                FireMode::Bolt,
+                &[(0.0, 2.4)],
+                [0.6, 0.3, 3.0, 8.0, 1.2],
+                400,
             ),
         ),
         // 2026-10-06: the secondaries are short utilities; no bolt for everybody.
@@ -1363,16 +1438,294 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 r,
             ),
         ),
+        // The three modes (MODES.md, 2026-10-07): the stages of two chains, the knife of a
+        // gun build, a pistol and a carbine. Appended: builds name abilities by position.
+        def(
+            "sword_2",
+            Extra,
+            0,
+            None,
+            ability(
+                36,
+                "Sword II",
+                600,
+                0,
+                0,
+                0.6,
+                Interrupt::OnStagger,
+                vec![(
+                    0,
+                    assisted(
+                        melee(r, 76.0, 110.0, 120, 60, 280, packet(65, Slash, 60.0, 25), 3, 0.7),
+                        30.0,
+                    ),
+                )],
+                r,
+            ),
+        ),
+        def(
+            "sword_3",
+            Extra,
+            0,
+            None,
+            ability(
+                37,
+                "Sword III",
+                900,
+                0,
+                0,
+                0.4,
+                Interrupt::OnStagger,
+                vec![
+                    (
+                        0,
+                        match assisted(
+                            melee(r, 80.0, 70.0, 260, 70, 450, packet(85, Slash, 220.0, 40), 2, 0.7),
+                            30.0,
+                        ) {
+                            Verb::MeleeArc(m) => Verb::MeleeArc(MeleeArc {
+                                half_height: 44.0,
+                                hit_stop: r.ms_to_ticks(40),
+                                ..m
+                            }),
+                            v => v,
+                        },
+                    ),
+                    (
+                        260,
+                        Verb::ApplyStatus(status(
+                            Status::Knockdown,
+                            1200,
+                            1.0,
+                            StackRule::Refresh,
+                            1,
+                            StatusTarget::Hit,
+                            r,
+                        )),
+                    ),
+                ],
+                r,
+            ),
+        ),
+        def(
+            "dagger_2",
+            Extra,
+            0,
+            None,
+            ability(
+                38,
+                "Dagger II",
+                400,
+                0,
+                0,
+                0.8,
+                Interrupt::OnStagger,
+                vec![(
+                    0,
+                    assisted(
+                        melee(r, 58.0, 80.0, 80, 40, 180, packet(38, Slash, 70.0, 12), 1, 1.0),
+                        30.0,
+                    ),
+                )],
+                r,
+            ),
+        ),
+        def(
+            "dagger_3",
+            Extra,
+            0,
+            None,
+            ability(
+                39,
+                "Dagger III",
+                800,
+                0,
+                0,
+                0.6,
+                Interrupt::OnStagger,
+                vec![
+                    (
+                        0,
+                        match assisted(
+                            melee(r, 60.0, 60.0, 180, 50, 360, packet(55, Pierce, 120.0, 30), 1, 1.0),
+                            30.0,
+                        ) {
+                            Verb::MeleeArc(m) => Verb::MeleeArc(MeleeArc {
+                                half_height: 44.0,
+                                hit_stop: r.ms_to_ticks(40),
+                                ..m
+                            }),
+                            v => v,
+                        },
+                    ),
+                    (
+                        180,
+                        Verb::ApplyStatus(status(
+                            Status::Launched,
+                            900,
+                            300.0,
+                            StackRule::Refresh,
+                            1,
+                            StatusTarget::Hit,
+                            r,
+                        )),
+                    ),
+                ],
+                r,
+            ),
+        ),
+        def(
+            "knife",
+            Extra,
+            0,
+            None,
+            ability(
+                40,
+                "Knife",
+                400,
+                0,
+                0,
+                1.0,
+                Interrupt::OnStagger,
+                vec![(
+                    0,
+                    melee(r, 56.0, 70.0, 100, 40, 200, packet(40, Slash, 60.0, 10), 1, 1.0),
+                )],
+                r,
+            ),
+        ),
+        def(
+            "pistol",
+            Secondary,
+            3,
+            None,
+            firearm(
+                r,
+                ability(
+                    41,
+                    "Pistol",
+                    180,
+                    0,
+                    0,
+                    0.9,
+                    Interrupt::Never,
+                    vec![(0, bullet(r, packet(32, Pierce, 40.0, 6), [16.0, 4.0, -2.0]))],
+                    r,
+                ),
+                8,
+                32,
+                1600,
+                180,
+                FireMode::Semi,
+                &[(0.0, 0.8), (0.3, 1.5), (-0.4, 2.1), (0.5, 2.6), (-0.3, 3.0), (0.2, 3.3)],
+                [1.0, 0.6, 2.5, 7.0, 0.8],
+                350,
+            ),
+        ),
+        def(
+            "carbine",
+            Primary,
+            2,
+            None,
+            firearm(
+                r,
+                ability(
+                    42,
+                    "Carbine",
+                    100,
+                    0,
+                    0,
+                    0.7,
+                    Interrupt::Never,
+                    vec![(0, bullet(r, packet(26, Pierce, 30.0, 4), [20.0, 4.0, -2.0]))],
+                    r,
+                ),
+                25,
+                75,
+                2400,
+                100,
+                FireMode::Auto,
+                &[
+                    (0.0, 0.4),
+                    (0.0, 0.9),
+                    (0.1, 1.4),
+                    (0.1, 2.0),
+                    (0.2, 2.6),
+                    (0.3, 3.1),
+                    (0.5, 3.5),
+                    (0.8, 3.8),
+                    (1.1, 4.0),
+                    (1.3, 4.1),
+                    (1.2, 4.2),
+                    (0.8, 4.3),
+                    (0.3, 4.4),
+                    (-0.3, 4.4),
+                    (-0.9, 4.4),
+                    (-1.4, 4.3),
+                    (-1.7, 4.2),
+                    (-1.6, 4.2),
+                    (-1.2, 4.3),
+                    (-0.6, 4.4),
+                    (0.0, 4.5),
+                    (0.6, 4.5),
+                    (1.1, 4.5),
+                    (1.4, 4.5),
+                    (1.4, 4.5),
+                ],
+                [0.5, 0.3, 3.5, 9.0, 0.35],
+                300,
+            ),
+        ),
     ];
     let mut pack = ContentPack {
         abilities,
         ..ContentPack::default()
     };
     let id = |p: &ContentPack, k: &str| p.find(k).expect(k);
+    // The chains (MODES.md 4.3), by key, as the content loader resolves them.
+    for (from, to, window_ms) in [
+        ("sword", "sword_2", 400),
+        ("sword_2", "sword_3", 400),
+        ("dagger", "dagger_2", 350),
+        ("dagger_2", "dagger_3", 350),
+    ] {
+        let next = id(&pack, to);
+        let i = id(&pack, from) as usize;
+        pack.abilities[i].ability.chain = Some(Chain {
+            next,
+            window: r.ms_to_ticks(window_ms),
+        });
+    }
+    // The reach of a target-action (MODES.md 5.3), as the loader derives it: an arc's
+    // reach, an aimed area's range, 600 for a bolt, or what content names.
+    for def in &mut pack.abilities {
+        let named = match def.key.as_str() {
+            "musket" => Some(1500.0),
+            "pistol" => Some(700.0),
+            "carbine" => Some(1200.0),
+            _ => None,
+        };
+        def.ability.range = named.unwrap_or_else(|| {
+            def.ability
+                .steps
+                .iter()
+                .find_map(|s| match &s.verb {
+                    Verb::MeleeArc(m) => Some(m.reach),
+                    Verb::Projectile(_) => Some(600.0),
+                    Verb::AreaEffect(ae) => match ae.origin {
+                        Origin::Aim { range } => Some(range),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .unwrap_or(0.0)
+        });
+    }
     let builds = vec![
         NamedBuild {
             name: "ironclad".into(),
             build: Build {
+                mode: Mode::Action,
                 frame: ArchetypeFrame::Colossus,
                 attributes: Attributes::new(15, 5, 20, 5, 10),
                 armour: ArmourClass::Plate,
@@ -1386,6 +1739,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
         NamedBuild {
             name: "blade".into(),
             build: Build {
+                mode: Mode::Action,
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::new(17, 13, 15, 5, 5),
                 armour: ArmourClass::Mail,
@@ -1399,6 +1753,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
         NamedBuild {
             name: "frostweaver".into(),
             build: Build {
+                mode: Mode::Rpg,
                 frame: ArchetypeFrame::Caster,
                 attributes: Attributes::new(5, 10, 5, 20, 15),
                 armour: ArmourClass::Cloth,
@@ -1412,6 +1767,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
         NamedBuild {
             name: "shade".into(),
             build: Build {
+                mode: Mode::Action,
                 frame: ArchetypeFrame::Infiltrator,
                 attributes: Attributes::new(15, 20, 10, 5, 5),
                 armour: ArmourClass::Leather,
@@ -1429,6 +1785,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
         NamedBuild {
             name: "mender".into(),
             build: Build {
+                mode: Mode::Rpg,
                 frame: ArchetypeFrame::Caster,
                 attributes: Attributes::new(5, 5, 10, 15, 20),
                 armour: ArmourClass::Cloth,
@@ -1446,6 +1803,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
         NamedBuild {
             name: "captain".into(),
             build: Build {
+                mode: Mode::Action,
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::new(15, 10, 15, 5, 10),
                 armour: ArmourClass::Mail,
@@ -1459,6 +1817,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
         NamedBuild {
             name: "marksman".into(),
             build: Build {
+                mode: Mode::Rpg,
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::new(10, 20, 10, 5, 10),
                 armour: ArmourClass::Leather,
@@ -1469,6 +1828,21 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 actives: vec![id(&pack, "dash"), id(&pack, "leap"), id(&pack, "haste")],
             },
         },
+        // The gun (MODES.md 3): a musket, a pistol, the knife, a dodge and a vanish.
+        NamedBuild {
+            name: "musketeer".into(),
+            build: Build {
+                mode: Mode::Gun,
+                frame: ArchetypeFrame::Striker,
+                attributes: Attributes::new(10, 17, 13, 5, 10),
+                armour: ArmourClass::Leather,
+                aspects: Aspects::one(Element::Shadow),
+                primary: id(&pack, "musket"),
+                secondary: id(&pack, "pistol"),
+                guard: None,
+                actives: vec![id(&pack, "dash"), id(&pack, "vanish")],
+            },
+        },
     ];
     pack.builds = builds;
     pack.creatures = vec![
@@ -1476,6 +1850,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             key: "sentinel".into(),
             name: "Sentinel".into(),
             build: Build {
+                mode: Mode::Action,
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::new(16, 14, 16, 8, 10),
                 armour: ArmourClass::Mail,
@@ -1500,6 +1875,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             key: "warden".into(),
             name: "The Warden".into(),
             build: Build {
+                mode: Mode::Action,
                 frame: ArchetypeFrame::Colossus,
                 attributes: Attributes::new(20, 8, 20, 14, 14),
                 armour: ArmourClass::Plate,
@@ -1538,6 +1914,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             key: "dummy".into(),
             name: "Training dummy".into(),
             build: Build {
+                mode: Mode::Action,
                 frame: ArchetypeFrame::Colossus,
                 attributes: Attributes::flat(5),
                 armour: ArmourClass::Leather,
@@ -1562,6 +1939,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             key: "trainer".into(),
             name: "Trainer".into(),
             build: Build {
+                mode: Mode::Action,
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::flat(5),
                 armour: ArmourClass::Cloth,
@@ -1638,6 +2016,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
 /// simulation and netcode tests. Not budget-balanced; use with `add_player_at`.
 pub fn phase2_build(pack: &ContentPack) -> Build {
     Build {
+        mode: Mode::Action,
         frame: ArchetypeFrame::Striker,
         attributes: Attributes::flat(10),
         armour: ArmourClass::Cloth,

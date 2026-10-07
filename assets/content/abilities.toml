@@ -17,9 +17,12 @@ prop = "sword"
 cooldown_ms = 600
 move_scale = 0.6
 interrupt = "on_stagger"
+# The first of three (MODES.md 4.3): pressed again in the recovery or within 400 ms after
+# it, the slot plays `sword_2`; the magnet turns the body 30 degrees toward the nearest.
+chain = { next = "sword_2", window_ms = 400 }
 [[ability.step]]
 at_ms = 0
-melee_arc = { reach = 72, arc = 90, half_height = 40, windup_ms = 150, active_ms = 60, recovery_ms = 300, damage = { amount = 60, type = "slash", knockback = 150, stagger = 20 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30 }
+melee_arc = { reach = 72, arc = 90, half_height = 40, windup_ms = 150, active_ms = 60, recovery_ms = 300, damage = { amount = 60, type = "slash", knockback = 150, stagger = 20 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30, assist = 30 }
 
 [[ability]]
 key = "hammer"
@@ -56,9 +59,10 @@ prop = "dagger"
 cooldown_ms = 400
 move_scale = 0.8
 interrupt = "on_stagger"
+chain = { next = "dagger_2", window_ms = 350 }
 [[ability.step]]
 at_ms = 0
-melee_arc = { reach = 56, arc = 70, half_height = 40, windup_ms = 100, active_ms = 40, recovery_ms = 200, damage = { amount = 35, type = "slash", knockback = 60, stagger = 10 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30 }
+melee_arc = { reach = 56, arc = 70, half_height = 40, windup_ms = 100, active_ms = 40, recovery_ms = 200, damage = { amount = 35, type = "slash", knockback = 60, stagger = 10 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30, assist = 30 }
 
 # ---------- ranged primaries (secondaries until 2026-10-06: the range is the weapon's) ----------
 
@@ -219,7 +223,8 @@ cost = 6
 cooldown_ms = 1000
 stamina = 30
 [[ability.step]]
-move_self = { dash = { speed = 900, duration_ms = 150 } }
+# The dodge (MODES.md 4.4): untouchable for its first 150 ms, and it cuts a recovery.
+move_self = { dash = { speed = 900, duration_ms = 150 }, iframes_ms = 150, cancel = "recovery" }
 
 [[ability]]
 key = "leap"
@@ -524,20 +529,22 @@ max_targets = 8
 requires_los = false
 exclude_actor = true
 
-# The gun (CONTENT.md 11, decided 2026-10-03): the crossbow's counterpart, slower, harder,
-# flatter, loud. Numbers proposed; the director tunes them.
+# The gun (CONTENT.md 11, decided 2026-10-03; a firearm since MODES.md 3.2): one round,
+# a long reload, a hard kick, a bullet at 20,000 u/s (MODES.md 3.6). The cooldown is the
+# cycle. Numbers proposed; the director tunes them.
 [[ability]]
 key = "musket"
 name = "Musket"
 slot = "primary"
 cost = 2
-cooldown_ms = 3000
 move_scale = 0.5
 interrupt = "never"
 prop = "musket"
+range = 1500
+firearm = { magazine = 1, reserve = 24, reload_ms = 2800, cycle_ms = 1200, fire = "bolt", headshot = 4.0, scope = 0, recoil = [[0.0, 2.4]], cone = { stand = 0.6, crouch = 0.3, move = 3.0, air = 8.0, shot = 1.2, recover_ms = 400 } }
 [[ability.step]]
-at_ms = 150
-projectile = { speed = 2600, gravity = 0.15, radius = 2, lifetime_ms = 2500, damage = { amount = 110, type = "pierce", knockback = 160, stagger = 15 }, spawn = { weapon = [20, 4, -2] }, spread = 0.2, count = 1 }
+at_ms = 0
+projectile = { speed = 20000, gravity = 0.02, radius = 2, lifetime_ms = 400, damage = { amount = 110, type = "pierce", knockback = 160, stagger = 15 }, spawn = { weapon = [20, 4, -2] }, spread = 0, count = 1 }
 
 # ---------- the secondaries (2026-10-06): short utilities, no bolt for everybody ----------
 # The range is the weapon's: a melee primary has nothing that reaches past a knife's 300 u.
@@ -578,3 +585,116 @@ interrupt = "never"
 at_ms = 100
 # 1200 u/s for 250 ms: 300 units and gone.
 projectile = { speed = 1200, gravity = 0.2, radius = 2, lifetime_ms = 250, damage = { amount = 40, type = "pierce", knockback = 60, stagger = 10 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3, count = 1 }
+
+# ---------- the three modes (MODES.md, 2026-10-07) ----------
+# Appended: stored builds name abilities by their position in this file. The stages of a
+# chain and the knife are `extra`: they come with another ability, never slotted.
+
+[[ability]]
+key = "sword_2"
+name = "Sword II"
+slot = "extra"
+cost = 0
+prop = "sword"
+cooldown_ms = 600
+move_scale = 0.6
+interrupt = "on_stagger"
+chain = { next = "sword_3", window_ms = 400 }
+[[ability.step]]
+at_ms = 0
+# The cut back across, quicker and wider.
+melee_arc = { reach = 76, arc = 110, half_height = 40, windup_ms = 120, active_ms = 60, recovery_ms = 280, damage = { amount = 65, type = "slash", knockback = 60, stagger = 25 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30, assist = 30 }
+
+[[ability]]
+key = "sword_3"
+name = "Sword III"
+slot = "extra"
+cost = 0
+prop = "sword"
+cooldown_ms = 900
+move_scale = 0.4
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+# The overhead that ends the chain: slow, heavy, and it puts the body on the ground.
+melee_arc = { reach = 80, arc = 70, half_height = 44, windup_ms = 260, active_ms = 70, recovery_ms = 450, damage = { amount = 85, type = "slash", knockback = 220, stagger = 40 }, max_targets = 2, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 40, assist = 30 }
+[[ability.step]]
+at_ms = 260
+apply_status = { status = "knockdown", duration_ms = 1200, magnitude = 1, target = "hit" }
+
+[[ability]]
+key = "dagger_2"
+name = "Dagger II"
+slot = "extra"
+cost = 0
+prop = "dagger"
+cooldown_ms = 400
+move_scale = 0.8
+interrupt = "on_stagger"
+chain = { next = "dagger_3", window_ms = 350 }
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 58, arc = 80, half_height = 40, windup_ms = 80, active_ms = 40, recovery_ms = 180, damage = { amount = 38, type = "slash", knockback = 70, stagger = 12 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30, assist = 30 }
+
+[[ability]]
+key = "dagger_3"
+name = "Dagger III"
+slot = "extra"
+cost = 0
+prop = "dagger"
+cooldown_ms = 800
+move_scale = 0.6
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+# The rising stab that ends the chain: it throws the body up, then down.
+melee_arc = { reach = 60, arc = 60, half_height = 44, windup_ms = 180, active_ms = 50, recovery_ms = 360, damage = { amount = 55, type = "pierce", knockback = 120, stagger = 30 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 40, assist = 30 }
+[[ability.step]]
+at_ms = 180
+apply_status = { status = "launched", duration_ms = 900, magnitude = 300, target = "hit" }
+
+# The knife of every gun build (MODES.md 3.7): a dagger's blow at full speed, silent.
+[[ability]]
+key = "knife"
+name = "Knife"
+slot = "extra"
+cost = 0
+prop = "dagger"
+cooldown_ms = 400
+move_scale = 1.0
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 56, arc = 70, half_height = 40, windup_ms = 100, active_ms = 40, recovery_ms = 200, damage = { amount = 40, type = "slash", knockback = 60, stagger = 10 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30 }
+
+# The pistol (MODES.md 3.7): the secondary of a gun build, a click a shot, a short cone
+# that opens fast. It is drawn as the musket until it has a model of its own.
+[[ability]]
+key = "pistol"
+name = "Pistol"
+slot = "secondary"
+cost = 3
+move_scale = 0.9
+interrupt = "never"
+prop = "musket"
+range = 700
+firearm = { magazine = 8, reserve = 32, reload_ms = 1600, cycle_ms = 180, fire = "semi", headshot = 4.0, scope = 0, recoil = [[0.0, 0.8], [0.3, 1.5], [-0.4, 2.1], [0.5, 2.6], [-0.3, 3.0], [0.2, 3.3]], cone = { stand = 1.0, crouch = 0.6, move = 2.5, air = 7.0, shot = 0.8, recover_ms = 350 } }
+[[ability.step]]
+at_ms = 0
+projectile = { speed = 20000, gravity = 0.02, radius = 2, lifetime_ms = 400, damage = { amount = 32, type = "pierce", knockback = 40, stagger = 6 }, spawn = { weapon = [16, 4, -2] }, spread = 0, count = 1 }
+
+# The carbine (MODES.md 3.2): held, it fires every 100 ms; the pattern climbs and then
+# wanders, as a spray does. Drawn as the musket until it has a model of its own.
+[[ability]]
+key = "carbine"
+name = "Carbine"
+slot = "primary"
+cost = 2
+move_scale = 0.7
+interrupt = "never"
+prop = "musket"
+range = 1200
+firearm = { magazine = 25, reserve = 75, reload_ms = 2400, cycle_ms = 100, fire = "auto", headshot = 4.0, scope = 0, recoil = [[0.0, 0.4], [0.0, 0.9], [0.1, 1.4], [0.1, 2.0], [0.2, 2.6], [0.3, 3.1], [0.5, 3.5], [0.8, 3.8], [1.1, 4.0], [1.3, 4.1], [1.2, 4.2], [0.8, 4.3], [0.3, 4.4], [-0.3, 4.4], [-0.9, 4.4], [-1.4, 4.3], [-1.7, 4.2], [-1.6, 4.2], [-1.2, 4.3], [-0.6, 4.4], [0.0, 4.5], [0.6, 4.5], [1.1, 4.5], [1.4, 4.5], [1.4, 4.5]], cone = { stand = 0.5, crouch = 0.3, move = 3.5, air = 9.0, shot = 0.35, recover_ms = 300 } }
+[[ability.step]]
+at_ms = 0
+projectile = { speed = 20000, gravity = 0.02, radius = 2, lifetime_ms = 400, damage = { amount = 26, type = "pierce", knockback = 30, stagger = 4 }, spawn = { weapon = [20, 4, -2] }, spread = 0, count = 1 }

@@ -21,7 +21,6 @@ pub struct Settings {
     pub sensitivity: f32,
     /// Pushing the mouse forward looks down.
     pub invert: bool,
-    pub third_person: bool,
     pub fullscreen: bool,
     /// The scale HUD and screens are drawn at: 1 to 4, or 0 for what the window's size
     /// gives (CLIENT.md 3).
@@ -47,7 +46,6 @@ impl Default for Settings {
             character: String::new(),
             sensitivity: DEFAULT_SENSITIVITY,
             invert: false,
-            third_person: false,
             fullscreen: false,
             ui_scale: 0,
             volume: DEFAULT_VOLUME,
@@ -131,7 +129,11 @@ impl Settings {
                     s.sensitivity = v.clamp(SENSITIVITY_RANGE.0, SENSITIVITY_RANGE.1);
                 }
                 "invert" => s.invert = flag()?,
-                "third_person" => s.third_person = flag()?,
+                // The camera is the character's mode's since MODES.md: an old file's
+                // word is read and dropped.
+                "third_person" => {
+                    flag()?;
+                }
                 "fullscreen" => s.fullscreen = flag()?,
                 "ui_scale" => s.ui_scale = text.parse::<u8>().map_err(|_| bad())?.min(4),
                 "volume" => s.volume = text.parse::<u8>().map_err(|_| bad())?.min(100),
@@ -155,14 +157,13 @@ impl Settings {
         let mut text = format!(
             "# gamengine client settings (docs/CLIENT.md 8)\n\
              hub = {}\nhub_cert = {}\nemail = {}\ncharacter = {}\nsensitivity = {}\n\
-             invert = {}\nthird_person = {}\nfullscreen = {}\nui_scale = {}\nvolume = {}\nmute = {}\nignored = {}\n",
+             invert = {}\nfullscreen = {}\nui_scale = {}\nvolume = {}\nmute = {}\nignored = {}\n",
             quoted(&self.hub),
             quoted(&self.hub_cert),
             quoted(&self.email),
             quoted(&self.character),
             self.sensitivity,
             self.invert,
-            self.third_person,
             self.fullscreen,
             self.ui_scale,
             self.volume,
@@ -309,7 +310,6 @@ mod tests {
             character: "Željko".into(),
             sensitivity: 0.09,
             invert: true,
-            third_person: true,
             volume: 35,
             mute: true,
             fullscreen: false,

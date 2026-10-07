@@ -170,7 +170,7 @@ impl Statuses {
 
     /// Movement speed multiplier from Slow, Haste, Chill and Stagger; 0 when rooted.
     pub fn speed_scale(&self) -> f32 {
-        if self.has(Status::Root) {
+        if self.has(Status::Root) || self.downed() {
             return 0.0;
         }
         let mut s = 1.0;
@@ -186,6 +186,11 @@ impl Statuses {
     /// Stagger: no activation, no guard.
     pub fn staggered(&self) -> bool {
         self.has(Status::Stagger)
+    }
+
+    /// On the ground (MODES.md 4.5): no activation, no guard, no movement of its own.
+    pub fn downed(&self) -> bool {
+        self.has(Status::Knockdown) || self.has(Status::Launched)
     }
 
     pub fn silenced(&self) -> bool {

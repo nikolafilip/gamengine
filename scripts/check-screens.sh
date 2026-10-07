@@ -223,7 +223,6 @@ click Back
 wait screen menu
 click Settings
 wait screen settings
-click "start in third person"
 click "size of text 2"
 click Back
 wait screen menu

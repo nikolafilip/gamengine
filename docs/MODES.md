@@ -305,3 +305,38 @@ is the zone's** (5.3: it makes the RPG body the one that never misses and never 
 and the gun body the one that can do both); **whether a mode change is a respec** (1); the
 **diminishing returns** of 4.5 and whether creatures are under them; **what a body does
 when its target walks out of sight** (waits in place, as proposed).
+
+## 10. As built
+
+### 10.1 The action mode (15a, 2026-10-07)
+
+Built as sections 2 and 4 say, with these readings:
+
+- **The mode is in the build** (`Build.mode`, `builds.toml` `mode`), validated with it
+  (`BuildError::GunNeedsFirearm`, `FirearmNeedsGun`, `GunHasNoGuard`, `NotSlottable`);
+  a build stored before it is read as `action`. The camera follows the mode of the sheet
+  the zone sent (`Content`, `BuildApplied`); `V` is a key offline and in a replay only,
+  `--third-person` likewise, the `third_person` setting is read and dropped.
+- **Chains** are `chain = { next, window_ms }` on an ability and the stages are
+  `slot = "extra"` abilities that come with it into the kit (`Kit::chain_next`; the
+  kit may hold twelve now, `MAX_ABILITIES`). The pressed slot plays the next stage from
+  the moment the running stage is past its last active window (`script_commit`) until
+  `window` after it ends; the hotbar's cell shows the stage (II, III). The sword and the
+  dagger chain three deep; the third puts the body down (`sword_3`: Knockdown 1.2 s;
+  `dagger_3`: Launched 300 u/s up for 0.9 s). The second cut's knockback is 60, not the
+  first's 150: a chain's early blows must not carry the body out of the third's reach.
+- **The magnet** is `assist` on a melee arc (30° on the chains' arcs): the nearest enemy
+  within reach and a half and in sight, with the line of sight traced to twenty units
+  short of the body's centre, since the mover's world holds the other bodies as solids.
+  The zone reads friend and foe by team and party; the client, which is not told
+  parties, reads everyone on another team as an enemy and, in the wild, everyone: a
+  swing predicted toward an ally there is corrected by the zone's reading.
+- **The dodge** is the dash's `iframes_ms = 150` (already in the vocabulary) with
+  `cancel = "recovery"`; Space plays the kit's dash while it is ready, else jumps.
+- **Knockdown and Launched** are statuses 14 and 15: no action, guard or movement; the
+  `DOWN` stance; diminishing returns per kind (`Player::controls`, ten seconds), creatures
+  under them too. A crouch has no hull of its own yet, so the head band of 3.5 does not
+  move with it.
+- **The combo counter**: the own blows within two seconds of each other, right of the aim.
+- The input frame carries `held` and `target` for every mode (PROTOCOL.md 23), so the
+  wire changes once for the three parts.
