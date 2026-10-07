@@ -131,7 +131,7 @@ account deletes them.
 `gm-client --replay FILE [--follow NAME] [--from SECONDS]` plays a file through the ordinary
 renderer: no connection, no prediction, bodies interpolated between frames as other players
 are in live play. The camera is a body's own eyes with its recorded view angles, or third
-person behind it (`V`), or the tactical camera over it (`Tab`). `[` and `]` step through the
+person behind it (`V`). `[` and `]` step through the
 players, `Space` pauses, `,` and `.` step a tick when paused, the arrow keys seek 5 s, `1`
 to `4` set the speed (¼, ½, 1, 2). The HUD shows the time, the followed body's name, build,
 team and health, its numbers over the file and the rules they break, each hit on or by it,

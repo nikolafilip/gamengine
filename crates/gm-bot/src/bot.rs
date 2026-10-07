@@ -254,13 +254,14 @@ pub async fn run_bot_on_link(
         .as_ref()
         .map(|(line, secs)| (line.clone(), ((secs * hz as f32).round() as u32).max(1)));
 
-    let build_name = |b: &gm_core::build::Build| -> String {
+    let mut pack = pack;
+    let build_name = |pack: &gm_core::build::ContentPack, b: &gm_core::build::Build| -> String {
         pack.builds
             .iter()
             .find(|nb| &nb.build == b)
             .map_or_else(|| "custom".to_string(), |nb| nb.name.clone())
     };
-    let mut current_build = build_name(&own);
+    let mut current_build = build_name(&pack, &own);
     let mut client = ClientState::new(entity, rate, Sheet::new(own, &pack, team));
     let mut brain = Brain::new(cfg.seed, cfg.behaviour);
     brain.hz = rate.hz();
@@ -350,6 +351,7 @@ pub async fn run_bot_on_link(
                         frame: client.sheet.build.frame,
                         team,
                         alive: client.own_alive,
+                        health: client.own_health,
                         others: &others,
                         tick: client.tick.wrapping_add(1),
                     }),
@@ -490,9 +492,16 @@ pub async fn run_bot_on_link(
                     }
                     Ok(Some(FromZone::BuildApplied(build))) => {
                         if build != client.sheet.build {
-                            current_build = build_name(&build);
+                            current_build = build_name(&pack, &build);
                             client.set_sheet(Sheet::new(build, &pack, team));
                         }
+                    }
+                    // Content tuned under the zone (GM.md 3): the same build on the new
+                    // numbers; the prediction goes on.
+                    Ok(Some(FromZone::Content { pack: tuned, own, .. })) => {
+                        pack = tuned;
+                        current_build = build_name(&pack, &own);
+                        client.set_sheet(Sheet::new(own, &pack, team));
                     }
                     Ok(Some(FromZone::TravelTicket { zone, addr, cert_der, token, web })) => {
                         let addr: SocketAddr = match addr.parse() {

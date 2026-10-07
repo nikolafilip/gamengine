@@ -280,7 +280,10 @@ pub struct Attributes {
 
 impl Attributes {
     pub const MIN: u8 = 5;
-    pub const MAX: u8 = 20;
+    pub const MAX: u8 = 25;
+    /// Points a character has to raise its attributes above the floor (MATRIX.md 2): its
+    /// own, apart from the kit's budget. Fewer may be spent; more is refused.
+    pub const FREE_POINTS: u32 = 30;
 
     pub const fn flat(v: u8) -> Attributes {
         Attributes {
@@ -306,7 +309,7 @@ impl Attributes {
         [self.str_, self.agi, self.con, self.int, self.spr]
     }
 
-    /// Build points spent: every point above the floor costs one.
+    /// Attribute points spent: every point above the floor costs one of `FREE_POINTS`.
     pub fn cost(self) -> u32 {
         self.as_array()
             .iter()
@@ -319,11 +322,17 @@ impl Attributes {
             .iter()
             .all(|v| (Self::MIN..=Self::MAX).contains(v))
     }
+
+    /// In range and within the free points.
+    pub fn affordable(self) -> bool {
+        self.in_range() && self.cost() <= Self::FREE_POINTS
+    }
 }
 
 impl Default for Attributes {
     fn default() -> Self {
-        Attributes::flat(12)
+        // Every attribute at 11: the thirty points spread evenly.
+        Attributes::flat(11)
     }
 }
 
@@ -347,9 +356,9 @@ pub struct Derived {
     pub stagger_threshold: f32,
 }
 
-pub const MAX_ARMOUR: f32 = 0.35;
-pub const MAX_WARD: f32 = 0.50;
-pub const MAX_EVASION: f32 = 0.40;
+pub const MAX_ARMOUR: f32 = 0.50;
+pub const MAX_WARD: f32 = 0.60;
+pub const MAX_EVASION: f32 = 0.50;
 /// Evasion lingers this many ticks after a `MoveSelf` ends (MATRIX.md 6).
 pub const EVADING_GRACE_TICKS: u32 = 2;
 /// Stagger build-up decays this many points per second (MATRIX.md 7).
@@ -378,21 +387,21 @@ impl Derived {
             attrs.spr as f32,
         );
         Derived {
-            health: 80 + 3 * attrs.con as i32,
-            stamina: 60.0 + 2.0 * (con + agi),
-            stamina_regen: (10.0 + 0.5 * agi) * a.regen,
-            focus: 40.0 + 4.0 * int + f.focus as f32,
-            focus_regen: 5.0 + 0.5 * spr,
-            max_speed: (290.0 + 2.0 * agi) * f.mobility * a.speed,
-            physical_mult: 0.80 + 0.02 * str_,
-            elemental_mult: 0.80 + 0.02 * int,
-            armour: (0.01 * con + f.armour).min(MAX_ARMOUR),
-            ward: (0.015 * spr + f.ward + a.ward).min(MAX_WARD),
-            evasion: (0.01 * agi + f.evasion + a.evasion).min(MAX_EVASION),
+            health: 500 + 40 * attrs.con as i32,
+            stamina: 60.0 + 3.0 * (con + agi),
+            stamina_regen: (10.0 + 0.6 * agi) * a.regen,
+            focus: 40.0 + 5.0 * int + f.focus as f32,
+            focus_regen: 5.0 + 0.6 * spr,
+            max_speed: (280.0 + 2.0 * agi) * f.mobility * a.speed,
+            physical_mult: 0.60 + 0.04 * str_,
+            elemental_mult: 0.60 + 0.04 * int,
+            armour: (0.015 * con + f.armour).min(MAX_ARMOUR),
+            ward: (0.02 * spr + f.ward + a.ward).min(MAX_WARD),
+            evasion: (0.015 * agi + f.evasion + a.evasion).min(MAX_EVASION),
             knockback_taken: 1.0 / f.mass,
-            knockback_dealt: 0.80 + 0.02 * str_,
-            status_duration: 1.20 - 0.02 * spr,
-            stagger_threshold: 40.0 + 2.0 * con,
+            knockback_dealt: 0.60 + 0.04 * str_,
+            status_duration: 1.30 - 0.03 * spr,
+            stagger_threshold: 40.0 + 3.0 * con,
         }
     }
 }
@@ -630,25 +639,32 @@ mod tests {
             ArmourClass::Cloth,
         );
         let hi = Derived::compute(
-            Attributes::flat(20),
+            Attributes::flat(25),
             ArchetypeFrame::Striker,
             ArmourClass::Cloth,
         );
-        assert_eq!((lo.health, hi.health), (95, 140));
-        assert_eq!((lo.stamina, hi.stamina), (80.0, 140.0));
-        assert!((lo.max_speed - 300.0).abs() < 1e-3 && (hi.max_speed - 330.0).abs() < 1e-3);
-        assert!((lo.physical_mult - 0.9).abs() < 1e-6 && (hi.physical_mult - 1.2).abs() < 1e-6);
-        assert!((lo.armour - 0.10).abs() < 1e-6 && (hi.armour - 0.25).abs() < 1e-6);
+        assert_eq!((lo.health, hi.health), (700, 1500));
+        assert_eq!((lo.stamina, hi.stamina), (90.0, 210.0));
+        assert!((lo.max_speed - 290.0).abs() < 1e-3 && (hi.max_speed - 330.0).abs() < 1e-3);
+        assert!((lo.physical_mult - 0.8).abs() < 1e-6 && (hi.physical_mult - 1.6).abs() < 1e-6);
+        assert!((lo.armour - 0.125).abs() < 1e-6 && (hi.armour - 0.425).abs() < 1e-6);
+        assert!((lo.ward - 0.15).abs() < 1e-6 && (hi.ward - 0.55).abs() < 1e-6);
         let plate = Derived::compute(
-            Attributes::flat(20),
+            Attributes::flat(25),
             ArchetypeFrame::Colossus,
             ArmourClass::Plate,
         );
         assert!((plate.max_speed - 330.0 * 0.92 * 0.90).abs() < 1e-3);
-        assert!((plate.armour - 0.30).abs() < 1e-6);
+        assert!((plate.armour - 0.475).abs() < 1e-6);
         assert!((plate.knockback_taken - 1.0 / 1.5).abs() < 1e-6);
+        // Thirty points: all of them, or fewer; never more, never past the cap.
         assert_eq!(Attributes::new(20, 20, 10, 5, 5).cost(), 35);
+        assert!(!Attributes::new(20, 20, 10, 5, 5).affordable());
+        assert!(Attributes::new(25, 15, 5, 5, 5).affordable());
+        assert!(Attributes::new(5, 5, 5, 5, 5).affordable());
         assert!(!Attributes::new(4, 20, 10, 5, 5).in_range());
+        assert!(!Attributes::new(26, 5, 5, 5, 5).affordable());
+        assert_eq!(Attributes::default().cost(), Attributes::FREE_POINTS);
     }
 
     fn packet(amount: u16, dtype: DamageType, bypass: Bypass) -> DamagePacket {

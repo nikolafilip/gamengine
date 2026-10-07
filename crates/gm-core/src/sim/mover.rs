@@ -49,6 +49,11 @@ pub mod anim {
     pub const STAGGER: u8 = 11;
     /// In the command stance: everyone sees a commander is at it (COMPANIONS.md 5.1).
     pub const COMMAND: u8 = 12;
+
+    /// The stances of a running script: the ones a body's `acting` ability goes with.
+    pub fn acts(state: u8) -> bool {
+        matches!(state, WINDUP | SWING | RECOVER | CAST)
+    }
 }
 
 /// Marker for "no cast animation" lookups.

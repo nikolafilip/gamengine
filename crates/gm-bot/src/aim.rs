@@ -232,11 +232,8 @@ impl Aimer {
                     .mover
                     .script
                     .and_then(|s| projectile(client, s.ability).map(|p| (p, s)));
-                let ready = client
-                    .sheet
-                    .kit
-                    .secondary
-                    .and_then(|slot| projectile(client, slot));
+                let ready = crate::brain::shot_of(&client.sheet.kit)
+                    .and_then(|(slot, _)| projectile(client, slot));
                 let target = Self::nearest(client, team, others);
                 // Its velocity over the last few ticks.
                 let velocity = target.map_or(Vec3::ZERO, |t| velocity_seen(client, t));

@@ -28,7 +28,20 @@ pub enum Behaviour {
     /// A dungeon: lead a squad through the creature posts of the map (`raid::Raid` thinks
     /// instead of this brain).
     Raid,
+    /// A sparring partner for a town: the duelist's whole kit, but it stands where it arrived
+    /// and fights only when struck at (a blow taken, or an enemy winding up within
+    /// `SPAR_SIGHT`), for `SPAR_SECS` after the last; it never follows further than
+    /// `SPAR_LEASH` from home (back it walks, then it stands again). Strollers, who never
+    /// swing, are left alone whatever their team.
+    Spar,
 }
+
+/// How near an enemy must be for its windup to wake a sparring partner.
+const SPAR_SIGHT: f32 = 420.0;
+/// How far a sparring partner follows a fight from home.
+const SPAR_LEASH: f32 = 260.0;
+/// How long a sparring partner keeps fighting after the last blow or windup aimed at it.
+const SPAR_SECS: u32 = 8;
 
 /// How far a strolling bot goes from where it arrived before it turns back.
 const STROLL_LEASH: f32 = 420.0;
@@ -40,6 +53,8 @@ pub struct View<'a> {
     pub frame: ArchetypeFrame,
     pub team: u8,
     pub alive: bool,
+    /// Own health as last read from the zone (a sparring partner wakes when it drops).
+    pub health: i32,
     /// Other entities at the render time (players, projectiles, areas).
     pub others: &'a [RenderEntity],
     /// The brain's tick counter (the mover's frame clock).
@@ -87,12 +102,36 @@ fn classify(kit: &Kit, slot: u8) -> Option<ActiveUse> {
     })
 }
 
-fn primary_arc(kit: &Kit) -> Option<&MeleeArc> {
-    let i = kit.primary? as usize;
-    match &kit.abilities[i].steps.first()?.verb {
-        Verb::MeleeArc(m) => Some(m),
-        _ => None,
-    }
+/// The swing among the two weapon slots, with its button (the range is the weapon's,
+/// MATRIX.md 10: a primary is a blade or a bow).
+fn swing_of(kit: &Kit) -> Option<(&MeleeArc, u16)> {
+    [
+        (kit.primary, buttons::PRIMARY),
+        (kit.secondary, buttons::SECONDARY),
+    ]
+    .into_iter()
+    .find_map(
+        |(slot, button)| match &kit.abilities[slot? as usize].steps.first()?.verb {
+            Verb::MeleeArc(m) => Some((m, button)),
+            _ => None,
+        },
+    )
+}
+
+/// The harmful shot among the two weapon slots: its kit slot and button.
+pub fn shot_of(kit: &Kit) -> Option<(u8, u16)> {
+    [
+        (kit.primary, buttons::PRIMARY),
+        (kit.secondary, buttons::SECONDARY),
+    ]
+    .into_iter()
+    .find_map(|(slot, button)| {
+        let i = slot?;
+        match &kit.abilities[i as usize].steps.first()?.verb {
+            Verb::Projectile(p) if p.damage.amount > 0 => Some((i, button)),
+            _ => None,
+        }
+    })
 }
 
 pub struct Brain {
@@ -114,6 +153,9 @@ pub struct Brain {
     /// Progress towards the goal: the distance a second ago, and a sidestep while stuck.
     goal_check: (u32, f32),
     sidestep_until: u32,
+    /// A sparring partner fights until this tick, and the health it last saw of itself.
+    spar_until: u32,
+    last_health: i32,
 }
 
 impl Brain {
@@ -135,6 +177,8 @@ impl Brain {
             goal: None,
             goal_check: (0, f32::MAX),
             sidestep_until: 0,
+            spar_until: 0,
+            last_health: i32::MAX,
         }
     }
 
@@ -193,7 +237,9 @@ impl Brain {
             return self.input(buttons, forward, side, ability);
         }
         let nearest = self.nearest(me, v.team, v.others);
-        let reach = primary_arc(v.kit).map_or(70.0, |m| m.reach);
+        let (reach, swing) =
+            swing_of(v.kit).map_or((70.0, buttons::PRIMARY), |(m, b)| (m.reach, b));
+        let shot = shot_of(v.kit);
         match self.behaviour {
             // A raid leader that lost its `raid::Raid` (it never does) stands still.
             Behaviour::Raid => {}
@@ -201,7 +247,7 @@ impl Brain {
                 if let Some((e, d)) = nearest {
                     self.face(eye, e.pos);
                     if d < reach && tick.is_multiple_of(24) {
-                        buttons |= buttons::PRIMARY;
+                        buttons |= swing;
                     }
                 }
             }
@@ -244,10 +290,12 @@ impl Brain {
                 if let Some((e, d)) = nearest {
                     if d < reach && tick.is_multiple_of(24) {
                         self.face(eye, e.pos);
-                        buttons |= buttons::PRIMARY;
-                    } else if tick >= self.next_shot {
+                        buttons |= swing;
+                    } else if tick >= self.next_shot
+                        && let Some((_, button)) = shot
+                    {
                         self.face(eye, e.pos);
-                        buttons |= buttons::SECONDARY;
+                        buttons |= button;
                         self.next_shot = tick + 96 + self.rng.below(64);
                     }
                 }
@@ -260,10 +308,13 @@ impl Brain {
                     }
                     if d < reach {
                         if tick.is_multiple_of(20) {
-                            buttons |= buttons::PRIMARY;
+                            buttons |= swing;
                         }
-                    } else if d > 150.0 && tick >= self.next_shot {
-                        buttons |= buttons::SECONDARY;
+                    } else if d > 150.0
+                        && tick >= self.next_shot
+                        && let Some((_, button)) = shot
+                    {
+                        buttons |= button;
                         self.next_shot = tick + 96;
                     }
                 } else {
@@ -274,12 +325,42 @@ impl Brain {
                     }
                 }
             }
-            Behaviour::Duelist => {
+            Behaviour::Duelist | Behaviour::Spar => {
+                let spar = self.behaviour == Behaviour::Spar;
                 let ranged = matches!(
                     v.frame,
                     ArchetypeFrame::Caster | ArchetypeFrame::Infiltrator
                 );
+                let home = if spar && v.alive {
+                    Some(*self.home.get_or_insert(me))
+                } else {
+                    None
+                };
+                let nearest = if spar {
+                    // Struck at? A blow taken, or a windup aimed from near by.
+                    let struck = v.health < self.last_health
+                        || nearest.is_some_and(|(e, d)| {
+                            d < SPAR_SIGHT && matches!(e.anim, anim::WINDUP | anim::CAST)
+                        });
+                    self.last_health = v.health;
+                    if struck && v.alive {
+                        self.spar_until = tick + SPAR_SECS * self.hz;
+                    }
+                    nearest.filter(|_| tick < self.spar_until)
+                } else {
+                    nearest
+                };
                 let Some((e, d)) = nearest else {
+                    if let Some(home) = home {
+                        // Nobody near: stand at home, walk back when a fight carried us off.
+                        let away = me - home;
+                        if away.truncate().length() > 40.0 {
+                            self.yaw = (-away.y).atan2(-away.x).to_degrees().rem_euclid(360.0);
+                            self.pitch = 0.0;
+                            forward = 0.6;
+                        }
+                        return self.input(buttons, forward, side, ability);
+                    }
                     // Nobody in sight: patrol.
                     forward = 1.0;
                     if tick >= self.next_turn {
@@ -306,6 +387,13 @@ impl Brain {
                 }
                 if d < 500.0 {
                     side = self.strafe * 0.6;
+                }
+                // At the leash a sparring partner stops advancing (it still turns and swings).
+                if let Some(home) = home
+                    && forward > 0.0
+                    && (me - home).truncate().length() > SPAR_LEASH
+                {
+                    forward = 0.0;
                 }
                 // Guard: block or parry a wind-up in reach.
                 if !busy
@@ -375,14 +463,14 @@ impl Brain {
                 }
                 if ability == 0 && !busy && buttons & buttons::GUARD == 0 {
                     if d < reach && tick.is_multiple_of(4) {
-                        buttons |= buttons::PRIMARY;
+                        buttons |= swing;
                     } else if d > reach
                         && d < 900.0
                         && tick >= self.next_shot
-                        && let Some(si) = v.kit.secondary
+                        && let Some((si, button)) = shot
                         && ready(si)
                     {
-                        buttons |= buttons::SECONDARY;
+                        buttons |= button;
                         self.next_shot = tick + 8;
                     }
                 }

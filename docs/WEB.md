@@ -266,7 +266,7 @@ not at the login form, and not in a scripted run. `say` carries a UI script's wo
 browser (`GM-SAY ...` on the console, CLIENT.md 9).
 
 A link may set what a visitor *sees* and nothing that acts for them: `third-person`,
-`tactical`, `map` (the offline map) and `gl` (force the WebGL2 build). **Only on a
+`map` (the offline map) and `gl` (force the WebGL2 build). **Only on a
 site whose `config.json` says `"dev": true`** a link may also carry the rest of the native
 flags: `connect=https://host:port&cert=<hex>` (a zone directly, without a hub), a login
 (`user`, `password`, `character`, `register`, `zone`), `name`, `build`, `team`, `seconds`, `report`
@@ -285,6 +285,22 @@ development site, from the options object) as it reads it and clears its own cop
 hub has answered; the session id lives in memory only, so a reload logs in again. The
 client's settings (CLIENT.md 8) are one `localStorage` entry, `gamengine.settings`: the last
 email and character, the mouse, the size of text; never a password.
+
+**A new build reaches every browser** (2026-10-06): `scripts/build-web.sh` writes the
+build's stamp (twelve hex digits of the wasm's, the glue's and the loader's hash) on the
+page's `<script src="boot.js?v=...">`, and `boot.js` carries it to the module it imports
+and to the wasm it hands `init` (`module_or_path`). A browser revalidates the page itself
+on every visit; the files under it are cached by heuristics (a file not changed in three
+days is kept for hours) and would otherwise be an old client against a new zone, which is
+`Reject("protocol version mismatch ...: reload the page")` and a ticket spent for nothing
+(the character is "still in a zone" for the hub's transit sweep, a minute). Only the stamp
+is required of the server; the play stack's servers (`scripts/dev/play.sh web`) also send
+`Cache-Control: no-cache`, so that a `build-web.sh` without a changed stamp is seen too.
+The zone's map is fetched as `assets/maps/NAME.bsp?v=<the hash the zone told>` (and the
+`.lit` the same): a browser that cached last build's map under the plain name — the
+director met it on 2026-10-06, the town rebuilt with its trainer and dummy, "this site's
+copy of the zone's map is another build" from the LAN — has nothing under the stamped one.
+The page's first map (the `map` link option, offline) has no hash and is fetched plain.
 
 ## 6. Security notes
 
@@ -376,7 +392,8 @@ fetches the content bundle (`assets/built/content/`: the manifest and the thinne
 at start, 2 KB and 50 KB, then the atlas of the UI's scale, 124 to 283 KB, once per
 scale; a prop of 2–16 KB when first seen), copied by `scripts/build-web.sh`. With the
 atlases per density (LOOK.md 2.2 and 11.4) the builds are **1,112,187 bytes (376,460
-packed)** and 3,103,848 (948,678).
+packed)** and 3,103,848 (948,678); with the fight's effects and protocol v9 (LOOK.md 13)
+**1,136,246 (383,589 packed)** and 3,128,065 (956,743).
 
 ## 10. Deliberately absent
 

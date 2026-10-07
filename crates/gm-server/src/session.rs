@@ -149,6 +149,8 @@ impl TickTable {
 pub struct Session {
     pub id: EntityId,
     pub name: String,
+    /// A game master (GM.md 1): the hub's word at the claim, or the zone's own list.
+    pub gm: bool,
     /// The avatar model the hub named at the claim, and the id last announced to clients
     /// (present only while the player's frame is the model's, MODELS.md 7).
     pub model: Option<ModelRef>,
@@ -247,6 +249,7 @@ impl Session {
         Session {
             id,
             name,
+            gm: false,
             model: None,
             announced: None,
             conn,
@@ -642,6 +645,7 @@ pub fn player_state(p: &Player, own: bool) -> EntityState {
         pitch: quant::pitch_to_wire(p.mover.pitch),
         vel: own.then(|| quant::quantize_vel3(p.mover.mv.velocity.into())),
         anim: p.anim,
+        acting: p.acting,
         health: own.then_some(p.health.clamp(0, u16::MAX as i32) as u16),
         flags: f,
         status: p.mover.statuses.mask(),
@@ -684,6 +688,7 @@ pub fn area_state(a: &Area) -> EntityState {
         pitch: 900,
         vel: None,
         anim: 0,
+        acting: 0,
         health: None,
         flags: flags::ALIVE,
         status: 0,
@@ -706,6 +711,7 @@ pub fn projectile_state(pr: &Projectile) -> EntityState {
         pitch: quant::pitch_to_wire(pitch),
         vel: None,
         anim: 0,
+        acting: 0,
         health: None,
         flags: flags::ALIVE,
         status: 0,

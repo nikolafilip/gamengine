@@ -437,6 +437,8 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
             content,
             hub: Some(link),
             gear_after_fight: LOCK,
+            gm_names: Vec::new(),
+            tuning_file: None,
             ..ZoneConfig::default()
         },
         world.clone(),

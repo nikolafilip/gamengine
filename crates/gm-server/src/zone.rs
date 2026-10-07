@@ -12,9 +12,10 @@ use gm_core::build::{Build, ContentPack};
 use gm_core::sim::{HitKind, MAX_CLAIMED_VIEW_LAG, Zone, ZoneEvent};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Contents, Hull};
+use gm_core::tuning::Tuning;
 use gm_core::vocab::EntityId;
 use gm_net::control::{
-    self, BodyKind, BuildChoice, FromZone, Look, PlayerEntry, SquadEntry, StallEntry,
+    self, BodyKind, BuildChoice, FromZone, GmNews, GmOp, Look, PlayerEntry, SquadEntry, StallEntry,
     stall_in_reach, trade_in_reach,
 };
 use rayon::prelude::*;
@@ -78,6 +79,12 @@ pub struct ZoneConfig {
     /// What a body wears does not change until it has neither dealt nor taken damage for
     /// this long (ITEMS.md 5).
     pub gear_after_fight: Duration,
+    /// Characters that are game masters here whatever the hub says (GM.md 1): an open
+    /// zone's way, and a hand for tests.
+    pub gm_names: Vec<String>,
+    /// Where the game masters' tuning is read from at the start and written after every
+    /// change (GM.md 3); none: a tuning lives as long as the zone.
+    pub tuning_file: Option<std::path::PathBuf>,
 }
 
 /// Where replays go and how much of them an hour may hold.
@@ -110,6 +117,8 @@ impl Default for ZoneConfig {
             arrive_at_entry: false,
             replay: None,
             gear_after_fight: GEAR_AFTER_FIGHT,
+            gm_names: Vec::new(),
+            tuning_file: None,
         }
     }
 }
@@ -319,6 +328,7 @@ const HUB_PATIENCE: Duration = Duration::from_secs(10);
 pub const GEAR_AFTER_FIGHT: Duration = Duration::from_secs(10);
 /// What a player is told when the hub did not answer in `HUB_PATIENCE`.
 const HUB_SILENT: &str = "the hub did not answer: try again";
+use gm_net::control::TRAINER_REACH;
 
 /// A line of the zone itself to one client (a refusal, a notice): it is not lost.
 fn zone_line(session: &Session, text: impl Into<String>) {
@@ -514,7 +524,6 @@ pub async fn run_with_web(
         map_name: world.name.clone(),
         map_hash: world.hash,
         open: cfg.open,
-        content: Arc::new(cfg.content.clone()),
         props: Arc::new(cfg.looks.props.clone()),
         hub: cfg.hub.clone(),
         chat: Default::default(),
@@ -560,7 +569,32 @@ pub async fn run_with_web(
         });
     }
 
-    let mut zone = Zone::new(rate, cfg.seed, world.spawns.clone(), cfg.content.clone());
+    // The content as loaded, and as a game master tuned it (GM.md 3): the tuning of the
+    // last run is read back; one that content refuses is dropped with a warning.
+    let mut tuning = match &cfg.tuning_file {
+        Some(path) => match gm_content::tuning::read(path) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(path = %path.display(), "tuning not read: {e}");
+                Tuning::default()
+            }
+        },
+        None => Tuning::default(),
+    };
+    let mut pack = Arc::new(tuning.apply(&cfg.content, rate));
+    if let Err(e) = pack.validate(rate) {
+        warn!("the tuning read is not valid content, dropped: {e}");
+        tuning = Tuning::default();
+        pack = Arc::new(cfg.content.clone());
+    }
+    if !tuning.is_default() {
+        info!(
+            tempo = tuning.tempo,
+            abilities = tuning.abilities.len(),
+            "tuned content"
+        );
+    }
+    let mut zone = Zone::new(rate, cfg.seed, world.spawns.clone(), (*pack).clone());
     // Minds (COMPANIONS.md): the nav grid, the creatures on their posts, the squads.
     let seeds: Vec<glam::Vec3> = world.spawns.iter().map(|s| s.origin).collect();
     let posts: Vec<CreatureSpawn> = if cfg.wild {
@@ -814,6 +848,7 @@ pub async fn run_with_web(
                         .and_then(|h| h.model)
                         .filter(|m| !revoked.iter().any(|(id, _)| *id == m.id));
                     let hired = hub.as_ref().map(|h| h.squad.clone()).unwrap_or_default();
+                    let hub_gm = hub.as_ref().is_some_and(|h| h.gm);
                     if let Some(h) = hub {
                         // What it wears (ITEMS.md 3.3): the hub's reading at the claim, or a
                         // later one this zone already has for the character (the answer to
@@ -854,9 +889,19 @@ pub async fn run_with_web(
                         server_tick: zone.tick,
                         build,
                         team,
+                        pack: pack.clone(),
                     }));
                     let mut session = Session::new(id, name.clone(), conn, control);
                     session.last_input_at = scheduler.tick();
+                    // A game master (GM.md 1): the hub's word, or the zone's own list.
+                    session.gm = hub_gm || cfg.gm_names.contains(&name);
+                    if session.gm {
+                        info!(entity = id, %name, "game master");
+                        session.send_control(FromZone::Gm(GmNews::Granted));
+                        if !tuning.is_default() {
+                            session.send_control(FromZone::Gm(GmNews::Tuning(tuning.clone())));
+                        }
+                    }
                     session.model = model;
                     session.announced = zone.player(id).and_then(|p| session.wears(p.frame()));
                     let look = look_of(&cfg.looks, &zone, &hub_slots, id);
@@ -983,10 +1028,138 @@ pub async fn run_with_web(
                     }
                 }
                 ClientEvent::Respec { id, build } => {
-                    let result = resolve(&zone, Some(&build))
-                        .and_then(|b| zone.request_respec(id, b).map_err(|e| e.to_string()));
+                    // MATRIX.md 9.1: in a team zone (the arena, the practice ground) a new
+                    // build is worn at the next respawn, as always; in the world it is
+                    // worn at once, at the trainer, by a living body out of any fight.
+                    let result = resolve(&zone, Some(&build)).and_then(|b| {
+                        if !cfg.wild {
+                            return zone.request_respec(id, b).map_err(|e| e.to_string());
+                        }
+                        let p = zone
+                            .player(id)
+                            .filter(|p| p.alive && !p.ghost)
+                            .ok_or("not now")?;
+                        let fight = zone
+                            .rate
+                            .ms_to_ticks(cfg.gear_after_fight.as_millis() as u32);
+                        if p.fought_within(zone.tick, fight) {
+                            return Err("not in a fight: wait a moment".into());
+                        }
+                        let at = p.mover.mv.origin;
+                        let near_trainer = zone.players().any(|t| {
+                            t.alive
+                                && t.unhurt
+                                && (t.mover.mv.origin - at).length() <= TRAINER_REACH
+                        });
+                        if !near_trainer {
+                            return Err("stand by the trainer in the town".into());
+                        }
+                        zone.respec_now(id, b).map_err(|e| e.to_string())
+                    });
                     if let Some(s) = sessions.get(&id) {
                         s.send_control(FromZone::RespecResult(result));
+                    }
+                }
+                ClientEvent::Gm { id, op } => {
+                    let Some(s) = sessions.get(&id) else { continue };
+                    if !s.gm {
+                        s.send_control(FromZone::Gm(GmNews::Refused("not a game master".into())));
+                        continue;
+                    }
+                    let name = s.name.clone();
+                    // A change of the tuning is tried on the content as loaded; what content
+                    // would refuse is refused here, and the tuning stands as it was.
+                    let mut tuned = None;
+                    let result: Result<(), String> = match op {
+                        GmOp::Tempo(t) => {
+                            let (lo, hi) = gm_core::tuning::TEMPO_RANGE;
+                            if !(lo..=hi).contains(&t) {
+                                Err(format!("the tempo is between {lo} and {hi}"))
+                            } else {
+                                let mut next = tuning.clone();
+                                next.tempo = t;
+                                tuned = Some(next);
+                                Ok(())
+                            }
+                        }
+                        GmOp::Ability(a) => {
+                            if !cfg.content.abilities.iter().any(|d| d.key == a.key) {
+                                Err(format!("no ability {}", a.key))
+                            } else {
+                                let mut next = tuning.clone();
+                                next.set(a);
+                                tuned = Some(next);
+                                Ok(())
+                            }
+                        }
+                        GmOp::ResetTuning => {
+                            tuned = Some(Tuning::default());
+                            Ok(())
+                        }
+                        GmOp::Heal { everyone } => {
+                            let ids: Vec<EntityId> = if everyone {
+                                zone.players().map(|p| p.id).collect()
+                            } else {
+                                vec![id]
+                            };
+                            for who in ids {
+                                zone.make_whole(who);
+                            }
+                            info!(%name, everyone, "gm: healed");
+                            Ok(())
+                        }
+                        GmOp::Respec(build) => {
+                            let r = zone.respec_now(id, build).map_err(|e| e.to_string());
+                            if r.is_ok() {
+                                info!(%name, "gm: respec now");
+                            }
+                            r
+                        }
+                    };
+                    let result = match tuned {
+                        Some(next) if result.is_ok() => {
+                            let next_pack = next.apply(&cfg.content, rate);
+                            match next_pack.validate(rate) {
+                                Ok(()) => {
+                                    tuning = next;
+                                    pack = Arc::new(next_pack);
+                                    zone.retune((*pack).clone());
+                                    info!(
+                                        %name,
+                                        tempo = tuning.tempo,
+                                        abilities = tuning.abilities.len(),
+                                        "gm: content tuned"
+                                    );
+                                    if let Some(path) = &cfg.tuning_file
+                                        && let Err(e) = gm_content::tuning::write(path, &tuning)
+                                    {
+                                        warn!(path = %path.display(), "tuning not written: {e}");
+                                    }
+                                    // Everyone runs the new numbers: a new `Content` each,
+                                    // and the tuning as it stands to the game masters.
+                                    for (sid, s) in &sessions {
+                                        let Some(p) = zone.player(*sid) else { continue };
+                                        s.send_control(FromZone::Content {
+                                            pack: (*pack).clone(),
+                                            own: p.sheet.build.clone(),
+                                            team: p.team(),
+                                            props: cfg.looks.props.clone(),
+                                        });
+                                        if s.gm {
+                                            s.send_control(FromZone::Gm(GmNews::Tuning(
+                                                tuning.clone(),
+                                            )));
+                                        }
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(format!("content refuses that: {e}")),
+                            }
+                        }
+                        _ => result,
+                    };
+                    if let (Err(e), Some(s)) = (result, sessions.get(&id)) {
+                        s.send_control(FromZone::Gm(GmNews::Refused(e)));
                     }
                 }
                 ClientEvent::Travel { id, zone: to_zone } => {
@@ -2413,7 +2586,7 @@ pub async fn run_with_web(
                     attacker,
                     target,
                     amount,
-                    ..
+                    absorbed,
                 } => {
                     match kind {
                         HitKind::Melee => report.hits_melee += 1,
@@ -2427,6 +2600,13 @@ pub async fn run_with_web(
                     {
                         s.damage_dealt += amount;
                         s.hits_landed += 1;
+                        // The attacker is told what it did: the number over the body
+                        // it hit (LOOK.md 13.8).
+                        s.send_control(FromZone::Hit {
+                            target,
+                            amount: amount.min(u16::MAX as u64) as u16,
+                            absorbed: absorbed.clamp(0, u16::MAX as i32) as u16,
+                        });
                     }
                     if let Some(s) = sessions.get_mut(&target) {
                         s.damage_taken += amount;
@@ -2476,8 +2656,24 @@ pub async fn run_with_web(
                 ZoneEvent::GuardBroken(_) => report.guard_breaks += 1,
                 ZoneEvent::Staggered(_) => report.staggers += 1,
                 ZoneEvent::StatusApplied { .. } => report.statuses_applied += 1,
-                ZoneEvent::Healed { .. }
-                | ZoneEvent::ProjectileSpawned { .. }
+                ZoneEvent::Healed {
+                    target,
+                    source,
+                    amount,
+                } => {
+                    // The healer is told what its Regen gave another body: the green
+                    // number over it (LOOK.md 13.8). The own healings are read from the
+                    // own health, like the own hurts.
+                    if source != target
+                        && let Some(s) = sessions.get_mut(&source)
+                    {
+                        s.send_control(FromZone::Healed {
+                            target,
+                            amount: amount.clamp(0, u16::MAX as i32) as u16,
+                        });
+                    }
+                }
+                ZoneEvent::ProjectileSpawned { .. }
                 | ZoneEvent::ProjectileRemoved(_)
                 | ZoneEvent::AreaSpawned { .. }
                 | ZoneEvent::AreaRemoved(_) => {}

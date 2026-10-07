@@ -16,7 +16,9 @@ fn blades_counter_pick_into_frostweavers_and_turn_the_match() {
     // Ninety seconds: at sixty the kill share after the counter-pick rested on some forty
     // kills and came within 0.05 of the bar in one run of a dozen (0.65–0.89, the same on
     // the Phase 6 build), and under it about once in forty.
-    let secs = 90;
+    // MATRIX.md v2 (2026-10-06) made a fight two to three times longer: 120 s, and the
+    // share before the counter-pick is read at 30 s, not 20.
+    let secs = 120;
     let o = play(Match {
         map: ARENA,
         bots: 16,
@@ -63,7 +65,7 @@ fn blades_counter_pick_into_frostweavers_and_turn_the_match() {
     for b in o.bots.iter().filter(|b| b.team == 1) {
         assert_eq!(b.final_build, "ironclad", "{}", b.name);
     }
-    // Kill share: team 2's share of the kills in the first 20 s versus the last 30 s.
+    // Kill share: team 2's share of the kills in the first 30 s versus the rest.
     let at = |t: u64| -> [u64; 3] {
         o.windows
             .iter()
@@ -71,7 +73,7 @@ fn blades_counter_pick_into_frostweavers_and_turn_the_match() {
             .find(|w| w.tick <= t)
             .map_or([0; 3], |w| w.team_kills)
     };
-    let early = at(20 * 64);
+    let early = at(30 * 64);
     let final_kills = o.server.team_kills;
     let late = [
         final_kills[0] - early[0],
@@ -80,13 +82,13 @@ fn blades_counter_pick_into_frostweavers_and_turn_the_match() {
     ];
     let share = |k: [u64; 3]| k[2] as f64 / (k[1] + k[2]).max(1) as f64;
     println!(
-        "team 2 kill share: first 20 s {:.2} ({:?}), after {:.2} ({:?})",
+        "team 2 kill share: first 30 s {:.2} ({:?}), after {:.2} ({:?})",
         share(early),
         early,
         share(late),
         late
     );
-    assert!(early[1] + early[2] >= 6, "too few early kills: {early:?}");
+    assert!(early[1] + early[2] >= 4, "too few early kills: {early:?}");
     assert!(late[1] + late[2] >= 10, "too few late kills: {late:?}");
     // Before the counter-pick the first twenty seconds hold about ten kills: too few to
     // put a bar on by themselves (their share ran from 0.00 to 0.62 over forty runs; that

@@ -9,7 +9,7 @@ use glam::Vec3;
 use gm_core::build::{Build, Sheet};
 use gm_core::encounter::{Ledger, Who};
 use gm_core::loot;
-use gm_core::sim::{Driver, HitKind, TEAM_WILD, Zone, ZoneEvent, buttons, tick_delta};
+use gm_core::sim::{Driver, HitKind, Input, TEAM_WILD, Zone, ZoneEvent, buttons, tick_delta};
 use gm_core::tick::Tick;
 use gm_core::trace::{CollisionWorld, Hull};
 use gm_core::trial::{Failure, Standing, judge};
@@ -235,6 +235,7 @@ impl Director {
             let id = zone.add_body(sheet.clone(), home, sp.yaw, Driver::Mind);
             zone.set_party(id, 0);
             zone.set_hold(id, true);
+            zone.set_unhurt(id, def.npc);
             let encounter = match d.encounters.iter().position(|e| e.name == sp.encounter) {
                 Some(i) => i,
                 None => {
@@ -633,6 +634,23 @@ impl Director {
         }
         for c in creatures.iter_mut() {
             if !zone.player(c.id).is_some_and(|p| p.alive) {
+                continue;
+            }
+            // One that stands still (the dummy, the trainer) has no mind: an empty frame
+            // a tick, facing its post, so that it stands on the floor like everybody.
+            if zone
+                .content
+                .creatures
+                .get(c.def as usize)
+                .is_some_and(|d| d.still)
+            {
+                frames.push((
+                    c.id,
+                    Input {
+                        yaw: c.yaw,
+                        ..Input::default()
+                    },
+                ));
                 continue;
             }
             let Some(s) = view.senses(zone, c.id, world, nav) else {

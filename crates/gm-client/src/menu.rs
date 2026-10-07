@@ -41,6 +41,10 @@ pub enum MenuAction {
     Inventory,
     /// Close the menu and open the page of people (PARTY.md 8).
     People,
+    /// Close the menu and open the character's page (MATRIX.md 9.1).
+    Character,
+    /// Close the menu and open the game master's page (GM.md 4).
+    Gm,
     Travel(String),
     /// Say goodbye to the zone and show the characters.
     Leave,
@@ -55,6 +59,8 @@ pub enum MenuAction {
 pub struct Offers {
     pub inventory: bool,
     pub people: bool,
+    /// The zone made this character a game master (GM.md 1).
+    pub gm: bool,
     pub travel: bool,
     pub leave: bool,
     pub fullscreen: bool,
@@ -110,7 +116,8 @@ impl GameMenu {
         let s = ui.scale;
         let gap = 5.0 * s;
         let h = ui.button_height();
-        let inner = 8.0 * (h + gap) + 2.0 * ui.line();
+        let rows = if offers.gm { 10.0 } else { 9.0 };
+        let inner = rows * (h + gap) + 2.0 * ui.line();
         let panel = Rect::centred(ui.size(), 160.0 * s, ui.panel_height(inner, true));
         let inner = ui.panel(panel, "menu");
         let mut col = Column::new(inner, gap);
@@ -122,6 +129,12 @@ impl GameMenu {
         }
         if ui.button_if(col.take(h), "People", offers.people) {
             return MenuAction::People;
+        }
+        if ui.button_if(col.take(h), "Character", offers.people) {
+            return MenuAction::Character;
+        }
+        if offers.gm && ui.button(col.take(h), "Game master") {
+            return MenuAction::Gm;
         }
         if ui.button_if(col.take(h), "Travel", offers.travel && hub.is_some())
             && let Some((hub, session)) = hub
@@ -162,11 +175,12 @@ impl GameMenu {
             ("C or Ctrl", "guard"),
             ("1 2 3 4", "the actives (Shift is 1)"),
             ("V", "first or third person"),
-            ("Tab", "the tactical view and the squad"),
             ("Enter", "say something"),
             ("F9", "report the player you look at"),
             ("I", "the inventory"),
+            ("K", "the character: points and kit"),
             ("P", "people, the party, a trade"),
+            ("G", "the game master's page"),
             ("E", "look at the stall you stand at"),
             ("B and N", "open, close a stall on a tile"),
             ("Escape", "this menu"),
@@ -743,6 +757,7 @@ mod tests {
     const ALL: Offers = Offers {
         inventory: true,
         people: true,
+        gm: false,
         travel: true,
         leave: true,
         fullscreen: true,
@@ -917,6 +932,7 @@ mod tests {
         let none = Offers {
             inventory: false,
             people: false,
+            gm: false,
             travel: false,
             leave: false,
             fullscreen: false,

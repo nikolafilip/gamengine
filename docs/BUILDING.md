@@ -58,7 +58,6 @@ two turns, the gate room with two sentinels, a stair, the Warden's hall).
 | `--build NAME` | preset build to ask the zone for: `ironclad`, `blade`, `frostweaver`, `shade` (default: the zone's default) |
 | `--team N` | team 1 or 2 (default 0: the zone balances) |
 | `--third-person` | start in the third-person viewport (`V` toggles at any time) |
-| `--tactical` | start in the tactical viewport (`Tab` toggles at any time); with `--headless --bench` it measures the view from above |
 | `--seconds N` | exit after N seconds and print the network statistics (scripted runs) |
 | `--avatar FILE.gmm` | offline: wear this ingested model (how a creator previews one before uploading) |
 | `--crowd N` | offline: N characters standing and walking around the start (benchmarks, `check-avatars.sh`) |
@@ -74,11 +73,8 @@ two turns, the gate room with two sentinels, a stair, the Warden's hall).
 
 Keys in a zone with a market: `B` opens a stall on the tile you stand on, `N` closes your stall.
 
-The tactical viewport (COMPANIONS.md 6): `Tab` kneels the body into the command stance and
-lifts the camera above it; `Tab` again stands up (400 ms). In it the cursor is free: `1`–`5`
-select a companion and `` ` `` all of them, left click selects the companion under the cursor,
-right click sends the selection to the ground under the cursor or onto the body under it,
-`F` orders follow and `H` hold; the movement keys pan, `Q`/`E` turn, the wheel zooms. The HUD
+Companions (COMPANIONS.md) follow and fight on their own; the tactical viewport that gave
+them orders was removed on 2026-10-06 (COMPANIONS.md 6). The HUD
 shows your health, stamina and focus, the squad with its orders, the creature being fought,
 and what the zone says of encounters, loot and trials. `Escape` opens the menu (Quit is
 there; `Q` no longer quits), `Enter` the chat line.
@@ -330,7 +326,7 @@ cargo run --release -p gm-client -- --replay replays/arena-*.gmr --follow lock06
 ```
 
 In the viewer: `[` `]` change the player, `Space` pauses, `,` `.` step a tick, the arrows seek
-5 s, `1`–`4` set the speed, `V` third person, `Tab` the tactical camera. In play, `F9`
+5 s, `1`–`4` set the speed, `V` third person. In play, `F9`
 reports the player under the crosshair.
 
 Flags: `gm-server --replay-dir DIR [--replay-mb-per-hour N] [--min-trust N]`;

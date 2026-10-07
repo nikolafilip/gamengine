@@ -5,6 +5,10 @@ use gm_core::build::{Build, ContentPack};
 
 /// How a client asks for a build: a preset by name (the zone resolves it against its content)
 /// or a full allocation (validated by the zone against MATRIX.md 9).
+/// How near the trainer a body must stand to wear a new build in the world (MATRIX.md
+/// 9.1): the zone enforces it, the client offers the button by it.
+pub const TRAINER_REACH: f32 = 160.0;
+
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub enum BuildChoice {
     Preset(String),
@@ -254,6 +258,38 @@ pub enum FromClient {
     TradeAsk {
         with: u32,
     },
+    // v10 (GM.md 2).
+    /// Something only a game master may ask (the zone says `Gm(Refused)` to anyone else).
+    Gm(GmOp),
+}
+
+/// What a game master may do to a running zone (GM.md 2): tune its timings, make a body
+/// whole, wear another build at once. Every change of the content is told to every client
+/// as a new `Content`.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum GmOp {
+    /// Every script's windups, windows and cast times take this many times as long.
+    Tempo(f32),
+    /// Numbers set outright on one ability (its key in the pack); all `None` forgets it.
+    Ability(gm_core::tuning::AbilityTuning),
+    /// Back to the content as loaded.
+    ResetTuning,
+    /// Full health, stamina and focus, every cooldown ready: the own body, or everyone.
+    Heal { everyone: bool },
+    /// This build now, not at the next respawn (validated as a respec is).
+    Respec(Build),
+}
+
+/// What the zone answers a game master (GM.md 2).
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+pub enum GmNews {
+    /// Sent after `Content` to a client whose character may do these things.
+    Granted,
+    /// The zone's tuning as it stands (after `Content` when it is not the default, and
+    /// after every change).
+    Tuning(gm_core::tuning::Tuning),
+    /// Why the last `Gm` was not done.
+    Refused(String),
 }
 
 /// What a zone says to a client (PROTOCOL.md 8). `Reject` is number 14 and `Kick` number
@@ -397,6 +433,19 @@ pub enum FromZone {
         id: u32,
         look: Look,
     },
+    // v10 (GM.md 2).
+    Gm(GmNews),
+    /// v10 (LOOK.md 13.8): the own hand landed a blow. `amount` came off the target's
+    /// health after its block took `absorbed`; the number the client floats over it.
+    /// The own hurts are read from the own health, which the snapshot carries.
+    Hit {
+        target: u32,
+        amount: u16,
+        absorbed: u16,
+    },
+    /// v10 (LOOK.md 13.8): a Regen the own hand put on another body gave it `amount`
+    /// health back this pulse. The own healings are read from the own health.
+    Healed { target: u32, amount: u16 },
 }
 
 pub const MAX_MESSAGE_BYTES: usize = u16::MAX as usize;
@@ -686,6 +735,15 @@ mod tests {
             FromZone::Killed {
                 victim: 3,
                 killer: 0,
+            },
+            FromZone::Hit {
+                target: 3,
+                amount: 40,
+                absorbed: 5,
+            },
+            FromZone::Healed {
+                target: 3,
+                amount: 25,
             },
         ];
         let mut buf = Vec::new();

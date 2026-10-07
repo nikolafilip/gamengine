@@ -44,6 +44,7 @@ fn state(id: u32, team: u8, pos: Vec3, yaw: f32, pitch: f32) -> EntityState {
         pitch: quant::pitch_to_wire(pitch),
         vel: None,
         anim: 0,
+        acting: 0,
         health: Some(100),
         flags: flags::ALIVE,
         status: 0,

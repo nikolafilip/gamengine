@@ -1,6 +1,6 @@
 # Wire Protocol
 
-Status: v8 (Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+Status: v9 (after Phase 14: the ability a stance belongs to, section 21; v8 of Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
 and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
@@ -204,7 +204,7 @@ Entity record:
 | yaw | 12 | YAW |
 | pitch | 11 | PITCH |
 | vel | 3 × svar | VEL. Absolute when SPAWN (or the baseline record has no velocity), delta otherwise |
-| anim | 8 | ANIM |
+| anim | 8 (+ uvar) | ANIM. When the stance is a script's (windup 3, swing 4, recovery 5, cast 10), the **acting ability** follows as a uvar: the `AbilityId` of the script (the pack's index and one). ANIM is set when either changes (v9, section 21) |
 | health | uvar | HEALTH |
 | flags | 8 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only) |
 | status | 16 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras) |
@@ -723,3 +723,55 @@ what a body holds, so that every client draws the same weapon in the same hand:
 - The zone chooses: the model of the weapon template worn (the hub's gear reading names
   the templates, HUB.md 3.9), else the primary ability's prop, else nothing; companions and
   creatures by their build.
+
+## 21. Changes in v9 (after Phase 14: seeing the fight)
+
+`PROTOCOL_VERSION` 9 (LOOK.md 13). The simulation is untouched; a snapshot says one thing
+more about a body, so that a client can draw a blow where it lands:
+
+- An entity's record carries **the acting ability** with its stance: `EntityState.acting`,
+  the `AbilityId` (the pack's index and one; 0 for none) of the script the stance shows,
+  written as a uvar right after `anim` and **only when the stance is a script's**
+  (`gm_core::sim::anim::acts`: windup, swing, recovery, cast). A body that stands, runs,
+  guards or lies dead costs nothing more; a swing costs one byte on each of its three
+  changes of stance. The zone sets it with the stance (`Player::acting`, from the running
+  script's ability); the client has it as `RenderEntity::acting`.
+- With it and the pack every client already has (`FromZone::Content`), a client knows the
+  reach, the arc and the times of the swing any body in sight is making: the wedge
+  `melee_hit_point` tests (VOCABULARY.md 5.1). Nothing is revealed that the shared
+  animation set did not already show (MODELS.md 9: nobody's avatar may hide a windup); it
+  is now exact instead of guessed.
+- `gm_core::sim::script_anim(ability, elapsed)` is the rule that turns a running script
+  into a stance, shared: the zone says it of every body, a client says it of its own body
+  from its prediction (a round trip sooner).
+- Replays record no acting ability (a replayed body's is 0): the viewer draws no wedges.
+
+
+## 22. Changes in v10 (the game master's hand)
+
+`PROTOCOL_VERSION` 10 (GM.md). Three messages at the ends of the enums, and one thing more
+in the simulation's snapshots:
+
+- `FromClient::Gm(GmOp)`: what a game master asks of the zone (a tempo over every script,
+  numbers set outright on one ability, the content as loaded, a healing, a build worn
+  now); `FromZone::Gm(GmNews)`: `Granted` after `Content` to a character the zone made a
+  game master, `Tuning` with the tuning as it stands, `Refused` with why. A zone answers
+  anyone else's `Gm` with `Refused("not a game master")`.
+- **`Content` may come again** while playing: the zone's content was tuned (GM.md 2) and
+  every client runs the new numbers from then on, the same build on the new pack; a client
+  keeps its prediction and its tracks (`ClientState::set_sheet`), it does not start over.
+- **An instant area stays for its echo** (section 5, `gm_core::sim::INSTANT_AREA_ECHO_MS`
+  = 100 ms): an area with no duration pulses once and then stays on the wire, spent, so
+  that it is in a snapshot; before, it was spawned, pulsed and removed within one tick and
+  no client ever saw it.
+- Hub protocol 10: `HubResponse::Claimed.gm` (the account is a moderator).
+- `FromZone::Hit { target, amount, absorbed }` (added 2026-10-06, before v10 was
+  committed): to the attacker, every blow its hand landed on another body, with what came
+  off the target's health and what the target's block took. The number the client floats
+  over the body (LOOK.md 13.8); nothing goes to anyone else, and the own hurts are read
+  from the own health in the snapshot. A sparring fight is some blows a second a body:
+  bytes on the reliable stream of no account.
+- `FromZone::Healed { target, amount }` (added 2026-10-06, likewise): to the healer, each
+  pulse of a Regen its hand put on another body, with what the pulse gave back (nothing
+  for a pulse at full health). Not sent when the healer is the target: the own health
+  says it. Four a second a body healed, for the Regen's seconds.

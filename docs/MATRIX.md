@@ -1,7 +1,9 @@
 # Character Matrix
 
-Status: v1, Phase 3. This document is the contract for point-buy characters, the type matrix
-and the damage pipeline. `gm-core::matrix` and `gm-core::build` mirror it; when they disagree,
+Status: v2, 2026-10-06 (v1 was Phase 3). This document is the contract for point-buy
+characters, the type matrix and the damage pipeline. v2 (section 13): the character's own
+thirty attribute points apart from the kit's budget, wider bands and seven times the health,
+the range as the weapon's, the trainer and the dummy. `gm-core::matrix` and `gm-core::build` mirror it; when they disagree,
 the document wins and the code is wrong. Changes to either go in one commit.
 
 PLAN.md 3.1, 3.2 and 0 are binding: no levels, no gear tiers, a fixed budget, rock-paper-scissors
@@ -11,22 +13,26 @@ the proposal that Phase 3 implements. The director's calls are recorded in secti
 
 ## 1. Principles
 
-1. **Numbers are compressed, counters are not.** No single derived stat spans more than
-   1.5× between the worst and the best attribute spread, and effective health against neutral
-   physical damage spans at most 2× (cloth infiltrator to plate colossus); the matrix then
-   moves damage by 4× either way. Builds are won by picking the right counter and landing
-   it, not by stacking a stat.
+1. **Counters move damage more than stats do.** A derived stat spans at most 2× between
+   the worst and the best attribute spread (health 700 → 1,500, damage ×0.8 → ×1.6); the
+   matrix then moves damage by 4× either way. Builds are won by picking the right counter
+   and landing it; the thirty points say what kind of fighter lands it. (v1 compressed the
+   bands to 1.5× and 95–140 health: a fight was over in a second and a point bought nothing;
+   section 13.)
 2. **Readable in three seconds.** Frame = silhouette, armour class = how the body moves,
    aspect = aura colour. Everything that changes the matrix is visible.
-3. **One budget, reallocatable.** A character is a `Build` worth exactly 100 points. Respec is
-   free and takes effect at the next respawn (Phase 3) or in a safe zone (Phase 4+).
+3. **Two budgets, reallocatable.** A character has thirty attribute points of its own and a
+   kit worth at most 40. Both are redone, free, at the trainer in the town (section 9.1); in
+   the arena at the next respawn.
 4. **No immunity.** Every multiplier is 0.25–4. Everything can be killed by anything, slower.
 5. **No RNG in damage.** Spread on projectiles is the only randomness in combat.
 
 ## 2. Attributes
 
-Five attributes, each **5..=20**, integer. The floor is 5 (25 points are free), every point
-above 5 costs one build point.
+Five attributes, each **5..=25**, integer. The floor is 5; a character has **thirty points**
+to put above it, however it likes (all in one, or spread; fewer may be spent, more is
+refused). They are not the kit's budget (section 9): a build does not trade a stat for an
+ability. The presets spend all thirty.
 
 | Attribute | Governs |
 |---|---|
@@ -115,23 +121,23 @@ Physical packets ignore this table; elemental packets ignore the armour-class ta
 `attr` is the attribute value (5..=20). All results are rounded to integers where they are
 pools; multipliers stay f32. Bands are deliberately narrow.
 
-| Stat | Formula | Range (5 → 20) |
+| Stat | Formula | Range (5 → 25) |
 |---|---|---|
-| Health | `80 + 3·CON` | 95 → 140 |
-| Stamina | `60 + 2·(CON + AGI)` | 80 → 140 |
-| Stamina regen /s | `(10 + 0.5·AGI) · armour.regen` | 12.5 → 20 |
-| Focus | `40 + 4·INT + frame.focus` | 60 → 120 (+20 Caster) |
-| Focus regen /s | `5 + 0.5·SPR` | 7.5 → 15 |
-| Move speed (u/s) | `(290 + 2·AGI) · frame.mobility · armour.speed` | 300 → 330 before frame/armour |
-| Physical damage × | `0.80 + 0.02·STR` | 0.90 → 1.20 |
-| Elemental damage × | `0.80 + 0.02·INT` | 0.90 → 1.20 |
-| Armour (physical mitigation) | `min(0.35, 0.01·CON + frame.armour)` | 0.05 → 0.30 |
-| Ward (elemental mitigation) | `min(0.50, 0.015·SPR + frame.ward + armour.ward)` | 0.075 → 0.45 |
-| Evasion | `min(0.40, 0.01·AGI + frame.evasion + armour.evasion)` | 0.05 → 0.30 |
+| Health | `500 + 40·CON` | 700 → 1,500 |
+| Stamina | `60 + 3·(CON + AGI)` | 90 → 210 |
+| Stamina regen /s | `(10 + 0.6·AGI) · armour.regen` | 13 → 25 |
+| Focus | `40 + 5·INT + frame.focus` | 65 → 165 (+20 Caster) |
+| Focus regen /s | `5 + 0.6·SPR` | 8 → 20 |
+| Move speed (u/s) | `(280 + 2·AGI) · frame.mobility · armour.speed` | 290 → 330 before frame/armour |
+| Physical damage × | `0.60 + 0.04·STR` | 0.80 → 1.60 |
+| Elemental damage × | `0.60 + 0.04·INT` | 0.80 → 1.60 |
+| Armour (physical mitigation) | `min(0.50, 0.015·CON + frame.armour)` | 0.075 → 0.375 |
+| Ward (elemental mitigation) | `min(0.60, 0.02·SPR + frame.ward + armour.ward)` | 0.10 → 0.50 |
+| Evasion | `min(0.50, 0.015·AGI + frame.evasion + armour.evasion)` | 0.075 → 0.375 |
 | Knockback taken × | `1 / frame.mass` | |
-| Knockback dealt × | `0.80 + 0.02·STR` | |
-| Status duration taken × | `1.20 − 0.02·SPR` | 1.10 → 0.80 |
-| Stagger threshold | `40 + 2·CON` | 50 → 80 |
+| Knockback dealt × | `0.60 + 0.04·STR` | |
+| Status duration taken × | `1.30 − 0.03·SPR` | 1.15 → 0.55 |
+| Stagger threshold | `40 + 3·CON` | 55 → 115 |
 
 Max speed feeds `MoveVars.max_speed`; jump velocity and acceleration are not attribute-scaled
 (movement skill is movement skill). Stamina regen pauses for 1 s after any stamina spend.
@@ -225,23 +231,43 @@ duration on reapplication; `Extend` adds the duration (capped at 3× the verb's 
 ```
 Build {
   frame:        Colossus | Striker | Caster | Infiltrator       free
-  attributes:   STR AGI CON INT SPR, each 5..=20                 Σ(attr − 5)
+  attributes:   STR AGI CON INT SPR, each 5..=25                 Σ(attr − 5) ≤ 30, the character's own
   armour:       Cloth | Leather | Mail | Plate                   0 / 4 / 8 / 12
   aspects:      1..=2 of Flame Shadow Storm Frost Stone          0 / 10
   kit:          primary, secondary, guard (optional), up to 4 actives   Σ ability cost
 }
-Σ cost == 100 exactly; unspent points are refused (the budget is the balance).
+armour + aspects + kit ≤ 40 (the kit's budget); unspent is allowed.
 ```
 
 Rules enforced by `gm-core::build::validate`:
 - every slot holds a distinct ability of the matching slot type (primary, secondary, guard,
   active); an ability's `aspect` requirement must be in the build's aspects;
 - at most one ability per cooldown group;
-- the attribute floor and cap, the exact budget, no duplicate aspects.
+- the attribute floor and cap, the thirty points, the kit's budget, no duplicate aspects.
 
-A rejected build never enters the zone; the zone falls back to nothing (the join is refused
-with the reason). Respec: `FromClient::Respec(Build)` is validated immediately and applied at
-the next respawn.
+A rejected build never enters the zone. A stored build the rules no longer take (the v1
+presets had 56–68 attribute points, and a bolt in the secondary slot) is **repaired** by the
+hub when the character enters (`Build::repaired`): the points are scaled down to thirty in
+their own proportion, and a kit the pack refuses becomes the preset's with the same primary
+(else the first); what cannot be repaired is refused in words.
+
+### 9.1 The trainer, the dummy and the arena
+
+`FromClient::Respec(Build)` is validated at once, and then:
+- in a **zone of the world** (the town; any zone that posts creatures) it is worn **now**,
+  with full pools, if the body is alive, out of any fight (ITEMS.md 5's ten seconds) and
+  within `TRAINER_REACH` = 160 u of the **trainer**: a creature marked `npc` (nothing hurts
+  it; the town posts one beside its board). Else it is refused with the reason;
+- in a **team zone** (the arena, the practice ground) it is worn at the next respawn, as in
+  v1, so a match can be re-specced mid-way (section 11).
+
+The client's page (`K`, CLIENT.md 4.6) edits the points and the kit anywhere and offers
+"Wear it" by the trainer; a game master wears any build at once, anywhere (GM.md 2).
+
+Three **training dummies** (`dummy`: a creature marked `still`, 5,000 health, back after
+5 s) stand in a triangle in the gated south street behind the trainer (2026-10-06; the one
+on the green north of the market was out of the way): each is hit like any body and the
+attacker reads what it dealt (LOOK.md 13.8). A `still` creature has no mind: it is driven an empty frame a tick.
 
 ## 10. Kits as data
 
@@ -250,12 +276,18 @@ start against VOCABULARY.md 11 and this document. The zone sends the loaded cont
 client after `Welcome` (`FromZone::Content`), so a client can never run different numbers than
 its zone and needs no content parser.
 
-Each ability carries: `slot` (primary | secondary | guard | active), `cost` (build points),
+Each ability carries: `slot` (primary | secondary | guard | active), `cost` (kit points),
 `aspect` (optional; the required aspect, and every elemental packet in the script must be of
-that element), and the verb script of VOCABULARY.md 6. Price bands, so that the budget binds
-against the attribute line: primaries 0–2, secondaries 3–5, guards 4–6, actives 6–12. The v1
-content ships the abilities and the four preset builds (`ironclad`, `blade`, `frostweaver`,
-`shade`) that the bots use; `assets/content/README.md` has the table. Phase 7 adds `mend`
+that element), and the verb script of VOCABULARY.md 6. Price bands: primaries 0–2,
+secondaries 2–4, guards 4–6, actives 6–12. **The range is the weapon's** (v2): a primary is
+either a melee weapon (sword, hammer, staff, dagger) or the ranged one (crossbow, musket, and
+the five elemental bolts); a secondary is a short utility (kick, shield bash, a knife of
+300 u, mend). A melee build has nothing that reaches past the knife; a ranged build's primary
+is the whole of its damage at range. (v1 gave every build a bolt in the secondary slot:
+melee had free range and range had no edge; section 13.) A creature may hold a second
+primary in its secondary slot (the sentinel's crossbow, the Warden's stone). The content
+ships the abilities and seven presets (`ironclad`, `blade`, `frostweaver`, `shade`, `mender`,
+`captain`, `marksman`); `assets/content/README.md` has the table. Phase 7 adds `mend`
 (secondary, 4), `sanctuary` (active, 10) and `war_standard` (active, 10; two more squad
 slots), the presets `mender` and `captain`, and two more files: `creatures.toml` (creatures
 are builds without a budget, with abilities marked `creature = true` that no player build may
@@ -336,3 +368,32 @@ implementation; verdicts are ours):
   predicts a status an enemy applies, so its timers are never consulted).
 - Deferred to Phase 4: the per-tick body list is O(N²) at 200 players (spatial partition with
   the swarm test).
+
+## 13. v2 (2026-10-06): the director played it
+
+The director, after playing Phase 14 with the fx and the GM hand: "char stats editable in
+game like Tales of Pirates or Ether Saga: start with 30 points to distribute however we like;
+an NPC for stat reset and a training dummy in town; very unfair that everybody has a right
+click fireball shooting far and DD one-hit killing spellcasters; fights are tap tap tap dead;
+'tactical' meant rock-paper-scissors, not the top view." Measured before the change: health
+95–140, the sword 35 slash at 300 ms ×1.25 on cloth = a caster dead in two hits, about one
+second of contact; the firebolt needed five; the presets spent 56–68 of 100 points on
+attributes, so every build was near 20 on four stats and a point moved health by 3 of 140.
+
+Done, as proposed and accepted ("do it all as you proposed"):
+- attributes 5..=25 with thirty points of the character's own (section 2), the kit's budget
+  40 apart from them (section 9); `Attributes::default()` is 11 across;
+- the bands of section 6 widened (health ×7, damage ×0.8–1.6), armour cap 0.50, ward 0.60;
+- the swings slowed and made heavier (sword 60 slash, 150/60/300 ms, 600 ms cooldown; the
+  hammer 90 at 1 s; the dagger 35 at 400 ms), the bolts made primaries at about one and a
+  half times their damage, and four secondaries in their place (section 10);
+- the trainer, the dummy and the arena rule (9.1); the character's page `K`; old builds
+  repaired at the hub; creature health ×3 (sentinel 1,200, Warden 15,000 at twice a player's
+  blows: `might`, COMPANIONS.md 8.1) and the heals ×5 (Mend 100/s, Sanctuary 60/s: the
+  healer's share of a body a second is what it was);
+- the tactical viewport removed from the client (PLAN.md 4.3 [REVERSED]; COMPANIONS.md 6):
+  1.3 KB of code and about 2% of the browser download, not the bloat, but no longer wanted.
+
+Numbers measured after the change are in PLAN.md 11.10 and section 11 (re-run). The
+director's call still open: the fight length he wants in play (the tempo and these numbers
+are the knobs, GM.md 3).

@@ -329,7 +329,8 @@ armour class: cloth pale, leather brown, mail steel, plate dark iron.
 What a custom model must not hide is drawn by the client around it: **armour class is in the
 gait** (the heavier the class, the longer and heavier the stride, the smaller the arm swing:
 MATRIX.md 1, "how the body moves"), **aspects are a ring at the feet** in the element colours
-(two halves for a dual aspect), and the team is a pip above the head.
+(two halves for a dual aspect), and the side is the colour of the name over the head (a
+pip until the director asked what it was: LOOK.md 13.4).
 
 ## 10. Moderation and takedown (PLAN.md 7)
 

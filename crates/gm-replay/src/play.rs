@@ -38,6 +38,7 @@ fn render(a: &EntityState, b: Option<&EntityState>, alpha: f32, dt: f32) -> Rend
         yaw,
         pitch,
         anim: state.anim,
+        acting: 0,
         flags: state.flags,
         status: state.status,
         health: state.health,

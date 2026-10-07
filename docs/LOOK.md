@@ -14,7 +14,9 @@ Code follows this document; a change to either goes in one commit. v0 was the pr
 built (11.2: found by running it; 12: measured). The same evening the director played it
 and three things changed (11.4): an atlas per UI scale and drawn faces instead of one
 atlas of dots magnified (2.2, 2.3), the grip (6.3), two pixels a dot at 1080 lines
-(CLIENT.md 3).
+(CLIENT.md 3). Then, having played it in a browser, the fight had to be seen: section 13
+(the wedge a swing hits and its slash, bolts, areas, sparks, names over bodies; protocol
+v9).
 
 ## 1. Principles
 
@@ -221,8 +223,8 @@ baked; one without (an armour, today) shows its first two letters in the title f
 
 ### 3.5 Kept
 
-The corner hints (the zone, `Esc menu`, `E look`), the crosshair, the tactical viewport's
-own drawing (COMPANIONS.md 6), the chat (CLIENT.md 5): skinned where they have a frame,
+The corner hints (the zone, `Esc menu`, `E look`), the crosshair, the chat (CLIENT.md 5):
+skinned where they have a frame,
 otherwise as they are.
 
 ## 4. The screens as grids
@@ -332,14 +334,14 @@ from the front and from its right: the fitting room on paper (CONTENT.md 9).
 
 Counter-Strike's root (the director, 2026-10-03): in the FPS viewport the own body is not
 drawn, and the held prop is drawn as a **view model**: the same `.gmm`, placed in view
-space (`Avatars::view_model`: 14 units out, 7 to the right, 6 under the eye, its business
+space (`Avatars::view_model`: 26 units out, 11 to the right, 10 under the eye (14, 7 and 6 until it was seen to fill half the view in a swing, 13), its business
 end along the look, turned 8° inward and tipped 4° up), with a bob read from the own
 travel (a figure of eight a stride of 64 units long) and a kick on a launch or a swing
 (the own predicted actions: back 3 units and up 14°, decaying over a sixth of a second).
 It is drawn in the world pass with the world's depth: a weapon can clip into a wall one is
 pressed against (the near plane is 4 units); a pass of its own is written down for Phase
 15 with `fit_view` per template, which the manifest already carries. Third person shows
-the prop in the hand as everybody sees it; the tactical view shows nothing of it.
+the prop in the hand as everybody sees it.
 
 ## 7. The purse: silver and gold
 
@@ -411,18 +413,18 @@ the musket (6.3), two pixels a dot from 600 to 1300 lines (CLIENT.md 3), every b
 Open still (small; the implementation picks and says so): where the weapon rests out of a
 fight (v1 holds it always); which two faces (Fira Sans Medium and MedievalSharp, both OFL,
 named in LICENSES.md: v1's pixel face was part of what read as low resolution, 11.4);
-the party frames' reach (v1: members present in the zone); **the marks on a body** (the
-plate of its aspects' colours at the feet and the cube over the head, blue for the own
-side and red for the other: flat boxes since Phases 3 and 6, and the director had to ask
-what they are, 11.4).
+the party frames' reach (v1: members present in the zone). (The marks on a body, flat
+boxes since Phases 3 and 6 that the director had to ask about, were decided the same
+evening: "nametags would work", 13.4, and a ring for the aspects.)
 
 ## 10. Deliberately absent
 
 Tooltips on the HUD's own cells (the hotbar, the party frames): the HUD has no pointer in
 the game; a key that shows the hotbar's words is Phase 15's. Armour drawn on the body
 (Phase 16: avatars per frame and class, CONTENT.md 3.2); minimaps
-(PLAN.md 0: none, ever); a quest log, an experience bar (no levels); nameplates over every
-body (the team pip stays; names on hover are a later call); a cursor theme in the browser
+(PLAN.md 0: none, ever); a quest log, an experience bar (no levels); (names over bodies
+were absent in v1, with a cube for the side: the director asked what the cube was and
+took names instead, 13.4); a cursor theme in the browser
 (the page's cursor is the browser's outside pointer lock); animations for holding a prop
 (the shared set moves the hand; a real set is later work); dropping an item on the ground
 (ECONOMY.md 3 has `ground`, no screen yet); a crafting screen (its grid is this toolkit's,
@@ -560,3 +562,183 @@ extension of the arm is wrong, it should be perpendicular to the arm, like held 
   arm covers a few more pixels than one along it), and the gate now takes the middle of
   five pairs instead of one (with three it still read 0.53 once, the play stack's bots
   fighting beside it).
+
+## 13. Seeing the fight (2026-10-03, after the director played in the browser)
+
+"Animations and effects are poor and non-existent: using a skill just moves the arm a bit
+and the damage area is guesswork. If we have a sword and swing it, either the sword or the
+blast arc should do the damage, and both should be observable by the player to be able to
+aim." And of the marks on a body: "nametags would work."
+
+What a blow hits was always exact in the zone (a wedge of a reach and an arc at the
+instant the windup ends, VOCABULARY.md 5.1) and never drawn. This section draws it.
+
+### 13.1 Principles
+
+1. **What is drawn is what does the damage.** The wedge on the floor and the slash in the
+   air are made from the same numbers `melee_hit_point` tests with: the reach and the arc
+   of the ability the body is acting, at the place and the facing it had. Nothing is
+   decided here: the zone alone says who was hit.
+2. **Everybody's blows, not only the own.** A snapshot says which ability a stance belongs
+   to (protocol v9, PROTOCOL.md 21: one byte with a script's stance), and every client has
+   the pack, so an enemy's windup shows where it will land as exactly as the own.
+3. **The own body acts at once.** Its stance in a swing or a cast, the wedge and the slash
+   come from its own prediction (`script_anim`, the rule the zone uses), not from the
+   zone's word of it a round trip later; a bolt flies from the hand the frame it is let go.
+4. **Effects are triangles, made every frame.** Coloured, unlit, see-through, in the
+   world; one draw call after the bodies, blended, tested against the depth and not
+   written to it (`fx.rs`, the entities' shader). No textures, no particles kept.
+
+### 13.2 What is drawn (`fx::Effects`)
+
+| When | What |
+|---|---|
+| a body winds up a swing | **the wedge on the floor** at its feet: outline, a faint fill, and a brighter fill running out to the reach as the windup runs out |
+| the swing lands (the stance turns to `swing`) | **the slash**: the wedge lit, and at chest height a band standing at the reach and a flat ribbon inside it, sweeping from the right edge of the arc to the left in the active time (never under 0.10 s: a sword's 45 ms would be three frames), bright at its leading edge, gone 0.24 s after |
+| a bolt in flight | a streak along its way, never longer than it has flown (13.8), and a bright head in a halo five times its radius (seen end-on by whoever shot it); the own bolts in their damage's colour (the aspects' colours; steel for a blow), from the hand at once for 0.16 s, then the zone's |
+| an area | a disc of its radius on the floor with a rim and a ring running outward, orange if it hurts and green if it helps; **a burst** when it appears: a wall rising on its edge and a flash, 0.35 s |
+| a body's health drops (where the frame knows it: the own, the party's, the squad's, a creature's) | a spark at its chest, the body lit for 0.14 s; the own: the frame's edge red for a third of a second, and the number lost (13.8) |
+| the zone says the own hand landed | the number dealt, in gold over the body hit (13.8) |
+| the zone says the own hand's Regen gave another body health back | the number, in green over the body healed (13.8) |
+| always | **the ring of its aspects** at a body's feet (one colour, or a half each) instead of v1's square plate |
+
+Colours: the own swing warm white, a friend's blue, anybody else's orange-red.
+
+### 13.3 Stances and the view model
+
+- **Every stance has its own time to be reached** (`gm_model::anim::fade_secs`): 70 ms
+  into a windup, 50 into a swing, 160 out into the recovery, 120 elsewhere. At the single
+  120 ms of before, a sword's 90 ms windup and 45 ms swing never reached their poses: that
+  was "moves the arm a bit". The swing's pose is straighter and the body turns further
+  into it.
+- **The own stance is predicted**: while the own script runs, `script_anim` of it; when
+  it is over here and not yet there, what the feet do; dead, staggered, guarding,
+  dashing and commanding stay the zone's word.
+- **The view model is carried across the view** by the own stance (drawn back to the
+  right in the windup, cut across to the left, let go), and stands twice as far from the
+  eye as before (26 units): at 14 it filled half the frame in a swing.
+
+### 13.4 Names over bodies
+
+A name over every body in sight within 900 units whose head a ray from the camera reaches
+(no names through walls), in small print with a shade: blue for the own side (team, squad,
+party), orange for a creature, red for another team, white otherwise; under it a thin bar
+of its health where the frame knows the health and its whole (the squad's, a creature's).
+The cube over the head is gone.
+
+### 13.5 Proposed numbers, and what is not done
+
+Proposed: every time and size in 13.2 and 13.3; 900 units for a name; the colours.
+
+Not done, and worth saying: **no ability has a picture or a sound of its own yet** (the
+effects are by verb: a swing, a bolt, an area); a cast shows nothing before its bolt or
+its area (a glow at the hands, a mark where an area will fall); a hit on a stranger
+whose health the wire does not carry shows nothing (PROTOCOL.md 5 sends health for the
+own party and creatures only: the open question of SOUND.md 9, bytes on the wire); a
+replay draws no wedges; the stances are still six poses blended, not animation (Phase 16
+is the body's look); nothing was measured on the real GPU (13.6).
+
+### 13.6 Measured, and found by running it
+
+- The acting ability costs **one byte with a script's stance**: a delta that starts a
+  swing is at most 5 bytes over the same delta without it (the test of the codec).
+- Sizes: WebGPU wasm **1,136,246 bytes (383,589 packed)**, +24,059; WebGL2 3,128,065
+  (956,743); the native client **9,798,240 bytes**, +40,528 (baseline updated). **393
+  tests** in the workspace (385 before). The gates of the look, the screens, the items,
+  the party and the sound pass with their desktop clients, the look's and the web's with
+  the browser; the published page was opened in headless Chromium at 1920 × 1080 on the
+  restarted play stack (60 fps, WebGPU, a fight by script).
+- Not measured: what the effects cost a frame on the iGPU (no display was logged in; they
+  are one draw call of a few hundred triangles).
+- By eye, on the software GPU at 1920 × 1080 and 1280 × 720, on a private stack: the
+  wedge, the slash and the names in third person; the swing across the view in first
+  person; a firebolt's head at its end. A bolt in flight was not caught by the captures
+  (a tenth of a second apart); the unit tests hold its geometry.
+- **A horizontal ribbon is nearly invisible from behind**: the first slash was a flat
+  sector at chest height, edge-on to a camera behind the shoulder. The band standing at
+  the reach is what reads, from every side.
+- **A bolt seen end-on is a dot**: the first streak was a few pixels to its own shooter.
+  The head got its halo and the tracer from the hand.
+- The view model at 14 units filled the lower half of the frame once it moved.
+
+### 13.7 Code review (Gemini 3.1 Pro, 2026-10-03, over the change's diff and `fx.rs`)
+
+| # | Finding | Verdict |
+|---|---|---|
+| 1 | A projectile's `def` is looked up in the own kit, and should be looked up in the pack | **Rejected.** A projectile's `def` is the index into its owner's kit (PROTOCOL.md 5; the zone writes the kit slot), unlike `acting`, which is the pack's; the lookup is made only for the own bolts, whose kit the client has |
+| 2 | The hit flash's tint is vector arithmetic that does not compile | **Rejected.** The tint is three floats; it compiles and the frame shows it |
+
+No design review was asked for before the code this time (the director was waiting on a
+playable build): the design is this section, written with the code.
+
+### 13.8 Numbers over bodies, and where a bolt begins (2026-10-06, the director's second look)
+
+"Let's make damage dealt appear over characters, something like it does in Tales of
+Pirates. Also RMB animations start from the camera or behind the character (in third
+person view) and not from the character."
+
+**The numbers.** What a blow did floats up from over the body's head in the title face
+and fades: 1.1 s, quick at first and slowing (the ease of `1 - (1 - t)²` over 44 scale
+units of screen), gone over the last 0.35 s, a shade behind for any wall.
+
+| Which | Where it is known | Colour, size |
+|---|---|---|
+| what the own hand dealt | the zone's word of it: `FromZone::Hit { target, amount, absorbed }` to the attacker (PROTOCOL.md 22) | gold, the largest (1.4 × the UI scale) |
+| what the own body lost | the own health, which every snapshot carries | red `-n`, the scale |
+| what the own body got back | the own health going up from a living body (a respawn is not a healing) | green `+n`, the scale |
+| what the own hand gave another body back (a Regen's pulse) | the zone's word of it: `FromZone::Healed { target, amount }` to the healer (PROTOCOL.md 22) | green `+n`, the largest |
+| a blow of the own hand all taken by a block | `amount` 0 with `absorbed` over 0 | grey `blocked`, small |
+
+A blow by somebody else on somebody else shows its spark and nothing more: what is dealt
+is told only to the one who dealt it, and the snapshot's health of a party member or a
+creature is not sent for the others, so a number from it would show for some bodies and
+not for others. The message goes to the attacker because the health of a stranger (an
+enemy team, a sparring bot) is not on the wire at all (13.5): without it, no number would
+ever show over the body one is fighting. A healing is told the same way and for the same
+reason: a mender's dart lands on a teammate who is in no party, whose health the wire does
+not carry; the number is one a pulse (four a second) for the Regen's time, and a Regen the
+own hand put on the own body (a sanctuary stood in) is not told, the own health says it. The own hurts come from the own health and not
+from a message, so that what is lost to a burn or a fall shows the same as a blow.
+
+In the first person the own head is not in the frame: the own numbers rise from under the
+aim instead (100 scale units under the dot, up 40). In the third person the own numbers
+start at the head itself; another's, over its name.
+
+**Where a bolt begins.** A bolt's streak was drawn 96 units long behind its head from the
+first frame, whatever it had flown: a bolt just let go from the hand was a line running
+back through the shooter, in the third person to the camera behind the shoulder, in the
+first from the eye. It was the streak, not the spawn: the zone spawned at the weapon's
+offset all along. Now the streak is never longer than the bolt has flown since it was
+first seen (`Effects::bolts`, by the entity's id; the own tracer from where it was let
+go), so it starts as a head at the hand and grows a tail. The own tracer also leaves from
+where the zone will spawn the bolt (`Origin::Weapon`'s offset in the body's yaw frame, as
+`resolve_origin`), not from a point in front of the eye.
+
+Seen on the software GPU at 1920 × 1080 on a private stack (`look.sh` in the session's
+scratchpad: Xvfb, the fight script, two sparring bots): `50` and `67` in gold over
+the bodies hit, `-26` in red over the own head and under the aim in the first person,
+and in the same frames another's crossbow bolt trailing its streak from in front of the
+shooter. The own ice shard's launch was not caught by a capture (a sixth of a second);
+the unit test holds that its streak begins at the hand.
+
+### 13.9 A body runs the way it goes (2026-10-06, the same evening)
+
+"Check if A/S/D can rotate the model so it appears to run to a side in the non-FPS view,
+since otherwise it looks like walking forward but moving sideways."
+
+The body was drawn facing where it looked in every stance, so a side-step was a body
+running ahead and sliding across. There are no side-step poses (Phase 16 is the body's
+look), and none are needed for this: **a body running or in the air is drawn facing its
+way of travel** (`app::facing`), turned toward it at 720°/s rather than snapped, and in
+every other stance — winding up, swinging, casting, guarding, standing — facing where it
+looks, which is where its blow lands. Backing off keeps the eyes on whom it backs off
+from: the travel turns the body only within 100° of the look; further back is a
+backpedal. The rule is the same for every body: the own from its prediction's velocity,
+the others from the velocity the two snapshots around the render time give. The facing is
+the drawing's alone — the wedge, the slash, the aim and the ring of aspects stay on the
+look, as before.
+
+Seen on the software GPU at 1920 × 1080 (`strafe.sh` in the session's scratchpad: a key
+held with `xdotool`): A in profile to the left, D to the right, W away, S a backpedal,
+idle on the look.
+

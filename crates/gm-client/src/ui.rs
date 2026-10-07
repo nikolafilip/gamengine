@@ -214,6 +214,10 @@ pub enum Key {
     Use,
     /// And `P`: the people here and of the party (PARTY.md 8).
     People,
+    /// And `K`: the character's page (MATRIX.md 9.1): the points and the kit.
+    Character,
+    /// And `G`: the game master's page (GM.md 4), for whom the zone granted it.
+    Gm,
 }
 
 impl Key {
@@ -237,6 +241,8 @@ impl Key {
             "I" => Key::Inventory,
             "E" => Key::Use,
             "P" => Key::People,
+            "K" => Key::Character,
+            "G" => Key::Gm,
             _ => return None,
         })
     }
@@ -446,6 +452,8 @@ pub enum RowMark {
     Marked,
     /// It is gone: shown for what it was.
     Struck,
+    /// It is in (one of several that may be): lit like the row picked.
+    Picked,
 }
 
 /// A thing in a slot of a grid (LOOK.md 2.4).
@@ -510,6 +518,8 @@ pub struct Ui<'a, C: Canvas> {
     cut: Vec<String>,
     /// A row of a list was pressed this frame.
     row_pressed: bool,
+    /// The row of a list the cursor is over this frame: the list's name and the row.
+    row_over: Option<(String, usize)>,
     /// The tooltip to draw at the end of the frame (over everything), if a slot was
     /// hovered long enough.
     tooltip: Option<(Rect, TipLines)>,
@@ -583,6 +593,7 @@ impl<'a, C: Canvas> Ui<'a, C> {
             clipped: Vec::new(),
             cut: Vec::new(),
             row_pressed: false,
+            row_over: None,
             tooltip: None,
             dropped: None,
             hovered: None,
@@ -1245,6 +1256,9 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 row_h,
             );
             let over = rr.contains(self.input.cursor);
+            if over {
+                self.row_over = Some((name.to_string(), i));
+            }
             if self.input.pressed && over {
                 // A double click activates the row both of its presses were on.
                 let here = Some((id.clone(), i));
@@ -1255,7 +1269,7 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 self.state.last_row = here;
                 self.row_pressed = true;
             }
-            if i == *selected {
+            if i == *selected || marks.get(i) == Some(&RowMark::Picked) {
                 self.canvas.rect(rr.x, rr.y, rr.w, rr.h, PICKED);
             } else if over {
                 self.canvas.rect(rr.x, rr.y, rr.w, rr.h, BUTTON);
@@ -1272,8 +1286,8 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 let ink = match mark {
                     RowMark::Marked => WARN,
                     RowMark::Struck => OFF,
-                    RowMark::Plain if c == 0 => TEXT,
-                    RowMark::Plain => FAINT,
+                    RowMark::Plain | RowMark::Picked if c == 0 => TEXT,
+                    RowMark::Plain | RowMark::Picked => FAINT,
                 };
                 self.canvas
                     .text_in(self.face, x, rr.y + 2.0 * s, s, ink, &shown);
@@ -1295,6 +1309,15 @@ impl<'a, C: Canvas> Ui<'a, C> {
             event = ListEvent::Picked;
         }
         event
+    }
+
+    /// The row of the list called `name` the cursor is over, once that list was drawn
+    /// this frame (what a line under the lists describes).
+    pub fn row_over(&self, name: &str) -> Option<usize> {
+        self.row_over
+            .as_ref()
+            .filter(|(n, _)| n == name)
+            .map(|(_, i)| *i)
     }
 
     /// One of a few, in a row under its label: the one picked is lit. Returns whether

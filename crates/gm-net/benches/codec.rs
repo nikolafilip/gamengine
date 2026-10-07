@@ -19,6 +19,7 @@ fn scene(tick: u32, shift: i32) -> Snapshot {
             pitch: 900,
             vel: (i == 1).then_some([1000, 0, -40]),
             anim: 2,
+            acting: 0,
             health: (i == 1).then_some(100),
             flags: flags::ALIVE | flags::ON_GROUND,
             status: 0,

@@ -86,6 +86,8 @@ pub struct RenderEntity {
     pub yaw: f32,
     pub pitch: f32,
     pub anim: u8,
+    /// The ability the stance belongs to (`AbilityId`; 0: none).
+    pub acting: u16,
     pub flags: u8,
     /// Active statuses, a bit per `Status` index.
     pub status: u16,
@@ -691,6 +693,7 @@ impl ClientState {
                 yaw,
                 pitch,
                 anim: state.anim,
+                acting: state.acting,
                 flags: state.flags,
                 status: state.status,
                 health: state.health,
@@ -779,6 +782,7 @@ mod tests {
             pitch: 900,
             vel: Some(quant::quantize_vel3(vel.into())),
             anim: 0,
+            acting: 0,
             health: Some(100),
             flags: f,
             status: 0,
@@ -789,10 +793,11 @@ mod tests {
         let mut s = Snapshot::new(tick);
         s.baseline_tick = baseline;
         s.last_input_tick = last_input;
-        // The Phase 2 test character's full pools (MATRIX.md 6 on flat attributes of 10).
+        // The Phase 2 test character's full pools (MATRIX.md 6 v2 on flat attributes of
+        // 10: stamina 60 + 3·20, focus 40 + 5·10).
         s.own = OwnState {
-            stamina: 100,
-            focus: 80,
+            stamina: 120,
+            focus: 90,
             statuses: Vec::new(),
         };
         s.entities = entities;

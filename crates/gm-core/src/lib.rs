@@ -34,4 +34,5 @@ pub mod status;
 pub mod tick;
 pub mod trace;
 pub mod trial;
+pub mod tuning;
 pub mod vocab;

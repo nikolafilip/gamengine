@@ -66,10 +66,6 @@ pub fn run(opts: &Options) -> Result<(), Error> {
     };
     sim.advance(&bsp, &idle, 2.0);
     let yaw0 = sim.yaw;
-    let mut tactical = crate::tactical::Tactical::new();
-    if opts.tactical {
-        tactical.enter(sim.yaw);
-    }
     let frames = opts.bench_frames.unwrap_or(120);
     let dt = 1.0 / 60.0;
     let mut stats = FrameStats::new();
@@ -105,17 +101,8 @@ pub fn run(opts: &Options) -> Result<(), Error> {
                 (at, yaw, pitch)
             });
         }
-        // The tactical viewport: the camera above the body, the world drawn from the
-        // body's leaf (the camera itself hangs in the rock over the ceiling).
         let (camera, cam_yaw, cam_pitch) = if let Some(cam) = replay_camera {
             cam
-        } else if opts.tactical {
-            tactical.steer(0.0, 0.0, 0.2, 0.0, dt);
-            (
-                tactical.camera(sim.origin()),
-                tactical.yaw,
-                crate::tactical::PITCH,
-            )
         } else {
             (eye, sim.yaw, sim.pitch)
         };
@@ -137,18 +124,6 @@ pub fn run(opts: &Options) -> Result<(), Error> {
         renderer.hud.begin((w, h));
         if let Some(p) = &playback {
             p.hud(&mut renderer.hud);
-        } else if opts.tactical {
-            let view = crate::app::HudView {
-                party: &[],
-                bars: &[],
-                squad: &[],
-                target: None,
-                scale: crate::ui::scale_for(renderer.hud.size, crate::front::PANEL_UNITS, 0),
-                manifest: None,
-                time: 0.0,
-                own_name: "",
-            };
-            crate::app::build_hud(&mut renderer.hud, None, &tactical, vp, view);
         }
         renderer.render(&gpu, &view, vp, &boxes, &avatars.draws);
         avatars.end_frame(&gpu, &mut renderer.characters);
@@ -192,7 +167,6 @@ fn clone_for_replay(o: &Options) -> Options {
         follow: o.follow.clone(),
         from: o.from,
         third_person: o.third_person,
-        tactical: o.tactical,
         bench_frames: o.bench_frames,
         headless: o.headless,
         software: o.software,

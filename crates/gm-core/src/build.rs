@@ -7,8 +7,9 @@ use crate::vocab::{
     Ability, ArchetypeFrame, DamageType, Guard, MoveKind, MoveSelf, Riposte, Trigger, Verb,
 };
 
-/// Every build spends exactly this many points (MATRIX.md 9).
-pub const BUDGET: u32 = 100;
+/// The kit's budget (MATRIX.md 9): armour, a second aspect and the abilities may cost at
+/// most this many points. Attributes are not in it: they come from `Attributes::FREE_POINTS`.
+pub const BUDGET: u32 = 40;
 /// Second aspect cost (MATRIX.md 5).
 pub const SECOND_ASPECT_COST: u32 = 10;
 pub const MAX_ACTIVES: usize = 4;
@@ -79,6 +80,14 @@ pub struct CreatureDef {
     /// Seconds after its encounter was cleared until it stands on its post again; 0 = never.
     pub respawn_s: u16,
     pub loot: Option<Loot>,
+    /// Stands on its post and does nothing, whatever is done to it (the training dummy):
+    /// no mind drives it.
+    pub still: bool,
+    /// Somebody of the town (the trainer): cannot be hurt, is spoken to with `E`.
+    pub npc: bool,
+    /// What its blows and spells are multiplied by beyond its attributes (1 = a player's
+    /// numbers): a creature's health is set apart from the bands, and so is its damage.
+    pub might: f32,
 }
 
 /// A character build (MATRIX.md 9). Ability references are indices into the content pack.
@@ -118,6 +127,7 @@ pub struct ContentPack {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuildError {
     AttributeOutOfRange,
+    AttributePoints { spent: u32 },
     NoAspect,
     TooManyAspects,
     UnknownAbility(u16),
@@ -153,7 +163,12 @@ impl core::fmt::Display for BuildError {
                 write!(f, "two abilities share cooldown group {g}")
             }
             BuildError::TooManyActives => write!(f, "at most {MAX_ACTIVES} actives"),
-            BuildError::Budget { spent } => write!(f, "build spends {spent} of {BUDGET} points"),
+            BuildError::Budget { spent } => write!(f, "kit costs {spent} of {BUDGET} points"),
+            BuildError::AttributePoints { spent } => write!(
+                f,
+                "attributes take {spent} of {} points",
+                Attributes::FREE_POINTS
+            ),
             BuildError::CreatureOnly(i) => write!(f, "ability {i} is a creature's"),
         }
     }
@@ -176,11 +191,10 @@ impl core::fmt::Display for ContentError {
 impl core::error::Error for ContentError {}
 
 impl Build {
-    /// Points spent (MATRIX.md 9).
+    /// Kit points spent (MATRIX.md 9): armour, the second aspect, the abilities.
     pub fn cost(&self, pack: &ContentPack) -> u32 {
         let ability = |i: u16| pack.abilities.get(i as usize).map_or(0, |a| a.cost as u32);
-        self.attributes.cost()
-            + self.armour.cost()
+        self.armour.cost()
             + if self.aspects.count() >= 2 {
                 SECOND_ASPECT_COST
             } else {
@@ -205,17 +219,74 @@ impl Build {
         out
     }
 
-    /// MATRIX.md 9: ranges, aspects, slots, gating, cooldown groups, the exact budget.
+    /// MATRIX.md 9: ranges, the free points, aspects, slots, gating, cooldown groups, the
+    /// kit's budget.
     pub fn validate(&self, pack: &ContentPack) -> Result<(), BuildError> {
         if !self.attributes.in_range() {
             return Err(BuildError::AttributeOutOfRange);
         }
+        let points = self.attributes.cost();
+        if points > Attributes::FREE_POINTS {
+            return Err(BuildError::AttributePoints { spent: points });
+        }
         self.check_kit(pack, false)?;
         let spent = self.cost(pack);
-        if spent != BUDGET {
+        if spent > BUDGET {
             return Err(BuildError::Budget { spent });
         }
         Ok(())
+    }
+
+    /// A stored build the content no longer takes, made into one it does (MATRIX.md 9.1):
+    /// attributes clamped to the range and, past the free points, scaled down to them; a
+    /// kit the pack refuses replaced by the preset with the same primary, else the first
+    /// preset. `None` when the build is fine as it is, or nothing can be made of it.
+    pub fn repaired(&self, pack: &ContentPack) -> Option<Build> {
+        if self.validate(pack).is_ok() {
+            return None;
+        }
+        let mut out = self.clone();
+        let mut attrs = out
+            .attributes
+            .as_array()
+            .map(|v| v.clamp(Attributes::MIN, Attributes::MAX));
+        let spent: u32 = attrs.iter().map(|&v| (v - Attributes::MIN) as u32).sum();
+        if spent > Attributes::FREE_POINTS {
+            // Each stat keeps its share of the points, rounded down; the remainder goes to
+            // the largest ones, one each, so that every point is kept.
+            let mut kept: Vec<u32> = attrs
+                .iter()
+                .map(|&v| (v - Attributes::MIN) as u32 * Attributes::FREE_POINTS / spent)
+                .collect();
+            let mut left = Attributes::FREE_POINTS - kept.iter().sum::<u32>();
+            let mut order: Vec<usize> = (0..5).collect();
+            order.sort_by_key(|&i| core::cmp::Reverse(attrs[i]));
+            for i in order {
+                if left == 0 {
+                    break;
+                }
+                kept[i] += 1;
+                left -= 1;
+            }
+            for (a, k) in attrs.iter_mut().zip(kept) {
+                *a = Attributes::MIN + k as u8;
+            }
+        }
+        let [str_, agi, con, int, spr] = attrs;
+        out.attributes = Attributes::new(str_, agi, con, int, spr);
+        if out.validate(pack).is_ok() {
+            return Some(out);
+        }
+        let preset = pack
+            .builds
+            .iter()
+            .find(|nb| nb.build.primary == self.primary)
+            .or_else(|| pack.builds.first())?;
+        out = Build {
+            attributes: out.attributes,
+            ..preset.build.clone()
+        };
+        out.validate(pack).is_ok().then_some(out)
     }
 
     /// A creature's build (COMPANIONS.md 8.1): the kit rules without the budget and without
@@ -256,7 +327,11 @@ impl Build {
                 .abilities
                 .get(index as usize)
                 .ok_or(BuildError::UnknownAbility(index))?;
-            if def.slot != expected {
+            // A creature may hold a second primary (a bow beside its blade) where a
+            // player holds a utility: the range rule of MATRIX.md 10 is for players.
+            let allowed = def.slot == expected
+                || (creature && expected == Slot::Secondary && def.slot == Slot::Primary);
+            if !allowed {
                 return Err(BuildError::WrongSlot { index, expected });
             }
             if def.creature && !creature {
@@ -364,7 +439,8 @@ impl ContentPack {
             if c.health == 0 || c.health > MAX_CREATURE_HEALTH {
                 return Err(err(format!("health must be 1..={MAX_CREATURE_HEALTH}")));
             }
-            if !(c.sight > 0.0 && c.leash > 0.0) {
+            // One that stands still has no sight and no leash to speak of.
+            if !c.still && !(c.sight > 0.0 && c.leash > 0.0) {
                 return Err(err("sight and leash must be positive".into()));
             }
             match &c.loot {
@@ -550,6 +626,8 @@ impl Sheet {
         if def.stagger_threshold > 0 {
             sheet.derived.stagger_threshold = def.stagger_threshold as f32;
         }
+        sheet.derived.physical_mult *= def.might;
+        sheet.derived.elemental_mult *= def.might;
         sheet
     }
 }
@@ -560,11 +638,17 @@ mod tests {
     use crate::sim::test_content;
 
     #[test]
-    fn presets_validate_and_spend_exactly_the_budget() {
+    fn presets_validate_within_the_budget_and_spend_all_their_points() {
         let pack = test_content::pack(TickRate::COMBAT);
         pack.validate(TickRate::COMBAT).unwrap();
         for nb in &pack.builds {
-            assert_eq!(nb.build.cost(&pack), BUDGET, "{}", nb.name);
+            assert!(nb.build.cost(&pack) <= BUDGET, "{}", nb.name);
+            assert_eq!(
+                nb.build.attributes.cost(),
+                Attributes::FREE_POINTS,
+                "{}",
+                nb.name
+            );
             let kit = Kit::from_build(&nb.build, &pack);
             assert!(
                 kit.primary.is_some() && kit.secondary.is_some(),
@@ -575,12 +659,41 @@ mod tests {
     }
 
     #[test]
+    fn an_old_build_is_repaired_into_one_the_pack_takes() {
+        let pack = test_content::pack(TickRate::COMBAT);
+        let base = pack.build("blade").unwrap().clone();
+        assert_eq!(base.repaired(&pack), None);
+        // Sixty-eight attribute points, as the v1 presets had: scaled to thirty, in shape.
+        let mut b = base.clone();
+        b.attributes = Attributes::new(20, 20, 20, 15, 18);
+        let r = b.repaired(&pack).expect("repairable");
+        assert_eq!(r.attributes.cost(), Attributes::FREE_POINTS);
+        assert!(r.attributes.str_ >= r.attributes.int, "{:?}", r.attributes);
+        assert_eq!(r.validate(&pack), Ok(()));
+        assert_eq!((r.primary, &r.actives), (base.primary, &base.actives));
+        // A kit the pack refuses: the preset with that primary, the attributes kept.
+        let mut b = base.clone();
+        b.secondary = pack.find("ice_shard").unwrap();
+        b.attributes = Attributes::new(25, 10, 5, 5, 5);
+        let r = b.repaired(&pack).expect("repairable");
+        assert_eq!(r.attributes, b.attributes);
+        assert_eq!(r.secondary, base.secondary);
+        assert_eq!(r.validate(&pack), Ok(()));
+    }
+
+    #[test]
     fn validation_catches_every_rule() {
         let pack = test_content::pack(TickRate::COMBAT);
         let base = pack.build("blade").unwrap().clone();
         let mut b = base.clone();
-        b.attributes.str_ = 21;
+        b.attributes.str_ = 26;
         assert_eq!(b.validate(&pack), Err(BuildError::AttributeOutOfRange));
+        let mut b = base.clone();
+        b.attributes.str_ += 1;
+        assert!(matches!(
+            b.validate(&pack),
+            Err(BuildError::AttributePoints { .. })
+        ));
         let mut b = base.clone();
         b.aspects = Aspects::NONE;
         assert_eq!(b.validate(&pack), Err(BuildError::NoAspect));
@@ -599,12 +712,28 @@ mod tests {
             b.validate(&pack),
             Err(BuildError::DuplicateAbility(_))
         ));
+        // Fewer points than the free ones is a build; a kit past the budget is not.
         let mut b = base.clone();
         b.attributes.str_ -= 1;
-        assert!(matches!(b.validate(&pack), Err(BuildError::Budget { .. })));
-        // Frost content needs the Frost aspect.
+        assert_eq!(b.validate(&pack), Ok(()));
         let mut b = base.clone();
-        b.secondary = pack.find("ice_shard").unwrap();
+        b.armour = ArmourClass::Plate;
+        b.actives = (0..pack.abilities.len() as u16)
+            .filter(|&i| {
+                pack.abilities[i as usize].slot == Slot::Active
+                    && pack.abilities[i as usize].aspect.is_none()
+                    && !pack.abilities[i as usize].creature
+            })
+            .take(MAX_ACTIVES)
+            .collect();
+        assert!(
+            matches!(b.validate(&pack), Err(BuildError::Budget { .. })),
+            "{:?}",
+            b.validate(&pack)
+        );
+        // Frost content needs the Frost aspect (the ice shard is a primary).
+        let mut b = base.clone();
+        b.primary = pack.find("ice_shard").unwrap();
         assert!(matches!(
             b.validate(&pack),
             Err(BuildError::MissingAspect { .. })

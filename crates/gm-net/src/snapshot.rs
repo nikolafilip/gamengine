@@ -96,6 +96,9 @@ pub struct EntityState {
     /// Quantized velocity (1/8 u/s); own entity only.
     pub vel: Option<[i32; 3]>,
     pub anim: u8,
+    /// The ability the stance belongs to (`AbilityId`; 0: none), sent with a stance that
+    /// is a script's (v9): what is swung or cast, so a client can draw where it lands.
+    pub acting: u16,
     /// Own entity (Phase 5: party) only.
     pub health: Option<u16>,
     pub flags: u8,
@@ -342,6 +345,7 @@ fn record_differs(e: &EntityState, b: &EntityState) -> bool {
         || e.pitch != b.pitch
         || (e.vel.is_some() && e.vel != b.vel)
         || e.anim != b.anim
+        || e.acting != b.acting
         || (e.health.is_some() && e.health != b.health)
         // No longer sent (the body left the viewer's party): see `write_entity`.
         || (e.health.is_none() && b.health.is_some())
@@ -399,7 +403,7 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
             if e.vel.is_some() && e.vel != b.vel {
                 m |= mask::VEL;
             }
-            if e.anim != b.anim {
+            if e.anim != b.anim || e.acting != b.acting {
                 m |= mask::ANIM;
             }
             if e.health.is_some() && e.health != b.health {
@@ -464,6 +468,9 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
     }
     if m & mask::ANIM != 0 {
         w.write_bits(e.anim as u64, 8);
+        if gm_core::sim::anim::acts(e.anim) {
+            w.write_uvar(e.acting as u64);
+        }
     }
     if m & mask::HEALTH != 0 {
         w.write_uvar(e.health.unwrap_or(0) as u64);
@@ -521,6 +528,7 @@ fn read_entity(
             pitch: 0,
             vel: None,
             anim: 0,
+            acting: 0,
             health: None,
             flags: 0,
             status: 0,
@@ -547,6 +555,11 @@ fn read_entity(
     }
     if m & mask::ANIM != 0 {
         e.anim = r.read_bits(8)? as u8;
+        e.acting = if gm_core::sim::anim::acts(e.anim) {
+            r.read_uvar()?.min(u16::MAX as u64) as u16
+        } else {
+            0
+        };
     }
     if m & mask::HEALTH != 0 {
         let h = r.read_uvar()?;
@@ -583,6 +596,7 @@ mod tests {
             pitch: 900,
             vel: own.then_some([1000, 0, -40]),
             anim: 2,
+            acting: 0,
             health: own.then_some(100),
             flags: flags::ALIVE | flags::ON_GROUND,
             status: 0,
@@ -638,6 +652,55 @@ mod tests {
         assert!(bytes.len() < full, "delta {} >= full {}", bytes.len(), full);
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, next);
+    }
+
+    /// v9: a stance that is a script's carries the ability it belongs to; any other
+    /// stance carries none and costs nothing more.
+    #[test]
+    fn the_acting_ability_travels_with_a_scripts_stance_and_with_no_other() {
+        use gm_core::sim::anim;
+        let base = scene(10, 0);
+        let mut next = scene(11, 0);
+        next.baseline_tick = 10;
+        let still = next.encode(Some(&base)).len();
+        // A swing of ability 7 begins: the stance and the ability, two bytes and a mask.
+        next.entities[3].anim = anim::WINDUP;
+        next.entities[3].acting = 7;
+        let bytes = next.encode(Some(&base));
+        assert!(bytes.len() <= still + 5, "{} over {still}", bytes.len());
+        let swung = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
+        assert_eq!(swung, next);
+        assert_eq!(
+            (swung.entities[3].anim, swung.entities[3].acting),
+            (anim::WINDUP, 7)
+        );
+        // The same stance of another ability is a change too.
+        let mut other = next.clone();
+        other.server_tick = 12;
+        other.baseline_tick = 11;
+        other.entities[3].acting = 300;
+        let back =
+            Snapshot::decode(&other.encode(Some(&next)), |t| (t == 11).then_some(&next)).unwrap();
+        assert_eq!(back.entities[3].acting, 300);
+        // Back on its feet: no ability is written and none is read.
+        let mut after = other.clone();
+        after.server_tick = 13;
+        after.baseline_tick = 12;
+        after.entities[3].anim = anim::RUN;
+        after.entities[3].acting = 0;
+        let back =
+            Snapshot::decode(&after.encode(Some(&other)), |t| (t == 12).then_some(&other)).unwrap();
+        assert_eq!(
+            (back.entities[3].anim, back.entities[3].acting),
+            (anim::RUN, 0)
+        );
+        // In a full snapshot as well.
+        let mut full = next.clone();
+        full.baseline_tick = 0;
+        assert_eq!(
+            Snapshot::decode(&full.encode(None), |_| None).unwrap(),
+            full
+        );
     }
 
     #[test]
@@ -713,6 +776,7 @@ mod tests {
             pitch: 0,
             vel: None,
             anim: 0,
+            acting: 0,
             health: None,
             flags: flags::ALIVE,
             status: 0,
@@ -730,6 +794,7 @@ mod tests {
             pitch: 0,
             vel: None,
             anim: 0,
+            acting: 0,
             health: None,
             flags: flags::ALIVE,
             status: 0,

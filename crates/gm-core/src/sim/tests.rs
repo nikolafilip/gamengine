@@ -1,7 +1,7 @@
 use glam::Vec3;
 
 use super::*;
-use crate::build::Build;
+use crate::build::{Build, ContentPack};
 use crate::collide::{Aabb, BoxWorld};
 use crate::matrix::{ArmourClass, Aspects, Attributes, Element};
 use crate::sim::test_content::{self, phase2_build};
@@ -34,6 +34,27 @@ fn arena(placements: &[(Vec3, f32)]) -> (BoxWorld, Zone, Vec<EntityId>) {
         .map(|&(o, y)| zone.add_player_at(build.clone(), 0, o, y))
         .collect();
     (world, zone, ids)
+}
+
+/// Builds placed at the listed `(build, origin, yaw)` triples.
+fn arena_with(placements: Vec<(Build, Vec3, f32)>) -> (BoxWorld, Zone, Vec<EntityId>) {
+    let world = BoxWorld::floor();
+    let mut zone = zone_with(placements.iter().map(|p| (p.1, p.2)).collect());
+    let ids = placements
+        .into_iter()
+        .map(|(build, o, y)| zone.add_player_at(build, 0, o, y))
+        .collect();
+    (world, zone, ids)
+}
+
+/// The Phase 2 character with a bolt as its primary (the ranged primaries of 2026-10-06)
+/// and a kick beside it.
+fn bolt_build(pack: &ContentPack, key: &str) -> Build {
+    Build {
+        primary: pack.find(key).expect(key),
+        secondary: pack.find("kick").expect("kick"),
+        ..phase2_build(pack)
+    }
 }
 
 /// Preset builds placed at the listed `(name, origin, yaw)` triples.
@@ -104,11 +125,11 @@ fn phase2_kit_validates_and_has_durations() {
         kit.secondary.unwrap() as usize,
         kit.actives[0].unwrap() as usize,
     );
-    assert_eq!(kit.durations[sword], 6 + 3 + 11);
+    assert_eq!(kit.durations[sword], 10 + 4 + 20);
     assert_eq!(kit.durations[dash], 10);
     assert_eq!(kit.durations[crossbow], 8);
-    assert_eq!(sheet.derived.health, 110);
-    assert_eq!(sheet.derived.stamina, 100.0);
+    assert_eq!(sheet.derived.health, 900);
+    assert_eq!(sheet.derived.stamina, 120.0);
 }
 
 #[test]
@@ -130,14 +151,14 @@ fn sword_hits_in_front_and_not_behind() {
         );
         let hp = zone.player(b).unwrap().health;
         if expect_hit {
-            // 35 slash x 1.0 (STR 10) x 1.25 (cloth) x 0.85 (armour) = 37.
-            assert_eq!(hp, 110 - 37, "yaw {attacker_yaw}");
+            // 60 slash x 1.0 (STR 10) x 1.25 (cloth) x 0.80 (armour) = 60.
+            assert_eq!(hp, 900 - 60, "yaw {attacker_yaw}");
             assert!(zone.events.iter().any(|e| matches!(
                 e,
-                ZoneEvent::Hit { attacker, target, amount: 37, kind: HitKind::Melee, .. } if *attacker == a && *target == b
+                ZoneEvent::Hit { attacker, target, amount: 60, kind: HitKind::Melee, .. } if *attacker == a && *target == b
             )));
         } else {
-            assert_eq!(hp, 110, "yaw {attacker_yaw}");
+            assert_eq!(hp, 900, "yaw {attacker_yaw}");
         }
         // Holding the button does not re-trigger; one swing per press.
         assert_eq!(hits(&zone, HitKind::Melee), expect_hit as usize);
@@ -146,31 +167,32 @@ fn sword_hits_in_front_and_not_behind() {
 
 #[test]
 fn crossbow_bolt_hits_the_first_body_in_line_even_an_ally() {
-    let (world, mut zone, ids) = arena(&[
-        (Vec3::new(0.0, 0.0, REST_Z), 0.0),
-        (Vec3::new(120.0, 0.0, REST_Z), 0.0),
-        (Vec3::new(240.0, 0.0, REST_Z), 0.0),
+    let pack = test_content::pack(RATE);
+    let (world, mut zone, ids) = arena_with(vec![
+        (
+            bolt_build(&pack, "crossbow"),
+            Vec3::new(0.0, 0.0, REST_Z),
+            0.0,
+        ),
+        (phase2_build(&pack), Vec3::new(120.0, 0.0, REST_Z), 0.0),
+        (phase2_build(&pack), Vec3::new(240.0, 0.0, REST_Z), 0.0),
     ]);
     let (a, b, c) = (ids[0], ids[1], ids[2]);
     let idle = input(0.0, 0.0, 0);
     tick(
         &mut zone,
         &world,
-        &[
-            (a, input(0.0, 0.0, buttons::SECONDARY)),
-            (b, idle),
-            (c, idle),
-        ],
+        &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle), (c, idle)],
         0,
     );
     run(&mut zone, &world, &[(a, idle), (b, idle), (c, idle)], 40);
-    // 40 pierce x 1.0 x 1.0 (cloth) x 0.85 = 34.
+    // 80 pierce x 1.0 x 1.0 (cloth) x 0.80 = 64.
     assert_eq!(
         zone.player(b).unwrap().health,
-        110 - 34,
+        900 - 64,
         "the body in between takes the bolt"
     );
-    assert_eq!(zone.player(c).unwrap().health, 110);
+    assert_eq!(zone.player(c).unwrap().health, 900);
     assert!(
         zone.events
             .iter()
@@ -204,7 +226,7 @@ fn dash_moves_fast_costs_stamina_and_pauses_regen() {
         p.mover.mv.origin
     );
     assert_eq!(
-        p.mover.stamina, 70.0,
+        p.mover.stamina, 90.0,
         "regen pauses for a second after a spend"
     );
     assert_eq!(p.anim, anim::DASH);
@@ -213,7 +235,7 @@ fn dash_moves_fast_costs_stamina_and_pauses_regen() {
     assert!(zone.player(a).unwrap().mover.dash.is_none());
     run(&mut zone, &world, &[(a, input(0.0, 1.0, 0))], 64);
     let p = zone.player(a).unwrap();
-    assert!(p.mover.stamina > 70.5, "regen resumed: {}", p.mover.stamina);
+    assert!(p.mover.stamina > 90.5, "regen resumed: {}", p.mover.stamina);
     assert!(!p.mover.evading(p.last_input_tick));
 }
 
@@ -259,9 +281,47 @@ fn lag_compensation_rewinds_the_target() {
                 view,
             );
         }
-        let hit = zone.player(b).unwrap().health < 110;
+        let hit = zone.player(b).unwrap().health < 900;
         assert_eq!(hit, expect_hit, "rewind {rewind}: old {old_x} now {now_x}");
     }
+}
+
+/// LOOK.md 13: while a body's stance is its script's, the zone says which ability it is
+/// (so a client can draw the swing where it lands), and the stance is the one
+/// `script_anim` gives for the ticks gone, which is how a client says its own.
+#[test]
+fn a_stance_names_the_ability_it_belongs_to_and_only_while_it_is_the_scripts() {
+    let (world, mut zone, ids) = arena(&[(Vec3::new(0.0, 0.0, REST_Z), 0.0)]);
+    let a = ids[0];
+    assert_eq!(zone.player(a).unwrap().acting, 0);
+    let mut stances = Vec::new();
+    for t in 0..40 {
+        let press = if t < 2 { buttons::PRIMARY } else { 0 };
+        tick(&mut zone, &world, &[(a, input(0.0, 0.0, press))], 0);
+        let p = zone.player(a).unwrap();
+        match p.mover.script {
+            Some(s) if anim::acts(p.anim) => {
+                let ability = &p.sheet.kit.abilities[s.ability as usize];
+                assert_eq!(p.acting, ability.id.0, "tick {t}");
+                assert_ne!(p.acting, 0);
+                let elapsed = crate::sim::tick_delta(p.last_input_tick, s.started).max(0) as u32;
+                assert_eq!(
+                    p.anim,
+                    crate::sim::script_anim(ability, elapsed),
+                    "tick {t}"
+                );
+            }
+            _ => assert_eq!(p.acting, 0, "tick {t}: stance {}", p.anim),
+        }
+        if stances.last() != Some(&p.anim) {
+            stances.push(p.anim);
+        }
+    }
+    // (It lands on the floor in its first tick.)
+    assert!(
+        stances.ends_with(&[anim::WINDUP, anim::SWING, anim::RECOVER, anim::IDLE]),
+        "a swing is wound up, lands, and is recovered from: {stances:?}"
+    );
 }
 
 #[test]
@@ -352,8 +412,9 @@ fn death_and_respawn() {
     let (a, b) = (ids[0], ids[1]);
     let mut swings = 0;
     let mut killed_at = None;
-    for t in 0..400 {
-        let press = t % 24 == 0;
+    // 900 health at 60 a blow is fifteen blows; the sword's cooldown is 39 ticks.
+    for t in 0..1000 {
+        let press = t % 48 == 0;
         if press {
             swings += 1;
         }
@@ -374,8 +435,8 @@ fn death_and_respawn() {
             break;
         }
     }
-    let killed_at = killed_at.expect("three swings kill");
-    assert!(swings >= 3);
+    let killed_at = killed_at.expect("fifteen swings kill");
+    assert!(swings >= 15);
     for _ in 0..zone.rate.ms_to_ticks(RESPAWN_MS) {
         tick(
             &mut zone,
@@ -390,7 +451,7 @@ fn death_and_respawn() {
         "respawned {} ticks after {killed_at}",
         zone.tick - killed_at
     );
-    assert_eq!(p.health, 110);
+    assert_eq!(p.health, 900);
     assert!(
         zone.events
             .iter()
@@ -467,13 +528,13 @@ fn shield_wall_blocks_from_the_front_costs_stamina_and_breaks() {
         );
         let p = zone.player(b).unwrap();
         let taken = p.max_health() - p.health;
-        // Sword 35 x 1.2 (STR 20) x 0.5 (plate) x 0.7 (armour 0.30) = 14.7 -> 15 unblocked,
-        // x 0.2 blocked = 2.94 -> 3.
+        // Sword 60 x 1.28 (STR 17) x 0.5 (plate) x 0.6 (armour 0.40) = 23.04 -> 23 unblocked,
+        // x 0.2 blocked = 4.608 -> 5.
         if expect_block {
-            assert_eq!(taken, 3, "facing {facing}");
+            assert_eq!(taken, 5, "facing {facing}");
             assert_eq!(stamina_before - p.mover.stamina, 12.0);
         } else {
-            assert_eq!(taken, 15, "facing {facing}");
+            assert_eq!(taken, 23, "facing {facing}");
         }
     }
     // Guard break: with less stamina than the block costs, the hit lands in full and staggers.
@@ -492,7 +553,7 @@ fn shield_wall_blocks_from_the_front_costs_stamina_and_breaks() {
         13,
     );
     let p = zone.player(b).unwrap();
-    assert_eq!(p.max_health() - p.health, 15);
+    assert_eq!(p.max_health() - p.health, 23);
     assert_eq!(p.mover.stamina, 0.0);
     assert!(p.mover.statuses.has(Status::Stagger));
     assert!(
@@ -604,9 +665,9 @@ fn stomp_pulses_once_damages_and_slows_everyone_in_range() {
         20,
     );
     let pb = zone.player(b).unwrap();
-    // 35 stone x 1.16 (INT 18) x 0.5 (Flame resists? no: Stone beats Flame -> 2) ...
-    // Stone into Flame is 2x, ward 0.015 * 18 = 0.27: 35 * 1.16 * 2 * 0.73 = 59.3 -> 59.
-    assert_eq!(pb.max_health() - pb.health, 59);
+    // 35 stone x 0.8 (INT 5), Stone into Flame is 2x, ward 0.02 * 5 = 0.10:
+    // 35 * 0.8 * 2 * 0.9 = 50.4 -> 50.
+    assert_eq!(pb.max_health() - pb.health, 50);
     assert!(pb.mover.statuses.has(Status::Slow));
     assert!(
         (pb.mover.statuses.speed_scale() - 0.7).abs() < 1e-6,
@@ -618,10 +679,21 @@ fn stomp_pulses_once_damages_and_slows_everyone_in_range() {
         zone.player(c).unwrap().max_health()
     );
     assert_eq!(hits(&zone, HitKind::Area), 1);
+    // An instant pulse stays on the wire for its echo (INSTANT_AREA_ECHO_MS), spent: it
+    // is seen, and it never pulses again.
     assert!(
-        zone.areas().is_empty(),
-        "an instant pulse is gone after one tick"
+        !zone.areas().is_empty(),
+        "an instant pulse lingers for its echo after it struck"
     );
+    let echo = zone.rate.ms_to_ticks(INSTANT_AREA_ECHO_MS) as usize + 1;
+    run(
+        &mut zone,
+        &world,
+        &[(a, input(0.0, 0.0, 0)), (b, idle), (c, idle)],
+        echo,
+    );
+    assert!(zone.areas().is_empty(), "the echo ended");
+    assert_eq!(hits(&zone, HitKind::Area), 1, "spent: no second pulse");
     assert!(
         zone.events
             .iter()
@@ -642,13 +714,14 @@ fn frost_nova_chills_twice_and_a_shard_freezes() {
     let pb = zone.player(b).unwrap();
     assert_eq!(pb.mover.statuses.stacks(Status::Chill), 2);
     assert!((pb.mover.statuses.speed_scale() - 0.7).abs() < 1e-6);
-    // Frost into Stone is 2x and ignores plate: 30 * 1.2 * 2 * (1 - 0.3 ward) = 50.4 -> 50.
-    assert_eq!(pb.max_health() - pb.health, 50);
-    // The ice shard adds the third stack: frozen (rooted), chill cleared, immune after.
+    // Frost into Stone is 2x and ignores plate: 30 * 1.4 (INT 20) * 2 * (1 - 0.2 ward) = 67.2 -> 67.
+    assert_eq!(pb.max_health() - pb.health, 67);
+    // The ice shard (the frostweaver's primary) adds the third stack: frozen (rooted),
+    // chill cleared, immune after.
     tick(
         &mut zone,
         &world,
-        &[(a, input(0.0, 0.0, buttons::SECONDARY)), (b, idle)],
+        &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle)],
         0,
     );
     run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 20);
@@ -669,16 +742,23 @@ fn frost_nova_chills_twice_and_a_shard_freezes() {
 
 #[test]
 fn burn_ticks_four_times_a_second_and_kills_are_attributed() {
-    let (world, mut zone, ids) = arena_builds(&[
-        ("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0),
-        ("shade", Vec3::new(200.0, 0.0, REST_Z), 180.0),
+    // A firebolt (a primary) into a shade.
+    let pack = test_content::pack(RATE);
+    let shade = pack.build("shade").unwrap().clone();
+    let (world, mut zone, ids) = arena_with(vec![
+        (
+            bolt_build(&pack, "firebolt"),
+            Vec3::new(0.0, 0.0, REST_Z),
+            0.0,
+        ),
+        (shade, Vec3::new(200.0, 0.0, REST_Z), 180.0),
     ]);
     let (a, b) = (ids[0], ids[1]);
     let idle = input(180.0, 0.0, 0);
     tick(
         &mut zone,
         &world,
-        &[(a, input(0.0, 0.0, buttons::SECONDARY)), (b, idle)],
+        &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle)],
         0,
     );
     run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 30);
@@ -728,7 +808,9 @@ fn blink_teleports_along_the_facing_and_stops_at_walls() {
 
 #[test]
 fn hammer_staggers_at_the_threshold_then_immunity_holds() {
-    // Ironclad hammer (35 stagger) into a blade (threshold 40 + 2 * 20 = 80): three hits.
+    // Ironclad hammer (35 stagger, a 64-tick cooldown) into a blade (threshold
+    // 40 + 3 * 15 = 85): a blow every 66 ticks, the meter losing 20.6 between blows
+    // (STAGGER_DECAY_PER_S 20), is 35, 49.4, 63.8, 78.1, 92.5: five hits.
     let (world, mut zone, ids) = arena_builds(&[
         ("ironclad", Vec3::new(0.0, 0.0, REST_Z), 0.0),
         ("blade", Vec3::new(55.0, 0.0, REST_Z), 180.0),
@@ -736,8 +818,8 @@ fn hammer_staggers_at_the_threshold_then_immunity_holds() {
     let (a, b) = (ids[0], ids[1]);
     let idle = input(180.0, 0.0, 0);
     let mut staggered_at = None;
-    for t in 0..200 {
-        let btn = if t % 40 == 0 { buttons::PRIMARY } else { 0 };
+    for t in 0..400 {
+        let btn = if t % 66 == 0 { buttons::PRIMARY } else { 0 };
         // The attacker keeps walking into the target so knockback cannot carry it away.
         tick(
             &mut zone,
@@ -750,7 +832,7 @@ fn hammer_staggers_at_the_threshold_then_immunity_holds() {
         }
     }
     let t = staggered_at.expect("staggered");
-    assert!(t >= 80, "needs three hits, staggered at tick {t}");
+    assert!(t >= 4 * 66, "needs five hits, staggered at tick {t}");
     let staggers = zone
         .events
         .iter()
@@ -758,7 +840,7 @@ fn hammer_staggers_at_the_threshold_then_immunity_holds() {
         .count();
     assert_eq!(staggers, 1, "immunity after the first stagger");
     assert!(
-        hits(&zone, HitKind::Melee) >= 4,
+        hits(&zone, HitKind::Melee) >= 6,
         "{}",
         hits(&zone, HitKind::Melee)
     );
@@ -797,15 +879,17 @@ fn fortify_cuts_frost_but_not_the_hammer() {
         &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle), (c, idle)],
         0,
     );
+    // (The hammer's 300 ms windup, then its knockback carrying b: long enough for b to
+    // settle, fortify holding for 5 s.)
     run(
         &mut zone,
         &world,
         &[(a, input(0.0, 0.0, 0)), (b, idle), (c, idle)],
-        25,
+        60,
     );
     let pb = zone.player(b).unwrap();
-    // Hammer 50 x 1.2 x 1.25 (blunt vs plate) x 0.7 (armour) = 52.5 -> 53, fortify ignored.
-    assert_eq!(pb.max_health() - pb.health, 53);
+    // Hammer 90 x 1.2 (STR 15) x 1.25 (blunt vs plate) x 0.6 (armour 0.40) = 81, fortify ignored.
+    assert_eq!(pb.max_health() - pb.health, 81);
     let before = pb.health;
     // c aims at b where the hammer's knockback left it.
     let to = pb.mover.mv.origin - zone.player(c).unwrap().mover.mv.origin;
@@ -816,7 +900,7 @@ fn fortify_cuts_frost_but_not_the_hammer() {
         &[
             (a, input(0.0, 0.0, 0)),
             (b, idle),
-            (c, input(yaw, 0.0, buttons::SECONDARY)),
+            (c, input(yaw, 0.0, buttons::PRIMARY)),
         ],
         0,
     );
@@ -827,10 +911,11 @@ fn fortify_cuts_frost_but_not_the_hammer() {
         40,
     );
     let pb = zone.player(b).unwrap();
-    // Ice shard 40 x 1.2 x 2 (frost into stone) x 0.7 (ward 0.30) x 0.6 (fortify) = 40.3 -> 40.
+    // Ice shard 50 x 1.4 (INT 20) x 2 (frost into stone) x 0.8 (ward 0.20) x 0.6 (fortify)
+    // = 67.2 -> 67.
     assert_eq!(
         before - pb.health,
-        40,
+        67,
         "{}",
         hits(&zone, HitKind::Projectile)
     );
@@ -844,8 +929,9 @@ fn respec_applies_at_the_next_respawn() {
     ]);
     let (a, b) = (ids[0], ids[1]);
     let frost = zone.content.build("frostweaver").unwrap().clone();
+    // A hundred attribute points where thirty are free.
     let bad = Build {
-        attributes: Attributes::new(5, 5, 5, 5, 5),
+        attributes: Attributes::flat(25),
         ..frost.clone()
     };
     assert!(zone.request_respec(b, bad).is_err());
@@ -879,7 +965,7 @@ fn respec_applies_at_the_next_respawn() {
     assert_eq!(pb.sheet.build.armour, ArmourClass::Cloth);
     assert!(pb.sheet.build.aspects.contains(Element::Frost));
     assert_eq!(pb.health, pb.sheet.derived.health);
-    assert_eq!(pb.health, 80 + 3 * 16);
+    assert_eq!(pb.health, 500 + 40 * 5);
     assert_eq!(
         pb.sheet.build.aspects,
         Aspects::two(Element::Frost, Element::Shadow)
@@ -1028,9 +1114,9 @@ fn a_mend_dart_heals_whoever_it_hits_and_is_not_an_attack() {
     assert_eq!(hits(&zone, HitKind::Projectile), 0, "no damage event");
     assert_eq!(p.mover.stamina, full_stamina, "nothing was blocked");
     assert_eq!(p.mover.guard, GuardState::Block, "and nothing interrupted");
-    // 20/s in pulses of 5 for 3 s, shortened by the ironclad's SPR 20 (x 0.8 = 2.4 s): nine
-    // or ten pulses depending on where the dart landed in the pulse cycle, all credited to
-    // the healer.
+    // 20/s in pulses of 5 for 3 s, neither shortened nor lengthened by the ironclad's SPR 10
+    // (x 1.0): twelve or thirteen pulses depending on where the dart landed in the pulse
+    // cycle, all credited to the healer.
     run(
         &mut zone,
         &world,
@@ -1038,7 +1124,7 @@ fn a_mend_dart_heals_whoever_it_hits_and_is_not_an_attack() {
         200,
     );
     let healed = zone.player(tank).unwrap().health - hurt;
-    assert!(healed == 45 || healed == 50, "healed {healed}");
+    assert!(healed == 60 || healed == 65, "healed {healed}");
     let credited: i32 = zone
         .events
         .iter()
@@ -1062,7 +1148,7 @@ fn an_aimed_area_lands_under_the_first_body_or_surface_on_the_view_ray() {
         ("blade", Vec3::new(300.0, 0.0, REST_Z), 180.0),
     ]);
     let (healer, ally) = (ids[0], ids[1]);
-    zone.player_mut(ally).unwrap().health -= 50;
+    zone.player_mut(ally).unwrap().health -= 250;
     let idle = input(180.0, 0.0, 0);
     tick(
         &mut zone,
@@ -1082,16 +1168,17 @@ fn an_aimed_area_lands_under_the_first_body_or_surface_on_the_view_ray() {
         (o - Vec3::new(300.0, 0.0, 0.0)).length() < 1.0,
         "under the ally: {o:?}"
     );
-    // It heals who stands in it, 12/s while they stay.
+    // It heals who stands in it, 60/s while they stay.
     run(
         &mut zone,
         &world,
         &[(healer, input(0.0, 0.0, 0)), (ally, idle)],
         130,
     );
-    let healed = zone.player(ally).unwrap().health - (zone.player(ally).unwrap().max_health() - 50);
+    let healed =
+        zone.player(ally).unwrap().health - (zone.player(ally).unwrap().max_health() - 250);
     assert!(
-        (20..=30).contains(&healed),
+        (100..=150).contains(&healed),
         "healed {healed} in two seconds"
     );
 
@@ -1129,7 +1216,7 @@ fn a_quake_is_a_telegraph_you_can_walk_out_of() {
             .creature("warden")
             .expect("the fixture's Warden");
         let sheet = crate::build::Sheet::creature(def, &zone.content, crate::sim::TEAM_WILD);
-        assert_eq!(sheet.derived.health, 7500);
+        assert_eq!(sheet.derived.health, 15000);
         let warden = zone.add_body(sheet, Vec3::new(0.0, 0.0, REST_Z), 0.0, Driver::Mind);
         zone.set_party(warden, 0);
         zone.set_hold(warden, true);
@@ -1163,8 +1250,9 @@ fn a_quake_is_a_telegraph_you_can_walk_out_of() {
         }
         let p = zone.player(victim).unwrap();
         if stays {
-            // 70 stone x 1.08 (INT 14) x 2 (Stone into Flame) x 0.73 (ward 0.27) = 110.4.
-            assert_eq!(p.max_health() - p.health, 110);
+            // 70 stone x 1.16 (INT 14) x 2 (the Warden's might) x 2 (Stone into Flame)
+            // x 0.9 (ward 0.10) = 292.3.
+            assert_eq!(p.max_health() - p.health, 292);
         } else {
             assert_eq!(p.health, p.max_health(), "at {:?}", p.mover.mv.origin);
         }
@@ -1270,35 +1358,40 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
             assert!(p.fought_within(zone.tick, 640));
             assert!(!p.fought_within(zone.tick.wrapping_add(641), 640));
         }
-        110 - zone.player(b).unwrap().health
+        900 - zone.player(b).unwrap().health
     };
     let slash = DamageType::Slash as usize;
     let mut sword = Gear::NONE;
     sword.dealt[slash] = 220;
     let mut cuirass = Gear::NONE;
     cuirass.taken[slash] = 220;
-    // 35 slash x 1.25 (cloth) x 0.85 (armour) = 37.19 in nothing (the test above); a place
+    // 60 slash x 1.25 (cloth) x 0.80 (armour) = 60 in nothing (the test above); a place
     // counts for half its item's edge, so 220 per mille is a factor of 1.11.
-    assert_eq!(swing(Gear::NONE, Gear::NONE), 37);
-    assert_eq!(swing(sword, Gear::NONE), 41, "37.19 x 1.11");
-    assert_eq!(swing(Gear::NONE, cuirass), 34, "37.19 / 1.11");
-    assert_eq!(swing(sword, cuirass), 37, "a wash");
+    assert_eq!(swing(Gear::NONE, Gear::NONE), 60);
+    assert_eq!(swing(sword, Gear::NONE), 67, "60 x 1.11");
+    assert_eq!(swing(Gear::NONE, cuirass), 54, "60 / 1.11");
+    assert_eq!(swing(sword, cuirass), 60, "a wash");
     // An edge on another type is no edge on this one.
     let mut frost = Gear::NONE;
     frost.dealt[DamageType::Frost as usize] = 250;
     frost.taken[DamageType::Frost as usize] = 250;
-    assert_eq!(swing(frost, frost), 37);
+    assert_eq!(swing(frost, frost), 60);
     // What a zone is told is kept within the cap.
     let mut wild = Gear::NONE;
     wild.dealt[slash] = 60_000;
-    assert_eq!(swing(wild, Gear::NONE), 42, "37.19 x 1.125, not x 31");
+    assert_eq!(swing(wild, Gear::NONE), 68, "60 x 1.125, not x 31");
 
     // A bolt in flight keeps the edge it was loosed with: the weapon is taken off while it
     // flies, and it lands as it left.
     let bolt = |edge: u16, take_off: bool| {
-        let (world, mut zone, ids) = arena(&[
-            (Vec3::new(0.0, 0.0, REST_Z), 0.0),
-            (Vec3::new(600.0, 0.0, REST_Z), 180.0),
+        let pack = test_content::pack(RATE);
+        let (world, mut zone, ids) = arena_with(vec![
+            (
+                bolt_build(&pack, "crossbow"),
+                Vec3::new(0.0, 0.0, REST_Z),
+                0.0,
+            ),
+            (phase2_build(&pack), Vec3::new(600.0, 0.0, REST_Z), 180.0),
         ]);
         let (a, b) = (ids[0], ids[1]);
         let mut crossbow = Gear::NONE;
@@ -1309,7 +1402,7 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
             tick(
                 &mut zone,
                 &world,
-                &[(a, input(0.0, 0.0, buttons::SECONDARY)), (b, idle)],
+                &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle)],
                 0,
             );
             if !zone.projectiles().is_empty() {
@@ -1322,7 +1415,7 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
         }
         run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 40);
         assert_eq!(hits(&zone, HitKind::Projectile), 1);
-        110 - zone.player(b).unwrap().health
+        900 - zone.player(b).unwrap().health
     };
     assert_eq!(bolt(250, true), bolt(250, false));
     assert!(bolt(250, false) > bolt(0, false));
@@ -1333,9 +1426,15 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
     // or with nothing. (At the content's burn a pulse is 3 points whatever is done to it;
     // the test below this one burns hard enough to tell.)
     let burn = |attacker: Gear, defender: Gear| {
-        let (world, mut zone, ids) = arena_builds(&[
-            ("blade", Vec3::new(0.0, 0.0, REST_Z), 0.0),
-            ("shade", Vec3::new(200.0, 0.0, REST_Z), 180.0),
+        let pack = test_content::pack(RATE);
+        let shade = pack.build("shade").unwrap().clone();
+        let (world, mut zone, ids) = arena_with(vec![
+            (
+                bolt_build(&pack, "firebolt"),
+                Vec3::new(0.0, 0.0, REST_Z),
+                0.0,
+            ),
+            (shade, Vec3::new(200.0, 0.0, REST_Z), 180.0),
         ]);
         let (a, b) = (ids[0], ids[1]);
         zone.set_gear(a, attacker);
@@ -1344,7 +1443,7 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
         tick(
             &mut zone,
             &world,
-            &[(a, input(0.0, 0.0, buttons::SECONDARY)), (b, idle)],
+            &[(a, input(0.0, 0.0, buttons::PRIMARY)), (b, idle)],
             0,
         );
         run(
@@ -1444,10 +1543,10 @@ fn gear_is_taken_when_a_blow_is_made_and_a_fight_is_damage() {
         assert_eq!(hits(&zone, HitKind::Melee), 0, "still in the windup");
         zone.set_gear(a, during);
         run(&mut zone, &world, &[(a, input(0.0, 0.0, 0)), (b, idle)], 12);
-        110 - zone.player(b).unwrap().health
+        900 - zone.player(b).unwrap().health
     };
-    assert_eq!(swing(sword, Gear::NONE), 41, "taken off in the windup");
-    assert_eq!(swing(Gear::NONE, sword), 37, "put on in the windup");
+    assert_eq!(swing(sword, Gear::NONE), 67, "taken off in the windup");
+    assert_eq!(swing(Gear::NONE, sword), 60, "put on in the windup");
 
     // An area: the caster's edge on the area's kind, the edge of whoever stands in it.
     let stomp = |caster: Gear, target: Gear| {
@@ -1468,13 +1567,13 @@ fn gear_is_taken_when_a_blow_is_made_and_a_fight_is_damage() {
     let (mut hammer, mut robe) = (Gear::NONE, Gear::NONE);
     hammer.dealt[stone] = 250;
     robe.taken[stone] = 250;
-    // 59.3 unrounded (the stomp test above).
-    assert_eq!(stomp(Gear::NONE, Gear::NONE), 59);
-    assert_eq!(stomp(hammer, Gear::NONE), 67, "59.3 x 1.125");
-    assert_eq!(stomp(Gear::NONE, robe), 53, "59.3 / 1.125");
+    // 50.4 unrounded (the stomp test above).
+    assert_eq!(stomp(Gear::NONE, Gear::NONE), 50);
+    assert_eq!(stomp(hammer, Gear::NONE), 57, "50.4 x 1.125");
+    assert_eq!(stomp(Gear::NONE, robe), 45, "50.4 / 1.125");
     assert_eq!(
         stomp(sword, Gear::NONE),
-        59,
+        50,
         "a sword's edge is not a stomp's"
     );
 

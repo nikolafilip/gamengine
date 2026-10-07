@@ -12,6 +12,8 @@ fn sixteen_players_at_150ms_and_3_percent_loss() {
     let secs = 30;
     let o = play(Match {
         behaviours: vec![Behaviour::Wander, Behaviour::Wander, Behaviour::Hunter],
+        // Blades and marksmen (MATRIX.md v2: a blade has no bolt): melee and projectiles both.
+        builds: vec![Some("blade".into()), Some("marksman".into())],
         ..Match::simple(16, secs, net_budget("test_loss"), (65, 85), 7)
     });
     let text = summarize(&o);

@@ -19,7 +19,7 @@ function say(text, error = false) {
 // with `connect` would walk a visitor's client into a stranger's zone, one with `script` or
 // `travel-to` would play their character for them once they log in, and one with `cache-mb`
 // would resize their cache.
-const LINK_OPTIONS = ["third-person", "tactical", "map"];
+const LINK_OPTIONS = ["third-person", "map"];
 const DEV_OPTIONS = ["connect", "cert", "user", "password", "character", "register", "name", "zone",
   "build", "team", "seconds", "script", "report", "cache-mb", "vram-mb", "travel-to", "travel-after",
   "ui-script"];
@@ -156,9 +156,14 @@ async function start(options, build) {
   fullscreen.hidden = false;
   canvas.focus();
   try {
-    const client = await import(`./gm-client-${build}.js`);
-    console.log(`GM-BUILD ${build}`);
-    await client.default();
+    // The build's stamp (index.html's `boot.js?v=`, written by scripts/build-web.sh) goes on
+    // the module and the wasm too: a browser that cached the last build fetches this one
+    // instead of meeting the zone's "protocol version mismatch".
+    const stamp = new URL(import.meta.url).searchParams.get("v");
+    const v = stamp ? `?v=${encodeURIComponent(stamp)}` : "";
+    const client = await import(`./gm-client-${build}.js${v}`);
+    console.log(`GM-BUILD ${build} ${stamp || ""}`);
+    await client.default({ module_or_path: new URL(`./gm-client-${build}_bg.wasm${v}`, import.meta.url) });
   } catch (e) {
     // wasm-bindgen unwinds out of `main` with an exception once the event loop is running;
     // that one is how winit hands control to the browser, not a failure.

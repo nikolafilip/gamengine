@@ -247,6 +247,13 @@ pub struct Renderer {
     entity_buf: wgpu::Buffer,
     entity_capacity: usize,
     entity_vertices: Vec<EntityVertex>,
+    /// The fight's effects (LOOK.md 13): see-through triangles drawn after the bodies,
+    /// blended, tested against the depth and not written to it. The frame fills `fx`.
+    fx_pipeline: wgpu::RenderPipeline,
+    fx_buf: wgpu::Buffer,
+    fx_capacity: usize,
+    pub fx: crate::fx::FxMesh,
+    fx_drawn: u32,
     globals_buf: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     /// The paperdoll's camera (LOOK.md 5), its own globals.
@@ -679,6 +686,53 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        // The effects: the entities' shader and vertex, blended over what is there.
+        let fx_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("effects"),
+            layout: Some(&entity_layout),
+            vertex: wgpu::VertexState {
+                module: &entity_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<crate::fx::FxVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &entity_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let fx_capacity = 3 * 2048;
+        let fx_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("effect vertices"),
+            size: (fx_capacity * std::mem::size_of::<crate::fx::FxVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let entity_capacity = 36 * 64;
         let entity_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("entity vertices"),
@@ -702,6 +756,11 @@ impl Renderer {
             entity_buf,
             entity_capacity,
             entity_vertices: Vec::new(),
+            fx_pipeline,
+            fx_buf,
+            fx_capacity,
+            fx: Default::default(),
+            fx_drawn: 0,
             globals_buf,
             globals_bg,
             doll_globals_buf,
@@ -829,10 +888,27 @@ impl Renderer {
                 bytemuck::cast_slice(&self.entity_vertices),
             );
         }
+        // The frame's effects, uploaded and forgotten: the next frame makes its own.
+        if self.fx.verts.len() > self.fx_capacity {
+            self.fx_capacity = self.fx.verts.len().next_power_of_two();
+            self.fx_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("effect vertices"),
+                size: (self.fx_capacity * std::mem::size_of::<crate::fx::FxVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        self.fx_drawn = self.fx.verts.len() as u32;
+        if self.fx_drawn > 0 {
+            gpu.queue
+                .write_buffer(&self.fx_buf, 0, bytemuck::cast_slice(&self.fx.verts));
+        }
+        self.fx.clear();
         self.characters
             .prepare_with_dolls(gpu, characters, doll.map_or(&[][..], |d| d.2));
         self.hud.prepare(gpu);
         self.draw_calls = (self.world.index_count > 0) as usize
+            + (self.fx_drawn > 0) as usize
             + !self.entity_vertices.is_empty() as usize
             + self.characters.drawn
             + !self.hud.is_empty() as usize;
@@ -884,6 +960,12 @@ impl Renderer {
                 pass.set_bind_group(0, &self.globals_bg, &[]);
                 pass.set_vertex_buffer(0, self.entity_buf.slice(..));
                 pass.draw(0..self.entity_vertices.len() as u32, 0..1);
+            }
+            if self.fx_drawn > 0 {
+                pass.set_pipeline(&self.fx_pipeline);
+                pass.set_bind_group(0, &self.globals_bg, &[]);
+                pass.set_vertex_buffer(0, self.fx_buf.slice(..));
+                pass.draw(0..self.fx_drawn, 0..1);
             }
             match &doll {
                 // The plates, then the doll (its own pass), then the rest.

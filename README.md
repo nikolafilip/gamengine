@@ -1,7 +1,7 @@
 # gamengine
 
-A lightweight Rust engine and a persistent action-sandbox MMORPG with three
-viewports (first-person, third-person, tactical) running on one shared
+A lightweight Rust engine and a persistent action-sandbox MMORPG with two
+viewports (first-person, third-person) running on one shared
 simulation. Measured in megabytes, built for integrated GPUs, open source.
 
 **Read [`PLAN.md`](PLAN.md) first.** It is the source of truth: thesis and
@@ -92,9 +92,8 @@ cargo run --release -p gm-client -- --map assets/maps/built/town.bsp --third-per
 ```
 
 Companions, command and the tutorial dungeon (Phase 7): a player leads a squad of three
-(hired avatars of other players, or recruits a tutorial zone lends), kneels into the command
-stance to see through the squad's eyes and give orders from the tactical viewport (`Tab`),
-and takes it through a gate and a boss; the kill drops its components through the hub and a
+(hired avatars of other players, or recruits a tutorial zone lends) that follows and fights
+on its own, and takes it through a gate and a boss; the kill drops its components through the hub and a
 role trial is recorded ([`docs/COMPANIONS.md`](docs/COMPANIONS.md)). Companions and creatures
 are the same body a player has, driven by minds that send the same inputs.
 

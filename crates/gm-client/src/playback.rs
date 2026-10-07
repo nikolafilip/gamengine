@@ -218,15 +218,14 @@ impl Playback {
             Some(m) => (m.pos + Vec3::Z * Hull::Player.eye_height(), m.yaw, m.pitch),
             None => (Vec3::new(0.0, 0.0, 128.0), 0.0, 0.0),
         };
-        let my_team = me.map_or(0, |m| m.team());
         for e in &entities {
             match e.kind {
                 EntityKind::Player => {
                     let SpawnInfo::Player {
                         frame,
-                        team,
                         aspects,
                         armour,
+                        ..
                     } = e.spawn
                     else {
                         continue;
@@ -244,11 +243,10 @@ impl Playback {
                         frame,
                         armour,
                         aspects,
-                        team,
-                        friendly: my_team != 0 && team == my_team,
                         status: e.status,
                         model: None,
                         distance: (e.pos - eye).length(),
+                        lit: 0.0,
                         prop: None,
                     });
                 }

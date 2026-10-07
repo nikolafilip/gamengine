@@ -23,7 +23,7 @@ use gm_hub_proto::player::PlayerRequest;
 use gm_model::ModelId;
 use gm_net::client::ClientState;
 use gm_net::control::{
-    BodyKind, BuildChoice, EncounterState, FromClient, FromZone, Look, Order, SquadEntry,
+    BodyKind, BuildChoice, EncounterState, FromClient, FromZone, GmNews, Look, Order, SquadEntry,
     StallEntry,
 };
 use gm_net::snapshot::{EntityKind, SpawnInfo};
@@ -40,9 +40,11 @@ use winit::window::{Window, WindowId};
 
 use crate::avatars::{Avatars, Body, DOLL, OWN, stall_boxes, stall_keeper};
 use crate::bag::{Bag, BagAction};
+use crate::character::{CharacterAction, CharacterPage, CharacterView};
 use crate::characters::CharacterDraw;
 use crate::content::Content;
 use crate::front::{Action, Auto, Front, PANEL_UNITS};
+use crate::gm::{GmAction, GmPage, GmView};
 use crate::hub::{Account, Hub, HubApi, ticket_addr};
 use crate::hud::{self, Hud};
 use crate::menu::{Chat, GameMenu, MenuAction, Offers, Said};
@@ -54,10 +56,10 @@ use crate::settings::Settings;
 use crate::stats::FrameStats;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::stats::{print_bench, print_bench_avatars};
-use crate::tactical::{self, Tactical, pick_body, pick_ground, project};
 use crate::ui::{self, Key, Ui, UiInput, UiState};
 use crate::world::{self, WorldMesh};
 use crate::{Error, Options};
+use gm_net::control::TRAINER_REACH;
 
 const MAX_STEPS_PER_FRAME: u32 = 8;
 /// Behind a screen with no zone being played, the camera turns this fast (CLIENT.md 2).
@@ -181,10 +183,19 @@ pub(crate) struct Online {
     messages: VecDeque<(Instant, String, [f32; 4])>,
     /// The market: open stalls and their keepers (ECONOMY.md 7).
     stalls: Vec<StallEntry>,
+    /// The zone granted the game master's page (GM.md 1), and its tuning as last told.
+    gm: bool,
+    tuning: gm_core::tuning::Tuning,
+    gm_note: String,
     /// The party as the hub has it, and who asked what (PARTY.md 4).
     social: Social,
     kills: u32,
     deaths: u32,
+    /// Blows the own hand landed, as the zone said (target, amount, absorbed): the
+    /// numbers the next frame floats over the bodies it finds (LOOK.md 13.8).
+    hits: Vec<(u32, u16, u16)>,
+    /// And what the own hand's Regen gave other bodies back (target, amount).
+    heals: Vec<(u32, u16)>,
     /// The hash of the map this connection plays on: the one loaded when it began, and
     /// from the zone's `Welcome` on the zone's (once that map is here).
     map_hash: u64,
@@ -230,9 +241,6 @@ struct Input {
     mouse: HashSet<MouseButton>,
     mouse_dx: f32,
     mouse_dy: f32,
-    /// Clicks and wheel turns since the last frame (the tactical viewport reads them).
-    clicks: Vec<MouseButton>,
-    wheel: f32,
 }
 
 impl Input {
@@ -258,23 +266,6 @@ impl Input {
         }
     }
 
-    /// A frame in the command stance (COMPANIONS.md 5.1): the button, the facing, nothing
-    /// else. The tactical viewport sends these.
-    fn command_input(&mut self, yaw: f32, pitch: f32) -> SimInput {
-        self.just_pressed.clear();
-        SimInput {
-            buttons: buttons::COMMAND,
-            yaw,
-            pitch,
-            forward: 0.0,
-            side: 0.0,
-            ability: 0,
-        }
-    }
-
-    /// Left click primary, right click secondary, Ctrl guard, Shift ability 1, keys 1–4 the
-    /// actives, V the viewport switch. `yaw`/`pitch` are the aim angles (re-aimed in third
-    /// person).
     fn sim_input(&mut self, yaw: f32, pitch: f32) -> SimInput {
         let (forward, side) = self.axes();
         let mut b = 0u16;
@@ -345,6 +336,8 @@ struct ViewModel {
     pitch: f32,
     stride: f32,
     kick: f32,
+    /// −1 drawn back in a windup, +1 across at the end of a cut, 0 at rest.
+    swing: f32,
     light: [f32; 3],
 }
 
@@ -352,6 +345,7 @@ struct App {
     opts: Options,
     /// The view model's kick (1 at a launch, decaying) and stride phase (LOOK.md 6.4).
     view_kick: f32,
+    view_swing: f32,
     view_stride: f32,
     view_model: Option<ViewModel>,
     /// The content bundle: the manifest, the props by key (CONTENT.md 6).
@@ -405,12 +399,15 @@ struct App {
     /// A replay being watched instead of a game being played (ANTICHEAT.md 3.4).
     #[cfg(not(target_arch = "wasm32"))]
     playback: Option<crate::playback::Playback>,
-    /// The tactical viewport (COMPANIONS.md 6): over either of the other two.
-    tactical: Tactical,
-    /// Leaves the world is drawn from in the tactical view (the squad's sight).
-    tactical_leaves: Vec<usize>,
-    /// Health bars to draw over bodies this frame: where, how full, the colour.
-    bars: Vec<(Vec3, f32, [f32; 4])>,
+    /// The fight's effects between frames, the triangles they made this frame, and the
+    /// names over the bodies (LOOK.md 13).
+    effects: crate::fx::Effects,
+    fx: crate::fx::FxMesh,
+    tags: Vec<Tag>,
+    /// The numbers over the bodies this frame (LOOK.md 13.8).
+    pops: Vec<crate::fx::Pop>,
+    /// The yaw each body was drawn facing last frame (LOOK.md 13.9), by its key.
+    facings: HashMap<u32, f32>,
     /// Per squad slot: the companion's health as last sent, and whether it lives.
     squad_view: Vec<(Option<u16>, bool)>,
     /// The creature being fought: name, health, maximum.
@@ -432,6 +429,9 @@ struct App {
     bag: Option<Bag>,
     /// The page of people, a trade or the tavern (PARTY.md 8).
     people: Option<People>,
+    gm_page: Option<GmPage>,
+    /// The character's page (MATRIX.md 9.1): `K`, or the menu.
+    character_page: Option<CharacterPage>,
     /// The party on the HUD: each other member's name, and its health when it is here.
     /// The party's other members: `None` when no body of that name is here, else the
     /// health the wire carries for it, when it does.
@@ -527,8 +527,13 @@ fn online(opts: &Options, sim: &Sim, map_hash: u64, entry: Entry) -> Result<Onli
         social: Social::default(),
         messages: VecDeque::new(),
         stalls: Vec::new(),
+        gm: false,
+        tuning: Default::default(),
+        gm_note: String::new(),
         kills: 0,
         deaths: 0,
+        hits: Vec::new(),
+        heals: Vec::new(),
         map_hash,
         respec_note: String::new(),
         pending_travel: None,
@@ -591,6 +596,7 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
     };
     let mut app = App {
         view_kick: 0.0,
+        view_swing: 0.0,
         view_stride: 0.0,
         view_model: None,
         content: start.content,
@@ -604,6 +610,8 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         chat: Chat::default(),
         bag: None,
         people: None,
+        gm_page: None,
+        character_page: None,
         party_view: Vec::new(),
         sound: crate::sound::Sound::new(
             start.settings.volume,
@@ -673,15 +681,14 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         first_frame_ms: 0.0,
         #[cfg(not(target_arch = "wasm32"))]
         playback: None,
-        tactical: Tactical::new(),
-        tactical_leaves: Vec::new(),
-        bars: Vec::new(),
+        effects: Default::default(),
+        fx: Default::default(),
+        tags: Vec::new(),
+        pops: Vec::new(),
+        facings: HashMap::new(),
         squad_view: Vec::new(),
         target_view: None,
     };
-    if app.opts.tactical {
-        app.tactical.enter(app.sim.yaw);
-    }
     app.bench_yaw0 = app.sim.yaw;
     app
 }
@@ -938,18 +945,24 @@ pub fn run(mut opts: Options) -> Result<(), Error> {
 }
 
 /// A map and its coloured lightmaps from the page's assets, with the hash of the `.bsp`.
+/// With `wanted` (the hash the zone told, WEB.md 5) the URLs carry it as a stamp: a browser
+/// that kept last build's map in its cache has nothing under this name and asks the site
+/// (found 2026-10-06: a map rebuilt on the site, the old one played from the LAN).
 #[cfg(target_arch = "wasm32")]
-async fn fetch_map(assets: &str, name: &str) -> Result<(Bsp, u64), String> {
+async fn fetch_map(assets: &str, name: &str, wanted: Option<u64>) -> Result<(Bsp, u64), String> {
     /// A map that has not arrived in this long is not coming (the zone waits 60 s for a
     /// client's first input).
     const FETCH_MS: u32 = 45_000;
-    let url = format!("{assets}/maps/{name}.bsp");
+    let stamp = wanted.map_or(String::new(), |h| format!("?v={h:016x}"));
+    let url = format!("{assets}/maps/{name}.bsp{stamp}");
     let fetch = async {
         let bytes = crate::web::fetch_bytes(&url)
             .await?
             .ok_or_else(|| format!("{url}: no such map on this site"))?;
         let mut bsp = Bsp::parse(&bytes).map_err(|e| format!("{url}: {e}"))?;
-        if let Some(lit) = crate::web::fetch_bytes(&format!("{assets}/maps/{name}.lit")).await? {
+        if let Some(lit) =
+            crate::web::fetch_bytes(&format!("{assets}/maps/{name}.lit{stamp}")).await?
+        {
             bsp.attach_lit(&lit).map_err(|e| format!("{url}: {e}"))?;
         }
         Ok((bsp, fnv1a64(&bytes)))
@@ -983,7 +996,6 @@ pub async fn run_web() -> Result<(), String> {
         build: page.string("build"),
         team: page.number("team").unwrap_or(0.0) as u8,
         third_person: page.flag("third-person"),
-        tactical: page.flag("tactical"),
         user: page.string("user").unwrap_or_default(),
         password: page.take("password").unwrap_or_default(),
         register: page.flag("register"),
@@ -1012,7 +1024,7 @@ pub async fn run_web() -> Result<(), String> {
     }
 
     tell_page("status", "loading the map");
-    let (bsp, map_hash) = fetch_map(&opts.assets, &map).await?;
+    let (bsp, map_hash) = fetch_map(&opts.assets, &map, None).await?;
     let palette = world::palette_from_bytes(
         crate::web::fetch_bytes(&format!("{}/textures/palette.lmp", opts.assets))
             .await?
@@ -1242,12 +1254,19 @@ fn order_name(order: &Order) -> &'static str {
 }
 
 /// The HUD of one frame (COMPANIONS.md 6): the own bars, the squad panel, the creature
-/// being fought and the messages in every viewport; in the tactical one also the health
-/// bars over the bodies and the keys.
-/// What the HUD draws besides the own bars: the health bars over bodies, the squad's
-/// health, the creature being fought, and the scale it is all drawn at.
+/// being fought and the messages in every viewport.
+/// What the HUD draws besides the own bars: the squad's health, the creature being
+/// fought, and the scale it is all drawn at.
 pub(crate) struct HudView<'a> {
-    pub bars: &'a [(Vec3, f32, [f32; 4])],
+    /// The names over the bodies in sight (LOOK.md 13).
+    pub tags: &'a [Tag],
+    /// The numbers floating over the bodies (LOOK.md 13.8).
+    pub pops: &'a [crate::fx::Pop],
+    /// The frame is seen from the own eyes: the own numbers have no head to float over
+    /// and sit under the aim instead.
+    pub first_person: bool,
+    /// The own body was just hurt: 1 running down to 0, the frame's red edge.
+    pub hurt: f32,
     pub squad: &'a [(Option<u16>, bool)],
     /// The other members of the party: name; `None` when no body of that name is here,
     /// else the health the wire carries for it, when it does.
@@ -1260,6 +1279,84 @@ pub(crate) struct HudView<'a> {
     pub time: f32,
     /// The own name, for the portrait frame.
     pub own_name: &'a str,
+}
+
+/// A name over a body (LOOK.md 13): where its head is, what it is called, the colour of
+/// its side, and its health as a part of the whole when the frame knows both.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Tag {
+    pub at: Vec3,
+    pub name: String,
+    pub ink: [f32; 4],
+    pub health: Option<f32>,
+}
+
+/// A body turns toward its way of travel this fast when it is drawn (LOOK.md 13.9).
+const FACING_TURN_DEG_PER_SEC: f32 = 720.0;
+/// A body runs facing its travel only while the travel is within this of where it
+/// looks: a side-step is a run to the side; backing off is a backpedal, the eyes on
+/// whom it backs off from.
+const FACING_BACKPEDAL_DEG: f32 = 100.0;
+
+/// Where a body is drawn facing (LOOK.md 13.9): running or in the air, its way of
+/// travel, so that a side-step is a run to the side and not a slide of a body running
+/// ahead; in every other stance where it looks, which is where its blow lands. `drawn` is
+/// the yaw it was drawn at last frame: the turn is quick, not a snap.
+pub(crate) fn facing(drawn: Option<f32>, view_yaw: f32, vel: Vec3, anim: u8, dt: f32) -> f32 {
+    use gm_core::sim::anim;
+    let flat = vel.truncate();
+    let mut target = view_yaw;
+    if matches!(anim, anim::RUN | anim::AIR) && flat.length() > 10.0 {
+        let travel = flat.y.atan2(flat.x).to_degrees();
+        let off = (travel - view_yaw + 180.0).rem_euclid(360.0) - 180.0;
+        if off.abs() <= FACING_BACKPEDAL_DEG {
+            target = travel;
+        }
+    }
+    let Some(drawn) = drawn else {
+        return target.rem_euclid(360.0);
+    };
+    let delta = (target - drawn + 180.0).rem_euclid(360.0) - 180.0;
+    let step = FACING_TURN_DEG_PER_SEC * dt.max(0.0);
+    (drawn + delta.clamp(-step, step)).rem_euclid(360.0)
+}
+
+/// The wedge and the times of an ability's swing, when its script begins with one: what
+/// the effects draw (`fx::Swing`), from the numbers the zone resolves the hit with.
+pub(crate) fn swing_of(ability: &gm_core::vocab::Ability, dt: f32) -> Option<crate::fx::Swing> {
+    match ability.steps.first() {
+        Some(gm_core::vocab::Step {
+            verb: gm_core::vocab::Verb::MeleeArc(arc),
+            at,
+        }) => Some(crate::fx::Swing {
+            reach: arc.reach,
+            arc_deg: arc.arc_deg,
+            windup: (at + arc.timing.windup) as f32 * dt,
+            active: arc.timing.active as f32 * dt,
+        }),
+        _ => None,
+    }
+}
+
+/// The colour of what deals a damage: its element's (the aspects' colours), or steel's
+/// for a blow.
+pub(crate) fn damage_ink(damage: &gm_core::vocab::DamagePacket) -> [f32; 4] {
+    use gm_core::vocab::DamageType;
+    let element = match damage.dtype {
+        DamageType::Flame => Some(0),
+        DamageType::Shadow => Some(1),
+        DamageType::Storm => Some(2),
+        DamageType::Frost => Some(3),
+        DamageType::Stone => Some(4),
+        _ => None,
+    };
+    match element {
+        Some(i) => {
+            let c = crate::avatars::ASPECT_COLOURS[i];
+            [c[0], c[1], c[2], 1.0]
+        }
+        None => [0.92, 0.94, 1.0, 1.0],
+    }
 }
 
 /// One cell of the hotbar (LOOK.md 3.2), as `--report` and the gate read it.
@@ -1334,15 +1431,22 @@ pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
     cells
 }
 
-pub(crate) fn build_hud(
-    hud: &mut Hud,
-    online: Option<&Online>,
-    tac: &Tactical,
-    vp: glam::Mat4,
-    view: HudView<'_>,
-) {
+/// Where a world point is on a screen of `size` pixels; `None` behind the camera.
+pub(crate) fn project(view_proj: glam::Mat4, size: (f32, f32), point: Vec3) -> Option<(f32, f32)> {
+    let clip = view_proj * point.extend(1.0);
+    if clip.w <= 1.0 {
+        return None;
+    }
+    let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+    Some(((x + 1.0) * 0.5 * size.0, (1.0 - y) * 0.5 * size.1))
+}
+
+pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, view: HudView<'_>) {
     let HudView {
-        bars,
+        tags,
+        pops,
+        first_person,
+        hurt,
         squad: squad_view,
         party,
         target,
@@ -1371,25 +1475,79 @@ pub(crate) fn build_hud(
     // The whole HUD on the first layer, in call order: a screen's plates (the same layer,
     // drawn after) cover it, as they covered the bars before there were layers.
     hud.set_layer(ui::LAYER_PLATES);
-    if tac.active {
-        for (at, frac, colour) in bars {
-            if let Some((x, y)) = project(vp, hud.size, *at) {
-                hud.bar(x - 22.0, y - 3.0, 44.0, 5.0, *frac, *colour);
+    // Hurt: the frame's edge goes red for a moment (LOOK.md 13).
+    if hurt > 0.0 {
+        for (k, part) in [0.035_f32, 0.07, 0.11].into_iter().enumerate() {
+            let (tx, ty) = (w * part, h * part);
+            let red = [0.85, 0.05, 0.03, 0.22 * hurt / (k as f32 + 1.0)];
+            hud.rect(0.0, 0.0, w, ty, red);
+            hud.rect(0.0, h - ty, w, ty, red);
+            hud.rect(0.0, ty, tx, h - 2.0 * ty, red);
+            hud.rect(w - tx, ty, tx, h - 2.0 * ty, red);
+        }
+    }
+    // The names over the bodies, under everything else of the HUD: small print, a shade
+    // behind it, the health under it where it is known.
+    {
+        let print = (s * 0.5).max(1.0);
+        for tag in tags {
+            let Some((x, y)) = project(vp, hud.size, tag.at) else {
+                continue;
+            };
+            let tw = hud.width(print, &tag.name);
+            let (tx, ty) = ((x - tw * 0.5).round(), (y - (cap + 3.0) * print).round());
+            hud.print(tx + 1.0, ty + 1.0, print, [0.0, 0.0, 0.0, 0.75], &tag.name);
+            hud.print(tx, ty, print, tag.ink, &tag.name);
+            if let Some(frac) = tag.health {
+                let bw = (40.0 * print).max(tw * 0.8);
+                hud.bar(
+                    (x - bw * 0.5).round(),
+                    y.round(),
+                    bw,
+                    3.0 * print,
+                    frac,
+                    tag.ink,
+                );
             }
         }
-        let hint = "tab back   1-5 ` select   lmb pick   rmb move / attack   f follow   h hold   wasd pan   q e turn   wheel zoom";
-        // Bottom right: the own bars are bottom left.
-        // (Small print is half the scale, and never under one.)
-        let small = (s * 0.5).max(1.0);
-        let tw = hud.width(small, hint);
-        hud.label(w - tw - 16.0, h - 14.0 * s, small, hud::DIM, hint);
-        let title = "tactical";
-        hud.label(w - hud.width(s, title) - 16.0, 16.0, s, hud::YELLOW, title);
-    } else {
-        // The aim: a dot in the middle.
-        hud.rect(w * 0.5 - 2.0, h * 0.5 - 2.0, 4.0, 4.0, hud::SHADE);
-        hud.rect(w * 0.5 - 1.0, h * 0.5 - 1.0, 2.0, 2.0, hud::WHITE);
     }
+    // The numbers (LOOK.md 13.8): in the title face over the head they belong to, what
+    // the own hand dealt the largest; each floats up as it fades, with a shade behind.
+    // The own hurts in the first person have no head in the frame: they fall from
+    // under the aim instead, where the eyes are.
+    {
+        use crate::fx::Blow;
+        let face = if hud.has_face(hud::FaceId::Title) {
+            hud::FaceId::Title
+        } else {
+            hud.words()
+        };
+        let (_, ascent) = hud.metrics(face);
+        for pop in pops {
+            let own = matches!(pop.blow, Blow::Taken | Blow::Healed);
+            let (x, y) = if own && first_person {
+                (w * 0.5, h * 0.5 + 100.0 * s - pop.lift * 40.0 * s)
+            } else {
+                let Some((x, y)) = project(vp, hud.size, pop.at) else {
+                    continue;
+                };
+                (x, y - pop.lift * 44.0 * s)
+            };
+            let print = match pop.blow {
+                Blow::Dealt | Blow::Mended => s * 1.4,
+                Blow::Taken | Blow::Healed => s,
+                Blow::Blocked => (s * 0.6).max(1.0),
+            };
+            let tw = hud.width_in(face, print, &pop.text);
+            let (tx, ty) = ((x - tw * 0.5).round(), (y - ascent * print).round());
+            let shade = [0.0, 0.0, 0.0, 0.8 * pop.ink[3]];
+            hud.text_in(face, tx + 1.0, ty + 1.0, print, shade, &pop.text);
+            hud.text_in(face, tx, ty, print, pop.ink, &pop.text);
+        }
+    }
+    // The aim: a dot in the middle.
+    hud.rect(w * 0.5 - 2.0, h * 0.5 - 2.0, 4.0, 4.0, hud::SHADE);
+    hud.rect(w * 0.5 - 1.0, h * 0.5 - 1.0, 2.0, 2.0, hud::WHITE);
     let Some(o) = online else { return };
     let Some(c) = &o.client else { return };
 
@@ -1652,12 +1810,7 @@ pub(crate) fn build_hud(
     // The squad, top left under the own body: slot, name, role, order, and its health.
     for (i, m) in o.squad.iter().enumerate() {
         let (health, alive) = squad_view.get(i).copied().unwrap_or((None, false));
-        let picked = tac.active && tac.selected & (1 << i) != 0;
-        let colour = match (alive, picked) {
-            (false, _) => hud::RED,
-            (true, true) => hud::GREEN,
-            (true, false) => hud::WHITE,
-        };
+        let colour = if alive { hud::WHITE } else { hud::RED };
         let text = format!(
             "{} {}  {}  {}",
             i + 1,
@@ -1878,6 +2031,8 @@ impl App {
             || self.menu.is_some()
             || self.bag.is_some()
             || self.people.is_some()
+            || self.gm_page.is_some()
+            || self.character_page.is_some()
             || self.title.is_some()
     }
 
@@ -1938,6 +2093,92 @@ impl App {
         self.release_keys();
     }
 
+    /// `K`: the character's page (MATRIX.md 9.1): the thirty points and the kit, worn at
+    /// the trainer.
+    fn open_character(&mut self) {
+        let Some(o) = &self.online else { return };
+        if o.client.is_none() {
+            return;
+        }
+        self.character_page = Some(CharacterPage::default());
+        self.menu = None;
+        self.bag = None;
+        self.people = None;
+        self.gm_page = None;
+        self.release_keys();
+    }
+
+    /// What the character's page asked for: the zone is asked, and answers
+    /// (`RespecResult`, shown as the page's note).
+    fn character_act(&mut self, action: CharacterAction) {
+        match action {
+            CharacterAction::None => {}
+            CharacterAction::Close => self.character_page = None,
+            CharacterAction::Wear(build) => {
+                if let Some(o) = &mut self.online {
+                    o.respec_note = "asked".into();
+                    o.net
+                        .send_control(FromClient::Respec(BuildChoice::Custom(build)));
+                }
+            }
+        }
+    }
+
+    /// Standing by the trainer (TRAINER_REACH of a body nothing hurts), where a build is
+    /// worn in the world; in a team zone (the arena) anywhere, at the next respawn.
+    fn at_trainer(&self) -> bool {
+        let Some(o) = &self.online else { return false };
+        let (Some(c), Some(pack)) = (&o.client, &o.pack) else {
+            return false;
+        };
+        // The client is not told whether the zone is of the world: one with somebody
+        // nothing hurts in it has a trainer; one without (the arena) wears a build at
+        // the next respawn; the dungeon has neither, and the zone says so when asked.
+        let npc = |id: &u32| {
+            matches!(o.kinds.get(id), Some(BodyKind::Creature { def })
+                if pack.creatures.get(*def as usize).is_some_and(|d| d.npc))
+        };
+        if !o.kinds.keys().any(npc) {
+            return true;
+        }
+        let me = c.mover.mv.origin;
+        c.others_at(c.render_tick(0.0))
+            .iter()
+            .any(|e| e.alive() && npc(&e.id) && (e.pos - me).length() <= TRAINER_REACH)
+    }
+
+    /// `G`: the game master's page (GM.md 4), for a character the zone granted it to.
+    fn open_gm(&mut self) {
+        let Some(o) = &self.online else { return };
+        if o.client.is_none() {
+            return;
+        }
+        if !o.gm {
+            self.note("the zone did not make this character a game master");
+            return;
+        }
+        self.gm_page = Some(GmPage::default());
+        self.menu = None;
+        self.bag = None;
+        self.people = None;
+        self.character_page = None;
+        self.release_keys();
+    }
+
+    /// What the game master's page asked for: the zone is asked, and answers.
+    fn gm_act(&mut self, action: GmAction) {
+        match action {
+            GmAction::None => {}
+            GmAction::Close => self.gm_page = None,
+            GmAction::Send(op) => {
+                if let Some(o) = &mut self.online {
+                    o.gm_note = "asked".into();
+                    o.net.send_control(FromClient::Gm(op));
+                }
+            }
+        }
+    }
+
     /// What the page of people asked for.
     fn people_act(&mut self, action: PeopleAction) {
         match action {
@@ -1989,7 +2230,6 @@ impl App {
     fn wants_pointer(&self) -> bool {
         !self.screen_up()
             && self.opts.bench_frames.is_none()
-            && !self.tactical.active
             && self.opts.script.is_none()
             && self.opts.replay.is_none()
     }
@@ -2012,7 +2252,6 @@ impl App {
         self.input.keys.clear();
         self.input.just_pressed.clear();
         self.input.mouse.clear();
-        self.input.clicks.clear();
     }
 
     /// A key the screens act on was pressed, by a person or by a script (CLIENT.md 6).
@@ -2032,10 +2271,11 @@ impl App {
                 self.menu = Some(GameMenu::default());
                 self.release_keys();
             }
-            // The tactical view has its own use for the keys around it.
-            Key::Inventory if !self.tactical.active => self.open_inventory(),
-            Key::People if !self.tactical.active => self.open_people(),
-            Key::Use if !self.tactical.active => self.open_stall(),
+            Key::Inventory => self.open_inventory(),
+            Key::People => self.open_people(),
+            Key::Use => self.open_stall(),
+            Key::Gm => self.open_gm(),
+            Key::Character => self.open_character(),
             _ => {}
         }
     }
@@ -2101,17 +2341,14 @@ impl App {
         self.menu = None;
         self.bag = None;
         self.people = None;
+        self.gm_page = None;
         self.character = None;
         self.chat.clear();
         self.entities.clear();
         self.bodies.clear();
-        self.bars.clear();
         self.squad_view.clear();
         self.party_view.clear();
         self.target_view = None;
-        if self.tactical.active {
-            self.tactical.active = false;
-        }
         if let Some(front) = &mut self.front {
             front.back_to_characters(why);
             self.front_up = true;
@@ -2270,6 +2507,8 @@ impl App {
             MenuAction::Resume => self.menu = None,
             MenuAction::Inventory => self.open_inventory(),
             MenuAction::People => self.open_people(),
+            MenuAction::Gm => self.open_gm(),
+            MenuAction::Character => self.open_character(),
             MenuAction::Travel(zone) => {
                 if let Some(o) = &mut self.online {
                     o.net.send_control(FromClient::Travel(zone.clone()));
@@ -2338,7 +2577,7 @@ impl App {
                 self.grabbed = false;
                 if self.chat.open {
                     self.chat.drop_line();
-                } else if !self.screen_up() && !self.tactical.active {
+                } else if !self.screen_up() {
                     self.ui_key(Key::Escape);
                 }
             } else if waited {
@@ -2401,21 +2640,6 @@ impl App {
             }
         }
         true
-    }
-
-    /// Tab: into the tactical viewport, or back out of it.
-    fn toggle_tactical(&mut self) {
-        if self.tactical.active {
-            self.tactical.active = false;
-            self.set_grab(self.opts.bench_frames.is_none());
-        } else {
-            self.tactical.enter(self.sim.yaw);
-            self.set_grab(false);
-        }
-        log::info!(
-            "tactical viewport: {}",
-            if self.tactical.active { "on" } else { "off" }
-        );
     }
 
     fn set_grab(&mut self, grab: bool) {
@@ -2535,9 +2759,6 @@ impl App {
         event_loop: &ActiveEventLoop,
     ) -> Option<(Vec3, f32, f32)> {
         self.respec_hotkeys();
-        let size = self.active.as_ref().map_or((1280.0, 720.0), |a| {
-            (a.config.width as f32, a.config.height as f32)
-        });
         let returns = self.returns_to_screens();
         let bsp = &self.bsp;
         let viewport = self.viewport;
@@ -2671,7 +2892,7 @@ impl App {
                             let (slot, assets) =
                                 (self.pending_fetch.clone(), self.opts.assets.clone());
                             wasm_bindgen_futures::spawn_local(async move {
-                                let fetched = fetch_map(&assets, &map).await;
+                                let fetched = fetch_map(&assets, &map, Some(map_hash)).await;
                                 *slot.borrow_mut() = Some(fetched);
                             });
                             return Some((self.sim.eye(), self.sim.yaw, self.sim.pitch));
@@ -2700,19 +2921,49 @@ impl App {
                         o.team = team;
                         o.props = props;
                         o.build_name = o.build_name_of(&pack, &own);
-                        log::info!(
-                            "content: {} abilities, {} presets; playing {} on team {team}",
-                            pack.abilities.len(),
-                            pack.builds.len(),
-                            o.build_name
-                        );
-                        o.client = Some(ClientState::new(
-                            entity,
-                            o.rate,
-                            Sheet::new(own, &pack, team),
-                        ));
+                        match &mut o.client {
+                            // Content tuned under the zone (GM.md 3): the same body on the
+                            // new numbers; the prediction goes on.
+                            Some(c) => {
+                                log::info!("content tuned: {} abilities", pack.abilities.len());
+                                c.set_sheet(Sheet::new(own, &pack, team));
+                                o.gm_note = "tuned".into();
+                            }
+                            None => {
+                                log::info!(
+                                    "content: {} abilities, {} presets; playing {} on team {team}",
+                                    pack.abilities.len(),
+                                    pack.builds.len(),
+                                    o.build_name
+                                );
+                                o.client = Some(ClientState::new(
+                                    entity,
+                                    o.rate,
+                                    Sheet::new(own, &pack, team),
+                                ));
+                            }
+                        }
                         o.pack = Some(pack);
                     }
+                    FromZone::Gm(news) => match news {
+                        GmNews::Granted => {
+                            o.gm = true;
+                            o.say("game master here: G opens the page".into(), hud::DIM);
+                            log::info!("game master");
+                        }
+                        GmNews::Tuning(t) => {
+                            o.gm_note = if t.is_default() {
+                                "as authored".into()
+                            } else {
+                                format!("tempo x{:.2}, {} set", t.tempo, t.abilities.len())
+                            };
+                            o.tuning = t;
+                        }
+                        GmNews::Refused(why) => {
+                            log::info!("gm refused: {why}");
+                            o.gm_note = format!("refused: {why}");
+                        }
+                    },
                     FromZone::BuildApplied(build) => {
                         let changed = o.client.as_ref().is_some_and(|c| c.sheet.build != build);
                         if changed && let Some(pack) = &o.pack {
@@ -2979,9 +3230,14 @@ impl App {
                             self.input.keys.clear();
                             self.input.just_pressed.clear();
                             self.input.mouse.clear();
-                            self.input.clicks.clear();
                         }
                     }
+                    FromZone::Hit {
+                        target,
+                        amount,
+                        absorbed,
+                    } => o.hits.push((target, amount, absorbed)),
+                    FromZone::Healed { target, amount } => o.heals.push((target, amount)),
                     FromZone::Killed { victim, killer } => {
                         let me = o.client.as_ref().map(|c| c.my_id);
                         if Some(killer) == me && victim != killer {
@@ -3063,6 +3319,7 @@ impl App {
                     o.social = Social::default();
                     self.bag = None;
                     self.people = None;
+                    self.gm_page = None;
                     self.entities.clear();
                     self.bodies.clear();
                 }
@@ -3078,47 +3335,13 @@ impl App {
         o.accumulator += frame_dt.min(0.25);
         let mut steps = 0;
         let bodies = c.latest_boxes();
-        // The tactical viewport's keys are read before the ticks consume them: 1–5 select a
-        // companion, ` selects all, F and H order the selection to follow or hold.
-        let in_tactical = self.tactical.active;
         let scripted = self.opts.script.as_deref() == Some("fight");
-        let mut orders: Vec<Order> = Vec::new();
-        if in_tactical {
-            let slots = [
-                KeyCode::Digit1,
-                KeyCode::Digit2,
-                KeyCode::Digit3,
-                KeyCode::Digit4,
-                KeyCode::Digit5,
-            ];
-            for (i, k) in slots.iter().enumerate() {
-                if self.input.just_pressed.contains(k) && i < o.squad.len() {
-                    self.tactical.selected = 1 << i;
-                }
-            }
-            if self.input.just_pressed.contains(&KeyCode::Backquote) {
-                self.tactical.selected = 0b1_1111;
-            }
-            if self.input.just_pressed.contains(&KeyCode::KeyF) {
-                orders.push(Order::Follow);
-            }
-            if self.input.just_pressed.contains(&KeyCode::KeyH) {
-                orders.push(Order::Hold);
-            }
-            let (forward, side) = self.input.axes();
-            let turn =
-                self.input.down(KeyCode::KeyE) as i32 - self.input.down(KeyCode::KeyQ) as i32;
-            self.tactical
-                .steer(forward, side, turn as f32, self.input.wheel, frame_dt);
-        }
-        self.input.wheel = 0.0;
         // What the own body did this frame, for the sound: its predicted actions and
         // the ground it covered by its own ticks (SOUND.md 3).
         let mut own_actions: Vec<gm_core::sim::Action> = Vec::new();
         let mut own_travel = 0.0_f32;
         while o.accumulator >= dt && steps < MAX_STEPS_PER_FRAME {
             let (yaw, pitch) = match viewport {
-                _ if in_tactical => (self.sim.yaw, self.sim.pitch),
                 Viewport::First => (self.sim.yaw, self.sim.pitch),
                 Viewport::Third => {
                     let eye = c.mover.eye();
@@ -3127,9 +3350,7 @@ impl App {
                 }
             };
             self.aim = (yaw, pitch);
-            let input = if in_tactical {
-                self.input.command_input(yaw, pitch)
-            } else if scripted {
+            let input = if scripted {
                 let target = self
                     .script_target
                     .map(|(_, at, velocity, _)| (at, velocity));
@@ -3165,7 +3386,9 @@ impl App {
         let t = c.render_tick(extra);
         self.entities.clear();
         self.bodies.clear();
-        self.bars.clear();
+        self.tags.clear();
+        self.effects.begin(frame_dt);
+        let feet_under = Vec3::Z * Hull::Player.mins().z;
         let my_team = o.team;
         let eye = {
             let alpha = (o.accumulator / o.rate.dt()).clamp(0.0, 1.0);
@@ -3173,7 +3396,6 @@ impl App {
         };
         let centre = eye - Vec3::Z * c.mover.mv.hull.eye_height();
         let camera = match viewport {
-            _ if in_tactical => self.tactical.camera(centre),
             Viewport::First => eye,
             Viewport::Third => third_person_camera(bsp, eye, self.sim.yaw, self.sim.pitch),
         };
@@ -3267,64 +3489,6 @@ impl App {
             }
             self.target_view = best.map(|(_, name, health, max)| (name, health, max));
         }
-        if in_tactical {
-            // The world is drawn from where the squad stands: the commander's leaf and
-            // each companion's (squad sight, COMPANIONS.md 5.2).
-            let mut leaves = vec![bsp.leaf_for_point(eye)];
-            for e in &others {
-                if e.alive() && o.squad.iter().any(|m| m.id == e.id) {
-                    leaves.push(bsp.leaf_for_point(e.pos + Vec3::Z * 22.0));
-                }
-            }
-            leaves.retain(|l| *l != 0);
-            leaves.sort_unstable();
-            leaves.dedup();
-            self.tactical_leaves = leaves;
-            // Clicks: left selects the companion under the cursor, right orders the
-            // selection onto the body under it, or to the ground under it.
-            let vp = view_proj(camera, self.tactical.yaw, tactical::PITCH, size.0 / size.1);
-            let (origin, dir) = self.tactical.ray(vp, size);
-            let (mut mates, mut strangers) = (Vec::new(), Vec::new());
-            for e in others
-                .iter()
-                .filter(|e| e.kind == EntityKind::Player && e.alive())
-            {
-                if o.squad.iter().any(|m| m.id == e.id) {
-                    mates.push((e.id, e.pos));
-                } else {
-                    strangers.push((e.id, e.pos));
-                }
-            }
-            for click in self.input.clicks.drain(..) {
-                match click {
-                    MouseButton::Left => {
-                        if let Some(slot) = pick_body(origin, dir, &mates)
-                            .and_then(|id| o.squad.iter().position(|m| m.id == id))
-                        {
-                            self.tactical.selected = 1 << slot;
-                        }
-                    }
-                    MouseButton::Right => match pick_body(origin, dir, &strangers) {
-                        Some(id) => orders.push(Order::Attack(id)),
-                        None => {
-                            if let Some(point) = pick_ground(bsp, origin, dir) {
-                                orders.push(Order::MoveTo(point.into()));
-                            }
-                        }
-                    },
-                    _ => {}
-                }
-            }
-            if !o.squad.is_empty() {
-                for order in orders.drain(..) {
-                    o.net.send_control(FromClient::Order {
-                        slots: self.tactical.selected,
-                        order,
-                    });
-                }
-            }
-        }
-        self.input.clicks.clear();
         for e in others.iter().copied() {
             match e.kind {
                 EntityKind::Player => {
@@ -3337,7 +3501,7 @@ impl App {
                     else {
                         continue;
                     };
-                    // Health the zone sends (the own party's and creatures') over the body.
+                    // Health the zone sends (the own party's and creatures') under the name.
                     let mate = o.squad.iter().position(|m| m.id == e.id);
                     let max_health = match (mate, o.kinds.get(&e.id), &o.pack) {
                         (Some(i), _, _) => Some(o.squad[i].max_health),
@@ -3346,62 +3510,103 @@ impl App {
                         }
                         _ => None,
                     };
-                    if in_tactical
-                        && e.alive()
-                        && let (Some(h), Some(max)) = (e.health, max_health)
-                    {
-                        let colour = if mate.is_some() { hud::GREEN } else { hud::RED };
-                        self.bars.push((
-                            e.pos + Vec3::Z * 44.0,
-                            h as f32 / max.max(1) as f32,
-                            colour,
-                        ));
-                    }
-                    if in_tactical
-                        && e.alive()
-                        && let Some(i) = mate
-                    {
-                        // A plate under each companion, bright when it is selected.
-                        let lit = self.tactical.selected & (1 << i) != 0;
-                        let feet = e.pos - Vec3::Z * 23.0;
-                        self.entities.push(EntityDraw {
-                            mins: feet - Vec3::new(22.0, 22.0, 0.0),
-                            maxs: feet + Vec3::new(22.0, 22.0, 1.5),
-                            color: if lit {
-                                [0.35, 1.0, 0.45, 1.0]
-                            } else {
-                                [0.12, 0.40, 0.18, 1.0]
+                    // Whose side it is on: the own team's, the own squad's and the own
+                    // party's are friends; a creature and another team's are foes.
+                    let name = o.names.get(&e.id).map(|n| n.0.as_str()).unwrap_or("");
+                    let creature = matches!(o.kinds.get(&e.id), Some(BodyKind::Creature { .. }));
+                    let friend = (my_team != 0 && team == my_team)
+                        || mate.is_some()
+                        || (!name.is_empty() && self.party_view.iter().any(|(n, _)| n == name));
+                    let foe = !friend && (creature || (my_team != 0 && team != 0));
+                    if e.alive() {
+                        // What it does, drawn where it lands (LOOK.md 13): the wedge of the
+                        // swing it winds up, the slash when it comes, a spark when it is hit.
+                        let swing = o
+                            .pack
+                            .as_ref()
+                            .zip((e.acting as usize).checked_sub(1))
+                            .and_then(|(p, i)| p.abilities.get(i))
+                            .and_then(|d| swing_of(&d.ability, dt));
+                        self.effects.fighter(
+                            &crate::fx::Fighter {
+                                key: e.id,
+                                feet: e.pos + feet_under,
+                                chest: 32.0,
+                                yaw: e.yaw,
+                                anim: e.anim,
+                                swing,
+                                side: if friend {
+                                    crate::fx::Side::Friend
+                                } else {
+                                    crate::fx::Side::Foe
+                                },
+                                health: e.health,
                             },
+                            &mut self.fx,
+                        );
+                        // What the own hand did to it, as the zone said: a number over
+                        // its head (LOOK.md 13.8).
+                        let over_head = e.pos + feet_under + Vec3::Z * 72.0;
+                        o.hits.retain(|&(target, amount, absorbed)| {
+                            if target != e.id {
+                                return true;
+                            }
+                            self.effects.hit(over_head, amount as u32, absorbed as u32);
+                            false
                         });
-                    }
-                    if in_tactical
-                        && e.alive()
-                        && o.squad
-                            .iter()
-                            .any(|m| matches!(m.order, Order::Attack(id) if id == e.id))
-                    {
-                        // The mark on whom the squad is ordered to attack.
-                        let feet = e.pos - Vec3::Z * 23.0;
-                        self.entities.push(EntityDraw {
-                            mins: feet - Vec3::new(30.0, 30.0, 0.0),
-                            maxs: feet + Vec3::new(30.0, 30.0, 1.0),
-                            color: [1.0, 0.15, 0.10, 1.0],
+                        o.heals.retain(|&(target, amount)| {
+                            if target != e.id {
+                                return true;
+                            }
+                            self.effects.healed(over_head, amount as u32);
+                            false
                         });
+                        // Its name over its head, when the head is in sight and near.
+                        let head = e.pos + Vec3::Z * 40.0;
+                        if !name.is_empty()
+                            && (head - camera).length() < 900.0
+                            && bsp.trace(Hull::Point, camera, head).fraction >= 1.0
+                        {
+                            self.tags.push(Tag {
+                                at: head,
+                                name: name.to_string(),
+                                ink: if friend {
+                                    [0.55, 0.80, 1.0, 1.0]
+                                } else if creature {
+                                    [1.0, 0.62, 0.30, 1.0]
+                                } else if foe {
+                                    [1.0, 0.42, 0.36, 1.0]
+                                } else {
+                                    hud::WHITE
+                                },
+                                health: e
+                                    .health
+                                    .zip(max_health)
+                                    .map(|(h, max)| h as f32 / max.max(1) as f32),
+                            });
+                        }
                     }
+                    let yaw = facing(
+                        self.facings.get(&e.id).copied(),
+                        e.yaw,
+                        e.vel,
+                        e.anim,
+                        frame_dt,
+                    );
+                    self.facings.insert(e.id, yaw);
                     self.bodies.push(Body {
                         key: e.id,
                         origin: e.pos,
-                        yaw: e.yaw,
+                        yaw,
                         pitch: e.pitch,
                         anim: e.anim,
                         frame,
                         armour,
                         aspects,
-                        team,
-                        friendly: my_team != 0 && team == my_team,
                         status: e.status,
                         model: o.names.get(&e.id).and_then(|n| n.2),
                         distance: (e.pos - camera).length(),
+                        lit: self.effects.flash(e.id),
                         prop: held_prop(
                             &mut self.content,
                             self.active.as_mut(),
@@ -3411,11 +3616,30 @@ impl App {
                     });
                 }
                 EntityKind::Projectile => {
+                    // A bright head on a streak along its way, round a small solid core.
                     self.entities.push(EntityDraw {
-                        mins: e.pos - Vec3::splat(2.5),
-                        maxs: e.pos + Vec3::splat(2.5),
-                        color: [1.0, 0.9, 0.3, 1.0],
+                        mins: e.pos - Vec3::splat(1.2),
+                        maxs: e.pos + Vec3::splat(1.2),
+                        color: [1.0, 0.95, 0.6, 1.0],
                     });
+                    // The own bolts are known by their ability (its size, its damage's
+                    // colour); another's is a bolt.
+                    let known = match e.spawn {
+                        SpawnInfo::Projectile { owner, def, .. } if owner == c.my_id => {
+                            c.sheet.kit.abilities.get(def as usize).and_then(|a| {
+                                a.steps.iter().find_map(|s| match &s.verb {
+                                    gm_core::vocab::Verb::Projectile(p) => {
+                                        Some((p.radius, damage_ink(&p.damage)))
+                                    }
+                                    _ => None,
+                                })
+                            })
+                        }
+                        _ => None,
+                    };
+                    let (radius, ink) = known.unwrap_or((3.0, crate::fx::BOLT));
+                    self.effects
+                        .projectile(e.id, e.pos, e.vel, radius, ink, camera, &mut self.fx);
                 }
                 EntityKind::Area => {
                     // What hurts is orange, what helps is green (PROTOCOL.md 5).
@@ -3425,15 +3649,8 @@ impl App {
                         } => (radius as f32, harmful),
                         _ => (32.0, true),
                     };
-                    self.entities.push(EntityDraw {
-                        mins: e.pos - Vec3::new(r, r, 0.0),
-                        maxs: e.pos + Vec3::new(r, r, 2.0),
-                        color: if harmful {
-                            [1.0, 0.5, 0.1, 1.0]
-                        } else {
-                            [0.2, 0.8, 0.4, 1.0]
-                        },
-                    });
+                    // A disc of its own size on the floor, and a burst when it appears.
+                    self.effects.area(e.id, e.pos, r, harmful, &mut self.fx);
                 }
             }
         }
@@ -3463,11 +3680,7 @@ impl App {
                     &own_actions,
                 );
             }
-            let yaw = if in_tactical {
-                self.tactical.yaw
-            } else {
-                self.sim.yaw
-            };
+            let yaw = self.sim.yaw;
             let listener = crate::sound::Listener {
                 pos: eye,
                 yaw: yaw.to_radians(),
@@ -3490,29 +3703,108 @@ impl App {
                 self.bodies.push(stall_keeper(stall, camera));
             }
         }
-        if in_tactical {
-            // Where each companion was told to go.
-            for m in &o.squad {
-                if let Order::MoveTo(p) = m.order {
-                    let p = Vec3::from(p);
-                    self.entities.push(EntityDraw {
-                        mins: p - Vec3::new(8.0, 8.0, 24.0),
-                        maxs: p + Vec3::new(8.0, 8.0, -20.0),
-                        color: [0.25, 0.55, 1.0, 1.0],
-                    });
+        // The own body's stance (LOOK.md 13): what the zone says of it, except that its
+        // own script is shown from the prediction, a round trip sooner; and so is the
+        // place its swing lands, which is what a hand aims with.
+        let own_script = c.mover.script.and_then(|s| {
+            let ability = c.sheet.kit.abilities.get(s.ability as usize)?;
+            let elapsed = gm_core::sim::tick_delta(c.tick, s.started).max(0) as u32;
+            Some((ability, elapsed))
+        });
+        let own_anim = {
+            use gm_core::sim::anim;
+            let said = c.own_anim;
+            if !c.synced() {
+                anim::IDLE
+            } else if !c.own_alive
+                || !(anim::acts(said) || matches!(said, anim::IDLE | anim::RUN | anim::AIR))
+            {
+                // Dead, staggered, commanding, dashing, guarding: the zone's word.
+                said
+            } else if let Some((ability, elapsed)) = own_script {
+                gm_core::sim::script_anim(ability, elapsed)
+            } else {
+                // The feet are predicted here, so their stance is too: a run that waited
+                // for the zone's word slid for a round trip before the legs moved (and
+                // the script over here and not yet there is the same case).
+                if !c.mover.mv.on_ground {
+                    anim::AIR
+                } else if c.mover.ground_speed() > 10.0 {
+                    anim::RUN
+                } else {
+                    anim::IDLE
                 }
             }
+        };
+        if c.synced() {
+            self.effects.fighter(
+                &crate::fx::Fighter {
+                    key: OWN,
+                    feet: centre + feet_under,
+                    // Under the eye in the first person, so the slash crosses the view.
+                    chest: 32.0,
+                    yaw: c.mover.yaw,
+                    anim: own_anim,
+                    swing: own_script.and_then(|(ability, _)| swing_of(ability, dt)),
+                    side: crate::fx::Side::Own,
+                    health: Some(c.own_health.clamp(0, u16::MAX as i32) as u16),
+                },
+                &mut self.fx,
+            );
         }
+        // A bolt the own body let go this frame flies from the hand at once (the zone's
+        // bolt shows a round trip later, well on its way).
+        for action in &own_actions {
+            if let gm_core::sim::Action::Fire { ability, step } = action
+                && let Some(gm_core::vocab::Verb::Projectile(p)) = c
+                    .sheet
+                    .kit
+                    .abilities
+                    .get(*ability as usize)
+                    .and_then(|a| a.steps.get(*step as usize))
+                    .map(|s| &s.verb)
+            {
+                // From where the zone spawns it (`resolve_origin`): the weapon's offset in
+                // the body's frame, else the eyes. Not the camera: in the third person
+                // the eye of the body is well in front of it.
+                let dir = gm_core::sim::view_dir(c.mover.yaw, c.mover.pitch);
+                let from = match p.spawn {
+                    gm_core::vocab::Origin::Weapon { offset } => {
+                        let (fwd, right) = gm_core::movement::yaw_vectors(c.mover.yaw);
+                        eye + fwd * offset[0] + right * offset[1] + Vec3::Z * offset[2]
+                    }
+                    _ => eye,
+                };
+                self.effects
+                    .launch(from, dir * p.speed, p.radius, damage_ink(&p.damage));
+            }
+        }
+        // A blow on a body the frame did not find (gone, or never in sight) says nothing.
+        o.hits.clear();
+        o.heals.clear();
+        self.effects.draw(camera, &mut self.fx);
+        self.effects.end();
+        self.pops = self.effects.numbers();
+        // (The own body's facing is kept across a frame in the first person, where it
+        // is not drawn: a switch of the viewport finds it where it was.)
+        let drawn: HashSet<u32> = self.bodies.iter().map(|b| b.key).chain([OWN]).collect();
+        self.facings.retain(|k, _| drawn.contains(k));
         match viewport {
-            Viewport::First if !in_tactical => {
+            Viewport::First => {
                 // The view model (LOOK.md 6.4): the held prop in the frame's corner, with
                 // the stride's bob and a kick on a launch.
-                let fired = own_actions.iter().any(|a| {
-                    matches!(
-                        a,
-                        gm_core::sim::Action::Fire { .. } | gm_core::sim::Action::Swing { .. }
-                    )
-                });
+                // A launch kicks; a swing is carried across the view by the own stance.
+                let fired = own_actions
+                    .iter()
+                    .any(|a| matches!(a, gm_core::sim::Action::Fire { .. }));
+                let want = match own_anim {
+                    gm_core::sim::anim::WINDUP => -1.0,
+                    gm_core::sim::anim::SWING => 1.0,
+                    gm_core::sim::anim::RECOVER => 0.55,
+                    _ => 0.0,
+                };
+                let rate = if want == 0.0 { 9.0 } else { 34.0 };
+                self.view_swing += (want - self.view_swing) * (frame_dt * rate).min(1.0);
                 if fired {
                     self.view_kick = 1.0;
                 }
@@ -3535,6 +3827,7 @@ impl App {
                         0.0
                     },
                     kick: self.view_kick,
+                    swing: self.view_swing,
                     light: crate::avatars::light_at(bsp, eye),
                 });
                 Some((eye, self.sim.yaw, self.sim.pitch))
@@ -3542,24 +3835,27 @@ impl App {
             _ => {
                 // The own body, posed by the server's animation state.
                 let build = &c.sheet.build;
+                let yaw = facing(
+                    self.facings.get(&OWN).copied(),
+                    self.sim.yaw,
+                    c.mover.mv.velocity,
+                    own_anim,
+                    frame_dt,
+                );
+                self.facings.insert(OWN, yaw);
                 self.bodies.push(Body {
                     key: OWN,
                     origin: eye - Vec3::Z * c.mover.mv.hull.eye_height(),
-                    yaw: self.sim.yaw,
+                    yaw,
                     pitch: self.sim.pitch,
-                    anim: if c.synced() {
-                        c.own_anim
-                    } else {
-                        gm_core::sim::anim::IDLE
-                    },
+                    anim: own_anim,
                     frame: gm_model::rig::frame_index(build.frame),
                     armour: build.armour as u8,
                     aspects: build.aspects.0,
-                    team: my_team,
-                    friendly: true,
                     status: c.mover.statuses.mask(),
                     model: o.names.get(&c.my_id).and_then(|n| n.2),
                     distance: 0.0,
+                    lit: self.effects.flash(OWN),
                     prop: held_prop(
                         &mut self.content,
                         self.active.as_mut(),
@@ -3567,11 +3863,7 @@ impl App {
                         o.looks.get(&c.my_id).copied().unwrap_or_default(),
                     ),
                 });
-                if in_tactical {
-                    Some((camera, self.tactical.yaw, tactical::PITCH))
-                } else {
-                    Some((camera, self.sim.yaw, self.sim.pitch))
-                }
+                Some((camera, self.sim.yaw, self.sim.pitch))
             }
         }
     }
@@ -3617,32 +3909,13 @@ impl App {
                 p.speed = speed;
             }
         }
-        if self.tactical.active {
-            let (forward, side) = self.input.axes();
-            let turn =
-                self.input.down(KeyCode::KeyE) as i32 - self.input.down(KeyCode::KeyQ) as i32;
-            self.tactical
-                .steer(forward, side, turn as f32, self.input.wheel, frame_dt);
-        }
-        self.input.wheel = 0.0;
-        self.input.clicks.clear();
         self.input.just_pressed.clear();
         p.advance(frame_dt);
         self.entities.clear();
         self.bodies.clear();
-        self.bars.clear();
-        let outside = self.tactical.active || self.viewport == Viewport::Third;
+        let outside = self.viewport == Viewport::Third;
         let (eye, yaw, pitch) = p.scene(outside, &mut self.bodies, &mut self.entities);
-        self.tactical_leaves = vec![self.bsp.leaf_for_point(eye)];
-        self.tactical_leaves.retain(|l| *l != 0);
-        if self.tactical.active {
-            let centre = eye - Vec3::Z * Hull::Player.eye_height();
-            (
-                self.tactical.camera(centre),
-                self.tactical.yaw,
-                tactical::PITCH,
-            )
-        } else if self.viewport == Viewport::Third {
+        if self.viewport == Viewport::Third {
             (third_person_camera(&self.bsp, eye, yaw, pitch), yaw, pitch)
         } else {
             (eye, yaw, pitch)
@@ -3843,7 +4116,6 @@ impl App {
         if self.capturing() {
             // Whatever was held is not held for the game while the toolkit has the keys.
             self.release_keys();
-            self.input.wheel = 0.0;
         }
 
         // Mouse look is applied per frame for responsiveness; movement uses it at tick time.
@@ -3891,11 +4163,8 @@ impl App {
             camera
         } else if self.front_up || self.title.is_some() {
             // Behind a screen with no zone: the map, turning slowly (CLIENT.md 2).
-            self.input.wheel = 0.0;
             self.entities.clear();
             self.bodies.clear();
-            self.bars.clear();
-            self.tactical_leaves.clear();
             let yaw = self.bench_yaw0 + BACKDROP_DEG_PER_S * self.started.elapsed().as_secs_f32();
             (self.sim.eye(), yaw.rem_euclid(360.0), 0.0)
         } else {
@@ -3917,24 +4186,6 @@ impl App {
             } else {
                 self.input.move_input(self.sim.yaw)
             };
-            // Offline the tactical viewport is a camera and nothing else: there is no squad.
-            let in_tactical = self.tactical.active;
-            let input = if in_tactical {
-                let (forward, side) = self.input.axes();
-                let turn =
-                    self.input.down(KeyCode::KeyE) as i32 - self.input.down(KeyCode::KeyQ) as i32;
-                let turn = if bench { 0.2 } else { turn as f32 };
-                self.tactical
-                    .steer(forward, side, turn, self.input.wheel, frame_dt);
-                MoveInput {
-                    yaw: self.sim.yaw,
-                    ..Default::default()
-                }
-            } else {
-                input
-            };
-            self.input.wheel = 0.0;
-            self.input.clicks.clear();
             self.input.just_pressed.clear();
             self.sim.advance(&self.bsp, &input, frame_dt);
             // Heard: the own body's steps and landings, offline too (its animation is
@@ -3973,11 +4224,8 @@ impl App {
             }
             self.entities.clear();
             self.bodies.clear();
-            self.bars.clear();
-            self.tactical_leaves = vec![self.bsp.leaf_for_point(self.sim.eye())];
-            self.tactical_leaves.retain(|l| *l != 0);
             match self.viewport {
-                Viewport::First if !in_tactical => (self.sim.eye(), self.sim.yaw, self.sim.pitch),
+                Viewport::First => (self.sim.eye(), self.sim.yaw, self.sim.pitch),
                 _ => {
                     let v = self.sim.curr.velocity;
                     self.bodies.push(Body {
@@ -3995,47 +4243,33 @@ impl App {
                         frame: 1,
                         armour: 0,
                         aspects: 0,
-                        team: 0,
-                        friendly: true,
                         status: 0,
                         model: None,
                         distance: 0.0,
+                        lit: 0.0,
                         // Offline (`--prop FILE`, CONTENT.md 9): the prop to look at.
                         prop: self.offline_prop,
                     });
-                    if in_tactical {
-                        if let Some(b) = self.bodies.last_mut() {
-                            b.anim = gm_core::sim::anim::COMMAND;
-                        }
-                        (
-                            self.tactical.camera(self.sim.origin()),
-                            self.tactical.yaw,
-                            tactical::PITCH,
-                        )
-                    } else {
-                        (
-                            third_person_camera(
-                                &self.bsp,
-                                self.sim.eye(),
-                                self.sim.yaw,
-                                self.sim.pitch,
-                            ),
+                    (
+                        third_person_camera(
+                            &self.bsp,
+                            self.sim.eye(),
                             self.sim.yaw,
                             self.sim.pitch,
-                        )
-                    }
+                        ),
+                        self.sim.yaw,
+                        self.sim.pitch,
+                    )
                 }
             }
         };
 
+        // Whether the character's page may wear its draft here, read before the renderer
+        // is borrowed for the frame.
+        let at_trainer = self.at_trainer();
         let Some(a) = &mut self.active else { return };
-        // The world is drawn from the camera's leaf; in the tactical viewport, whose camera
-        // hangs in the rock above the ceiling, from the leaves the squad stands in.
-        let leaves = if self.tactical.active {
-            self.tactical_leaves.clone()
-        } else {
-            vec![self.bsp.leaf_for_point(camera)]
-        };
+        // The world is drawn from the camera's leaf.
+        let leaves = vec![self.bsp.leaf_for_point(camera)];
         if a.drawn_from != leaves {
             if leaves.is_empty() || leaves.contains(&0) {
                 a.renderer.set_visible_faces(&a.gpu, None);
@@ -4103,8 +4337,9 @@ impl App {
         }
         a.avatars.begin_frame();
         if let Some(v) = self.view_model.take() {
-            a.avatars
-                .view_model(v.slot, v.eye, v.yaw, v.pitch, v.stride, v.kick, v.light);
+            a.avatars.view_model(
+                v.slot, v.eye, v.yaw, v.pitch, v.stride, v.kick, v.swing, v.light,
+            );
         }
         for body in &self.bodies {
             a.avatars.push(
@@ -4114,7 +4349,18 @@ impl App {
                 &a.renderer.characters,
                 &mut self.entities,
             );
+            // The ring of its aspects at its feet (MODELS.md 9, LOOK.md 13).
+            if body.anim != gm_core::sim::anim::DEAD && body.aspects != 0 {
+                crate::fx::aspect_ring(
+                    &mut self.fx,
+                    body.origin + Vec3::Z * Hull::Player.mins().z,
+                    body.yaw,
+                    body.aspects,
+                );
+            }
         }
+        // The frame's effects go to the renderer, which draws them after the bodies.
+        a.renderer.fx.verts.append(&mut self.fx.verts);
         a.avatars.push_crowd(
             self.started.elapsed().as_secs_f32(),
             frame_dt,
@@ -4140,14 +4386,16 @@ impl App {
         if let Some(p) = &self.playback {
             p.hud(&mut a.renderer.hud);
         }
-        if !watching && (!bench || self.opts.tactical) && !self.front_up && self.title.is_none() {
+        if !watching && !bench && !self.front_up && self.title.is_none() {
             build_hud(
                 &mut a.renderer.hud,
                 self.online.as_ref(),
-                &self.tactical,
                 vp,
                 HudView {
-                    bars: &self.bars,
+                    tags: &self.tags,
+                    pops: &self.pops,
+                    first_person: self.viewport == Viewport::First,
+                    hurt: self.effects.own_hurt,
                     squad: &self.squad_view,
                     party: &self.party_view,
                     target: self.target_view.as_ref(),
@@ -4163,6 +4411,8 @@ impl App {
         let (mut menu_action, mut said) = (MenuAction::None, None);
         let mut bag_action = BagAction::None;
         let mut people_action = PeopleAction::None;
+        let mut gm_action = GmAction::None;
+        let mut character_action = CharacterAction::None;
         if !bench {
             let playing = self.online.as_ref().is_some_and(|o| o.client.is_some());
             let screen = match (&self.front, &self.menu, &self.bag) {
@@ -4171,12 +4421,16 @@ impl App {
                 (_, Some(menu), _) => menu.page.name(),
                 (_, _, Some(bag)) => bag.page.name(),
                 _ if self.people.is_some() => self.people.as_ref().map_or("", |p| p.page.name()),
+                _ if self.gm_page.is_some() => self.gm_page.as_ref().map_or("", |g| g.name()),
+                _ if self.character_page.is_some() => {
+                    self.character_page.as_ref().map_or("", |p| p.name())
+                }
                 _ if self.chat.open => "chat",
                 _ => "game",
             };
             // Whose stall the body stands at, for the corner of the screen.
             let near = Self::stall_in_reach(self.online.as_ref())
-                .filter(|_| playing && self.hub.is_some() && !self.tactical.active)
+                .filter(|_| playing && self.hub.is_some())
                 .map(|s| s.owner.clone());
             let me = self.opts.name.clone();
             let keeps_stall = self
@@ -4217,6 +4471,7 @@ impl App {
                 if !playing {
                     self.bag = None;
                     self.people = None;
+                    self.gm_page = None;
                 }
                 match (&mut self.bag, &self.hub) {
                     (Some(bag), Some(hub)) if self.menu.is_none() => {
@@ -4275,6 +4530,43 @@ impl App {
                         },
                     );
                 }
+                // The game master's page (GM.md 4).
+                if let (Some(page), Some(o), None, None, None) = (
+                    &mut self.gm_page,
+                    &self.online,
+                    &self.menu,
+                    &self.bag,
+                    &self.people,
+                ) && let (Some(c), Some(pack)) = (&o.client, &o.pack)
+                {
+                    let view = GmView {
+                        pack,
+                        own: &c.sheet.build,
+                        tuning: &o.tuning,
+                        rate: o.rate,
+                        note: &o.gm_note,
+                    };
+                    gm_action = page.frame(&mut ui, &view);
+                }
+                // The character's page (MATRIX.md 9.1).
+                if let (Some(page), Some(o), None, None, None, None) = (
+                    &mut self.character_page,
+                    &self.online,
+                    &self.menu,
+                    &self.bag,
+                    &self.people,
+                    &self.gm_page,
+                ) && let (Some(c), Some(pack)) = (&o.client, &o.pack)
+                {
+                    let view = CharacterView {
+                        pack,
+                        own: &c.sheet.build,
+                        rate: o.rate,
+                        at_trainer,
+                        note: &o.respec_note,
+                    };
+                    character_action = page.frame(&mut ui, &view);
+                }
                 match &mut self.menu {
                     Some(_) if self.bag.is_some() => {}
                     Some(menu) => {
@@ -4287,6 +4579,7 @@ impl App {
                         let offers = Offers {
                             inventory: playing && hub.is_some() && self.character.is_some(),
                             people: playing,
+                            gm: playing && self.online.as_ref().is_some_and(|o| o.gm),
                             travel: playing && hub.is_some(),
                             leave: returns && self.online.is_some(),
                             fullscreen: cfg!(not(target_arch = "wasm32")),
@@ -4295,8 +4588,11 @@ impl App {
                         let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
                         menu_action = menu.frame(&mut ui, hub, offers, here, &mut self.settings);
                     }
-                    None if self.bag.is_some() || self.people.is_some() => {}
-                    None if playing && !self.chat.open && !self.tactical.active => {
+                    None if self.bag.is_some()
+                        || self.people.is_some()
+                        || self.gm_page.is_some()
+                        || self.character_page.is_some() => {}
+                    None if playing && !self.chat.open => {
                         // Where this is, and the two keys nothing else tells of.
                         let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
                         let hint = if here.is_empty() {
@@ -4342,11 +4638,10 @@ impl App {
                         frame: gm_model::rig::frame_index(build.frame),
                         armour: build.armour as u8,
                         aspects: build.aspects.0,
-                        team: 0,
-                        friendly: true,
                         status: 0,
                         model: o.names.get(&c.my_id).and_then(|n| n.2),
                         distance: 0.0,
+                        lit: 0.0,
                         prop: held_prop(
                             &mut self.content,
                             Some(a),
@@ -4480,6 +4775,8 @@ impl App {
         let [answered, clicked] = front_actions;
         self.bag_act(bag_action);
         self.people_act(people_action);
+        self.gm_act(gm_action);
+        self.character_act(character_action);
         self.act(answered, menu_action, said, event_loop);
         self.act(clicked, MenuAction::None, None, event_loop);
     }
@@ -4589,7 +4886,6 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
-                self.tactical.cursor = self.cursor;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let turn = match delta {
@@ -4598,8 +4894,6 @@ impl ApplicationHandler for App {
                 };
                 if self.screen_up() {
                     self.ui_input.wheel += turn;
-                } else {
-                    self.input.wheel += turn;
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => match state {
@@ -4616,9 +4910,6 @@ impl ApplicationHandler for App {
                             self.last_press = (!double).then_some((now, self.cursor));
                             self.ui_press(self.cursor, double);
                         }
-                    } else if self.tactical.active {
-                        // The cursor is free here: a click picks or orders.
-                        self.input.clicks.push(button);
                     } else if !self.grabbed && self.opts.bench_frames.is_none() {
                         self.set_grab(true);
                     } else {
@@ -4707,7 +4998,8 @@ impl ApplicationHandler for App {
                             KeyCode::KeyI if !event.repeat => self.ui_key(Key::Inventory),
                             KeyCode::KeyE if !event.repeat => self.ui_key(Key::Use),
                             KeyCode::KeyP if !event.repeat => self.ui_key(Key::People),
-                            KeyCode::Tab if !event.repeat => self.toggle_tactical(),
+                            KeyCode::KeyG if !event.repeat => self.ui_key(Key::Gm),
+                            KeyCode::KeyK if !event.repeat => self.ui_key(Key::Character),
                             KeyCode::KeyV if !event.repeat => {
                                 self.viewport = match self.viewport {
                                     Viewport::First => Viewport::Third,
@@ -4750,6 +5042,36 @@ impl ApplicationHandler for App {
 mod tests {
     use super::*;
     use gm_core::collide::BoxWorld;
+
+    #[test]
+    fn a_running_body_faces_its_travel_and_an_acting_one_its_aim() {
+        use gm_core::sim::anim;
+        let side = Vec3::new(0.0, 200.0, 0.0);
+        // Looking along +x and stepping to the left (+y): drawn running that way, turned
+        // to it over a few frames rather than at once.
+        assert_eq!(facing(None, 0.0, side, anim::RUN, 0.016), 90.0);
+        let turned = facing(Some(0.0), 0.0, side, anim::RUN, 0.05);
+        assert!(turned > 30.0 && turned < 40.0, "{turned}");
+        let there = facing(Some(turned), 0.0, side, anim::RUN, 0.25);
+        assert_eq!(there, 90.0);
+        // Winding up a blow: back to the aim, where the blow lands. In the air, the travel.
+        assert_eq!(facing(Some(90.0), 0.0, side, anim::WINDUP, 0.25), 0.0);
+        assert_eq!(facing(Some(90.0), 0.0, side, anim::AIR, 0.25), 90.0);
+        // Standing still, or guarding: the aim. Backing off: a backpedal, the aim kept.
+        assert_eq!(facing(None, 30.0, Vec3::ZERO, anim::RUN, 0.016), 30.0);
+        assert_eq!(facing(None, 30.0, side, anim::GUARD, 0.016), 30.0);
+        let back = Vec3::new(-200.0, 50.0, 0.0);
+        assert_eq!(facing(None, 0.0, back, anim::RUN, 0.016), 0.0);
+        // The turn takes the short way round.
+        let near = facing(
+            Some(350.0),
+            0.0,
+            Vec3::new(200.0, 60.0, 0.0),
+            anim::RUN,
+            0.01,
+        );
+        assert!(!(10.0..=350.0).contains(&near), "{near}");
+    }
 
     #[test]
     fn third_person_camera_stays_out_of_walls() {

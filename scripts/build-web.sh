@@ -35,7 +35,13 @@ build() { # name, cargo feature flags...
 build webgpu
 build webgl --features webgl
 
-cp "$ROOT/web/index.html" "$ROOT/web/boot.js" "$OUT/"
+cp "$ROOT/web/boot.js" "$OUT/"
+# The build's stamp (the wasm's and the loader's hash) on the script's URL, which boot.js
+# carries to the module and the wasm: a browser that cached the last build fetches this one.
+# The page itself is what a browser revalidates on every visit (WEB.md 2.5).
+STAMP="$(cat "$OUT"/gm-client-*_bg.wasm "$OUT"/gm-client-*.js "$OUT/boot.js" | sha256sum | cut -c1-12)"
+sed "s|src=\"boot.js\"|src=\"boot.js?v=$STAMP\"|" "$ROOT/web/index.html" >"$OUT/index.html"
+grep -q "boot.js?v=$STAMP" "$OUT/index.html" || { echo "web: index.html names no boot.js to stamp" >&2; exit 1; }
 cp "$ROOT"/assets/maps/built/*.bsp "$ROOT"/assets/maps/built/*.lit "$OUT/assets/maps/"
 cp "$ROOT/assets/textures/palette.lmp" "$OUT/assets/textures/"
 # The content bundle (CONTENT.md 6): the manifest and the atlas are fetched at start, the

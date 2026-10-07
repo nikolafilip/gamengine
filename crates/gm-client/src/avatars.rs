@@ -65,14 +65,13 @@ pub struct Body {
     pub frame: u8,
     pub armour: u8,
     pub aspects: u8,
-    /// 0 none; otherwise drawn as a pip above the head, `friendly` or not.
-    pub team: u8,
-    pub friendly: bool,
     /// Status mask (the aura).
     pub status: u16,
     pub model: Option<ModelId>,
     /// Distance from the camera: nearest wearers load first.
     pub distance: f32,
+    /// Just hit: 1 running down to 0, drawn as a flash of light on the body (LOOK.md 13).
+    pub lit: f32,
     /// The prop it holds (LOOK.md 6), as a slot of the character renderer, when the
     /// bundle has it on the GPU.
     pub prop: Option<usize>,
@@ -262,6 +261,10 @@ impl Avatars {
         } else if has(Status::Haste) {
             tint = tint.map(|c| c * 1.35);
         }
+        // A hit lights the body for a moment.
+        if body.lit > 0.0 {
+            tint = tint.map(|c| c + (2.2 - c) * body.lit.min(1.0));
+        }
         let hips_z = characters.info(slot).map_or(29.0, |i| i.hips_z());
         let track = self.tracks.entry(body.key).or_insert_with(|| Track {
             animator: Animator::new(body.anim),
@@ -308,9 +311,9 @@ impl Avatars {
             light,
             attach: None,
         });
-        if body.anim != anim::DEAD {
-            markers(body, feet, boxes);
-        }
+        // The marks round a body (its aspects' ring, its name) are the frame's: the
+        // effects and the HUD draw them (LOOK.md 13); nothing solid stands for them.
+        let _ = (feet, boxes);
     }
 
     /// The view model (LOOK.md 6.4): the held prop drawn in view space, at the bottom
@@ -325,6 +328,7 @@ impl Avatars {
         pitch: f32,
         stride: f32,
         kick: f32,
+        swing: f32,
         light: [f32; 3],
     ) {
         let (sy, cy) = yaw.to_radians().sin_cos();
@@ -339,7 +343,14 @@ impl Avatars {
             0.0,
             (stride * 2.0 * std::f32::consts::TAU).sin() * 0.4,
         );
-        let at = eye + forward * (14.0 - kick * 3.0) + right * (7.0 + bob.x) + up * (-6.0 + bob.z);
+        // A swing carries it across the view (LOOK.md 13): drawn back to the right in the
+        // windup (`swing` under 0), cut across to the left (over 0).
+        // (Twice as far out as the hand is, so that it takes a corner of the view and
+        // not half of it: a view model is seen, the fight is looked at.)
+        let at = eye
+            + forward * (26.0 - kick * 4.0 + swing.max(0.0) * 4.0)
+            + right * (11.0 + bob.x - swing * 14.0)
+            + up * (-10.0 + bob.z + swing.abs() * 2.0);
         // The prop's +X along the look (its +Y to the left, +Z up), then, in its own
         // frame, tipped up by the kick and turned a little inward.
         let basis = Mat4::from_cols(
@@ -349,7 +360,8 @@ impl Avatars {
             at.extend(1.0),
         );
         let tip = Mat4::from_rotation_y((-(4.0 + kick * 14.0f32)).to_radians());
-        let inward = Mat4::from_rotation_z(8.0f32.to_radians());
+        let inward = Mat4::from_rotation_z((8.0f32 + swing * 62.0).to_radians())
+            * Mat4::from_rotation_x((swing * -35.0f32).to_radians());
         self.draws.push(CharacterDraw {
             slot,
             world: Mat4::IDENTITY,
@@ -412,11 +424,10 @@ impl Avatars {
                 frame,
                 armour,
                 aspects: 1 << (i % 5),
-                team: 1 + (i % 2) as u8,
-                friendly: i % 2 == 0,
                 status: 0,
                 model,
                 distance: (origin - camera).length(),
+                lit: 0.0,
                 prop: self.crowd_prop,
             };
             self.push(&body, dt, bsp, characters, boxes);
@@ -465,39 +476,6 @@ impl Avatars {
 
     pub fn crowd_len(&self) -> usize {
         self.crowd.len()
-    }
-}
-
-/// The marks the client draws around every body whatever it wears (MODELS.md 9): the aspect
-/// ring at the feet and the team pip above the head.
-fn markers(body: &Body, feet: Vec3, boxes: &mut Vec<EntityDraw>) {
-    let aspects: Vec<usize> = (0..5).filter(|i| body.aspects & (1 << i) != 0).collect();
-    let r = 9.0;
-    for (k, a) in aspects.iter().take(2).enumerate() {
-        let c = ASPECT_COLOURS[*a];
-        // One aspect: the whole plate; two: a half each.
-        let (x0, x1) = match (aspects.len().min(2), k) {
-            (1, _) => (-r, r),
-            (_, 0) => (-r, 0.0),
-            _ => (0.0, r),
-        };
-        boxes.push(EntityDraw {
-            mins: feet + Vec3::new(x0, -r, 0.2),
-            maxs: feet + Vec3::new(x1, r, 0.9),
-            color: [c[0] * 0.8, c[1] * 0.8, c[2] * 0.8, 1.0],
-        });
-    }
-    if body.team != 0 {
-        let top = feet + Vec3::Z * 66.0;
-        boxes.push(EntityDraw {
-            mins: top - Vec3::splat(2.5),
-            maxs: top + Vec3::splat(2.5),
-            color: if body.friendly {
-                [0.25, 0.45, 1.0, 1.0]
-            } else {
-                [1.0, 0.3, 0.2, 1.0]
-            },
-        });
     }
 }
 
@@ -556,11 +534,10 @@ pub fn stall_keeper(stall: &gm_net::control::StallEntry, camera: Vec3) -> Body {
         frame: stall.frame,
         armour: stall.armour,
         aspects: 0,
-        team: 0,
-        friendly: true,
         status: 0,
         model: stall.model,
         distance: (origin - camera).length(),
+        lit: 0.0,
         prop: None,
     }
 }

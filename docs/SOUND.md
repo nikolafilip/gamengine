@@ -162,7 +162,7 @@ Offline (`--offline`), the own body's steps and landings come from the local mov
 
 The listener is **the own body** (its eye) **facing the camera's way** (`Listener`):
 distances are the body's, as the player hears them whatever the view; left and right are
-the screen's, in the third-person and tactical views as in the first. A cue at a place
+the screen's, in the third-person view as in the first. A cue at a place
 has
 
 - a **gain** by distance: `1 / (1 + d / 256)` for `d` in units, nothing beyond **2,048**

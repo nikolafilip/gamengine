@@ -10,10 +10,13 @@ mod app;
 mod avatars;
 mod bag;
 mod cache;
+mod character;
 mod characters;
 mod content;
 mod font;
 mod front;
+mod fx;
+mod gm;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
 mod hub;
@@ -28,7 +31,6 @@ mod script;
 mod settings;
 mod sound;
 mod stats;
-mod tactical;
 mod ui;
 #[cfg(target_arch = "wasm32")]
 mod web;
@@ -90,8 +92,6 @@ pub struct Options {
     pub vram_mb: u64,
     /// Offline: stand here instead of at the map's start: `(x, y, z, yaw)`.
     pub start: Option<[f32; 4]>,
-    /// Start in the tactical viewport (COMPANIONS.md 6); Tab toggles it.
-    pub tactical: bool,
     /// A scripted player instead of the keyboard (acceptance runs, WEB.md 8): `fight` walks
     /// at the nearest enemy and attacks.
     pub script: Option<String>,
@@ -122,7 +122,7 @@ pub struct Options {
 }
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
-[--third-person] [--tactical] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
+[--third-person] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
 [--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--prop KEY] [--crowd N [--crowd-dir DIR]] \
 [--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW] [--script fight|walk] [--report] [--travel-to ZONE [--travel-after SECS]] \
 [--sound-dump FILE.wav]\n\
@@ -168,7 +168,6 @@ impl Default for Options {
             cache_mb: 2048,
             vram_mb: 256,
             start: None,
-            tactical: false,
             script: None,
             report: false,
             replay: None,
@@ -212,7 +211,6 @@ fn parse_args() -> Result<Options, String> {
                     .map_err(|e| format!("--team: {e}"))?
             }
             "--third-person" => o.third_person = true,
-            "--tactical" => o.tactical = true,
             "--hub" => o.hub = Some(value("--hub")?.parse().map_err(|e| format!("--hub: {e}"))?),
             "--hub-cert" => o.hub_cert = PathBuf::from(value("--hub-cert")?),
             "--user" => o.user = value("--user")?,

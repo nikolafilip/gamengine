@@ -237,26 +237,14 @@ them into ordinary inputs. Nothing here can name a human's body as a recipient.
 
 ## 6. The tactical viewport (client)
 
-- Entered with `Tab` (toggle; `--tactical` starts in it); while in it every input frame
-  carries the `command` bit, no movement and no actions. Leaving it releases the bit; the
-  body stands up 400 ms later.
-- Camera: 760 u from the point it looks at, pitched 60° down, panned with the movement keys
-  within 1,536 u of the body, zoomed with the wheel (420–1,100 u), turned with Q/E. Ceilings
-  and near walls cut away by back-face culling: from above a room is a doll's house.
-- The world is drawn from the leaves the squad stands in (the commander's and each living
-  companion's), not from the camera's, which hangs in the rock above the ceiling. Where no
-  squad member can see, the screen is dark; an order can still be sent there.
-- Mouse: free cursor. Left click selects a companion (on its body or with keys 1–5; `` ` ``
-  selects all). Right click on the ground orders `MoveTo`, on a body orders `Attack`; `F`
-  orders `Follow`, `H` orders `Hold`.
-- Drawn: everything the snapshot holds (which in the stance is squad sight), a plate under
-  each companion (bright when selected), a marker at each `MoveTo` point and under each
-  `Attack` target, health bars over the squad and over creatures; areas in orange when they
-  harm and green when they help.
-- The HUD (all viewports): own health, stamina and focus; the squad panel (slot, name, role,
-  order, health); the bar of the creature being fought (the one the squad is ordered onto,
-  or else the nearest that is hurt); encounter, loot, trial and refused-order messages. Its
-  font is drawn in the client, five by seven dots, capitals only.
+**Removed 2026-10-06** at the director's decision (PLAN.md 4.3 [REVERSED]): "tactical" in
+the pitch meant rock-paper-scissors combat, not a view from above. The client has no `Tab`
+view, no squad selection and sends no `FromClient::Order`; companions follow their commander
+and fight on their own (section 5, the `Follow` default). The command stance (button bit 11),
+squad sight and the `Order`/`OrderRefused` messages remain on the wire for a later
+point-and-order from the third person. The HUD keeps the squad panel (slot, name, role,
+order, health), the bar of the creature being fought (the nearest that is hurt), and the
+encounter, loot and trial messages.
 
 ## 7. Navigation
 
@@ -286,18 +274,26 @@ them into ordinary inputs. Nothing here can name a human's body as a recipient.
 [[creature]]
 key, name
 frame, armour, aspects, attributes      # as a build: the body is read by the same rules
-health                                   # overrides 80 + 3·CON; 1..=60,000
+health                                   # overrides 500 + 40·CON; 1..=60,000
 stagger_threshold                        # optional override
-primary, secondary, guard, actives       # abilities, slot-typed like a build's
-sight, leash                             # units
+might = 1.0                              # multiplies its blows and spells (MATRIX.md v2: 1 = a player's)
+primary, secondary, guard, actives       # abilities, slot-typed like a build's; a ranged
+                                         # primary may sit in the secondary slot (the bow beside the blade)
+sight, leash                             # units (a `still` one needs none)
 boss = true|false
+still = true|false                       # stands and does nothing: no mind (the training dummy)
+npc = true|false                         # nothing hurts it; `E` speaks to it (the trainer, MATRIX.md 9.1)
 respawn_s                                # 0 = never while the zone runs
 [creature.loot]                          # bosses only
 components, standard = [materials], top = [materials], coin
 ```
 
-A creature's sheet is a build without a budget: attributes may leave 5..=20, nothing is
+A creature's sheet is a build without a budget: attributes may leave 5..=25, nothing is
 priced, and it may slot abilities marked `creature = true`, which no player build can.
+(2026-10-06: players have seven times v1's health; the sentinel has 1,200 at a player's
+blows, the Warden 15,000 at twice them, and the heals scaled with the health (Mend 100/s,
+Sanctuary 60/s), so that a squad with a healer clears the tutorial in 175–200 s on the Warden
+without a death and one without a healer never does: `gm-ai/tests/{dungeon,skirmish}.rs`.)
 Everything else is the build rules (slot types, aspect gating, one ability per cooldown
 group). Its frame is one of the four: the hitbox table has no fifth row yet, so the Warden
 is a colossus among colossi and told apart by its name, its team pip and its health bar. (A

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use glam::Vec3;
 
-use crate::build::{Build, BuildError, ContentPack, Sheet};
+use crate::build::{Build, BuildError, ContentPack, Kit, Sheet};
 use crate::collide::{Aabb, BodyGrid, EntityWorld};
 use crate::geom::{Capsule, ray_capsule, sweep_sphere_capsule};
 use crate::matrix::{
@@ -66,6 +66,11 @@ pub struct Player {
     pub alive: bool,
     pub respawn_at: Tick,
     pub anim: u8,
+    /// The ability whose script the stance shows (`AbilityId`: the pack's index and one),
+    /// while the stance is a windup, a swing, a recovery or a cast; 0 otherwise. Everybody
+    /// who sees the body is told (PROTOCOL.md 5), so that a swing can be drawn where it
+    /// lands.
+    pub acting: u16,
     /// Clamped rewind target for melee (PROTOCOL.md 7.4).
     pub view_tick: Tick,
     /// `min(13, half_rtt_ticks + 8)`; the server sets it from the measured RTT.
@@ -109,6 +114,9 @@ pub struct Player {
     /// No timed respawn: the body stays down until [`Zone::revive`] (an encounter holds its
     /// dead, a creature belongs to its encounter).
     pub hold: bool,
+    /// Nothing hurts it (COMPANIONS.md 8.1 `npc`): a packet lands for nothing, not even
+    /// its triggers. The town's trainer.
+    pub unhurt: bool,
     /// A mind's frame for the next tick.
     next: Option<Input>,
 }
@@ -186,6 +194,10 @@ pub struct Projectile {
     pub bounces_left: u8,
     pub hit: Vec<EntityId>,
 }
+
+/// How long an instant area (one pulse, no duration) stays on the wire after its pulse,
+/// so that it is in a snapshot and the shockwave can be seen where it struck.
+pub const INSTANT_AREA_ECHO_MS: u32 = 100;
 
 /// A pulsing volume (VOCABULARY.md 5.3), server only.
 #[derive(Clone, Debug)]
@@ -432,6 +444,7 @@ impl Zone {
             alive: true,
             respawn_at: 0,
             anim: anim::IDLE,
+            acting: 0,
             view_tick: self.tick,
             view_claimed: self.tick,
             max_rewind: MAX_REWIND_TICKS,
@@ -453,6 +466,7 @@ impl Zone {
             gear: Gear::NONE,
             party: id,
             hold: false,
+            unhurt: false,
             next: None,
         };
         self.players.insert(id, p);
@@ -482,6 +496,13 @@ impl Zone {
 
     /// Hold a body's respawn (or release it): a held body stays down until [`Zone::revive`].
     /// Releasing a dead body lets the timed respawn run from now.
+    /// Whether anything hurts the body (the town's people: never).
+    pub fn set_unhurt(&mut self, id: EntityId, unhurt: bool) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.unhurt = unhurt;
+        }
+    }
+
     pub fn set_hold(&mut self, id: EntityId, hold: bool) {
         let now = self.tick;
         let respawn_ticks = self.respawn_ticks;
@@ -583,6 +604,16 @@ impl Zone {
         self.players.remove(&id)
     }
 
+    /// Content changed under a running zone (GM.md 3): every body's kit is compiled
+    /// against the new pack, in place. Builds, health, cooldowns and a script under way
+    /// are kept; a script reads the new numbers from its next step on.
+    pub fn retune(&mut self, pack: ContentPack) {
+        self.content = pack;
+        for p in self.players.values_mut() {
+            p.sheet.kit = Kit::from_build(&p.sheet.build, &self.content);
+        }
+    }
+
     /// Validate a new build and apply it at the player's next respawn (MATRIX.md 9).
     pub fn request_respec(&mut self, id: EntityId, build: Build) -> Result<(), BuildError> {
         build.validate(&self.content)?;
@@ -590,6 +621,39 @@ impl Zone {
             p.pending_build = Some(build);
         }
         Ok(())
+    }
+
+    /// A game master's respec (GM.md 2): the build now, where the body stands, with full
+    /// pools and nothing running. Told as a `Respawned` so the client's prediction and
+    /// everyone's picture of the body switch as they do at a respawn.
+    pub fn respec_now(&mut self, id: EntityId, build: Build) -> Result<(), BuildError> {
+        build.validate(&self.content)?;
+        let Some(p) = self.players.get(&id) else {
+            return Ok(());
+        };
+        let (origin, yaw) = (p.mover.mv.origin, p.mover.yaw);
+        self.request_respec(id, build)?;
+        self.revive(id, origin, yaw, true);
+        self.events.push(ZoneEvent::Respawned(id));
+        Ok(())
+    }
+
+    /// A game master's healing (GM.md 2): full health, stamina and focus, every cooldown
+    /// ready, every status gone; where the body stands. Nothing for a dead body: that is
+    /// what a respawn is for.
+    pub fn make_whole(&mut self, id: EntityId) {
+        let Some(p) = self.players.get_mut(&id) else {
+            return;
+        };
+        if !p.alive {
+            return;
+        }
+        p.health = p.sheet.derived.health;
+        p.mover.stamina = p.sheet.derived.stamina;
+        p.mover.focus = p.sheet.derived.focus;
+        p.mover.cooldowns = [p.last_input_tick; crate::sim::MAX_ABILITIES];
+        p.mover.statuses = Default::default();
+        p.stagger = 0.0;
     }
 
     /// Queue a frame for execution (PROTOCOL.md 4). `view_tick` 0 means "no rewind". Frames
@@ -826,6 +890,7 @@ impl Zone {
         }
         for p in self.players.values_mut() {
             p.anim = compute_anim(p);
+            p.acting = compute_acting(p);
         }
     }
 
@@ -1248,15 +1313,23 @@ impl Zone {
 
     fn pulse_areas(&mut self, world: &dyn CollisionWorld) {
         let now = self.tick;
+        let echo = self.rate.ms_to_ticks(INSTANT_AREA_ECHO_MS);
         let mut areas = std::mem::take(&mut self.areas);
         let mut keep = Vec::with_capacity(areas.len());
         for mut area in areas.drain(..) {
-            if tick_delta(now, area.next_pulse) >= 0 {
+            let instant = area.def.duration == 0;
+            // An instant area pulses once; it then stays, spent, for its echo (PROTOCOL.md
+            // 5): spawned, pulsed and gone within one tick it would be in no snapshot, and
+            // a shockwave nobody sees cannot be read. `ends` is then when the echo ends.
+            if tick_delta(now, area.next_pulse) >= 0 && !(instant && area.pulses > 0) {
                 self.pulse_area(world, &area);
                 area.pulses += 1;
                 area.next_pulse = area.next_pulse.wrapping_add(area.def.interval.max(1));
+                if instant {
+                    area.ends = now.wrapping_add(echo);
+                }
             }
-            let done = area.def.duration == 0 && area.pulses > 0
+            let done = instant && area.pulses > 0 && tick_delta(now, area.ends) >= 0
                 || area.def.duration > 0 && tick_delta(area.next_pulse, area.ends) > 0;
             if done {
                 self.events.push(ZoneEvent::AreaRemoved(area.id));
@@ -1454,7 +1527,7 @@ impl Zone {
         let Some(t) = self.players.get_mut(&target) else {
             return false;
         };
-        if !t.alive {
+        if !t.alive || t.unhurt {
             return false;
         }
         let frame_now = t.last_input_tick;
@@ -1810,6 +1883,40 @@ fn shape_overlap(shape: &Shape, origin: Vec3, dir: Vec3, cap: &Capsule) -> Optio
     }
 }
 
+/// The stance of a body `elapsed` ticks into the script of `ability`: a swing's windup,
+/// its active ticks and its recovery, or a cast. The zone says it of every body; a client
+/// says it of its own from its prediction, a round trip sooner (LOOK.md 13).
+pub fn script_anim(ability: &crate::vocab::Ability, elapsed: Tick) -> u8 {
+    if let Some(crate::vocab::Step {
+        verb: Verb::MeleeArc(arc),
+        at,
+    }) = ability.steps.first()
+    {
+        let windup_end = at + arc.timing.windup;
+        let active_end = windup_end + arc.timing.active;
+        return if elapsed < windup_end {
+            anim::WINDUP
+        } else if elapsed < active_end {
+            anim::SWING
+        } else {
+            anim::RECOVER
+        };
+    }
+    anim::CAST
+}
+
+/// The ability a stance belongs to (`Player::acting`): the running script's, while the
+/// stance is the script's own.
+fn compute_acting(p: &Player) -> u16 {
+    if !anim::acts(p.anim) {
+        return 0;
+    }
+    p.mover
+        .script
+        .and_then(|s| p.sheet.kit.abilities.get(s.ability as usize))
+        .map_or(0, |a| a.id.0)
+}
+
 fn compute_anim(p: &Player) -> u8 {
     if !p.alive {
         return anim::DEAD;
@@ -1832,22 +1939,7 @@ fn compute_anim(p: &Player) -> u8 {
         let ab = &p.sheet.kit.abilities[s.ability as usize];
         // Script times live in the client's tick space; the last executed frame is "now".
         let elapsed = tick_delta(p.last_input_tick, s.started).max(0) as Tick;
-        if let Some(crate::vocab::Step {
-            verb: Verb::MeleeArc(arc),
-            at,
-        }) = ab.steps.first()
-        {
-            let windup_end = at + arc.timing.windup;
-            let active_end = windup_end + arc.timing.active;
-            return if elapsed < windup_end {
-                anim::WINDUP
-            } else if elapsed < active_end {
-                anim::SWING
-            } else {
-                anim::RECOVER
-            };
-        }
-        return anim::CAST;
+        return script_anim(ab, elapsed);
     }
     if !p.mover.mv.on_ground {
         anim::AIR

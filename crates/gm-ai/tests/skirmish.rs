@@ -86,10 +86,15 @@ fn the_reference_squad_kills_the_warden_on_open_ground() {
 
 #[test]
 fn other_squads_and_other_leaders() {
-    // A leader who fights beside the squad, and a squad around an infiltrator: both clear.
+    // A leader who fights beside the squad, and an infiltrator leading the reference
+    // squad: both clear. (Until MATRIX.md v2 the second was a squad of shades around one:
+    // the shade's shadow dart was its 2× into the Warden's stone; with a dagger and a
+    // knife, slash into plate at the Warden's armour is a quarter of a blow and two
+    // shades beside the tank and the healer take 330–480 s, and the Warden at twice a
+    // player's blows kills them first in two seeds of three. That is the matrix.)
     for (label, squad, commander, fights) in [
         ("fighting leader", REFERENCE, "blade", true),
-        ("shades", ["ironclad", "mender", "shade"], "shade", false),
+        ("shade leader", REFERENCE, "shade", false),
     ] {
         let mut kills = 0;
         for seed in 1..=3 {

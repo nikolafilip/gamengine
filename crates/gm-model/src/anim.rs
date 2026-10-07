@@ -10,6 +10,21 @@ use crate::rig::bone::*;
 
 /// Cross-fade between two states.
 pub const FADE_SECS: f32 = 0.12;
+
+/// How long a body takes to reach the pose of the state it enters. A blow is quick: a
+/// sword's windup is 90 ms and its active window 45, and at the common 120 ms the arm
+/// never reached either pose ("using a skill just moves the arm a bit", LOOK.md 13). The
+/// weapon is drawn back within the shortest windup, comes across in three frames, and
+/// the follow-through is let go slowly.
+pub fn fade_secs(state: u8) -> f32 {
+    match state {
+        anim::WINDUP => 0.07,
+        anim::SWING => 0.05,
+        anim::RECOVER => 0.16,
+        anim::PARRY | anim::STAGGER => 0.06,
+        _ => FADE_SECS,
+    }
+}
 /// Distance covered by one full run cycle (two steps).
 pub const RUN_CYCLE_UNITS: f32 = 160.0;
 /// The speed at which the run cycle is at full amplitude.
@@ -125,18 +140,26 @@ pub fn pose(i: &AnimInput) -> Pose {
         }
         anim::WINDUP => {
             arms(&mut p, 78.0, 0.0, 0.0, 25.0, 0.0);
-            // The weapon arm goes up and back, the body coils to the right.
-            p.rot[UPPER_ARM_R] = rz(-35.0) * rx(-55.0);
-            p.rot[FOREARM_R] = rz(70.0);
-            torso(&mut p, -4.0, -28.0);
+            // The weapon arm is cocked: the elbow drawn back, the hand beside the right
+            // shoulder, the fist turned so the blade stands up and back over it; the body
+            // coils to the right.
+            p.rot[UPPER_ARM_R] = rz(-40.0) * rx(20.0);
+            p.rot[FOREARM_R] = rz(80.0);
+            p.rot[HAND_R] = ry(-105.0);
+            torso(&mut p, -4.0, -34.0);
             legs(&mut p, -14.0, 14.0, 12.0, 10.0);
         }
         anim::SWING => {
             arms(&mut p, 78.0, 15.0, 0.0, 30.0, 0.0);
-            // The arm cuts across to the front left, the body uncoils.
-            p.rot[UPPER_ARM_R] = rz(65.0) * rx(20.0);
-            p.rot[FOREARM_R] = rz(12.0);
-            torso(&mut p, 12.0, 32.0);
+            // The arm cuts across to the front left at chest height, nearly straight; the
+            // wrist is bent outward so the blade carries on ahead of the hand (a fist's
+            // blade stands across the forearm, and an arm swung forward would otherwise
+            // hold it across the body, pointing left: "the hand turned inward"), dipping
+            // a little at the end of the cut; the body uncoils and leans into it.
+            p.rot[UPPER_ARM_R] = rz(60.0) * rx(8.0);
+            p.rot[FOREARM_R] = rz(15.0);
+            p.rot[HAND_R] = ry(8.0) * rz(-55.0);
+            torso(&mut p, 16.0, 38.0);
             legs(&mut p, -24.0, 22.0, 16.0, 6.0);
         }
         anim::RECOVER => {
@@ -228,6 +251,8 @@ pub struct Animator {
     cycle: f32,
     from: Pose,
     fade: f32,
+    /// Seconds the fade into the present state takes (`fade_secs`).
+    fade_over: f32,
     current: Pose,
 }
 
@@ -246,6 +271,7 @@ impl Animator {
             from: Pose::REST,
             // No fade on first sight: an entity appears in its pose.
             fade: 1.0,
+            fade_over: fade_secs(state),
             current: Pose::REST,
         }
     }
@@ -268,6 +294,7 @@ impl Animator {
         if state != self.state {
             self.from = self.current;
             self.fade = 0.0;
+            self.fade_over = fade_secs(state);
             self.t = 0.0;
             self.state = state;
         }
@@ -276,7 +303,7 @@ impl Animator {
         self.t += dt;
         self.cycle = (self.cycle + distance / cycle_units(weight) * std::f32::consts::TAU)
             .rem_euclid(std::f32::consts::TAU);
-        self.fade = (self.fade + dt / FADE_SECS).min(1.0);
+        self.fade = (self.fade + dt / self.fade_over).min(1.0);
         let target = pose(&AnimInput {
             state,
             t: self.t,

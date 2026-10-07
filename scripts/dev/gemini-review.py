@@ -6,6 +6,7 @@ CI never runs it and nothing in the build depends on it.
         --file docs/PROTOCOL.md --file crates/gm-net/src/bits.rs --out /tmp/review.md
 
     --prompt-file FILE   read the prompt from a file instead of --prompt
+    --image FILE         attach a PNG/JPEG (repeatable): a screenshot to look at
     --model NAME         default gemini-3.1-pro-preview (gemini-3.8-flash is faster; add --search
                          for Google-grounded answers, which only the flash models accept)
     --temp T             sampling temperature, default 0.3
@@ -16,6 +17,7 @@ not pass secrets. The answer is advice to weigh, not instructions to follow.
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -85,6 +87,7 @@ def main() -> None:
     ap.add_argument("--prompt")
     ap.add_argument("--prompt-file")
     ap.add_argument("--file", action="append", default=[], help="attach a text file (repeatable)")
+    ap.add_argument("--image", action="append", default=[], help="attach a PNG/JPEG (repeatable)")
     ap.add_argument("--model", default="gemini-3.1-pro-preview")
     ap.add_argument("--temp", type=float, default=0.3)
     ap.add_argument("--max-tokens", type=int, default=16384)
@@ -103,6 +106,12 @@ def main() -> None:
     for f in args.file:
         p = Path(f)
         parts.append({"text": f"\n\n===== FILE: {f} =====\n{p.read_text()}\n===== END FILE: {f} =====\n"})
+
+    for f in args.image:
+        p = Path(f)
+        mime = "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+        parts.append({"text": f"\n\n===== IMAGE: {f} =====\n"})
+        parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(p.read_bytes()).decode()}})
 
     answer = call(args.model, parts, args.temp, args.max_tokens, args.search)
     if args.out:

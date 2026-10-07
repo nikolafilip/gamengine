@@ -1,6 +1,8 @@
 # gamengine v1 abilities (MATRIX.md 10). Authored in milliseconds and names; gm-content compiles
 # this against the zone tick rate and validates it against VOCABULARY.md 11 and MATRIX.md.
-# Price bands: primaries 0-2, secondaries 3-5, guards 4-6, actives 6-12.
+# Price bands (MATRIX.md 10, v2): primaries 0-2 (a melee weapon or the ranged one: the range is
+# the weapon's, 2026-10-06), secondaries 2-4 (short utilities: a kick, a bash, a knife of 300 u,
+# a mend), guards 4-6, actives 6-12. The kit's budget is 40; attributes are not in it.
 # Damage types: slash pierce blunt (physical) | flame shadow storm frost stone (elements).
 # An ability with an `aspect` needs that aspect in the build; its elemental packets are that element.
 
@@ -12,12 +14,12 @@ name = "Sword"
 slot = "primary"
 cost = 2
 prop = "sword"
-cooldown_ms = 300
+cooldown_ms = 600
 move_scale = 0.6
 interrupt = "on_stagger"
 [[ability.step]]
 at_ms = 0
-melee_arc = { reach = 72, arc = 90, half_height = 40, windup_ms = 90, active_ms = 45, recovery_ms = 160, damage = { amount = 35, type = "slash", knockback = 150, stagger = 20 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30 }
+melee_arc = { reach = 72, arc = 90, half_height = 40, windup_ms = 150, active_ms = 60, recovery_ms = 300, damage = { amount = 60, type = "slash", knockback = 150, stagger = 20 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30 }
 
 [[ability]]
 key = "hammer"
@@ -25,12 +27,12 @@ name = "Hammer"
 slot = "primary"
 cost = 2
 prop = "hammer"
-cooldown_ms = 600
+cooldown_ms = 1000
 move_scale = 0.5
 interrupt = "on_stagger"
 [[ability.step]]
 at_ms = 0
-melee_arc = { reach = 76, arc = 80, half_height = 40, windup_ms = 200, active_ms = 60, recovery_ms = 340, damage = { amount = 50, type = "blunt", bypass = ["magic_shield"], knockback = 220, stagger = 35 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30 }
+melee_arc = { reach = 76, arc = 80, half_height = 40, windup_ms = 300, active_ms = 80, recovery_ms = 500, damage = { amount = 90, type = "blunt", bypass = ["magic_shield"], knockback = 220, stagger = 35 }, max_targets = 3, cleave_falloff = 0.7, parryable = true, hit_stop_ms = 30 }
 
 [[ability]]
 key = "staff"
@@ -38,12 +40,12 @@ name = "Staff"
 slot = "primary"
 cost = 0
 prop = "staff"
-cooldown_ms = 350
+cooldown_ms = 600
 move_scale = 0.7
 interrupt = "on_stagger"
 [[ability.step]]
 at_ms = 0
-melee_arc = { reach = 64, arc = 70, half_height = 40, windup_ms = 100, active_ms = 45, recovery_ms = 200, damage = { amount = 25, type = "blunt", knockback = 120, stagger = 15 }, max_targets = 2, cleave_falloff = 0.6, parryable = true, hit_stop_ms = 30 }
+melee_arc = { reach = 64, arc = 70, half_height = 40, windup_ms = 150, active_ms = 60, recovery_ms = 300, damage = { amount = 40, type = "blunt", knockback = 120, stagger = 15 }, max_targets = 2, cleave_falloff = 0.6, parryable = true, hit_stop_ms = 30 }
 
 [[ability]]
 key = "dagger"
@@ -51,35 +53,36 @@ name = "Dagger"
 slot = "primary"
 cost = 0
 prop = "dagger"
-cooldown_ms = 200
+cooldown_ms = 400
 move_scale = 0.8
 interrupt = "on_stagger"
 [[ability.step]]
 at_ms = 0
-melee_arc = { reach = 56, arc = 70, half_height = 40, windup_ms = 60, active_ms = 30, recovery_ms = 90, damage = { amount = 22, type = "slash", knockback = 60, stagger = 10 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30 }
+melee_arc = { reach = 56, arc = 70, half_height = 40, windup_ms = 100, active_ms = 40, recovery_ms = 200, damage = { amount = 35, type = "slash", knockback = 60, stagger = 10 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30 }
 
-# ---------- secondaries ----------
+# ---------- ranged primaries (secondaries until 2026-10-06: the range is the weapon's) ----------
 
 [[ability]]
 key = "crossbow"
 name = "Crossbow"
-slot = "secondary"
-cost = 4
+slot = "primary"
+cost = 2
 prop = "crossbow"
-cooldown_ms = 1500
+cooldown_ms = 1800
 move_scale = 0.7
 interrupt = "never"
 [[ability.step]]
 at_ms = 125
-projectile = { speed = 1800, gravity = 0.3, radius = 2, lifetime_ms = 3000, damage = { amount = 40, type = "pierce", knockback = 100, stagger = 10 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3, count = 1 }
+projectile = { speed = 1800, gravity = 0.3, radius = 2, lifetime_ms = 3000, damage = { amount = 80, type = "pierce", knockback = 100, stagger = 10 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3, count = 1 }
 
 [[ability]]
 key = "firebolt"
 name = "Firebolt"
-slot = "secondary"
-cost = 4
+slot = "primary"
+cost = 2
+prop = "staff"
 aspect = "flame"
-cooldown_ms = 1500
+cooldown_ms = 1200
 focus = 10
 move_scale = 0.7
 interrupt = "on_damage"
@@ -90,18 +93,19 @@ speed = 1400
 gravity = 0.1
 radius = 4
 lifetime_ms = 3000
-damage = { amount = 35, type = "flame", knockback = 60, stagger = 10 }
+damage = { amount = 55, type = "flame", knockback = 60, stagger = 10 }
 spawn = { weapon = [16, 4, -2] }
 spread = 0.3
-on_hit = [ { status = { status = "burn", duration_ms = 3000, magnitude = 8, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
+on_hit = [ { status = { status = "burn", duration_ms = 3000, magnitude = 12, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
 
 [[ability]]
 key = "ice_shard"
 name = "Ice shard"
-slot = "secondary"
-cost = 4
+slot = "primary"
+cost = 2
+prop = "staff"
 aspect = "frost"
-cooldown_ms = 900
+cooldown_ms = 1000
 focus = 8
 move_scale = 0.7
 interrupt = "on_damage"
@@ -112,7 +116,7 @@ speed = 1500
 gravity = 0.15
 radius = 4
 lifetime_ms = 3000
-damage = { amount = 40, type = "frost", knockback = 60, stagger = 10 }
+damage = { amount = 50, type = "frost", knockback = 60, stagger = 10 }
 spawn = { weapon = [16, 4, -2] }
 spread = 0.3
 on_hit = [ { status = { status = "chill", duration_ms = 3000, magnitude = 0, max_stacks = 3, stacking = "extend", target = "hit" } } ]
@@ -120,36 +124,39 @@ on_hit = [ { status = { status = "chill", duration_ms = 3000, magnitude = 0, max
 [[ability]]
 key = "stone_throw"
 name = "Stone throw"
-slot = "secondary"
-cost = 4
+slot = "primary"
+cost = 2
+prop = "staff"
 aspect = "stone"
-cooldown_ms = 1600
+cooldown_ms = 1800
 focus = 8
 move_scale = 0.6
 interrupt = "on_damage"
 [[ability.step]]
 at_ms = 250
-projectile = { speed = 1100, gravity = 0.6, radius = 6, lifetime_ms = 3000, damage = { amount = 45, type = "stone", knockback = 250, stagger = 30 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
+projectile = { speed = 1100, gravity = 0.6, radius = 6, lifetime_ms = 3000, damage = { amount = 75, type = "stone", knockback = 250, stagger = 30 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
 
 [[ability]]
 key = "shadow_dart"
 name = "Shadow dart"
-slot = "secondary"
-cost = 3
+slot = "primary"
+cost = 2
+prop = "staff"
 aspect = "shadow"
-cooldown_ms = 700
+cooldown_ms = 800
 focus = 6
 move_scale = 0.8
 interrupt = "never"
 [[ability.step]]
 at_ms = 100
-projectile = { speed = 2000, gravity = 0.05, radius = 2, lifetime_ms = 3000, damage = { amount = 30, type = "shadow", bypass = ["evasion"], knockback = 40, stagger = 5 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
+projectile = { speed = 2000, gravity = 0.05, radius = 2, lifetime_ms = 3000, damage = { amount = 40, type = "shadow", bypass = ["evasion"], knockback = 40, stagger = 5 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
 
 [[ability]]
 key = "spark"
 name = "Spark"
-slot = "secondary"
-cost = 4
+slot = "primary"
+cost = 2
+prop = "staff"
 aspect = "storm"
 cooldown_ms = 1200
 focus = 10
@@ -162,7 +169,7 @@ speed = 2400
 gravity = 0
 radius = 3
 lifetime_ms = 3000
-damage = { amount = 32, type = "storm", knockback = 40, stagger = 10 }
+damage = { amount = 50, type = "storm", knockback = 40, stagger = 10 }
 spawn = { weapon = [16, 4, -2] }
 spread = 0.3
 on_hit = [ { status = { status = "shock", duration_ms = 16, magnitude = 1, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
@@ -436,7 +443,7 @@ lifetime_ms = 3000
 damage = { amount = 0, type = "blunt" }
 spawn = { weapon = [16, 4, -2] }
 spread = 0.3
-on_hit = [ { status = { status = "regen", duration_ms = 3000, magnitude = 20, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
+on_hit = [ { status = { status = "regen", duration_ms = 3000, magnitude = 100, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
 
 [[ability]]
 key = "sanctuary"
@@ -454,7 +461,7 @@ shape = { cylinder = { radius = 140, height = 96 } }
 origin = { aim = 500 }
 duration_ms = 6000
 interval_ms = 1000
-effects = [ { status = "regen", duration_ms = 1500, magnitude = 12, max_stacks = 1, stacking = "refresh", target = "area" } ]
+effects = [ { status = "regen", duration_ms = 1500, magnitude = 60, max_stacks = 1, stacking = "refresh", target = "area" } ]
 falloff = "none"
 max_targets = 8
 requires_los = false
@@ -522,12 +529,52 @@ exclude_actor = true
 [[ability]]
 key = "musket"
 name = "Musket"
-slot = "secondary"
-cost = 4
-cooldown_ms = 2500
+slot = "primary"
+cost = 2
+cooldown_ms = 3000
 move_scale = 0.5
 interrupt = "never"
 prop = "musket"
 [[ability.step]]
 at_ms = 150
-projectile = { speed = 2600, gravity = 0.15, radius = 2, lifetime_ms = 2500, damage = { amount = 55, type = "pierce", knockback = 160, stagger = 15 }, spawn = { weapon = [20, 4, -2] }, spread = 0.2, count = 1 }
+projectile = { speed = 2600, gravity = 0.15, radius = 2, lifetime_ms = 2500, damage = { amount = 110, type = "pierce", knockback = 160, stagger = 15 }, spawn = { weapon = [20, 4, -2] }, spread = 0.2, count = 1 }
+
+# ---------- the secondaries (2026-10-06): short utilities, no bolt for everybody ----------
+# The range is the weapon's: a melee primary has nothing that reaches past a knife's 300 u.
+
+[[ability]]
+key = "kick"
+name = "Kick"
+slot = "secondary"
+cost = 2
+cooldown_ms = 1500
+move_scale = 0.6
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 64, arc = 60, half_height = 40, windup_ms = 120, active_ms = 50, recovery_ms = 250, damage = { amount = 25, type = "blunt", knockback = 320, stagger = 40 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30 }
+
+[[ability]]
+key = "shield_bash"
+name = "Shield bash"
+slot = "secondary"
+cost = 2
+cooldown_ms = 4000
+move_scale = 0.5
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 60, arc = 60, half_height = 40, windup_ms = 150, active_ms = 50, recovery_ms = 300, damage = { amount = 35, type = "blunt", knockback = 200, stagger = 70 }, max_targets = 1, cleave_falloff = 1.0, parryable = false, hit_stop_ms = 30 }
+
+[[ability]]
+key = "throwing_knife"
+name = "Throwing knife"
+slot = "secondary"
+cost = 3
+cooldown_ms = 2000
+move_scale = 0.8
+interrupt = "never"
+[[ability.step]]
+at_ms = 100
+# 1200 u/s for 250 ms: 300 units and gone.
+projectile = { speed = 1200, gravity = 0.2, radius = 2, lifetime_ms = 250, damage = { amount = 40, type = "pierce", knockback = 60, stagger = 10 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3, count = 1 }

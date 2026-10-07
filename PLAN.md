@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-10-03 (Phases 0–14 implemented; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-10-06 (Phases 0–14 and the GM hand implemented, the character's build of 2026-10-06; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -189,11 +189,19 @@ draws at the feet (MODELS.md 9).
 Fixed pool split across base attributes (STR, AGI, CON, INT, SPR), archetype modifiers (mass, armor
 class, mobility), and kit (counters, multipliers, skill slots). Reallocatable. Visual is decoupled from function.
 
+**[CORRECTED 2026-10-06]** Two pools, not one: the character's own **thirty attribute points**
+(Tales of Pirates / Ether Saga: "start with 30 points to distribute however we like"), and the kit's
+budget of 40. One pool had the presets spend 56–68 of 100 on attributes and a point buy nothing
+(MATRIX.md 13). Redone, free, at the **trainer** in the town; a **training dummy** stands on the green.
+
 ### 3.2 RPS rules
 Opportunity cost on everything. True bypasses (magic through armor, blunt through magic shields, tracking
 through evasion). Kits readable within ~3 s of contact through silhouette, stance, aura. Compressed stat
 bands. Type matrix with stacking multipliers, dual-type 4×. The matrix, the attribute set and the
-budget are `docs/MATRIX.md` (v1, Phase 3, proposed to the director in its section 12).
+budget are `docs/MATRIX.md` (v2 since 2026-10-06; v1 was Phase 3). **The range is the weapon's**
+(2026-10-06): a melee primary has no bolt, a ranged primary is the whole of a build's damage at range;
+the secondary is a short utility. "Tactical" in the pitch meant this rock-paper-scissors, not a top view
+(4.3). Bands were widened the same day: health 700–1,500, a sword blow of 60 at 600 ms.
 
 ### 3.3 Onboarding
 Archetype first, math later. 3-minute tutorial proving the loop. Build & Model Browser with community presets.
@@ -219,6 +227,16 @@ Areas and dungeons unlock by clearing the previous area or passing solo/bot-assi
 Imbalance is the point. Every unfair mechanic has a radical counterplay. Terrain decides. Corner-peeking
 **stays** as the third-person advantage; the server only hides what is behind solid geometry (PVS).
 
+**[CORRECTED 2026-10-07]** Not viewports: **three modes, each a game, chosen by the character**
+(`docs/MODES.md`). The director: "The Action type (GTA style) / FPS / 3rd person RPG should be 3
+different modes that are not interchangeable during play, it should be pre selected by
+character." **Gun** is first person with Counter-Strike 1.6's mechanics (magazine, reload, recoil,
+a cone that opens, headshots). **Action** is MapleStory 2 and Blade & Soul: free aim behind the
+shoulder, chains, cancels, a dodge that cannot be hit, knockdowns, ganks under diminishing
+returns. **RPG** is Ether Saga and Tales of Pirates: mouse driven, a target, actions that walk the
+body into range and land. The mode is in the build; `V` and the `third_person` setting go. The
+table above stays as the rock-paper-scissors between them. Nothing built yet: Phase 15 (11.8).
+
 ### 4.2 Ranged weapons are projectiles, not hitscan [CORRECTED, DECIDED]
 Muskets, crossbows, bolts, spells all have travel time and drop. Reasons: fits the setting, removes the
 need for hitscan lag-compensation rewinds, and blunts aimbots because leading a moving target is the
@@ -230,6 +248,12 @@ guild vault; (3) officer tool at a war table/watchtower with the body exposed.
 *(Phase 7 built (1): any character commands 3 companions, a leadership ability in the build makes it
 5; orders are given from the command stance, in which the body does nothing else. (2) and (3) are
 not built. `docs/COMPANIONS.md` 3 and 5.)*
+
+**[REVERSED 2026-10-06]** The tactical top-down viewport was removed from the client at the
+director's decision: "tactical" in the pitch meant rock-paper-scissors combat, not a view from
+above, and the view was bloat. Companions follow and fight on their own; the command stance and
+the `Order` messages stay on the wire for a later point-and-order from the third person
+(`docs/COMPANIONS.md` 6).
 
 ### 4.4 Friendly fire and collision [DECIDED, scoped]
 Always on for AoE and projectiles. "Friendly" affects UI only, never damage. Team-kill stats feed reputation.
@@ -495,7 +519,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 4 | Hub: accounts, persistence, zones, handoff, 200-bot swarm | 200 bots on one zone under CPU budget; login → zone → handoff → logout round trip. **Done 2026-10-01** (11.10) |
 | 5 | Economy: stalls, escrow contracts, component drops with corrected split, crafting, decomposition, account storage caps, guild halls, tavern hires, ledger | every coin/item movement is a DB transaction; scam test suite passes (mutation lock, escrow, floors). **Done 2026-10-01** (11.10) |
 | 6 | Custom models: ingestion, hash cache, LRU, silhouette fallback, takedown flag, moderation queue | 100 unique uploaded avatars in a town at 60 fps on iGPU, no disk growth past cap. **Done 2026-10-01** (11.10) |
-| 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars. **Done 2026-10-01** (11.10) |
+| 7 | Tactical viewport + AI companions + role trials | solo player clears a tutorial dungeon with 3 hired avatars. **Done 2026-10-01** (11.10); the tactical viewport removed 2026-10-06 (4.3 [REVERSED]) |
 | 8 | WASM/WebGPU/WebTransport build | browser client joins the same zone as native clients. **Done 2026-10-02** (11.10) |
 | 9 | Anti-cheat statistics, replays, reputation | replay of any contested fight reviewable; aim-outlier report per account. **Done 2026-10-02** (11.10) |
 | 10 | The client's screens: login, characters, a new character from the archetypes, the game menu, chat, settings; UI scripts | a person with nothing but the program gets from a cold start into the town and on to another zone, on the desktop and in a browser, by clicking; no refusal ends the program. **Done 2026-10-02** (11.10) |
@@ -503,8 +527,9 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 12 | Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans; the tavern and a trade between two players as screens | two people clear the tutorial dungeon together and split what it drops, and one sells the other what it got. **Done 2026-10-02** (11.10) |
 | 13 | Sound: patches synthesized at start, cues inferred from the snapshots, a mixer of our own natively and the browser's nodes in the browser | steps, hits and the town are heard, inside the size budgets of both targets; proved by a run rendered to a file on a machine without a device. **Done 2026-10-03** (11.10) |
 | 14 | The look: the content standard and its tool (`docs/CONTENT.md`: every item, ability and creature a row with its model, picture and sound; `gm-tools content check/build/report/import`; a committed bundle); weapons as props drawn in hands (the first models from a CC0 pack, a musket beside the crossbow) and a first-person view model; the toolkit's skin, icons and real fonts; the inventory, storage, stall and trade as grids with tooltips and drag, an equip panel with a paperdoll; a HUD with a portrait, party frames and a hotbar showing cooldowns; silver and gold only (`docs/LOOK.md`) | a character seen by another holds the sword it wears; the inventory is a grid of pictures and a drag onto the weapon slot wears a sword; the hotbar shows each ability's state; `gm-tools content build` reproduces the committed bundle byte for byte; on the desktop and in a browser, inside the budgets of both (the browser's raised to 2 MiB by the director). **Done 2026-10-03** (11.10) |
-| 15 | *(proposed 2026-10-03; the director wants it)* The content editor: `gm-tools content edit`, native only, on the client's toolkit over the same TOML files (CONTENT.md 10): the tables as lists, a row as a form with the validation of `check` as it is typed, a model or a picture imported by path and fitted in the 3D view of `look`, links to abilities and materials picked from lists, saved back as text with the diff shown | an item is added, given a model and a picture, priced and made wearable without a text editor, and the result is a one-row diff in git that `check` accepts |
-| 16 | *(proposed 2026-10-03)* The body's look: official avatars per frame and armour class replacing the mannequin, creature models (the Warden, the sentinels), portraits baked from them, the armour overlay in `Look.worn`; sounds per ability as content (SOUND.md 9's open item); the first content pass (more weapons and materials with their pictures) | nobody in the town is a grey mannequin unless their model is refused; the Warden is a creature to look at; every ability of the content has its own picture and sound |
+| 15 | *(proposed 2026-10-07, the director's correction of 4.1)* The three modes (`docs/MODES.md`), in three parts played one after another: **action** (the mode in the build and fixed on the client, `V` gone; the magnet, chains, cancels, the dodge with its untouchable window, knockdown and launch under diminishing returns, the combo counter), **gun** (the firearm block: magazine, reload, cycle, recoil pattern and cone, the head band, three weapons in hand, the ammo HUD; a musketeer preset, a pistol), **rpg** (the target and its frame, target-actions that walk the body into range on the nav grid and aim by the zone, the repeating primary, the ground click, the orbit camera; `range` in content; the aim statistics skipping RPG bodies) | a sword chained three times into a knockdown and a roll through a firebolt; a spray controlled against its pattern and a crouched headshot at 1,500 u; a frostweaver that clicks a dummy, presses the shard, walks into range and lands it; the character's mode never changes in play |
+| 16 | *(proposed 2026-10-03, renumbered 2026-10-07; the director wants it)* The content editor: `gm-tools content edit`, native only, on the client's toolkit over the same TOML files (CONTENT.md 10): the tables as lists, a row as a form with the validation of `check` as it is typed, a model or a picture imported by path and fitted in the 3D view of `look`, links to abilities and materials picked from lists, saved back as text with the diff shown | an item is added, given a model and a picture, priced and made wearable without a text editor, and the result is a one-row diff in git that `check` accepts |
+| 17 | *(proposed 2026-10-03, renumbered 2026-10-07)* The body's look: official avatars per frame and armour class replacing the mannequin, creature models (the Warden, the sentinels), portraits baked from them, the armour overlay in `Look.worn`; sounds per ability as content (SOUND.md 9's open item); the first content pass (more weapons and materials with their pictures) | nobody in the town is a grey mannequin unless their model is refused; the Warden is a creature to look at; every ability of the content has its own picture and sound |
 | ∞ | Content, balance, ops, community | permanent |
 
 ### 11.9 First concrete step
@@ -1357,7 +1382,7 @@ the wire:
 **2026-10-03, Phase 14 done** (same machine; the director's decisions of the morning in CONTENT.md 11 and
 LOOK.md 9: finished CC0 models welcome, a look between Tales of Pirates and Ether Saga with Counter-Strike's
 standard for weapons, the browser's megabyte doubled, drag and keys both musts, top gear tens of gold; the
-GUI editor he wants is Phase 15):
+GUI editor he wants is Phase 16 since 2026-10-07):
 - **Copper is gone** (section 0 and 5.1 corrected): the ledger's integer is silver, 100 to a gold, every
   stored number kept its value, two coin fields; `MAX_PRICE` 10^10, the grant cap 500 silver; the
   purchasing-power scale in ECONOMY.md 12 is the director's (top gear 10–30 g, fully crafted 60–100 g).
@@ -1395,7 +1420,7 @@ GUI editor he wants is Phase 15):
   screen's plates; a view model pushed before the avatars' frame began was cleared; the browser's prop
   fetches landed in an inbox nobody polled; a grid picked listings by the item's id instead of the
   listing's; an unknown list must not drop the pick the first answer fills.
-- Known limits: armour is not drawn on the body (Phase 16), no icons for abilities and statuses yet
+- Known limits: armour is not drawn on the body (Phase 17 since 2026-10-07), no icons for abilities and statuses yet
   (their names stand in; CONTENT.md 8's image model is the plan), a weapon is always held (never
   sheathed), the view model shares the world's depth (clips into a wall pressed against), the tavern and
   people pages are rows still, a left hand holds nothing, no scrollbar on the hotbar's statuses.
@@ -1415,6 +1440,94 @@ GUI editor he wants is Phase 15):
   200,633 / 282,595 bytes (`max_atlas_bytes` 393,216), the bundle 713,302; WebGPU wasm 1,112,187
   (376,460 packed), WebGL2 3,103,848; `gm-client` 9,757,712 (+10,256; baseline updated). Left to the
   director: what the marks on a body should be (12).
+- **Then the fight had to be seen** (LOOK.md 13; the director in the browser: "using a skill just moves
+  the arm a bit and the damage area is guesswork ... either the sword or the blast arc should do the
+  damage, and both should be observable"; and of the marks: "nametags would work"). **Protocol v9**: a
+  snapshot says which ability a script's stance belongs to (`EntityState.acting`, one byte with a
+  windup, swing, recovery or cast), so every client can draw anybody's blow from the pack's own numbers.
+  The client's **effects pass** (`fx.rs`: see-through triangles made every frame, one blended draw after
+  the bodies): the **wedge a swing will hit on the floor** as the windup runs out, the **slash** sweeping
+  at the reach when it lands, bolts as a streak with a head in a halo (the own from the hand at once),
+  areas as discs with a burst, a spark and a flash on whoever's health drops, the red edge when the own
+  body is hurt, the **ring of its aspects** at a body's feet and **its name over its head** (the plate
+  and the cube are gone). Stances reach their poses in times of their own (a windup in 70 ms, a swing in
+  50: at the common 120 ms a sword's never did); the own stance, wedge and slash are predicted
+  (`gm_core::sim::script_anim`, shared with the zone); the first-person weapon is carried across the
+  view and stands twice as far from the eye. Measured: one byte a script's stance; WebGPU wasm 1,136,246
+  (383,589 packed), `gm-client` 9,798,240 (+40,528), 393 tests; not measured: the effects' frame cost on
+  the iGPU. Not done: pictures and sounds per ability, a cast's own telegraph, hits on strangers (their
+  health is not on the wire), wedges in replays, real animation (Phase 17 since 2026-10-07).
+- **The game master's hand (2026-10-06)** (`docs/GM.md` v1; the director, having played with the effects:
+  "the thunder animation is not visible on screen, also animations seem a bit too fast ... add some kind
+  of admin menu for me (GM) so I can test and tune it ... a bit longer animations so skilled players can
+  react ... custom builds and a reset of attribute points"). **The thunder**: an instant area (Thunderclap,
+  Stomp) was spawned, pulsed and removed within one tick, so it was in no snapshot and no client could
+  draw it; it now stays on the wire, spent, for 100 ms. **Protocol v10**: `FromClient::Gm` /
+  `FromZone::Gm`; `Content` may come again while playing (the zone was tuned; the prediction goes on).
+  **The tuning** (`gm_core::tuning`): a tempo over every windup, window, cast time, parry window and
+  dash (cooldowns and statuses keep their time), and numbers set outright per ability, applied to the pack
+  as loaded and validated as content; `Zone::retune` compiles every kit in place; `gm-server --tuning
+  FILE` keeps it as TOML between runs (one file for the play stack's three zones). **Who**: a moderator's
+  characters (`gm-hub --grant-moderator`, `Claimed.gm`, hub protocol 10) or `gm-server --gm NAME`. **The
+  page** (`gm.rs`, `G` or the menu): Timing (tempo, every ability's numbers as the ticks make them,
+  sliders), Build (a custom build against the 100 points with the pack's verdict as it is edited, worn
+  now: the first way to wear a build content does not name), Body (heal). **Sparring partners**
+  (`gm-bot --behaviour spar`, `play.sh spar`): stand, fight back when struck at, leave strollers alone;
+  `play.sh people` respawns the town (bots now live 23 h: a session token lives 24). Measured (GM.md 6): a
+  Thunderclap is 5 frames of area and a 0.35 s burst on a 30 fps software client (0 frames before); a tuning
+  reaches every client within the second; `gm-client` 9,842,640 (+44,400), WebGPU wasm 1,162,150; 376
+  tests outside the hub. Not done: the tuning reaching other zones at once, a tempo
+  on statuses, slow motion. **The same evening, from another machine**: "protocol version mismatch",
+  then "the character is still in a zone" — the browser had kept v9's wasm and glue from its cache
+  (the page's files were served without a cache header and a module import has no stamp) and met the
+  v10 zones; every try spent a ticket, so the character was in transit until the hub's minute sweep.
+  Now `build-web.sh` stamps `boot.js?v=<hash>` into the page and the loader carries the stamp to the
+  module and the wasm (WEB.md 5), the play stack's page servers say `Cache-Control: no-cache`, and the
+  zone's rejection says what to do (reload the page or get the new client).
+
+- **The character's build (2026-10-06, the same day, later)** (`docs/MATRIX.md` v2, its section 13; the
+  director, having played with the GM hand: "char stats editable in game like Tales of Pirates or Ether
+  Saga ... start with 30 points to distribute however we like ... NPC for stat reset and dummy training
+  target doll ... very unfair is all people having right click fireball ... DD just 1 hit killing
+  spellcasters ... fights seem very fast, tap tap tap tap dead ... 'tactical' was meant as rock paper
+  scissors, not the top view. Check if you can easily get rid of tactical top view and reduce game size and
+  bloat"; the proposal was accepted whole). **Measured before**: health 95–140, the sword 35 at 300 ms and
+  ×1.25 on cloth = a caster dead in two blows, a second of contact; every preset's secondary a bolt; the
+  presets spending 56–68 of 100 points on attributes (a point moved health by 3 of 140); the tactical
+  viewport 1.3 KB of own code and about 2% of the wasm (twiggy on a named build: `app.rs` 262 KB, bitcode
+  decoders 106 KB, winit 95 KB, the web plumbing 80 KB are the weight). **Two pools** (3.1 [CORRECTED]):
+  thirty attribute points of the character's own, 5..=25 each, unspent allowed; a kit budget of 40 (armour,
+  a second aspect, the abilities; at most, not exactly). **The bands** (MATRIX.md 6): health `500 + 40·CON`
+  (700–1,500), damage `0.60 + 0.04·STR/INT` (×0.8–1.6), caps 0.50/0.60/0.50. **The range is the weapon's**
+  (MATRIX.md 10): the crossbow, the musket and the five elemental bolts are primaries now (cost 2, about one
+  and a half times their damage, longer cooldowns); the secondaries are a kick, a shield bash, a throwing
+  knife of 300 u and the mend; the melee primaries slower and heavier (the sword 60 slash at 150/60/300 ms
+  and 600 ms; the hammer 90 at a second; the dagger 35 at 400 ms); a seventh preset, `marksman`. Minds and
+  bots find the swing and the shot by verb in either weapon slot (a creature may keep a bow beside its
+  blade). **The trainer and the dummy** (MATRIX.md 9.1, COMPANIONS.md 8.1: `still`, `npc`, `might`): the
+  town posts both (its map is rebuilt; it is a wild zone now); a build is worn at once within 160 u of
+  the trainer, out of a fight; in the arena at the next respawn as before; the dummy has 5,000 health and
+  is back in 5 s, and the attacker reads what it dealt (LOOK.md 13.8, already there). **The page** `K`
+  (`character.rs`, CLIENT.md 4.5): the thirty points with what each buys, frame, armour, aspects, the kit;
+  the game master's Build tab is the same editor. **Old builds** are repaired by the hub at Enter
+  (`Build::repaired`: points scaled to thirty in proportion, a refused kit replaced by the preset with the
+  same primary). **The tactical viewport is gone** from the client (4.3 [REVERSED], COMPANIONS.md 6:
+  `app.rs` 5,306 → 4,998 lines; the stance and the orders stay on the wire). **Balance, measured in the
+  gm-ai tests** (16 s a run): at seven times the health the Warden fell to a squad without a healer;
+  creature health ×3 (sentinel 1,200, Warden 15,000) did not fix it, nor would a sentinel above a player's
+  blows (the gate became unbeatable); what fixed it was the heals scaling with the health (Mend 20 → 100/s,
+  Sanctuary 12 → 60/s) and the Warden at twice a player's blows (`might` 2.0): the reference squad clears
+  the tutorial 8 of 8 seeds, the Warden in 175–200 s without a death, and squads without a healer never
+  (`dungeon.rs`, `skirmish.rs`); a squad of shades no longer kills the Warden (it lost its shadow dart, its
+  2× into stone: the skirmish's second case is a shade leading the reference squad). The matrix gate
+  (`check-matrix.sh`): ironclad : blade 41 : 15 (2.73; was 2.9), frostweaver : ironclad 51 : 3 (17; was 31),
+  blade : frostweaver 26 : 15 (1.73; was 1.7), mirror 26 : 33; **56 kills per matchup over 3 × 60 s where
+  there were 130: a fight lasts 2.3 times longer**. The counter-pick over the protocol reads its early share
+  at 30 s of 120 (the first 20 s held 1–2 kills); the netcode test fields marksmen among the blades, or no
+  bolt flies. Sizes and counts: `gm-client` 9,843,440 (+800: the character's page is about what the tactical view was; baseline updated), WebGPU wasm 1,162,264 (+114, the stamped map fetch), WebGL2 3,154,055; 402 workspace tests outside the hub's database ones, 0 failed. Screenshots at 1080p: `~/.local/share/gamengine/play/shots/2026-10-06-build/` (the page; the dummy on the green with its nametag). Not done: a tempo on cooldowns, `E` at the trainer (the
+  page opens from anywhere; the trainer is where it is worn), the dummy's health on the wire (the number
+  dealt is enough), armour drawn. The director's knob: whether 175–200 s on the Warden and 2.3× longer
+  duels are the fight length he wants (GM.md 3's tempo and these numbers).
 
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
@@ -1472,9 +1585,10 @@ The look's numbers are **proposed** in `docs/CONTENT.md` 11 and `docs/LOOK.md` 9
 purse's scale as the director gave it, 36-dot cells, 150 ms to a tooltip, the paperdoll's camera); the
 director **decided** on 2026-10-03: finished CC0 models may be reused and the look to aim for is between
 Tales of Pirates and Ether Saga, with Counter-Strike 1.6's standard (not its assets) for weapons; a GUI
-editor is wanted (Phase 15); the browser's megabyte may be doubled or tripled (WEB.md 9: 2 MiB); drag and
+editor is wanted (Phase 16 since 2026-10-07); the browser's megabyte may be doubled or tripled (WEB.md 9: 2 MiB); drag and
 drop and keyboard shortcuts are both musts; top gear is tens of gold. As built and open to change: a
 weapon is always held (never sheathed), the two faces (Fira Sans Medium, MedievalSharp), party frames for
-members present in the zone only, the view model's place, **the marks on a body** (the aspect plate at
-the feet and the side's cube over the head: the director had to ask what they are, LOOK.md 11.4).
+members present in the zone only, the view model's place. (The marks on a body were decided on
+2026-10-03: names over heads instead of the cube, a ring instead of the plate, LOOK.md 13.)
+The three modes are **proposed** in `docs/MODES.md` 9 (2026-10-07: the presets' modes, hitscan or a bolt at 20,000 u/s, the head band, whether an RPG body's aim is the zone's, whether a mode change is a respec, the diminishing returns on controls).
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

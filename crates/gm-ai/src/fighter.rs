@@ -420,7 +420,7 @@ impl Fighter {
 
     /// Whether the kit has a ready way to fight at range.
     fn ranged_slot(&self) -> Option<(u8, f32, f32, Tick)> {
-        match self.plan.secondary {
+        match self.plan.shot() {
             Some((
                 slot,
                 Use::Shot {
@@ -729,13 +729,13 @@ impl Fighter {
                 return self.finish(s, f);
             }
         }
-        if let Some((slot, Use::Swing { reach, arc, .. })) = self.plan.primary
+        if let Some((slot, Use::Swing { reach, arc, .. })) = self.plan.swing()
             && s.ready(slot)
             && d - t.radius() <= reach
             && self.aimed(eye, t.centre(), arc * 0.35)
             && !self.wedge_blocked(s, reach, arc, t.id, e.ally)
         {
-            f.buttons |= Self::pulse(s, buttons::PRIMARY);
+            f.buttons |= Self::pulse(s, KitPlan::button_for(slot));
             return self.finish(s, f);
         }
         if let Some((slot, speed, gravity, _)) = ranged
@@ -755,7 +755,7 @@ impl Fighter {
                         self.rng.range_f32(-1.0, 1.0) * AIM_ERROR_DEG * 1.7,
                         self.rng.range_f32(-1.0, 1.0) * AIM_ERROR_DEG * 1.7,
                     );
-                    f.buttons |= Self::pulse(s, buttons::SECONDARY);
+                    f.buttons |= Self::pulse(s, KitPlan::button_for(slot));
                 }
             }
         }

@@ -1838,6 +1838,34 @@
 "team" "0"
 }
 {
+"classname" "gm_creature"
+"origin" "-200 -560 40"
+"angle" "90"
+"creature" "trainer"
+"encounter" "trainer"
+}
+{
+"classname" "gm_creature"
+"origin" "0 -830 40"
+"angle" "90"
+"creature" "dummy"
+"encounter" "dummy"
+}
+{
+"classname" "gm_creature"
+"origin" "-90 -940 40"
+"angle" "90"
+"creature" "dummy"
+"encounter" "dummy"
+}
+{
+"classname" "gm_creature"
+"origin" "90 -940 40"
+"angle" "90"
+"creature" "dummy"
+"encounter" "dummy"
+}
+{
 "classname" "info_player_start"
 "origin" "-940 -660 40"
 "angle" "32"

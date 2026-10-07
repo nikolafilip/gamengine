@@ -44,6 +44,10 @@ struct Args {
     replay_mb_per_hour: u64,
     /// The least trust tier the zone admits (ANTICHEAT.md 6).
     min_trust: i16,
+    /// Characters that are game masters here whatever the hub says (GM.md 1).
+    gm: Vec<String>,
+    /// Where the game masters' tuning is kept between runs (GM.md 3).
+    tuning: Option<PathBuf>,
 }
 
 const USAGE: &str = "gm-server [--map PATH] [--content DIR] [--default-build NAME] [--listen ADDR] \
@@ -52,7 +56,8 @@ const USAGE: &str = "gm-server [--map PATH] [--content DIR] [--default-build NAM
 [--hub ADDR --hub-cert PATH --zone-id NAME --zone-secret S [--public-addr ADDR] \
 [--requires TRIAL,TRIAL,...]] \
 [--web-listen ADDR [--web-cert PEM --web-key PEM] [--web-url https://HOST:PORT] [--web-origin ORIGIN]... \
-[--web-info-out PATH]] [--replay-dir DIR [--replay-mb-per-hour N]] [--min-trust N]   (env: GM_ZONE_SECRET)";
+[--web-info-out PATH]] [--replay-dir DIR [--replay-mb-per-hour N]] [--min-trust N] \
+[--gm NAME,NAME,...] [--tuning FILE]   (env: GM_ZONE_SECRET)";
 
 /// A comma-separated list of names.
 fn names(list: &str) -> Vec<String> {
@@ -94,6 +99,8 @@ fn parse_args() -> Result<Args, String> {
         replay_dir: None,
         replay_mb_per_hour: 512,
         min_trust: 0,
+        gm: Vec::new(),
+        tuning: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -147,6 +154,8 @@ fn parse_args() -> Result<Args, String> {
             "--squads" => args.squads = true,
             "--recruits" => args.recruits = names(&value("--recruits")?),
             "--requires" => args.requires = names(&value("--requires")?),
+            "--gm" => args.gm = names(&value("--gm")?),
+            "--tuning" => args.tuning = Some(PathBuf::from(value("--tuning")?)),
             "--web-listen" => {
                 args.web_listen = Some(
                     value("--web-listen")?
@@ -337,6 +346,8 @@ async fn main() -> anyhow::Result<()> {
             zone: args.zone_id.clone(),
         }),
         gear_after_fight: gm_server::GEAR_AFTER_FIGHT,
+        gm_names: args.gm,
+        tuning_file: args.tuning,
     };
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;

@@ -646,6 +646,7 @@ mod tests {
                 pitch: quant::pitch_to_wire(pitch),
                 vel: None,
                 anim: 0,
+                acting: 0,
                 health: None,
                 flags: flags::ALIVE,
                 status: 0,

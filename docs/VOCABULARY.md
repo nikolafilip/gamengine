@@ -269,6 +269,10 @@ are placeholders for netcode work, not tuning:
 | Dash | ability 1 | at 0: `MoveSelf::Dash{900 u/s, 150 ms}`, 30 stamina | 1 s | 1.0 |
 
 Health 100, stamina 100 regenerating 15/s, respawn 3 s after death at a free spawn point.
+(Historical: the Phase 2 numbers. Since MATRIX.md v2, 2026-10-06, the sword is 60 slash at
+150/60/300 ms and 600 ms, the crossbow a primary of 80 pierce at 1.8 s, and health 700–1,500;
+`gm_core::sim::test_content::phase2_build` keeps the Phase 2 kit shape over the current
+numbers.)
 
 Timing rule: script clocks run in the **client's frame ticks** on both sides (the server passes
 each frame's tick to `step_mover`, never its own tick), so cooldowns and dash durations elapse
@@ -314,7 +318,7 @@ is lost; projectile chains were never allowed by the validator.
   In it the frame is read as view angles only: no movement, no jump, no action, no guard.
   It is stepped in `step_mover` on both sides of the wire, like the guard; the snapshot's
   own-entity flag `commanding` settles a disagreement. Animation state 12, `command`.
-- **Creatures** are builds without a budget (`CreatureDef`): attributes may leave 5..=20,
+- **Creatures** are builds without a budget (`CreatureDef`): attributes may leave 5..=25,
   health is set by content (up to 60,000), and they may slot abilities marked `creature`,
   which no player build can. Everything else is the build rules.
 - Animation states: idle, run, air, windup, swing, recover, dash, dead, guard, parry, cast,

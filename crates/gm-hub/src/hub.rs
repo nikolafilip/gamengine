@@ -796,6 +796,8 @@ impl Hub {
             let Ok(build) = serde_json::from_value::<Build>(h.build) else {
                 continue;
             };
+            // A hire made under older rules is read under the current ones (MATRIX.md 9.1).
+            let build = build.repaired(&self.cfg.content).unwrap_or(build);
             let Some((what, role)) = build_words(&self.cfg.content, &build) else {
                 continue;
             };
@@ -1103,8 +1105,17 @@ async fn handle(
                 .await?
                 .filter(|r| r.account_id == account)
                 .ok_or(HubError::NotFound)?;
-            // A build the content no longer takes is refused here, in words, and not at a
-            // zone's door after the claim.
+            // A build the content no longer takes is repaired here (MATRIX.md 9.1) and
+            // stored, so that a character outlives a change of the rules; one nothing can
+            // be made of is refused in words, and not at a zone's door after the claim.
+            let row = match row.build.repaired(&hub.cfg.content) {
+                None => row,
+                Some(build) => {
+                    info!(character = row.id, "build repaired to the current rules");
+                    hub.db.set_build(account, row.id, &build).await?;
+                    crate::db::CharacterRow { build, ..row }
+                }
+            };
             row.build.validate(&hub.cfg.content).map_err(|e| {
                 HubError::Invalid(format!("this character's build is no longer valid: {e}"))
             })?;
@@ -1373,11 +1384,13 @@ async fn handle(
                     // As gear: read after the character became this zone's. A change
                     // that comes later is told to this zone, with a larger number.
                     hub.parties.reading(row.id).await?,
+                    // A moderator's character is a game master there (GM.md 1).
+                    hub.models.is_moderator(row.account_id).await?,
                 ))
             }
             .await;
             match rest {
-                Ok((squad, model, gear, party)) => Ok(HubResponse::Claimed {
+                Ok((squad, model, gear, party, gm)) => Ok(HubResponse::Claimed {
                     character: row.id,
                     name: row.name.clone(),
                     state,
@@ -1386,6 +1399,7 @@ async fn handle(
                     squad,
                     gear,
                     party,
+                    gm,
                 }),
                 Err(e) => {
                     let _ = hub.db.release(row.id, &zone).await;

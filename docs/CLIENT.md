@@ -200,6 +200,26 @@ The HUD as before, and:
 - **Enter** opens the chat line (5).
 - **I** opens the inventory, and **E** the stall the body stands at (ITEMS.md 6): screens
   like the menu's, with the body standing while one is up.
+- **K** opens the character (MATRIX.md 9.1): the thirty attribute points with what each
+  buys, the frame, the armour, the aspects and the kit, edited anywhere; "Wear it" is
+  offered beside the trainer (the client knows one by a body nothing hurts), or anywhere
+  in a zone with none, where the zone wears it at the next respawn (the arena) or says why
+  not (the dungeon). The zone's answer is the page's note. Its shape since the evening of
+  2026-10-06 (the director: "confusing and can't even read everything"; Gemini's review of
+  a capture against Ether Saga's and Tales of Pirates' sheets agreed on every point): a
+  panel 820 units wide where the frame allows, two columns under a row of presets. Left,
+  the body: frame, armour (each button with its kit points), aspects, then
+  `attributes   n of 30 points left` in gold over five rows of `STR  - 7 +  blows x0.88`
+  (a name, the buttons, the value, what the points buy, in words). Right, the kit: the
+  weapons, the secondaries over the guards, and the actives in two lists side by side
+  (one that scrolls where the panel is narrow), every row in sight at 1080p; the kit's
+  budget in gold over the actives; the actives in the build lit like a picked row
+  (`RowMark::Picked`), not `[x]`. Under both, a line or two that read the ability under
+  the cursor from its script (`character::words_of`: points, stamina or focus, cooldown,
+  the aspect it needs, and what it does: `140 u around you: 40 storm, staggers, shock for
+  0.1 s`); the bottom row holds the buttons and, beside them, what is wrong with the draft,
+  else the zone's word, else `to wear it, stand by the trainer at the town board`. The
+  same editor is the game master's Build tab (GM.md 4), with Close in its tab row.
 - **P** opens the people (PARTY.md 8): the party, who asks something, who else is here;
   from it the trade window (which also comes up by itself when the zone opens a trade)
   and the tavern. Under the squad the HUD shows the party's other members, with the
@@ -279,13 +299,12 @@ Decided once per frame, in this order:
 2. A screen (login, characters, new character, entering, the menu and its pages, the
    screen for no hub): `Tab`, arrows, `Enter`, `Escape`; the game gets nothing, keys that
    were held are let go, and the frames sent to the zone hold no keys.
-3. The game, as before (`W A S D`, the mouse, `1`–`4`, `V`, `Tab` for the tactical view,
-   `F9` to report, and the rest of the Keys page), plus `Enter` and `Escape`, and since
-   Phase 11 `I` and `E`, and since Phase 12 `P`, which open a screen (not in the tactical
-   view, which has its own use for the keys around it). They are keys only here: under rules 1 and 2 they are
-   letters.
+3. The game, as before (`W A S D`, the mouse, `1`–`4`, `V`, `F9` to report, and the rest
+   of the Keys page), plus `Enter` and `Escape`, and since Phase 11 `I` and `E`, and since
+   Phase 12 `P`, and since 2026-10-06 `K`, which open a screen. They are keys only here:
+   under rules 1 and 2 they are letters. (`Tab` for the tactical view was removed on 2026-10-06, COMPANIONS.md 6.)
 
-`Q` no longer quits (it is a letter one types, and the tactical view turns with it): Quit
+`Q` no longer quits (it is a letter one types): Quit
 is in the menu, and closing the window still works. In benchmarks nothing changes: no
 screen is up, so rule 3 is all there is.
 

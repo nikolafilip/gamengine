@@ -69,7 +69,7 @@ struct Args {
 }
 
 const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:PORT [--web-cert SHA256HEX]) [--map PATH] [--bots N] [--secs N] \
-[--behaviour wander|hunter|hold|duelist|stroll|raid] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick] [--aim brain|hand|lock|flick,...] [--report-after SECS] [--say TEXT [--say-every SECS]]\n\
+[--behaviour wander|hunter|hold|duelist|stroll|raid|spar] [--seed N] [--builds a,b,...] [--teams 1,2,...] [--counter-pick] [--aim brain|hand|lock|flick,...] [--report-after SECS] [--say TEXT [--say-every SECS]]\n\
        gm-bot --hub ADDR --hub-cert PATH --user EMAIL --password PW [--register] --character NAME --zone ID \
 [--travel-to ZONE --travel-after SECS] [--maps-dir DIR] [--secs N] [--behaviour ...] \
 [--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall] \
@@ -151,6 +151,7 @@ fn parse_args() -> Result<Args, String> {
                     "duelist" => Behaviour::Duelist,
                     "stroll" => Behaviour::Stroll,
                     "raid" => Behaviour::Raid,
+                    "spar" => Behaviour::Spar,
                     other => return Err(format!("--behaviour: unknown {other}")),
                 }
             }

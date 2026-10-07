@@ -62,6 +62,8 @@ pub struct Claimed {
     pub gear: GearReading,
     /// The party it is in (PARTY.md 3).
     pub party: PartyReading,
+    /// The character is a game master here (GM.md 1).
+    pub gm: bool,
 }
 
 /// How long a stopping zone waits for the hub to take one last thing.
@@ -121,6 +123,7 @@ impl HubLink {
                 squad,
                 gear,
                 party,
+                gm,
             }) => Ok(Claimed {
                 character,
                 name,
@@ -130,6 +133,7 @@ impl HubLink {
                 squad,
                 gear,
                 party,
+                gm,
             }),
             Ok(other) => Err(format!("unexpected hub answer {other:?}")),
             Err(HubClientError::Refused(e)) => Err(e.to_string()),

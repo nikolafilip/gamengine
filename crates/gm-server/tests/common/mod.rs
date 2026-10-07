@@ -196,6 +196,8 @@ pub fn play(m: Match) -> Outcome {
                     arrive_at_entry: false,
                     replay: None,
                     gear_after_fight: gm_server::GEAR_AFTER_FIGHT,
+                    gm_names: Vec::new(),
+                    tuning_file: None,
                 };
                 let report =
                     gm_server::run(cfg, zone_world, endpoint, std::future::pending()).await?;

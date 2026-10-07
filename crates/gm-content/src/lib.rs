@@ -6,6 +6,7 @@
 
 pub mod items;
 pub mod looks;
+pub mod tuning;
 
 use std::path::Path;
 
@@ -490,6 +491,12 @@ pub(crate) struct CreatureToml {
     #[serde(default)]
     respawn_s: u16,
     loot: Option<LootToml>,
+    #[serde(default)]
+    still: bool,
+    #[serde(default)]
+    npc: bool,
+    #[serde(default = "one")]
+    might: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -991,6 +998,9 @@ fn compile_creature(c: &CreatureToml, pack: &ContentPack) -> Result<CreatureDef,
         leash: c.leash,
         boss: c.boss,
         respawn_s: c.respawn_s,
+        still: c.still,
+        npc: c.npc,
+        might: c.might,
         loot: c.loot.as_ref().map(|l| Loot {
             components: l.components,
             standard: l.standard.clone(),

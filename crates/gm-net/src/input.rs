@@ -203,7 +203,12 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert_eq!(InputDatagram::decode(&[]), Err(NetError::Overrun));
-        assert_eq!(InputDatagram::decode(&[9, 0, 0]), Err(NetError::Version(9)));
+        // The version after this one: wrong whatever this one is.
+        let other = crate::PROTOCOL_VERSION + 1;
+        assert_eq!(
+            InputDatagram::decode(&[other, 0, 0]),
+            Err(NetError::Version(other))
+        );
         assert_eq!(
             InputDatagram::decode(&[crate::PROTOCOL_VERSION, 7]),
             Err(NetError::Kind(7))

@@ -3,6 +3,7 @@
 
 use gm_core::build::{Kit, MAX_ACTIVES, Sheet};
 use gm_core::matrix::ArmourClass;
+use gm_core::sim::buttons;
 use gm_core::tick::Tick;
 use gm_core::vocab::{
     Ability, ApplyStatus, ArchetypeFrame, AreaEffect, Guard, MoveKind, Origin, Shape, Status,
@@ -237,17 +238,43 @@ impl KitPlan {
         }
     }
 
-    /// Reach of the primary when it is a swing.
+    /// The swing among the two weapon slots (the range is the weapon's, MATRIX.md 10: a
+    /// player's primary is a blade or a bow; a creature may hold both), primary first.
+    pub fn swing(&self) -> Option<(u8, Use)> {
+        [self.primary, self.secondary]
+            .into_iter()
+            .flatten()
+            .find(|(_, u)| matches!(u, Use::Swing { .. }))
+    }
+
+    /// The harmful shot among the two weapon slots, primary first.
+    pub fn shot(&self) -> Option<(u8, Use)> {
+        [self.primary, self.secondary]
+            .into_iter()
+            .flatten()
+            .find(|(_, u)| matches!(u, Use::Shot { mends: false, .. }))
+    }
+
+    /// The button that fires kit slot `slot`: the primary's or the secondary's.
+    pub fn button_for(slot: u8) -> u16 {
+        if slot == 0 {
+            buttons::PRIMARY
+        } else {
+            buttons::SECONDARY
+        }
+    }
+
+    /// Reach of the swing, when there is one.
     pub fn reach(&self) -> f32 {
-        match self.primary {
+        match self.swing() {
             Some((_, Use::Swing { reach, .. })) => reach,
             _ => 0.0,
         }
     }
 
-    /// A harmful shot in the secondary slot: the kit fights at range.
+    /// A harmful shot in a weapon slot: the kit fights at range.
     pub fn shoots(&self) -> bool {
-        matches!(self.secondary, Some((_, Use::Shot { mends: false, .. })))
+        self.shot().is_some()
     }
 
     /// Any ability that heals somebody else.

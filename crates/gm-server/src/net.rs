@@ -13,7 +13,7 @@ use gm_hub_proto::protocol::{
     SayTo, StallSummary,
 };
 use gm_net::PROTOCOL_VERSION;
-use gm_net::control::{self, BuildChoice, FromClient, FromZone};
+use gm_net::control::{self, BuildChoice, FromClient, FromZone, GmOp};
 use gm_net::input::InputDatagram;
 use gm_net::link::{Link, WebEndpoint, web_accept};
 use tokio::sync::{mpsc, oneshot};
@@ -26,6 +26,8 @@ pub struct JoinInfo {
     pub server_tick: u32,
     pub build: Build,
     pub team: u8,
+    /// The zone's content as it stands (a game master may have tuned it, GM.md 3).
+    pub pack: Arc<ContentPack>,
 }
 
 /// A character the hub claimed for this zone (HUB.md 3.1).
@@ -43,6 +45,8 @@ pub struct HubJoin {
     pub gear: GearReading,
     /// The party it is in, as the hub read it at the claim (PARTY.md 3).
     pub party: PartyReading,
+    /// The hub says the character is a game master here (GM.md 1).
+    pub gm: bool,
 }
 
 /// What a client asks about its party (PARTY.md 4).
@@ -243,6 +247,11 @@ pub enum ClientEvent {
         id: EntityId,
         result: Result<(), String>,
     },
+    /// A game master's act (GM.md 2); the zone refuses anyone else's.
+    Gm {
+        id: EntityId,
+        op: GmOp,
+    },
     StallsLoaded(Vec<StallSummary>),
     HubStallClosed {
         stall: i64,
@@ -296,7 +305,6 @@ pub struct NetConfig {
     /// Accept empty session tokens (Phase 2 development and tests).
     pub open: bool,
     /// Sent to every client after `Welcome` (MATRIX.md 10).
-    pub content: Arc<ContentPack>,
     /// The prop keys a `Look` indexes, sent with the content (LOOK.md 6.2).
     pub props: Arc<Vec<String>>,
     /// The hub, when this zone runs under one: tokens are then mandatory.
@@ -492,7 +500,11 @@ async fn handle_connection(
     };
     let reject = |reason: &str| FromZone::Reject(reason.to_string());
     let rejection = if version != PROTOCOL_VERSION as u16 {
-        Some(reject("protocol version mismatch"))
+        // An old page or client: say what to do, since the ticket it holds is spent.
+        Some(reject(&format!(
+            "protocol version mismatch (the zone speaks {PROTOCOL_VERSION}, this client {version}): \
+             the game was updated; reload the page or get the new client"
+        )))
     } else if token.is_empty() && (!cfg.open || cfg.hub.is_some()) {
         Some(reject("session token required"))
     } else {
@@ -531,6 +543,7 @@ async fn handle_connection(
                             squad: claimed.squad,
                             gear: claimed.gear,
                             party: claimed.party,
+                            gm: claimed.gm,
                         }),
                     )
                 }
@@ -589,7 +602,7 @@ async fn handle_connection(
         map_hash: cfg.map_hash,
     };
     let content = FromZone::Content {
-        pack: (*cfg.content).clone(),
+        pack: (*info.pack).clone(),
         own: info.build.clone(),
         team: info.team,
         props: (*cfg.props).clone(),
@@ -743,6 +756,11 @@ async fn handle_connection(
                     }
                     Ok(Some(FromClient::Respec(build))) => {
                         if tx.send(ClientEvent::Respec { id, build }).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(FromClient::Gm(op))) => {
+                        if tx.send(ClientEvent::Gm { id, op }).await.is_err() {
                             break;
                         }
                     }

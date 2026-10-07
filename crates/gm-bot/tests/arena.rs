@@ -82,6 +82,7 @@ fn play(bsp: &Arc<Bsp>, build_a: &str, build_b: &str, seed: u64, secs: u32) -> O
                 yaw: p.mover.yaw,
                 pitch: p.mover.pitch,
                 anim: p.anim,
+                acting: 0,
                 flags: if p.alive { flags::ALIVE } else { 0 },
                 status: p.mover.statuses.mask(),
                 health: None,
@@ -100,6 +101,7 @@ fn play(bsp: &Arc<Bsp>, build_a: &str, build_b: &str, seed: u64, secs: u32) -> O
                     frame: p.sheet.build.frame,
                     team: *team,
                     alive: p.alive,
+                    health: p.health,
                     others: &visible,
                     tick: t,
                 });

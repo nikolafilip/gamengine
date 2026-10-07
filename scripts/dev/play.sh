@@ -9,6 +9,9 @@
 #   scripts/dev/play.sh stop
 #   scripts/dev/play.sh status
 #   scripts/dev/play.sh give NAME         coin and a few items for an offline character of yours
+#   scripts/dev/play.sh gm EMAIL          make an account's characters game masters (G in the game: GM.md)
+#   scripts/dev/play.sh people            respawn the town's people and the arena's duelists (they live 23 h)
+#   scripts/dev/play.sh spar [N] [BUILDS] N sparring partners in the town (stand, fight back): tune on them
 #   scripts/dev/play.sh client [ARGS...]  the windowed client on this stack (ALSA_CARD=1 for sound here)
 #   scripts/dev/play.sh web               serve the browser build against this hub on http://127.0.0.1:24510
 #
@@ -88,10 +91,12 @@ start() {
   zone() { # name port extra...
     local name=$1 port=$2; shift 2
     # shellcheck disable=SC2086
+    # One tuning file for all three zones (GM.md 3): a game master's numbers set in the
+    # town are read by the arena and the dungeon at their next start.
     "$B/gm-server" --map "assets/maps/built/$name.bsp" --listen "$bind:$port" --cert-out "$D/$name.der" \
       --hub "$HUB" --hub-cert "$D/hub.der" --zone-id "$name" --zone-secret "$SECRET" --report-secs 30 \
       --web-listen "$bind:$((port + 1))" ${ip:+--public-addr "$ip:$port" --web-url "https://$ip:$((port + 1))"} \
-      "$@" >"$D/log/$name.log" 2>&1 &
+      --tuning "$D/tuning.toml" "$@" >"$D/log/$name.log" 2>&1 &
     echo $! >>"$D/pids"
   }
   zone town $((P + 2)) --hz 20
@@ -99,29 +104,7 @@ start() {
   zone dungeon $((P + 6)) --squads --recruits ironclad,mender,frostweaver --arrive-at-entry
   sleep 1.5
   printf 'hub = "%s"\nhub_cert = "%s"\n' "$host:$P" "$D/hub.der" >"$D/settings.toml"
-
-  # The town's people. Registering is idempotent (--register on an existing account logs in).
-  # Three avatars for hire in the tavern: their owners list them and stay offline.
-  bot owners --bots 3 --user 'owner-{i}@bots.test' --register --character 'Avatar{i}' \
-    --builds ironclad,mender,frostweaver --zone town --list-for-hire 150 --secs 0
-  # A stall keeper: walks to the first market tile, opens its stall, and lists whatever an
-  # operator hands it at 1 s 20 c (each start hands it five more things; --fresh forgets them).
-  spawn keeper --bots 1 --user keeper@bots.test --register --character Keeper --builds ironclad --zone town \
-    --stalls 1 --sell-at 120 --secs 86400 --behaviour stroll
-  for _ in $(seq 1 100); do /usr/bin/grep -aq "stall stands" "$D/log/keeper.log" 2>/dev/null && break; sleep 0.2; done
-  for item in "sword core/iron,frame/oak" "sword core/dragonbone,frame/whalebone,gem/opal" "dagger core/iron,frame/oak" \
-              "cuirass core/iron,frame/oak" "cuirass core/dragonbone,frame/whalebone"; do
-    # shellcheck disable=SC2086
-    hubctl --grant-item Keeper $item >>"$D/log/grants.log" 2>&1
-  done
-  # Bojan: joins a party when asked (P → Invite), answers a party line and a whisper, trades.
-  spawn bojan --bots 1 --user bojan@bots.test --register --character Bojan --builds blade --zone town \
-    --secs 86400 --behaviour hold --sociable --trade-for 300
-  # Four strollers on the square, and eight duelists keeping the arena warm.
-  spawn walkers --bots 4 --user 'walker-{i}@bots.test' --register --character 'Walker{i}' \
-    --builds ironclad,blade,frostweaver,shade --zone town --secs 86400 --behaviour stroll
-  spawn duelists --bots 8 --user 'duelist-{i}@bots.test' --register --character 'Duelist{i}' \
-    --builds ironclad,blade,frostweaver,shade --zone arena --secs 86400 --behaviour duelist
+  people
   cat <<EOF
 hub $host:$P (cert $D/hub.der); zones town (20 Hz), arena, dungeon; logs in $D/log
 settings: $D/settings.toml
@@ -132,6 +115,50 @@ settings: $D/settings.toml
   stop:     $0 stop
 EOF
   [[ -z "$ip" ]] || echo "  network:  $0 web                       then, on another machine, https://$ip:24510/"
+}
+
+# A bot's day: a session token lives 24 h (SESSION_SECS), so a bot that plays longer ends
+# with "hub refused: unauthorized" at its leaving save. Bots are respawned instead (`people`).
+BOT_SECS=82800
+
+# The town's people, on a running stack (start calls this; `people` again respawns whoever
+# has gone: the bots live BOT_SECS and a stack runs for days). Registering is idempotent
+# (--register on an existing account logs in). Three avatars for hire in the tavern: their
+# owners list them and stay offline.
+people() {
+  need; cd "$R"; hub_up || { echo "start the stack first"; exit 1; }
+  bot owners --bots 3 --user 'owner-{i}@bots.test' --register --character 'Avatar{i}' \
+    --builds ironclad,mender,frostweaver --zone town --list-for-hire 150 --secs 0
+  # A stall keeper: walks to the first market tile, opens its stall, and lists whatever an
+  # operator hands it at 1 s 20 c (each start hands it five more things; --fresh forgets them).
+  spawn keeper --bots 1 --user keeper@bots.test --register --character Keeper --builds ironclad --zone town \
+    --stalls 1 --sell-at 120 --secs $BOT_SECS --behaviour stroll
+  for _ in $(seq 1 100); do /usr/bin/grep -aq "stall stands" "$D/log/keeper.log" 2>/dev/null && break; sleep 0.2; done
+  for item in "sword core/iron,frame/oak" "sword core/dragonbone,frame/whalebone,gem/opal" "dagger core/iron,frame/oak" \
+              "cuirass core/iron,frame/oak" "cuirass core/dragonbone,frame/whalebone"; do
+    # shellcheck disable=SC2086
+    hubctl --grant-item Keeper $item >>"$D/log/grants.log" 2>&1
+  done
+  # Bojan: joins a party when asked (P → Invite), answers a party line and a whisper, trades.
+  spawn bojan --bots 1 --user bojan@bots.test --register --character Bojan --builds blade --zone town \
+    --secs $BOT_SECS --behaviour hold --sociable --trade-for 300
+  # Four strollers on the square, and eight duelists keeping the arena warm.
+  spawn walkers --bots 4 --user 'walker-{i}@bots.test' --register --character 'Walker{i}' \
+    --builds ironclad,blade,frostweaver,shade --zone town --secs $BOT_SECS --behaviour stroll
+  spawn duelists --bots 8 --user 'duelist-{i}@bots.test' --register --character 'Duelist{i}' \
+    --builds ironclad,blade,frostweaver,shade --zone arena --secs $BOT_SECS --behaviour duelist
+}
+
+# Sparring partners in the town: they stand where they arrive, face whoever comes at them
+# and fight back with the whole kit, so a windup, a cast or a parry can be watched and
+# tuned on a body that answers. `spar [N] [BUILDS]`: N of them (default 3), one build each
+# from the list (default a sword, a crossbow, a caster with Ice shard).
+spar() {
+  need; cd "$R"; hub_up || { echo "start the stack first"; exit 1; }
+  local n=${1:-3} builds=${2:-blade,marksman,frostweaver}
+  spawn spar --bots "$n" --user 'spar-{i}@bots.test' --register --character 'Spar{i}' \
+    --builds "$builds" --zone town --secs $BOT_SECS --behaviour spar
+  echo "$n sparring partners on their way to the town (log: $D/log/spar.log)"
 }
 
 web_down() {
@@ -172,7 +199,31 @@ give() {
     && hubctl --grant-item "$who" cuirass core/iron,frame/oak && hubctl --grant-item "$who" dagger core/iron,frame/oak
 }
 
+# A game master (GM.md 1): the hub's moderator flag on the account; its characters get the
+# page at their next entry into a zone.
+gm() {
+  local email=${1:?the email of the account}
+  hubctl --grant-moderator "$email" && echo "$email: a game master from the next zone entered (G opens the page)"
+}
+
 client() { cd "$R" && exec env ALSA_CARD="${ALSA_CARD:-1}" "$B/gm-client" --settings "$D/settings.toml" "$@"; }
+
+# The page's server: Python's, with every file told "no-cache" (revalidate: 304 when the
+# file is the same), so a browser never plays last build's client against this build's zone
+# (WEB.md 5). With a certificate and key it serves https (the LAN).
+WEB_SERVER='
+import http.server, ssl, sys
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+server = http.server.ThreadingHTTPServer((sys.argv[1], int(sys.argv[2])), Handler)
+if len(sys.argv) > 3:
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(sys.argv[3], sys.argv[4])
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
+'
 
 web() {
   [[ -s "$R/target/web/index.html" ]] || { echo "no browser build: scripts/build-web.sh first"; exit 1; }
@@ -183,7 +234,7 @@ web() {
   url="$(sed -n 's/.*"url": "\([^"]*\)".*/\1/p' "$D/hub-web.json")"
   hash="$(sed -n 's/.*"cert_sha256": "\([^"]*\)".*/\1/p' "$D/hub-web.json")"
   echo "{\"hub\": \"$url\", \"hub_cert_sha256\": \"$hash\", \"dev\": true}" >"$D/web/config.json"
-  (cd "$D/web" && exec python3 -m http.server $((P + 10)) --bind 127.0.0.1 >"$D/log/http.log" 2>&1) &
+  (cd "$D/web" && exec python3 -c "$WEB_SERVER" 127.0.0.1 $((P + 10)) >"$D/log/http.log" 2>&1) &
   echo $! >"$D/web.pid"
   echo "http://127.0.0.1:$((P + 10))/  (the page's own form logs in; the pinned hub cert lives 13 days)"
   local ip; ip="$(lan)" || return 0
@@ -209,13 +260,7 @@ EOF
   chmod +x "$D/bundle/gamengine-client/play"
   tar -czhf "$D/web/gamengine-client.tar.gz" -C "$D/bundle" gamengine-client
   ln -s "$D/hub.der" "$D/web/hub.der"
-  (cd "$D/web" && exec python3 -c '
-import http.server, ssl, sys
-server = http.server.ThreadingHTTPServer((sys.argv[1], 24510), http.server.SimpleHTTPRequestHandler)
-tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-tls.load_cert_chain(sys.argv[2], sys.argv[3])
-server.socket = tls.wrap_socket(server.socket, server_side=True)
-server.serve_forever()' "$ip" "$crt" "$key" >>"$D/log/https.log" 2>&1) &
+  (cd "$D/web" && exec python3 -c "$WEB_SERVER" "$ip" 24510 "$crt" "$key" >>"$D/log/https.log" 2>&1) &
   echo $! >>"$D/web.pid"
   cat <<EOF
 on another machine of the network:
@@ -229,6 +274,9 @@ case "${1:-}" in
   stop) stop ;;
   status) status ;;
   give) shift; give "$@" ;;
+  gm) shift; gm "$@" ;;
+  people) people ;;
+  spar) shift; spar "$@" ;;
   client) shift; client "$@" ;;
   web) web ;;
   *) sed -n '2,15p' "$0"; exit 2 ;;
