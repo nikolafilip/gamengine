@@ -2,7 +2,8 @@
 //! by hand. A stall is bought from only by a body standing at it; what is worn changes
 //! through the zone, at once, and not in a fight; and the zone's hits show the edge, before
 //! and after, to the point. Needs `GM_TEST_DATABASE_URL` (a Postgres the test may wipe);
-//! without it the test is skipped.
+//! without it the test is skipped. The gun mode's hand (MODES.md 3.7) is pinned here too:
+//! the weapon switched to is what everyone is told the body holds.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -44,8 +45,12 @@ const GATE: &str = "one thing at a time: try again in a moment";
 /// What the test tells a client to do, and what the client has seen.
 #[derive(Default)]
 struct Shared {
+    /// The body's own id in the zone.
+    id: u32,
     yaw: f32,
     buttons: u16,
+    /// The gun mode's hand (MODES.md 3.7): 0 the gun, 1 the pistol, 2 the knife.
+    held: u8,
     say: Vec<FromClient>,
     health: i32,
     alive: bool,
@@ -98,6 +103,7 @@ impl Hand {
         let rate = TickRate::new(hz as u32);
         let mut client = ClientState::new(entity, rate, Sheet::new(own, &pack, team));
         let shared = Arc::new(Mutex::new(Shared {
+            id: entity,
             yaw,
             ..Shared::default()
         }));
@@ -121,7 +127,7 @@ impl Hand {
                                 forward: 0.0,
                                 side: 0.0,
                                 ability: 0,
-                                held: 0,
+                                held: s.held,
                                 target: 0,
                             };
                             (input, std::mem::take(&mut s.say))
@@ -356,19 +362,22 @@ fn strings(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|p| p.to_string()).collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
-    let Ok(url) = std::env::var("GM_TEST_DATABASE_URL") else {
-        eprintln!("SKIPPED: set GM_TEST_DATABASE_URL to a Postgres this test may wipe");
-        return;
-    };
-    if let Ok(filter) = std::env::var("GM_TRACE") {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_test_writer()
-            .try_init();
-    }
-    let db = Db::connect(&url).await.expect("database");
+/// The tests of this file share one database and wipe it: one at a time.
+static DATABASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A hub and the town zone, stood up on this machine for one test: what a test needs
+/// of them by name. The tasks run until the test's runtime is dropped.
+struct Town {
+    db: Db,
+    hub_addr: std::net::SocketAddr,
+    hub_cert: Vec<u8>,
+    world: Arc<ZoneWorld>,
+    map: Arc<Bsp>,
+    grid: gm_bsp::StallGrid,
+}
+
+async fn stand_up(url: &str) -> Town {
+    let db = Db::connect(url).await.expect("database");
     db.migrate().await.expect("migrations");
     db.wipe().await.expect("wipe");
     let content = gm_content::load_dir(Path::new(CONTENT), TickRate::COMBAT).expect("content");
@@ -437,6 +446,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
         ZoneConfig {
             max_ticks: Some(64 * 120),
             content,
+            looks: gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks"),
             hub: Some(link),
             gear_after_fight: LOCK,
             gm_names: Vec::new(),
@@ -448,6 +458,37 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
         std::future::pending(),
     ));
 
+    Town {
+        db,
+        hub_addr,
+        hub_cert,
+        world,
+        map,
+        grid,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
+    let Ok(url) = std::env::var("GM_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set GM_TEST_DATABASE_URL to a Postgres this test may wipe");
+        return;
+    };
+    let _one_at_a_time = DATABASE.lock().await;
+    if let Ok(filter) = std::env::var("GM_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    }
+    let Town {
+        db,
+        hub_addr,
+        hub_cert,
+        world,
+        map,
+        grid,
+    } = stand_up(&url).await;
     // A keeper on a market tile, a buyer in front of the counter and facing it, and
     // somebody across the square. (An operator puts them there: `gm-hub --place`.)
     // (A wall of plate: each blow moves it a hair, and five of them leave it standing.)
@@ -749,4 +790,68 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
     let (_, has) = smith.inventory().await;
     assert!(has.iter().any(|i| i.id == cuirass && i.worn));
     assert_eq!(direct.audit().await, Ok(0));
+}
+
+/// The gun mode's hand (MODES.md 3.7, LOOK.md 6.2): a musketeer arrives holding its
+/// musket; what it switches to, everyone is told it holds, once a switch; and the musket
+/// again when it switches back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_weapon_switched_to_is_what_everyone_sees_in_the_hand() {
+    let Ok(url) = std::env::var("GM_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set GM_TEST_DATABASE_URL to a Postgres this test may wipe");
+        return;
+    };
+    let _one_at_a_time = DATABASE.lock().await;
+    let town = stand_up(&url).await;
+    let looks = gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks");
+    let (musket, pistol, dagger) = (
+        looks.prop_index("musket"),
+        looks.prop_index("pistol"),
+        looks.prop_index("dagger"),
+    );
+    assert!(musket != pistol && pistol != dagger && dagger != musket);
+
+    let gunner = Someone::new(town.hub_addr, &town.hub_cert, "Gunner", "musketeer").await;
+    let watcher = Someone::new(town.hub_addr, &town.hub_cert, "Watcher", "blade").await;
+    let g = Hand::join(&gunner.ticket().await, "Gunner", 0.0, town.map.clone()).await;
+    let w = Hand::join(&watcher.ticket().await, "Watcher", 0.0, town.map.clone()).await;
+    let gunner_id = g.shared.lock().unwrap().id;
+
+    // On arrival the watcher is told the musket, in the roster or the player's info.
+    w.until("the gunner's musket on arrival", |s| {
+        s.heard.iter().any(|m| match m {
+            FromZone::Roster(list) => list
+                .iter()
+                .any(|e| e.id == gunner_id && e.look.held == musket),
+            FromZone::PlayerInfo { id, look, .. } => *id == gunner_id && look.held == musket,
+            _ => false,
+        })
+    })
+    .await;
+
+    for (hand, prop, what) in [
+        (1u8, pistol, "the pistol"),
+        (2, dagger, "the knife"),
+        (0, musket, "the musket again"),
+    ] {
+        w.shared.lock().unwrap().heard.clear();
+        g.shared.lock().unwrap().held = hand;
+        w.until(what, |s| {
+            s.heard.iter().any(
+                |m| matches!(m, FromZone::Look { id, look } if *id == gunner_id && look.held == prop),
+            )
+        })
+        .await;
+    }
+    // Said once a switch, not once a tick.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let said = w
+        .shared
+        .lock()
+        .unwrap()
+        .heard
+        .iter()
+        .filter(|m| matches!(m, FromZone::Look { id, .. } if *id == gunner_id))
+        .count();
+    assert_eq!(said, 1, "one look for the switch back");
 }

@@ -343,6 +343,28 @@ pressed against (the near plane is 4 units); a pass of its own is written down f
 15 with `fit_view` per template, which the manifest already carries. Third person shows
 the prop in the hand as everybody sees it.
 
+**The view fit** (2026-10-07, 13.10): a prop laid along the arm by its `fit` (the
+crossbow, the musket: 6.3) lay across the view, its muzzle to the left of the look. A
+template's `fit_view` (CONTENT.md 3.1) is a second fit in the same terms, applied to the
+built prop in the view only (`gm_model::pose::view_fit`: the same matrix in model space,
+after the attach): the crossbow and the musket are turned back by their 100° and 88°, the
+pistol by its 88° and brought 0.3 m nearer the eye, a short thing. A prop no template
+fits is drawn as built.
+
+**The hand in the gun mode** (MODES.md 3.7): the view model is the weapon switched to,
+`1 2 3`, read from the own mover and the manifest (the ability in hand, its `prop`) the
+frame the key is pressed; the zone tells everyone the same hand with a `Look` when it
+changes (6.2: the musket, the pistol, the knife's dagger), so a stranger's body holds
+what the gunner switched to.
+
+**The reload** (MODES.md 3.2): while the firearm in hand is being reloaded (the own
+predicted mover's reload, 0 to 1 over its `reload_ms`), the view model is brought down
+4.5 units, 3 nearer and 3 to the left, tipped 24° and rolled 40° over towards the off
+hand, worked at it with a bob of nine cycles a reload, eased in and out over the first and
+last 22% of it. The stranger sees the `RELOAD` stance (13.3). Offline, `--prop KEY` in
+the first person is the fitting room of the view model: the prop in the view with the
+stride's bob; `R` held works a reload over and over.
+
 ## 7. The purse: silver and gold
 
 The director dropped copper (2026-10-03). The ledger's integer is **silver**; **100 silver =
@@ -742,3 +764,36 @@ Seen on the software GPU at 1920 × 1080 (`strafe.sh` in the session's scratchpa
 held with `xdotool`): A in profile to the left, D to the right, W away, S a backpedal,
 idle on the look.
 
+### 13.10 The gun in the hand (2026-10-07, the director played the gun mode)
+
+"FPS mode, for example when I take musket, musket is oriented wrong and gun has no model
+at all, both need reload animation of some kind. Knife also needs model, maybe then it
+will be and feel a bit more like CS 1.6."
+
+Three faults, one cause each:
+
+- **The musket lay across the view.** The view model put the prop's +X along the look
+  (6.4), which is where a blade's tip is after its fit; the musket's fit lays it along the
+  arm for the third person (6.3), so its muzzle was +Y, to the left. The `fit_view` the
+  manifest had carried since Phase 14 is now applied (6.4): the crossbow and the musket
+  turned back, the pistol nearer.
+- **The pistol and the knife showed the musket.** A body's `Look` was the worn weapon's
+  model, else the primary's prop, and nothing changed it when the gun mode's hand changed
+  (MODES.md 3.7: the mover's `held`). The zone now reads the hand (`look_of`: in the gun
+  mode the ability in hand, whatever is worn) and says a `Look` when it changes, once a
+  switch (`crates/gm-server/tests/items.rs`: the watcher hears the pistol, the knife, the
+  musket again, once each); the own view model reads the hand from the predicted mover
+  the same frame. The pistol has a model of its own (`gm-tools content synth pistol`:
+  a flintlock, 17 KB of glb, 1.0 KB of gmm); the knife is the dagger the content already
+  had. The carbine is still drawn as the musket.
+- **No reload to see.** The view model is lowered, rolled over and worked while the own
+  reload runs (6.4); the stranger had the `RELOAD` stance already.
+
+Seen on the software GPU at 1920 × 1080, offline and on a private play stack with a
+musketeer driven by `xdotool` (the session's scratchpad `vm/`): the musket along the look
+with its lock under the eye, the pistol on `2`, the dagger on `3`, "reloading" with the
+pistol dropped to the frame's corner and the musket dipped and rolled; the captures are in
+`~/.local/share/gamengine/play/shots/2026-10-07-gun/`. Sizes and counts: WebGPU wasm
+1,237,363 (+9,801 over 15c's 1,227,562; the cap 2 MiB), the bundle 7 props and 23 baked
+icons (the pistol's among them), `content check` reproduces it; the two tests of
+`items.rs` pass against the test database, the workspace's unit tests as before.

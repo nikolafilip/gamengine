@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use web_time::Instant;
 
-use glam::{Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 use gm_bsp::Bsp;
 use gm_core::build::{ContentPack, Sheet};
 use gm_core::collide::{Aabb, sweep_boxes};
@@ -412,6 +412,8 @@ struct Active {
 #[derive(Clone, Copy)]
 struct ViewModel {
     slot: usize,
+    /// The template's `fit_view` for the prop (LOOK.md 6.4), identity without one.
+    fit: Mat4,
     eye: Vec3,
     yaw: f32,
     pitch: f32,
@@ -419,6 +421,8 @@ struct ViewModel {
     kick: f32,
     /// −1 drawn back in a windup, +1 across at the end of a cut, 0 at rest.
     swing: f32,
+    /// How far along the reload in hand is, 0 when none (MODES.md 3.2).
+    reload: f32,
     light: [f32; 3],
 }
 
@@ -674,6 +678,59 @@ fn held_prop(
     let active = active?;
     let (gpu, characters) = (&active.gpu, &mut active.renderer.characters);
     content.prop(key, |model| Some(characters.add_model(gpu, model)))
+}
+
+/// Where the view model of a prop sits (LOOK.md 6.4): the `fit_view` of the template
+/// whose model it is, as a matrix in model space; identity for a prop no template fits.
+fn view_fit_of(content: &Content, key: &str) -> Mat4 {
+    content
+        .manifest
+        .as_ref()
+        .and_then(|m| {
+            m.templates
+                .iter()
+                .find(|t| t.model.as_deref() == Some(key))
+                .and_then(|t| t.fit_view.as_ref())
+        })
+        .map_or(Mat4::IDENTITY, gm_model::pose::view_fit)
+}
+
+/// The prop of the weapon in the own hand in the gun mode (MODES.md 3.7): the ability
+/// switched to, by its key in the pack, through the manifest; `None` in another mode or
+/// for a hand with nothing. The zone says the same with a `Look`, a round trip later.
+fn gun_hand_prop(
+    content: &Content,
+    pack: Option<&ContentPack>,
+    c: &gm_net::client::ClientState,
+) -> Option<String> {
+    let kit = &c.sheet.kit;
+    if kit.mode != gm_core::vocab::Mode::Gun {
+        return None;
+    }
+    let slot = c.mover.in_hand(kit)? as usize;
+    let def = kit.abilities.get(slot)?.id.0.checked_sub(1)? as usize;
+    let key = &pack?.abilities.get(def)?.key;
+    content
+        .manifest
+        .as_ref()?
+        .abilities
+        .iter()
+        .find(|a| &a.key == key)?
+        .prop
+        .clone()
+}
+
+/// How far along the reload of the firearm in the own hand is (MODES.md 3.2): 0 when
+/// none is under way, rising to 1 as it ends.
+fn reload_progress(c: &gm_net::client::ClientState) -> f32 {
+    let Some((f, g)) = c.mover.gun_in_hand(&c.sheet.kit) else {
+        return 0.0;
+    };
+    let Some(until) = g.reload_until else {
+        return 0.0;
+    };
+    let left = gm_core::sim::tick_delta(until, c.tick).max(0) as f32;
+    (1.0 - left / f.reload.max(1) as f32).clamp(0.0, 1.0)
 }
 
 fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start) -> App {
@@ -1501,7 +1558,11 @@ fn rpg_bodies_of(c: &ClientState, my_team: u8) -> Vec<crate::rpg::Body> {
 
 /// The active slot (1-based) that is a dash with an untouchable window (MODES.md 4.4),
 /// while it is ready: what Space plays in the action mode.
-pub(crate) fn dodge_slot(kit: &gm_core::build::Kit, mover: &gm_core::sim::Mover, now: u32) -> Option<u8> {
+pub(crate) fn dodge_slot(
+    kit: &gm_core::build::Kit,
+    mover: &gm_core::sim::Mover,
+    now: u32,
+) -> Option<u8> {
     kit.actives.iter().enumerate().find_map(|(i, slot)| {
         let slot = (*slot)? as usize;
         let ab = kit.abilities.get(slot)?;
@@ -1584,7 +1645,9 @@ pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
     if kit.mode == gm_core::vocab::Mode::Gun {
         // The gun mode (MODES.md 3.7): the three weapons, the one in hand lit, then the
         // actives on 4 to 7.
-        let knife = kit.knife.map(|k| kit.abilities[k as usize].id.0.saturating_sub(1));
+        let knife = kit
+            .knife
+            .map(|k| kit.abilities[k as usize].id.0.saturating_sub(1));
         cell("1", kit.primary, Some(build.primary));
         cell("2", kit.secondary, Some(build.secondary));
         cell("3", kit.knife, knife);
@@ -1749,7 +1812,13 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
         let text = format!("{} hits", combo.0);
         let print = s * 1.2;
         let ink = [1.0, 0.85, 0.3, fade];
-        hud.text(w * 0.5 + 18.0 * s + 1.0, h * 0.5 - 8.0 * s + 1.0, print, [0.0, 0.0, 0.0, 0.8 * fade], &text);
+        hud.text(
+            w * 0.5 + 18.0 * s + 1.0,
+            h * 0.5 - 8.0 * s + 1.0,
+            print,
+            [0.0, 0.0, 0.0, 0.8 * fade],
+            &text,
+        );
         hud.text(w * 0.5 + 18.0 * s, h * 0.5 - 8.0 * s, print, ink, &text);
     }
     let Some(o) = online else { return };
@@ -1761,7 +1830,15 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
     // mask and its lines.
     if let Some((f, g)) = c.mover.gun_in_hand(&c.sheet.kit) {
         let now = c.tick;
-        let cone = gm_core::sim::cone_deg(f, c.sheet.derived.max_speed, &c.mover, g, crouched, g.spray, now);
+        let cone = gm_core::sim::cone_deg(
+            f,
+            c.sheet.derived.max_speed,
+            &c.mover,
+            g,
+            crouched,
+            g.spray,
+            now,
+        );
         let per_deg = h / (crate::render::fov_y_deg() / zoom.max(1.0));
         let gap = (cone * per_deg).max(4.0 * s);
         let len = 6.0 * s;
@@ -3529,7 +3606,9 @@ impl App {
                         o.hits.push((target, amount, absorbed));
                         let now = Instant::now();
                         self.combo = match self.combo {
-                            (n, Some(last)) if now.duration_since(last).as_secs_f32() < COMBO_SECS => {
+                            (n, Some(last))
+                                if now.duration_since(last).as_secs_f32() < COMBO_SECS =>
+                            {
                                 (n + 1, Some(now))
                             }
                             _ => (1, Some(now)),
@@ -3646,7 +3725,11 @@ impl App {
         let rpg = c.sheet.kit.mode == gm_core::vocab::Mode::Rpg;
         // The RPG mode's keys (MODES.md 5.3): with a target they ask for a target-action;
         // without one they press as the action mode does.
-        let rpg_bodies = if rpg { rpg_bodies_of(c, o.team) } else { Vec::new() };
+        let rpg_bodies = if rpg {
+            rpg_bodies_of(c, o.team)
+        } else {
+            Vec::new()
+        };
         let mut rpg_pressed = 0u16;
         let mut rpg_ability = 0u8;
         if rpg {
@@ -3844,7 +3927,10 @@ impl App {
         // sends for a targeted body; a stranger's whole is read as the band's top.
         if rpg && let Some(target) = self.rpg.target {
             if let Some(e) = others.iter().find(|e| e.id == target) {
-                let name = o.names.get(&target).map_or_else(|| "?".to_string(), |n| n.0.clone());
+                let name = o
+                    .names
+                    .get(&target)
+                    .map_or_else(|| "?".to_string(), |n| n.0.clone());
                 let max = match (o.kinds.get(&target), &o.pack) {
                     (Some(BodyKind::Creature { def }), Some(pack)) => {
                         pack.creatures.get(*def as usize).map_or(1500, |d| d.health)
@@ -4177,13 +4263,20 @@ impl App {
         if rpg {
             if let Some(goal) = self.rpg.walk {
                 let feet = goal + Vec3::Z * Hull::Player.mins().z;
-                self.fx.wall(feet, 10.0, 6.0, [1.0, 0.85, 0.3, 0.6], [1.0, 0.85, 0.3, 0.0]);
+                self.fx.wall(
+                    feet,
+                    10.0,
+                    6.0,
+                    [1.0, 0.85, 0.3, 0.6],
+                    [1.0, 0.85, 0.3, 0.0],
+                );
             }
             if let Some(t) = self.rpg.target
                 && let Some(e) = others.iter().find(|e| e.id == t)
             {
                 let feet = e.pos + Vec3::Z * Hull::Player.mins().z;
-                self.fx.wall(feet, 20.0, 4.0, [1.0, 0.3, 0.2, 0.7], [1.0, 0.3, 0.2, 0.0]);
+                self.fx
+                    .wall(feet, 20.0, 4.0, [1.0, 0.3, 0.2, 0.7], [1.0, 0.3, 0.2, 0.0]);
             }
         }
         self.effects.end();
@@ -4213,15 +4306,28 @@ impl App {
                 }
                 self.view_kick = (self.view_kick - frame_dt * 6.0).max(0.0);
                 self.view_stride += own_travel / 64.0;
-                let prop = held_prop(
-                    &mut self.content,
-                    self.active.as_mut(),
-                    &o.props,
-                    o.looks.get(&c.my_id).copied().unwrap_or_default(),
-                );
+                // The gun mode's hand is known here before the zone says so.
+                let key = match gun_hand_prop(&self.content, o.pack.as_ref(), c) {
+                    Some(key) => Some(key),
+                    None => o
+                        .props
+                        .get(o.looks.get(&c.my_id).copied().unwrap_or_default().held as usize)
+                        .cloned(),
+                };
+                let fit = key
+                    .as_deref()
+                    .map_or(Mat4::IDENTITY, |k| view_fit_of(&self.content, k));
+                let prop = key.and_then(|key| {
+                    let active = self.active.as_mut()?;
+                    let (gpu, characters) = (&active.gpu, &mut active.renderer.characters);
+                    self.content
+                        .prop(&key, |model| Some(characters.add_model(gpu, model)))
+                });
+                let reload = reload_progress(c);
                 // (Not while the scope is up, MODES.md 3.2.)
                 self.view_model = prop.filter(|_| !self.input.scoped).map(|slot| ViewModel {
                     slot,
+                    fit,
                     eye,
                     yaw: self.sim.yaw + self.view_punch.0,
                     pitch: self.sim.pitch - self.view_punch.1,
@@ -4232,6 +4338,7 @@ impl App {
                     },
                     kick: self.view_kick,
                     swing: self.view_swing,
+                    reload,
                     light: crate::avatars::light_at(bsp, eye),
                 });
                 // The recoil's punch on the view (MODES.md 3.3).
@@ -4291,7 +4398,9 @@ impl App {
 
     /// A left click in the RPG mode (MODES.md 5.2, 5.5).
     fn rpg_click(&mut self) {
-        let Some((vp, size)) = self.last_vp else { return };
+        let Some((vp, size)) = self.last_vp else {
+            return;
+        };
         let Some((from, dir)) = crate::rpg::Rpg::ray(vp, size, self.cursor) else {
             return;
         };
@@ -4595,7 +4704,11 @@ impl App {
             let turn = self.settings.sensitivity / self.zoom.max(1.0);
             let tilt = if self.settings.invert { -turn } else { turn };
             self.sim.yaw -= self.input.mouse_dx * turn;
-            let (low, high) = if self.rpg_mode() { (5.0, 80.0) } else { (-89.0, 89.0) };
+            let (low, high) = if self.rpg_mode() {
+                (5.0, 80.0)
+            } else {
+                (-89.0, 89.0)
+            };
             self.sim.pitch = (self.sim.pitch + self.input.mouse_dy * tilt).clamp(low, high);
         }
         self.sim.yaw = self.sim.yaw.rem_euclid(360.0);
@@ -4692,7 +4805,41 @@ impl App {
             self.entities.clear();
             self.bodies.clear();
             match self.viewport {
-                Viewport::First => (self.sim.eye(), self.sim.yaw, self.sim.pitch),
+                Viewport::First => {
+                    // The fitting room of the view model (`--prop KEY`, LOOK.md 6.4):
+                    // the prop in the view with its stride's bob; R held works a reload
+                    // over and over, to see it.
+                    let eye = self.sim.eye();
+                    self.view_stride +=
+                        self.sim.curr.velocity.truncate().length() * frame_dt / 64.0;
+                    let t = self.started.elapsed().as_secs_f32();
+                    let reload = if self.input.down(KeyCode::KeyR) {
+                        (t / 2.4).fract()
+                    } else {
+                        0.0
+                    };
+                    self.view_model = self.offline_prop.map(|slot| ViewModel {
+                        slot,
+                        fit: self
+                            .opts
+                            .prop
+                            .as_deref()
+                            .map_or(Mat4::IDENTITY, |k| view_fit_of(&self.content, k)),
+                        eye,
+                        yaw: self.sim.yaw,
+                        pitch: self.sim.pitch,
+                        stride: if self.sim.curr.on_ground {
+                            self.view_stride
+                        } else {
+                            0.0
+                        },
+                        kick: 0.0,
+                        swing: 0.0,
+                        reload,
+                        light: crate::avatars::light_at(&self.bsp, eye),
+                    });
+                    (eye, self.sim.yaw, self.sim.pitch)
+                }
                 _ => {
                     let v = self.sim.curr.velocity;
                     self.bodies.push(Body {
@@ -4805,7 +4952,7 @@ impl App {
         a.avatars.begin_frame();
         if let Some(v) = self.view_model.take() {
             a.avatars.view_model(
-                v.slot, v.eye, v.yaw, v.pitch, v.stride, v.kick, v.swing, v.light,
+                v.slot, v.fit, v.eye, v.yaw, v.pitch, v.stride, v.kick, v.swing, v.reload, v.light,
             );
         }
         for body in &self.bodies {
@@ -4837,7 +4984,10 @@ impl App {
             &mut self.entities,
         );
         let vp = crate::render::view_proj_zoomed(camera, cam_yaw, cam_pitch, aspect, self.zoom);
-        self.last_vp = Some((vp, (a.config.width.max(1) as f32, a.config.height.max(1) as f32)));
+        self.last_vp = Some((
+            vp,
+            (a.config.width.max(1) as f32, a.config.height.max(1) as f32),
+        ));
         // One scale for the HUD and the screens: what the window gives, or what was chosen;
         // and the atlas made for that scale (LOOK.md 2.2), from the frame it is here.
         let scale = ui::scale_for(

@@ -437,6 +437,36 @@ pub fn hammer_prop() -> crate::write::PropGlb {
     k.glb
 }
 
+/// A flintlock pistol (MODES.md 3.7): a short barrel along +Z, the grip dropping back
+/// under the hand at the origin, the lock on the right, brass at the butt; in metres.
+pub fn pistol_prop() -> crate::write::PropGlb {
+    let mut k = PropKit::new(&[
+        [0.30, 0.30, 0.34, 1.0], // barrel, blued
+        [0.36, 0.22, 0.12, 1.0], // walnut stock
+        [0.60, 0.48, 0.22, 1.0], // brass furniture
+        [0.20, 0.20, 0.22, 1.0], // the lock, dark
+    ]);
+    // The barrel from the lock forward, the fore-stock under it.
+    k.cylinder(2, [0.0, 0.03], -0.01, 0.30, 0.011, 8, 0);
+    k.cuboid([-0.015, 0.0, -0.02], [0.015, 0.03, 0.18], 1);
+    // The grip: three steps down and back, the brass cap at the bottom.
+    k.cuboid([-0.014, -0.035, -0.06], [0.014, 0.0, -0.01], 1);
+    k.cuboid([-0.014, -0.07, -0.085], [0.014, -0.035, -0.035], 1);
+    k.cuboid([-0.015, -0.105, -0.11], [0.015, -0.07, -0.06], 1);
+    k.cuboid([-0.017, -0.115, -0.115], [0.017, -0.105, -0.055], 2);
+    // The lock plate and the cock on the right, the trigger and its guard under.
+    k.cuboid([0.014, -0.005, -0.03], [0.019, 0.025, 0.05], 3);
+    k.cuboid([0.016, 0.02, -0.02], [0.026, 0.045, 0.0], 3);
+    k.cuboid([-0.005, -0.03, 0.0], [0.005, -0.02, 0.05], 2);
+    k.cuboid([-0.005, -0.03, 0.0], [0.005, -0.005, 0.005], 2);
+    k.cuboid([-0.005, -0.03, 0.045], [0.005, -0.005, 0.05], 2);
+    k.cuboid([-0.004, -0.02, 0.015], [0.004, -0.005, 0.02], 3);
+    // The ramrod under the barrel and a brass band at the muzzle end of the stock.
+    k.cylinder(2, [0.0, -0.008], 0.02, 0.27, 0.0035, 6, 2);
+    k.cuboid([-0.017, -0.012, 0.15], [0.017, 0.044, 0.165], 2);
+    k.glb
+}
+
 /// A musket: a long barrel along +Z over a walnut stock, the lock and the trigger guard
 /// under the hand at the origin, in metres.
 pub fn musket_prop() -> crate::write::PropGlb {

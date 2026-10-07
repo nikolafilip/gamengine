@@ -149,7 +149,10 @@ pub fn run(cmd: ContentCmd) -> Result<()> {
                 "sword" => gm_ingest::synth::sword_prop(0.85),
                 "hammer" => gm_ingest::synth::hammer_prop(),
                 "musket" => gm_ingest::synth::musket_prop(),
-                other => bail!("`{other}` is not a prop the tool makes: sword, hammer, musket"),
+                "pistol" => gm_ingest::synth::pistol_prop(),
+                other => {
+                    bail!("`{other}` is not a prop the tool makes: sword, hammer, musket, pistol")
+                }
             }
             .build();
             std::fs::write(&out, &glb).with_context(|| format!("writing {}", out.display()))?;

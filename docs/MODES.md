@@ -350,8 +350,9 @@ Built as section 3 says, with these readings:
   mover keeps a `GunState` per hand (magazine, reserve, the reload under way, the last
   shot and the index in the spray); a spawn fills both. The musket (one round, bolt
   action, a kick of 2.4°), the pistol (eight, a click a shot) and the carbine (25, held,
-  a pattern of 25 pairs) are content; the pistol and the carbine are drawn as the musket
-  until they have models.
+  a pattern of 25 pairs) are content; the pistol has a model of its own since the
+  director played it (2026-10-07: `gm-tools content synth pistol`, LOOK.md 13.10), the
+  carbine is drawn as the musket until it has one.
 - **The kick** is applied twice, as 3.3 says: the client's view is punched by the pair
   and the punch falls to a third in 60 ms; the zone turns the bolt by the pair before
   it rolls the cone. The frames sent carry the mouse's aim, never the punch.
@@ -366,6 +367,10 @@ Built as section 3 says, with these readings:
   switch of weapon drops it. The stance `RELOAD`. The bolt action fires standing or
   walking, never above half the body's speed.
 - **In hand** `1 2 3` (the gun, the pistol, the knife) and the actives on `4`–`7`;
+  the hand is what everyone sees held (LOOK.md 6.2: the zone says a `Look` when it
+  changes; the own view model reads it from the predicted mover the same frame) and
+  the view model is turned to the look by the template's `fit_view` (LOOK.md 6.4);
+  the reload lowers and works the view model (LOOK.md 6.4);
   Ctrl crouches; the secondary mouse button toggles the scope of a firearm that has one
   (2 or 4: the field of view and the mouse divided by it, the view model hidden, a
   mask with its lines); the own block of the snapshot carries both hands' rounds and

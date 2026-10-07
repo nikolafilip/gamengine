@@ -224,18 +224,34 @@ fn replay_written(w: &Written) {
 }
 
 /// What a body holds (LOOK.md 6.1): the model of the weapon it wears, else the prop of
-/// its primary ability, else nothing; as an index into the pack's prop list.
+/// its primary ability, else nothing; as an index into the pack's prop list. In the gun
+/// mode (MODES.md 3.7) the hand is the weapon switched to, `1 2 3`, whatever is worn:
+/// the prop of the ability in hand.
 fn look_of(
     looks: &gm_content::looks::Looks,
     zone: &Zone,
     hub_slots: &std::collections::BTreeMap<u32, HubSlot>,
     body: u32,
 ) -> Look {
+    let player = zone.player(body);
+    if let Some(p) = player
+        && p.sheet.kit.mode == gm_core::vocab::Mode::Gun
+    {
+        let in_hand = p
+            .mover
+            .in_hand(&p.sheet.kit)
+            .and_then(|slot| p.sheet.kit.abilities.get(slot as usize))
+            .map(|a| a.id.0.saturating_sub(1) as usize);
+        return Look {
+            held: looks.held(None, in_hand),
+            worn: Look::NONE,
+        };
+    }
     let worn = hub_slots
         .get(&body)
         .map(|s| s.worn[0].as_str())
         .filter(|t| !t.is_empty());
-    let primary = zone.player(body).map(|p| p.sheet.build.primary as usize);
+    let primary = player.map(|p| p.sheet.build.primary as usize);
     Look {
         held: looks.held(worn, primary),
         worn: Look::NONE,
@@ -539,6 +555,8 @@ pub async fn run_with_web(
     let event_tx = tx.clone();
     drop(tx);
     let mut hub_slots: BTreeMap<EntityId, HubSlot> = BTreeMap::new();
+    // The gun hand each player was last seen with (MODES.md 3.7): a change is a `Look`.
+    let mut hands_seen: HashMap<EntityId, u8> = HashMap::new();
     let mut revoked: Vec<(ModelId, Instant)> = Vec::new();
     // The market: open stalls by id (the hub is their owner; this is its mirror).
     let mut stalls: BTreeMap<i64, StallSummary> = BTreeMap::new();
@@ -777,6 +795,7 @@ pub async fn run_with_web(
                             s.conn.close(4, b"character joined again");
                         }
                         hub_slots.remove(&old);
+                        hands_seen.remove(&old);
                         party_waits.remove(&old);
                         trade_asks.retain(|asker, (asked, _)| *asker != old && *asked != old);
                         // (The old session's own leave finds nothing left to announce.)
@@ -1238,6 +1257,7 @@ pub async fn run_with_web(
                             s.conn.close(0, b"travelled");
                         }
                         hub_slots.remove(&id);
+                        hands_seen.remove(&id);
                         parties.left(character, Instant::now());
                         party_waits.remove(&id);
                         trade_asks.retain(|asker, (asked, _)| *asker != id && *asked != id);
@@ -2411,6 +2431,23 @@ pub async fn run_with_web(
         let t_sim = Instant::now();
         zone.step(&world.bsp);
         phases.sim += t_sim.elapsed();
+        // The weapon switched to in the gun mode (MODES.md 3.7) is what the hand shows
+        // (LOOK.md 6.2): everyone is told when it changes.
+        for s in sessions.values() {
+            let Some(p) = zone.player(s.id) else {
+                continue;
+            };
+            if p.sheet.kit.mode != gm_core::vocab::Mode::Gun {
+                continue;
+            }
+            let held = p.mover.held;
+            if hands_seen.insert(s.id, held) != Some(held) {
+                let look = look_of(&cfg.looks, &zone, &hub_slots, s.id);
+                for other in sessions.values() {
+                    other.send_control(FromZone::Look { id: s.id, look });
+                }
+            }
+        }
 
         let events: Vec<ZoneEvent> = zone.events.drain(..).collect();
         let mut recorded: Vec<gm_replay::Event> = match &recorder {

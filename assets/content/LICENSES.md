@@ -14,6 +14,7 @@ official content as a whole is CC-BY-SA 4.0 (LICENSE.md at the root).
 | `props/crossbow.glb` | the same pack (`crossbow_1handed.gltf` + `rogue_texture.png`) | CC0 1.0 |
 | `props/hammer.glb` | ours: `gm-tools content synth hammer` | CC-BY-SA 4.0 |
 | `props/musket.glb` | ours: `gm-tools content synth musket` | CC-BY-SA 4.0 |
+| `props/pistol.glb` | ours: `gm-tools content synth pistol` | CC-BY-SA 4.0 |
 
 The pack's files were packed into single `.glb`s by `gm-tools content import prop`
 (the glTF JSON, its `.bin` and its texture, unchanged otherwise).

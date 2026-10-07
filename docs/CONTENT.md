@@ -119,6 +119,14 @@ fit = { move = [0.0, -0.02, 0.0], turn = [0, 90, 0], scale = 1.0 }   # metres, d
 space and the client does nothing at draw time. `gm-tools content look sword --out x.png`
 (9) shows the result on the mannequin in every stance, to tune a fit by eye.
 
+A row may carry a `fit_view` as well: a second fit in the same terms (metres, degrees
+about glTF's X, Y, Z, a scale) that the first-person view model applies to the built prop
+and nothing else does (LOOK.md 6.4; the manifest carries it, `gm_model::pose::view_fit`
+turns it into model space). What the fit laid along the arm for the third person is
+turned back to point along the look: `fit_view = { turn = [0, -88, 0] }` for the musket,
+the pistol's also moved 0.3 m nearer the eye. `gm-client --offline --prop KEY` in the
+first person shows it (`R` held: the reload).
+
 A prop's vertices are written with `joints = [0, 0, 0, 0]`, `weights = [255, 0, 0, 0]`: the
 character pipeline's uniform block (MODELS.md 9: 24 matrices, the scale, a tint, the light)
 is uploaded whole for a prop too, with the hand's matrix at index 0 and the other
@@ -128,7 +136,7 @@ A pack's file without a texture (flat colours per material, or `COLOR_0` per ver
 way the low-poly packs come) gets a texture made for it: every flat colour becomes an
 8 × 8 swatch of a small atlas and the vertices point at their swatch (at most 256 colours;
 a file with some textured and some flat primitives is refused: it must be one or the
-other). Our own hammer and musket are made this way (`gm-tools content synth`).
+other). Our own hammer, musket and pistol are made this way (`gm-tools content synth`).
 
 Two-handed holds, sheathing to the back out of a fight, and a left-hand prop are all `held`
 values a later phase can act on; v1 draws every prop in the right hand, always.

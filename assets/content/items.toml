@@ -16,8 +16,10 @@
 # The fist holds +Z across the forearm (a blade, a hammer); a turn about Y lays it
 # elsewhere: 100 along the arm (what is aimed: the crossbow, the musket), a little the
 # other way to stand it up (the staff). `gm-tools content look KEY --out x.png` shows it;
-# `fit_view` is where the first-person view model sits (LOOK.md 6.4). An icon is baked
-# from the model unless icons/<icon>.png is given.
+# `fit_view` is where the first-person view model sits (LOOK.md 6.4): a second fit, in the
+# same terms, applied to the built prop in the view only, so what the fit laid along the
+# arm is turned back to point along the look (the crossbow, the musket, the pistol). An
+# icon is baked from the model unless icons/<icon>.png is given.
 
 [[template]]
 id = "sword"
@@ -57,6 +59,7 @@ strikes = "pierce"
 layers = ["shard", "core", "frame", "gem"]
 model = "crossbow"
 fit = { turn = [0, 100, 0], scale = 0.7 }
+fit_view = { turn = [0, -100, 0] }
 
 [[template]]
 id = "musket"
@@ -65,6 +68,18 @@ strikes = "pierce"
 layers = ["shard", "core", "frame", "gem"]
 model = "musket"
 fit = { turn = [0, 88, 0] }
+fit_view = { turn = [0, -88, 0] }
+
+# The pistol of a gun build (MODES.md 3.7), ours (`gm-tools content synth pistol`): aimed
+# like the musket, so laid along the arm and turned back to the look in the view.
+[[template]]
+id = "pistol"
+kind = "weapon"
+strikes = "pierce"
+layers = ["shard", "core", "frame", "gem"]
+model = "pistol"
+fit = { turn = [0, 88, 0] }
+fit_view = { move = [0.0, -0.02, -0.3], turn = [0, -88, 0] }   # nearer the eye: a short thing
 
 [[template]]
 id = "cuirass"

@@ -668,7 +668,7 @@ at_ms = 0
 melee_arc = { reach = 56, arc = 70, half_height = 40, windup_ms = 100, active_ms = 40, recovery_ms = 200, damage = { amount = 40, type = "slash", knockback = 60, stagger = 10 }, max_targets = 1, cleave_falloff = 1.0, parryable = true, hit_stop_ms = 30 }
 
 # The pistol (MODES.md 3.7): the secondary of a gun build, a click a shot, a short cone
-# that opens fast. It is drawn as the musket until it has a model of its own.
+# that opens fast.
 [[ability]]
 key = "pistol"
 name = "Pistol"
@@ -676,7 +676,7 @@ slot = "secondary"
 cost = 3
 move_scale = 0.9
 interrupt = "never"
-prop = "musket"
+prop = "pistol"
 range = 700
 firearm = { magazine = 8, reserve = 32, reload_ms = 1600, cycle_ms = 180, fire = "semi", headshot = 4.0, scope = 0, recoil = [[0.0, 0.8], [0.3, 1.5], [-0.4, 2.1], [0.5, 2.6], [-0.3, 3.0], [0.2, 3.3]], cone = { stand = 1.0, crouch = 0.6, move = 2.5, air = 7.0, shot = 0.8, recover_ms = 350 } }
 [[ability.step]]

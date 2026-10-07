@@ -57,6 +57,30 @@ pub fn grip_right() -> Mat4 {
     )
 }
 
+/// Where the first-person view model sits (LOOK.md 6.4, CONTENT.md 3.1): a template's
+/// `fit_view`, written like its `fit` in glTF's conventions (metres, degrees about X,
+/// then Y, then Z, a scale; scaled, turned, moved), as a matrix in model space (+X
+/// forward, +Z up, units) applied to the built prop before it is placed in the view. A
+/// prop laid along the arm by its `fit` (a musket, turned 88° about Y) is turned back by
+/// the same angle to point along the look.
+pub fn view_fit(f: &[f32; 7]) -> Mat4 {
+    const UNITS_PER_METRE: f32 = 32.0;
+    let r = Mat4::from_rotation_z(f[5].to_radians())
+        * Mat4::from_rotation_y(f[4].to_radians())
+        * Mat4::from_rotation_x(f[3].to_radians());
+    let gltf = Mat4::from_translation(Vec3::new(f[0], f[1], f[2]) * UNITS_PER_METRE)
+        * r
+        * Mat4::from_scale(Vec3::splat(f[6]));
+    // glTF (+Y up, facing +Z) to model space (+Z up, facing +X): x, y, z -> z, x, y.
+    let to_model = Mat4::from_cols(
+        glam::Vec4::new(0.0, 1.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
+        glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
+        glam::Vec4::W,
+    );
+    to_model * gltf * to_model.transpose()
+}
+
 /// Where a held prop is drawn: the skinning matrix of `prop_r`, the translation to that
 /// bone's pivot, the grip.
 pub fn prop_attach(pivots: &[Vec3; BONES], skin: &[Mat4; BONES]) -> Mat4 {
@@ -88,6 +112,23 @@ mod tests {
     use super::*;
     use crate::rig::{self, ALL_BONES, bone};
     use gm_core::vocab::ArchetypeFrame;
+
+    #[test]
+    fn a_view_fit_turns_about_the_upright_and_moves_in_metres() {
+        // The musket lies along the arm (+Y of model space after its fit of 88° about
+        // glTF's Y); its view fit of −88° brings the muzzle back along +X.
+        let m = view_fit(&[0.0, 0.0, 0.0, 0.0, -88.0, 0.0, 1.0]);
+        let muzzle = m.transform_vector3(Vec3::Y);
+        assert!(
+            (muzzle - Vec3::new(88f32.to_radians().sin(), 88f32.to_radians().cos(), 0.0)).length()
+                < 1e-5,
+            "{muzzle}"
+        );
+        // A move of a metre forward in glTF (+Z) is 32 units along model +X; up (+Y) is +Z.
+        let m = view_fit(&[0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 2.0]);
+        assert_eq!(m.transform_point3(Vec3::ZERO), Vec3::new(32.0, 0.0, 16.0));
+        assert_eq!(m.transform_vector3(Vec3::X), Vec3::X * 2.0);
+    }
 
     #[test]
     fn the_grip_is_a_rotation_that_holds_a_blade_across_the_arm() {

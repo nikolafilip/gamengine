@@ -320,15 +320,18 @@ impl Avatars {
     /// right of the frame, its business end along the look, bobbing with `stride` (in
     /// strides) and kicked back by `kick` (1 at a launch, decaying to 0).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn view_model(
         &mut self,
         slot: usize,
+        fit: Mat4,
         eye: Vec3,
         yaw: f32,
         pitch: f32,
         stride: f32,
         kick: f32,
         swing: f32,
+        reload: f32,
         light: [f32; 3],
     ) {
         let (sy, cy) = yaw.to_radians().sin_cos();
@@ -347,10 +350,20 @@ impl Avatars {
         // windup (`swing` under 0), cut across to the left (over 0).
         // (Twice as far out as the hand is, so that it takes a corner of the view and
         // not half of it: a view model is seen, the fight is looked at.)
+        // The reload (MODES.md 3.2, LOOK.md 6.4): the weapon is brought down and rolled
+        // over to the left to be worked, with the off hand's bob at it, and raised again
+        // at the end; `reload` is how far along it is, 0 when none.
+        let working = if reload > 0.0 {
+            let ease = |x: f32| x * x * (3.0 - 2.0 * x);
+            ease((reload / 0.22).min(1.0)) * ease(((1.0 - reload) / 0.22).min(1.0))
+        } else {
+            0.0
+        };
+        let busy = working * (reload * 9.0 * std::f32::consts::TAU).sin();
         let at = eye
-            + forward * (26.0 - kick * 4.0 + swing.max(0.0) * 4.0)
-            + right * (11.0 + bob.x - swing * 14.0)
-            + up * (-10.0 + bob.z + swing.abs() * 2.0);
+            + forward * (26.0 - kick * 4.0 + swing.max(0.0) * 4.0 - working * 3.0)
+            + right * (11.0 + bob.x - swing * 14.0 - working * 3.0)
+            + up * (-10.0 + bob.z + swing.abs() * 2.0 - working * 4.5 + busy * 0.6);
         // The prop's +X along the look (its +Y to the left, +Z up), then, in its own
         // frame, tipped up by the kick and turned a little inward.
         let basis = Mat4::from_cols(
@@ -359,16 +372,16 @@ impl Avatars {
             up.extend(0.0),
             at.extend(1.0),
         );
-        let tip = Mat4::from_rotation_y((-(4.0 + kick * 14.0f32)).to_radians());
-        let inward = Mat4::from_rotation_z((8.0f32 + swing * 62.0).to_radians())
-            * Mat4::from_rotation_x((swing * -35.0f32).to_radians());
+        let tip = Mat4::from_rotation_y((-(4.0 + kick * 14.0f32) + working * 24.0).to_radians());
+        let inward = Mat4::from_rotation_z((8.0f32 + swing * 62.0 + working * 18.0).to_radians())
+            * Mat4::from_rotation_x((swing * -35.0f32 - working * 40.0 + busy * 3.0).to_radians());
         self.draws.push(CharacterDraw {
             slot,
             world: Mat4::IDENTITY,
             pose: Pose::default(),
             tint: [1.0; 3],
             light,
-            attach: Some(basis * inward * tip),
+            attach: Some(basis * inward * tip * fit),
         });
     }
 
