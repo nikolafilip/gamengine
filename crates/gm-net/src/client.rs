@@ -422,6 +422,18 @@ impl ClientState {
             // the server interrupted is dropped; a broken block is released.
             m.stamina = own_state.stamina as f32;
             m.focus = own_state.focus as f32;
+            // The firearms' rounds are the zone's too (MODES.md 3.8); a reload the zone
+            // does not see is dropped, one it sees and we do not runs on its word.
+            if let Some(g) = own_state.guns {
+                for i in 0..2 {
+                    m.guns[i].magazine = g.magazine[i];
+                    m.guns[i].reserve = g.reserve[i];
+                }
+                let held = m.held.min(1) as usize;
+                if !g.reloading {
+                    m.guns[held].reload_until = None;
+                }
+            }
             let immune = (
                 m.statuses.chill_immune_until,
                 m.statuses.stagger_immune_until,
@@ -845,6 +857,7 @@ mod tests {
             stamina: 120,
             focus: 90,
             statuses: Vec::new(),
+            guns: None,
         };
         s.entities = entities;
         s.normalize(None);

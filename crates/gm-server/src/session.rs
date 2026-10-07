@@ -16,7 +16,7 @@ use gm_hub_proto::protocol::{ModelId, ModelRef};
 use gm_net::MAX_DATAGRAM_PAYLOAD;
 use gm_net::control::{BodyKind, FromZone};
 use gm_net::quant;
-use gm_net::snapshot::{EntityState, OwnState, Snapshot, SpawnInfo, StatusWire, flags};
+use gm_net::snapshot::{EntityState, GunsWire, OwnState, Snapshot, SpawnInfo, StatusWire, flags};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -655,7 +655,13 @@ pub fn player_state(p: &Player, own: bool) -> EntityState {
 /// The own block (PROTOCOL.md 5): resources and statuses relative to the acknowledged frame.
 pub fn own_state(p: &Player) -> OwnState {
     let now = p.last_input_tick;
+    let guns = (p.sheet.kit.mode == gm_core::vocab::Mode::Gun).then(|| GunsWire {
+        magazine: [p.mover.guns[0].magazine, p.mover.guns[1].magazine],
+        reserve: [p.mover.guns[0].reserve, p.mover.guns[1].reserve],
+        reloading: p.mover.reloading(now),
+    });
     OwnState {
+        guns,
         stamina: p.mover.stamina.round().clamp(0.0, u16::MAX as f32) as u16,
         focus: p.mover.focus.round().clamp(0.0, u16::MAX as f32) as u16,
         statuses: p

@@ -113,12 +113,22 @@ struct Globals {
 /// View-projection for a Quake-convention camera (Z up, yaw counter-clockwise from +X, positive
 /// pitch looks down), producing wgpu clip space.
 pub fn view_proj(eye: Vec3, yaw_deg: f32, pitch_deg: f32, aspect: f32) -> Mat4 {
+    view_proj_zoomed(eye, yaw_deg, pitch_deg, aspect, 1.0)
+}
+
+/// As [`view_proj`], with the field of view divided by `zoom` (a scope, MODES.md 3.2).
+pub fn view_proj_zoomed(eye: Vec3, yaw_deg: f32, pitch_deg: f32, aspect: f32, zoom: f32) -> Mat4 {
     let (sy, cy) = yaw_deg.to_radians().sin_cos();
     let (sp, cp) = pitch_deg.to_radians().sin_cos();
     let forward = Vec3::new(cp * cy, cp * sy, -sp);
-    let proj =
-        glam::camera::rh::proj::directx::perspective(FOV_Y_DEG.to_radians(), aspect, NEAR, FAR);
+    let fov = (FOV_Y_DEG / zoom.max(1.0)).to_radians();
+    let proj = glam::camera::rh::proj::directx::perspective(fov, aspect, NEAR, FAR);
     proj * glam::camera::rh::view::look_to_mat4(eye, forward, Vec3::Z)
+}
+
+/// The vertical field of view in degrees, for what the HUD draws in angles.
+pub const fn fov_y_deg() -> f32 {
+    FOV_Y_DEG
 }
 
 /// A solid box: projectiles, areas, markers. Players are `characters::CharacterDraw`.

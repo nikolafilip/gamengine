@@ -705,6 +705,34 @@ pub fn command_exit_ticks(dt: f32) -> Tick {
     (COMMAND_EXIT_MS as f32 / 1000.0 / dt).ceil() as Tick
 }
 
+/// The cone a firearm's bolt is rolled in now (MODES.md 3.4), in degrees: the stance's
+/// base, the movement's share, the air's, and the shots of the spray within `recover`
+/// of the last. `shot` is the index of the shot in its spray (0 for the first).
+pub fn cone_deg(
+    f: &crate::vocab::Firearm,
+    max_speed: f32,
+    m: &Mover,
+    g: &GunState,
+    crouched: bool,
+    shot: u8,
+    now: Tick,
+) -> f32 {
+    let base = if crouched && m.mv.on_ground {
+        f.cone.crouch
+    } else {
+        f.cone.stand
+    };
+    let speed = m.mv.ground_speed() / max_speed.max(1.0);
+    let recent = if shot > 0 && tick_delta(now, g.last_shot) <= f.cone.recover as i32 {
+        shot as f32
+    } else {
+        0.0
+    };
+    base + f.cone.moving * speed.clamp(0.0, 1.2)
+        + if m.mv.on_ground { 0.0 } else { f.cone.air }
+        + f.cone.shot * recent
+}
+
 /// Line of sight from `eye` to a body's `centre` through the mover's world, which holds
 /// the other bodies as solids: the trace stops a little short of the body, so the body
 /// itself is not in its own way.
@@ -908,18 +936,8 @@ fn resolve_step<W: CollisionWorld + ?Sized>(
             let (kick, cone_deg, headshot) = match &ab.firearm {
                 Some(f) => {
                     let g = &m.guns[m.held.min(1) as usize];
-                    let crouched = input.buttons & buttons::CROUCH != 0 && m.mv.on_ground;
-                    let base = if crouched { f.cone.crouch } else { f.cone.stand };
-                    let speed = m.mv.ground_speed() / sheet.derived.max_speed.max(1.0);
-                    let recent = if script.shot > 0 && tick_delta(now, g.last_shot) <= f.cone.recover as i32 {
-                        script.shot as f32
-                    } else {
-                        0.0
-                    };
-                    let cone = base
-                        + f.cone.moving * speed.clamp(0.0, 1.2)
-                        + if m.mv.on_ground { 0.0 } else { f.cone.air }
-                        + f.cone.shot * recent;
+                    let crouched = input.buttons & buttons::CROUCH != 0;
+                    let cone = cone_deg(f, sheet.derived.max_speed, m, g, crouched, script.shot, now);
                     (f.kick(script.shot), cone, f.headshot)
                 }
                 None => ((0.0, 0.0), 0.0, 1.0),

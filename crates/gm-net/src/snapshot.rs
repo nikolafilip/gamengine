@@ -125,6 +125,17 @@ pub struct OwnState {
     pub stamina: u16,
     pub focus: u16,
     pub statuses: Vec<StatusWire>,
+    /// The firearms of a gun build (MODES.md 3.8): the primary's and the secondary's
+    /// magazine and reserve, and whether the one in hand is being reloaded. `None` for a
+    /// build without one: a bit.
+    pub guns: Option<GunsWire>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GunsWire {
+    pub magazine: [u8; 2],
+    pub reserve: [u16; 2],
+    pub reloading: bool,
 }
 
 pub const MAX_OWN_STATUSES: usize = 8;
@@ -309,6 +320,17 @@ fn write_own(w: &mut BitWriter, own: &OwnState) {
         w.write_svar((s.magnitude * MAGNITUDE_SCALE).round() as i64);
         w.write_bits(s.stacks.min(7) as u64, 3);
     }
+    match own.guns {
+        None => w.write_bits(0, 1),
+        Some(g) => {
+            w.write_bits(1, 1);
+            for i in 0..2 {
+                w.write_uvar(g.magazine[i] as u64);
+                w.write_uvar(g.reserve[i] as u64);
+            }
+            w.write_bits(g.reloading as u64, 1);
+        }
+    }
 }
 
 fn read_own(r: &mut BitReader<'_>) -> Result<OwnState, NetError> {
@@ -331,10 +353,24 @@ fn read_own(r: &mut BitReader<'_>) -> Result<OwnState, NetError> {
             stacks,
         });
     }
+    let guns = if r.read_bits(1)? == 1 {
+        let mut g = GunsWire::default();
+        for i in 0..2 {
+            g.magazine[i] =
+                u8::try_from(r.read_uvar()?).map_err(|_| NetError::Malformed("magazine"))?;
+            g.reserve[i] =
+                u16::try_from(r.read_uvar()?).map_err(|_| NetError::Malformed("reserve"))?;
+        }
+        g.reloading = r.read_bits(1)? == 1;
+        Some(g)
+    } else {
+        None
+    };
     Ok(OwnState {
         stamina,
         focus,
         statuses,
+        guns,
     })
 }
 
@@ -614,6 +650,11 @@ mod tests {
                 magnitude: 0.25,
                 stacks: 1,
             }],
+            guns: Some(GunsWire {
+                magazine: [1, 8],
+                reserve: [23, 32],
+                reloading: true,
+            }),
         };
         s.entities.push(player(1, shift, true));
         for i in 2..17 {
@@ -711,9 +752,9 @@ mod tests {
         next.last_input_tick = 5;
         next.own.statuses.clear();
         let bytes = next.encode(Some(&base));
-        // header 2 + 3 x 4 + own (stamina 1, focus 2, count 4 bits) + count 1 + removed 1,
-        // bit-packed: 19 bytes.
-        assert_eq!(bytes.len(), 19);
+        // header 2 + 3 x 4 + own (stamina 1, focus 2, count 4 bits, the guns' bit and
+        // their 4 bytes) + count 1 + removed 1, bit-packed: 23 bytes.
+        assert_eq!(bytes.len(), 23);
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, next);
         // One entity moves: only it is on the wire, the rest still come back.
@@ -722,7 +763,7 @@ mod tests {
         moved.baseline_tick = 10;
         moved.entities[7].pos[0] += 4;
         let bytes = moved.encode(Some(&base));
-        assert!(bytes.len() <= 19 + 7, "{}", bytes.len());
+        assert!(bytes.len() <= 23 + 7, "{}", bytes.len());
         let back = Snapshot::decode(&bytes, |t| (t == 10).then_some(&base)).unwrap();
         assert_eq!(back, moved);
     }

@@ -76,6 +76,8 @@ const BENCH_CROWD_SWING_DEG: f32 = 22.0;
 /// Third-person camera: behind, slightly right and above the eyes (VOCABULARY.md 9).
 /// A blow within this many seconds of the last keeps the combo counter going (MODES.md 4.6).
 const COMBO_SECS: f32 = 2.0;
+/// The recoil's punch on the view falls to a third in this long (MODES.md 3.3).
+const PUNCH_DECAY_SECS: f32 = 0.06;
 const CAMERA_BACK: f32 = 110.0;
 const CAMERA_RIGHT: f32 = 24.0;
 const CAMERA_UP: f32 = 12.0;
@@ -243,6 +245,10 @@ struct Input {
     mouse: HashSet<MouseButton>,
     mouse_dx: f32,
     mouse_dy: f32,
+    /// The gun mode (MODES.md 3.7): the weapon in hand (0 the gun, 1 the pistol, 2 the
+    /// knife) and whether the scope is up (the secondary button toggles it).
+    held: u8,
+    scoped: bool,
 }
 
 impl Input {
@@ -269,9 +275,12 @@ impl Input {
     }
 
     /// The frame's input. `dodge` is the active slot (1-based) Space plays instead of a
-    /// jump (MODES.md 4.6): the kit's dash, while it is ready.
-    fn sim_input(&mut self, yaw: f32, pitch: f32, dodge: Option<u8>) -> SimInput {
-        let (forward, side) = self.axes();
+    /// jump (MODES.md 4.6): the kit's dash, while it is ready. In the gun mode (MODES.md
+    /// 3.7) `1 2 3` take the gun, the pistol and the knife in hand, `4`–`7` are the
+    /// actives, Ctrl crouches, Shift walks, `R` reloads and the secondary button is the
+    /// scope.
+    fn sim_input(&mut self, yaw: f32, pitch: f32, dodge: Option<u8>, gun: bool) -> SimInput {
+        let (mut forward, mut side) = self.axes();
         let mut b = 0u16;
         let dodged = dodge.is_some() && self.just_pressed.contains(&KeyCode::Space);
         if self.down(KeyCode::Space) && dodge.is_none() {
@@ -283,28 +292,61 @@ impl Input {
         if self.mouse.contains(&MouseButton::Left) {
             b |= buttons::PRIMARY;
         }
-        if self.mouse.contains(&MouseButton::Right) {
-            b |= buttons::SECONDARY;
-        }
-        // Guard is on C as well: a browser keeps Ctrl+W for itself (WEB.md 3.4).
-        if self.down(KeyCode::ControlLeft)
+        let ctrl = self.down(KeyCode::ControlLeft)
             || self.down(KeyCode::ControlRight)
-            || self.down(KeyCode::KeyC)
-        {
-            b |= buttons::GUARD;
+            || self.down(KeyCode::KeyC);
+        let shift = self.down(KeyCode::ShiftLeft) || self.down(KeyCode::ShiftRight);
+        let mut ability;
+        if gun {
+            for (i, k) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3]
+                .iter()
+                .enumerate()
+            {
+                if self.just_pressed.contains(k) {
+                    self.held = i as u8;
+                    self.scoped = false;
+                }
+            }
+            ability = [
+                KeyCode::Digit4,
+                KeyCode::Digit5,
+                KeyCode::Digit6,
+                KeyCode::Digit7,
+            ]
+            .iter()
+            .position(|k| self.just_pressed.contains(k))
+            .map_or(0, |i| i as u8 + 1);
+            if ctrl {
+                b |= buttons::CROUCH;
+            }
+            if shift {
+                forward *= 0.5;
+                side *= 0.5;
+            }
+            if self.scoped {
+                b |= buttons::SCOPE;
+            }
+        } else {
+            if self.mouse.contains(&MouseButton::Right) {
+                b |= buttons::SECONDARY;
+            }
+            // Guard is on C as well: a browser keeps Ctrl+W for itself (WEB.md 3.4).
+            if ctrl {
+                b |= buttons::GUARD;
+            }
+            if shift {
+                b |= buttons::ABILITY1;
+            }
+            ability = [
+                KeyCode::Digit1,
+                KeyCode::Digit2,
+                KeyCode::Digit3,
+                KeyCode::Digit4,
+            ]
+            .iter()
+            .position(|k| self.just_pressed.contains(k))
+            .map_or(0, |i| i as u8 + 1);
         }
-        if self.down(KeyCode::ShiftLeft) || self.down(KeyCode::ShiftRight) {
-            b |= buttons::ABILITY1;
-        }
-        let mut ability = [
-            KeyCode::Digit1,
-            KeyCode::Digit2,
-            KeyCode::Digit3,
-            KeyCode::Digit4,
-        ]
-        .iter()
-        .position(|k| self.just_pressed.contains(k))
-        .map_or(0, |i| i as u8 + 1);
         if dodged && let Some(d) = dodge {
             ability = d;
         }
@@ -316,7 +358,7 @@ impl Input {
             forward,
             side,
             ability,
-            held: 0,
+            held: if gun { self.held } else { 0 },
             target: 0,
         }
     }
@@ -419,6 +461,11 @@ struct App {
     /// The combo counter (MODES.md 4.6): blows the own hand landed within two seconds of
     /// each other, and when the last landed.
     combo: (u32, Option<Instant>),
+    /// The recoil's punch on the view (MODES.md 3.3), (yaw, pitch) degrees, decaying.
+    view_punch: (f32, f32),
+    /// The scope's zoom this frame (1 without one): the field of view is divided by it
+    /// and so is the mouse.
+    zoom: f32,
     /// The yaw each body was drawn facing last frame (LOOK.md 13.9), by its key.
     facings: HashMap<u32, f32>,
     /// Per squad slot: the companion's health as last sent, and whether it lives.
@@ -699,6 +746,8 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         tags: Vec::new(),
         pops: Vec::new(),
         combo: (0, None),
+        view_punch: (0.0, 0.0),
+        zoom: 1.0,
         facings: HashMap::new(),
         squad_view: Vec::new(),
         target_view: None,
@@ -1297,6 +1346,10 @@ pub(crate) struct HudView<'a> {
     pub own_name: &'a str,
     /// The combo counter (MODES.md 4.6): hits in the chain, and seconds since the last.
     pub combo: (u32, f32),
+    /// The gun mode (MODES.md 3.8): whether the body crouches (the cone's base), and the
+    /// scope's zoom this frame (1 without).
+    pub crouched: bool,
+    pub zoom: f32,
 }
 
 /// A name over a body (LOOK.md 13): where its head is, what it is called, the colour of
@@ -1474,6 +1527,27 @@ pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
             stage,
         });
     };
+    if kit.mode == gm_core::vocab::Mode::Gun {
+        // The gun mode (MODES.md 3.7): the three weapons, the one in hand lit, then the
+        // actives on 4 to 7.
+        let knife = kit.knife.map(|k| kit.abilities[k as usize].id.0.saturating_sub(1));
+        cell("1", kit.primary, Some(build.primary));
+        cell("2", kit.secondary, Some(build.secondary));
+        cell("3", kit.knife, knife);
+        for (i, key) in ["4", "5", "6", "7"].into_iter().enumerate() {
+            cell(
+                key,
+                kit.actives.get(i).copied().flatten(),
+                build.actives.get(i).copied(),
+            );
+        }
+        if let Some(held) = cells.get_mut(c.mover.held as usize)
+            && held.state == "ready"
+        {
+            held.state = "active";
+        }
+        return cells;
+    }
     cell("LMB", kit.primary, Some(build.primary));
     cell("RMB", kit.secondary, Some(build.secondary));
     cell("C", kit.guard, build.guard);
@@ -1511,6 +1585,8 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
         time,
         own_name,
         combo,
+        crouched,
+        zoom,
     } = view;
     let (w, h) = hud.size;
     // The HUD's words: the text face of the bundle, the small one without it.
@@ -1617,6 +1693,51 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
     }
     let Some(o) = online else { return };
     let Some(c) = &o.client else { return };
+
+    // The gun mode (MODES.md 3.8): the crosshair opens with the cone, four lines whose
+    // gap is the cone's angle on the screen; the magazine over the reserve bottom right,
+    // in red below half a magazine, "reloading" while the hands are at it; the scope's
+    // mask and its lines.
+    if let Some((f, g)) = c.mover.gun_in_hand(&c.sheet.kit) {
+        let now = c.tick;
+        let cone = gm_core::sim::cone_deg(f, c.sheet.derived.max_speed, &c.mover, g, crouched, g.spray, now);
+        let per_deg = h / (crate::render::fov_y_deg() / zoom.max(1.0));
+        let gap = (cone * per_deg).max(4.0 * s);
+        let len = 6.0 * s;
+        let (cx, cy) = (w * 0.5, h * 0.5);
+        for (dx, dy, lw, lh) in [
+            (-gap - len, -s * 0.5, len, s),
+            (gap, -s * 0.5, len, s),
+            (-s * 0.5, -gap - len, s, len),
+            (-s * 0.5, gap, s, len),
+        ] {
+            hud.rect(cx + dx - 1.0, cy + dy - 1.0, lw + 2.0, lh + 2.0, hud::SHADE);
+            hud.rect(cx + dx, cy + dy, lw, lh, hud::WHITE);
+        }
+        if zoom > 1.0 {
+            let r = h * 0.42;
+            let mask = [0.0, 0.0, 0.0, 0.92];
+            hud.rect(0.0, 0.0, w, cy - r, mask);
+            hud.rect(0.0, cy + r, w, h - cy - r, mask);
+            hud.rect(0.0, cy - r, cx - r, 2.0 * r, mask);
+            hud.rect(cx + r, cy - r, w - cx - r, 2.0 * r, mask);
+            hud.rect(cx - r, cy - s * 0.5, 2.0 * r, s, [0.0, 0.0, 0.0, 0.6]);
+            hud.rect(cx - s * 0.5, cy - r, s, 2.0 * r, [0.0, 0.0, 0.0, 0.6]);
+        }
+        let low = (g.magazine as u32) * 2 < f.magazine as u32 || g.magazine == 0;
+        let ink = if low { hud::RED } else { hud::WHITE };
+        let text = format!("{} / {}", g.magazine, g.reserve);
+        let print = s * 2.0;
+        let tw = hud.width(print, &text);
+        let (x, y) = (w - 16.0 - tw, h - 16.0 - cap * print);
+        hud.print(x + 1.0, y + 1.0, print, hud::SHADE, &text);
+        hud.print(x, y, print, ink, &text);
+        if c.mover.reloading(now) {
+            let word = "reloading";
+            let tw = hud.width(s, word);
+            hud.label(w - 16.0 - tw, y - line, s, hud::YELLOW, word);
+        }
+    }
 
     // The own body, top left (LOOK.md 3.1): a portrait in its frame, the name, the three
     // bars; without a skin, the bars alone as before, bottom left.
@@ -2852,6 +2973,7 @@ impl App {
         }
         let bsp = &self.bsp;
         let viewport = self.viewport;
+        let scope = self.gun_scope();
         let o = self.online.as_mut()?;
         o.backlog.extend(o.net.poll());
         // The zone's map is still being fetched (a browser): what the zone sent after its
@@ -3443,6 +3565,7 @@ impl App {
         let dodge = (c.sheet.kit.mode == gm_core::vocab::Mode::Action)
             .then(|| dodge_slot(&c.sheet.kit, &c.mover, c.tick))
             .flatten();
+        let gun = c.sheet.kit.mode == gm_core::vocab::Mode::Gun;
         while o.accumulator >= dt && steps < MAX_STEPS_PER_FRAME {
             let (yaw, pitch) = match viewport {
                 Viewport::First => (self.sim.yaw, self.sim.pitch),
@@ -3461,7 +3584,7 @@ impl App {
                 self.aim = (input.yaw, input.pitch);
                 input
             } else {
-                self.input.sim_input(yaw, pitch, dodge)
+                self.input.sim_input(yaw, pitch, dodge, gun)
             };
             let before = c.mover.mv.origin;
             let datagram = c.local_tick(bsp, input);
@@ -3498,6 +3621,23 @@ impl App {
             o.prev_origin.lerp(o.curr_origin, alpha) + Vec3::Z * c.mover.mv.hull.eye_height()
         };
         let centre = eye - Vec3::Z * c.mover.mv.hull.eye_height();
+        // The recoil's punch (MODES.md 3.3): the firearm's kick for this shot lands on the
+        // view at once and decays over 150 ms; the frames sent carry the mouse's aim,
+        // the zone kicks the bolt by the same pair.
+        for a in &own_actions {
+            if let gm_core::sim::Action::Fire { kick, .. } = a
+                && (kick.0 != 0.0 || kick.1 != 0.0)
+            {
+                self.view_punch = *kick;
+            }
+        }
+        let decay = (-frame_dt / PUNCH_DECAY_SECS).exp();
+        self.view_punch = (self.view_punch.0 * decay, self.view_punch.1 * decay);
+        self.zoom = if self.input.scoped {
+            scope.max(1) as f32
+        } else {
+            1.0
+        };
         let camera = match viewport {
             Viewport::First => eye,
             Viewport::Third => third_person_camera(bsp, eye, self.sim.yaw, self.sim.pitch),
@@ -3919,11 +4059,12 @@ impl App {
                     &o.props,
                     o.looks.get(&c.my_id).copied().unwrap_or_default(),
                 );
-                self.view_model = prop.map(|slot| ViewModel {
+                // (Not while the scope is up, MODES.md 3.2.)
+                self.view_model = prop.filter(|_| !self.input.scoped).map(|slot| ViewModel {
                     slot,
                     eye,
-                    yaw: self.sim.yaw,
-                    pitch: self.sim.pitch,
+                    yaw: self.sim.yaw + self.view_punch.0,
+                    pitch: self.sim.pitch - self.view_punch.1,
                     stride: if c.mover.mv.on_ground {
                         self.view_stride
                     } else {
@@ -3933,7 +4074,12 @@ impl App {
                     swing: self.view_swing,
                     light: crate::avatars::light_at(bsp, eye),
                 });
-                Some((eye, self.sim.yaw, self.sim.pitch))
+                // The recoil's punch on the view (MODES.md 3.3).
+                Some((
+                    eye,
+                    self.sim.yaw + self.view_punch.0,
+                    (self.sim.pitch - self.view_punch.1).clamp(-89.0, 89.0),
+                ))
             }
             _ => {
                 // The own body, posed by the server's animation state.
@@ -3969,6 +4115,20 @@ impl App {
                 Some((camera, self.sim.yaw, self.sim.pitch))
             }
         }
+    }
+
+    /// The scope of the firearm in hand (MODES.md 3.2): its zoom, 0 without one.
+    fn gun_scope(&self) -> u8 {
+        let Some(c) = self.online.as_ref().and_then(|o| o.client.as_ref()) else {
+            return 0;
+        };
+        if self.input.held > 1 {
+            return 0;
+        }
+        c.mover
+            .in_hand(&c.sheet.kit)
+            .and_then(|i| c.sheet.kit.abilities[i as usize].firearm.as_ref())
+            .map_or(0, |f| f.scope)
     }
 
     /// A frame of a replay (ANTICHEAT.md 3.4): its keys, its time, its scene, and the camera
@@ -4229,7 +4389,7 @@ impl App {
         } else if bench {
             self.sim.yaw += BENCH_YAW_DEG_PER_S * frame_dt;
         } else if self.grabbed && !up {
-            let turn = self.settings.sensitivity;
+            let turn = self.settings.sensitivity / self.zoom.max(1.0);
             let tilt = if self.settings.invert { -turn } else { turn };
             self.sim.yaw -= self.input.mouse_dx * turn;
             self.sim.pitch = (self.sim.pitch + self.input.mouse_dy * tilt).clamp(-89.0, 89.0);
@@ -4472,7 +4632,7 @@ impl App {
             &a.renderer.characters,
             &mut self.entities,
         );
-        let vp = view_proj(camera, cam_yaw, cam_pitch, aspect);
+        let vp = crate::render::view_proj_zoomed(camera, cam_yaw, cam_pitch, aspect, self.zoom);
         // One scale for the HUD and the screens: what the window gives, or what was chosen;
         // and the atlas made for that scale (LOOK.md 2.2), from the frame it is here.
         let scale = ui::scale_for(
@@ -4510,6 +4670,10 @@ impl App {
                         self.combo.0,
                         self.combo.1.map_or(f32::MAX, |t| t.elapsed().as_secs_f32()),
                     ),
+                    crouched: self.input.down(KeyCode::ControlLeft)
+                        || self.input.down(KeyCode::ControlRight)
+                        || self.input.down(KeyCode::KeyC),
+                    zoom: self.zoom,
                 },
             );
         }
@@ -5028,7 +5192,12 @@ impl ApplicationHandler for App {
                     } else if !self.grabbed && self.opts.bench_frames.is_none() {
                         self.set_grab(true);
                     } else {
-                        self.input.mouse.insert(button);
+                        if self.input.mouse.insert(button)
+                            && button == MouseButton::Right
+                            && self.gun_scope() > 1
+                        {
+                            self.input.scoped = !self.input.scoped;
+                        }
                     }
                 }
                 ElementState::Released => {

@@ -340,3 +340,39 @@ Built as sections 2 and 4 say, with these readings:
 - **The combo counter**: the own blows within two seconds of each other, right of the aim.
 - The input frame carries `held` and `target` for every mode (PROTOCOL.md 23), so the
   wire changes once for the three parts.
+
+### 10.2 The gun mode (15b, 2026-10-07)
+
+Built as section 3 says, with these readings:
+
+- **The firearm** is a `firearm` block on a primary or a secondary (`Firearm` in the
+  vocabulary, VOCABULARY.md 11 for its ranges); its cycle is the ability's cooldown. The
+  mover keeps a `GunState` per hand (magazine, reserve, the reload under way, the last
+  shot and the index in the spray); a spawn fills both. The musket (one round, bolt
+  action, a kick of 2.4°), the pistol (eight, a click a shot) and the carbine (25, held,
+  a pattern of 25 pairs) are content; the pistol and the carbine are drawn as the musket
+  until they have models.
+- **The kick** is applied twice, as 3.3 says: the client's view is punched by the pair
+  and the punch falls to a third in 60 ms; the zone turns the bolt by the pair before
+  it rolls the cone. The frames sent carry the mouse's aim, never the punch.
+- **The cone** (`gm_core::sim::cone_deg`) is the same function on both sides: the HUD's
+  crosshair opens by it, the zone rolls in it, added to the bolt's own spread. A crouch
+  is the button held on the ground (there is no crouching hull yet), so the head band
+  does not move with it. Walking is Shift at half the axes.
+- **The head band** (`HEAD_BAND` = 12 u, ×`headshot`, before armour) is read where the
+  bolt's sweep meets the capsule, against the rewound capsule as the hit itself is.
+- **The reload**: `R`, or the trigger on an empty magazine (and the trigger held, on an
+  auto); it ends by itself; a stagger or a knockdown drops it and keeps the rounds; a
+  switch of weapon drops it. The stance `RELOAD`. The bolt action fires standing or
+  walking, never above half the body's speed.
+- **In hand** `1 2 3` (the gun, the pistol, the knife) and the actives on `4`–`7`;
+  Ctrl crouches; the secondary mouse button toggles the scope of a firearm that has one
+  (2 or 4: the field of view and the mouse divided by it, the view model hidden, a
+  mask with its lines); the own block of the snapshot carries both hands' rounds and
+  whether the one in hand is being reloaded, and the client adopts them.
+- **The HUD**: the four lines of the crosshair at the cone's angle, the magazine over
+  the reserve bottom right (red under half a magazine), "reloading", the hotbar as the
+  three weapons (the one in hand lit) and the actives.
+- Not built: an ammo item and a pickup (the reserve refills at a respawn), wall
+  penetration, a scope model; the `musket` at 20,000 u/s is 3.6's bolt, hitscan is not
+  built.

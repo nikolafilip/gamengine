@@ -193,6 +193,7 @@ Own block (never delta-encoded: it is small and the client must adopt it exactly
 | per status: remaining | uvar | frame ticks left, relative to `last_input_tick` |
 | per status: magnitude | svar | `round(magnitude × 16)` |
 | per status: stacks | 3 | |
+| guns | 1 | v11: 1 for a gun build (MODES.md 3.8), then for the primary and the secondary each `magazine` (uvar) and `reserve` (uvar), and 1 bit: the one in hand is being reloaded |
 
 Entity record:
 

@@ -16,8 +16,8 @@ mod tests;
 
 pub use mover::{
     Action, CAST_ANIM_NONE, Company, Dash, GuardState, GunState, Input, Mover, Nearby, Script,
-    anim, buttons, capsule_at, command_exit_ticks, melee_hit_point, step_mover, view_dir,
-    yaw_toward,
+    anim, buttons, capsule_at, command_exit_ticks, cone_deg, melee_hit_point, step_mover,
+    view_dir, yaw_toward,
 };
 pub use zone::{
     Area, DOT_INTERVAL_TICKS, Driver, HEAD_BAND, History, HitKind, INSTANT_AREA_ECHO_MS,
