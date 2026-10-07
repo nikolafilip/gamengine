@@ -796,3 +796,6 @@ in the simulation's snapshots:
 - The own block carries the firearm in hand's `magazine`, `reserve` and `reloading`
   (section 5, MODES.md 3.8), added with the gun mode.
 - The animation states `DOWN` (13) and `RELOAD` (14).
+- **The targeted body's health** (MODES.md 5.2): a snapshot carries `health` for the body
+  the client's last executed frame named as its `target`, as it does for the client's
+  party and for creatures; nothing else of that body changes.

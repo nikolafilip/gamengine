@@ -1,7 +1,7 @@
 # GAMENGINE — Design & Engineering Plan
 
 Working title: **gamengine** (rename later). Persistent action-sandbox MMORPG with multi-genre viewports,
-built on a lightweight Rust engine. Last updated 2026-10-06 (Phases 0–14 and the GM hand implemented, the character's build of 2026-10-06; see 11.10).
+built on a lightweight Rust engine. Last updated 2026-10-07 (Phases 0–15 implemented: the three modes of MODES.md; see 11.10).
 
 Sources: the engine/architecture discussion (Rust, wgpu, netcode, AI-assisted build, open source) and the
 game-design discussion (economy, combat, UGC, legal, AI companions). Every finding from those conversations
@@ -527,7 +527,7 @@ All item and coin movements are DB transactions; escrow states are enforced by c
 | 12 | Parties of people: invitations, party and whisper chat, an encounter and its loot shared by humans; the tavern and a trade between two players as screens | two people clear the tutorial dungeon together and split what it drops, and one sells the other what it got. **Done 2026-10-02** (11.10) |
 | 13 | Sound: patches synthesized at start, cues inferred from the snapshots, a mixer of our own natively and the browser's nodes in the browser | steps, hits and the town are heard, inside the size budgets of both targets; proved by a run rendered to a file on a machine without a device. **Done 2026-10-03** (11.10) |
 | 14 | The look: the content standard and its tool (`docs/CONTENT.md`: every item, ability and creature a row with its model, picture and sound; `gm-tools content check/build/report/import`; a committed bundle); weapons as props drawn in hands (the first models from a CC0 pack, a musket beside the crossbow) and a first-person view model; the toolkit's skin, icons and real fonts; the inventory, storage, stall and trade as grids with tooltips and drag, an equip panel with a paperdoll; a HUD with a portrait, party frames and a hotbar showing cooldowns; silver and gold only (`docs/LOOK.md`) | a character seen by another holds the sword it wears; the inventory is a grid of pictures and a drag onto the weapon slot wears a sword; the hotbar shows each ability's state; `gm-tools content build` reproduces the committed bundle byte for byte; on the desktop and in a browser, inside the budgets of both (the browser's raised to 2 MiB by the director). **Done 2026-10-03** (11.10) |
-| 15 | *(proposed 2026-10-07, the director's correction of 4.1)* The three modes (`docs/MODES.md`), in three parts played one after another: **action** (the mode in the build and fixed on the client, `V` gone; the magnet, chains, cancels, the dodge with its untouchable window, knockdown and launch under diminishing returns, the combo counter), **gun** (the firearm block: magazine, reload, cycle, recoil pattern and cone, the head band, three weapons in hand, the ammo HUD; a musketeer preset, a pistol), **rpg** (the target and its frame, target-actions that walk the body into range on the nav grid and aim by the zone, the repeating primary, the ground click, the orbit camera; `range` in content; the aim statistics skipping RPG bodies) | a sword chained three times into a knockdown and a roll through a firebolt; a spray controlled against its pattern and a crouched headshot at 1,500 u; a frostweaver that clicks a dummy, presses the shard, walks into range and lands it; the character's mode never changes in play |
+| 15 | The three modes *(proposed 2026-10-07, the director's correction of 4.1; built the same day)* (`docs/MODES.md`), in three parts played one after another: **action** (the mode in the build and fixed on the client, `V` gone; the magnet, chains, cancels, the dodge with its untouchable window, knockdown and launch under diminishing returns, the combo counter), **gun** (the firearm block: magazine, reload, cycle, recoil pattern and cone, the head band, three weapons in hand, the ammo HUD; a musketeer preset, a pistol), **rpg** (the target and its frame, target-actions that walk the body into range on the nav grid and aim by the zone, the repeating primary, the ground click, the orbit camera; `range` in content; the aim statistics skipping RPG bodies) | a sword chained three times into a knockdown and a roll through a firebolt; a spray controlled against its pattern and a crouched headshot at 1,500 u; a frostweaver that clicks a dummy, presses the shard, walks into range and lands it; the character's mode never changes in play. **Done 2026-10-07** (11.10) |
 | 16 | *(proposed 2026-10-03, renumbered 2026-10-07; the director wants it)* The content editor: `gm-tools content edit`, native only, on the client's toolkit over the same TOML files (CONTENT.md 10): the tables as lists, a row as a form with the validation of `check` as it is typed, a model or a picture imported by path and fitted in the 3D view of `look`, links to abilities and materials picked from lists, saved back as text with the diff shown | an item is added, given a model and a picture, priced and made wearable without a text editor, and the result is a one-row diff in git that `check` accepts |
 | 17 | *(proposed 2026-10-03, renumbered 2026-10-07)* The body's look: official avatars per frame and armour class replacing the mannequin, creature models (the Warden, the sentinels), portraits baked from them, the armour overlay in `Look.worn`; sounds per ability as content (SOUND.md 9's open item); the first content pass (more weapons and materials with their pictures) | nobody in the town is a grey mannequin unless their model is refused; the Warden is a creature to look at; every ability of the content has its own picture and sound |
 | ∞ | Content, balance, ops, community | permanent |
@@ -1528,6 +1528,52 @@ GUI editor he wants is Phase 16 since 2026-10-07):
   page opens from anywhere; the trainer is where it is worn), the dummy's health on the wire (the number
   dealt is enough), armour drawn. The director's knob: whether 175–200 s on the Warden and 2.3× longer
   duels are the fight length he wants (GM.md 3's tempo and these numbers).
+
+**2026-10-07, Phase 15 done: the three modes** (`docs/MODES.md`; the director in the morning: "3
+different modes that are not interchangeable during play, pre selected by character", then "build it all
+as you proposed"; three commits, 15a, 15b, 15c; the numbers of this entry are measured with the final
+build, none estimated):
+- **The mode is the build's** (`Build.mode`, `builds.toml`; a build stored before it is read as `action`)
+  and the camera is the mode's: `V`, the `third_person` setting and the page's flag are out of play
+  (offline and in a replay `V` and `--third-person` remain). Validated with the build: a gun build's
+  primary is a firearm, it has no guard, no other build holds a firearm, a chain's stage or the knife is
+  never slotted by hand (`slot = "extra"`, `Kit::chain_next`, `Kit::knife`, `MAX_ABILITIES` 12).
+- **Action** (10.1): chains (`chain = { next, window_ms }`, the sword and the dagger three deep, the third
+  a Knockdown or a Launched), the magnet (`assist` on an arc, 30°), the dodge (the dash's 150 ms untouchable
+  and `cancel = "recovery"`, Space while ready), Knockdown and Launched (statuses 14, 15; the `DOWN`
+  stance) under diminishing returns (half, nothing, ten seconds), the combo counter. The second cut's
+  knockback is 60: a chain's early blows must not carry the body out of the third's reach.
+- **Gun** (10.2): `firearm` on a primary or secondary (magazine, reserve, reload, cycle = cooldown,
+  `auto`/`semi`/`bolt`, the recoil pattern, the cone, the head band ×4 on the top 12 u of the hull); the
+  pattern on the view (a punch that falls to a third in 60 ms) and on the bolt, the cone rolled by the
+  zone and drawn by the HUD from one function (`sim::cone_deg`); `1 2 3` the gun, the pistol, the knife,
+  `4`–`7` the actives, Ctrl crouches, Shift walks, `R` reloads, the secondary button the scope (2 or 4);
+  the own block carries both hands' rounds; bullets are bolts at 20,000 u/s (3.6; hitscan not built).
+  Content: the musket a firearm, a pistol and a carbine (drawn as the musket), the knife, the musketeer.
+- **RPG** (10.3): the target (a click, Tab, Escape), target-actions that walk the body into range on
+  the client's own nav grid (`gm-ai` is a dependency of the client now, `rpg.rs`) and are aimed by the
+  zone (the lock of the yaw, the companions' lead for a bolt, an aimed area under the target), the
+  repeating primary, the orbit camera and the free pointer, the target's health on the wire, the aim
+  statistics skipping the mode (replay format 2).
+- **Wire**: protocol v11 (the input frame 63 → 97 bits: `held`, `target`; buttons 12 reload, 13 scope;
+  the own block's guns; the targeted body's health), replay format 2 (the roster's `mode`).
+- **Acceptance, as tests** (`gm-core`'s `sim::tests`, 15 new): a sword chained three times into a
+  knockdown with the window closing by itself; a dash cut into a recovery that a blow passes through;
+  the magnet turning 30° toward an enemy and never toward an ally; controls diminishing and a launch
+  lifting the body; the musket firing one round then reloading by itself, `R` on the pistol, the cycle
+  bounding the rate, a stagger dropping the reload and keeping the rounds, the pattern kicking the
+  second shot of a spray by its pair and the cone opening on the move, a headshot at ×4 against the body
+  shot, the bolt action refusing a run, the knife, a switch dropping a reload; a target-action turning a
+  body that looked away and leading its bolt to a runner, nothing aimed at a target out of range or
+  behind a wall, a sword swung at a body behind, a nova put under its target. The content loader and the
+  fixture pack mirror each other over the new fields; a bullet is bounded (20,000 u/s) and so is every
+  firearm number (VOCABULARY.md 11). The matrix gate still holds after the chains (ironclad : blade
+  43 : 11, frostweaver : ironclad 51 : 3, blade : frostweaver 21 : 16 over 3 × 60 s).
+- **Sizes and counts**: `gm-client` 9,956,048 (+112,608 over 9,843,440: the three modes, the nav grid in the client; baseline updated), WebGPU wasm 1,227,562 (+65,298; the cap 2 MiB), WebGL2 3,218,784; 418 workspace tests outside the hub's database ones, 0 failed (the dungeon-over-the-protocol test failed once while a release build and the smoke run shared the machine, and passed alone). **Run, not only tested**: the arena with twelve duelist bots (ironclad, blade, frostweaver, shade, musketeer) and a scripted client per mode for 25 s each on an Xvfb at 1080p under llvmpipe, 79–81 fps, 209–212 MB peak RSS, 21 kills, no panic; screenshots in `~/.local/share/gamengine/play/shots/2026-10-07-modes/` (the musketeer from its eyes with the ammo and the weapons, the blade knocked down by a bot's chain, the frostweaver from the orbit camera). The RPG mode's clicks and walks are exercised by hand only: the scripted fighter does not click.
+- **Not done, written down** (MODES.md 10): an ammo item and a pickup (the reserve refills at a respawn),
+  a crouching hull (the head band does not move with a crouch), a scope model, hitscan, the people page's
+  word of the mode, a target kept five seconds out of sight, a body walking round bodies. The director
+  has not played it: the LAN stack ran the old build at the end of the day. His knobs are MODES.md 9.
 
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute

@@ -177,6 +177,8 @@ impl GameMenu {
             ("Space", "dodge, while the dash is ready"),
             ("R", "reload (gun)"),
             ("1 2 3", "gun, pistol, knife in hand"),
+            ("click", "target a body or walk (rpg)"),
+            ("Tab", "the next enemy in sight (rpg)"),
             ("Enter", "say something"),
             ("F9", "report the player you look at"),
             ("I", "the inventory"),

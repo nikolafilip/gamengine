@@ -1485,6 +1485,7 @@ dependencies = [
  "bytes",
  "cpal",
  "glam",
+ "gm-ai",
  "gm-bsp",
  "gm-core",
  "gm-hub-proto",

@@ -376,3 +376,36 @@ Built as section 3 says, with these readings:
 - Not built: an ammo item and a pickup (the reserve refills at a respawn), wall
   penetration, a scope model; the `musket` at 20,000 u/s is 3.6's bolt, hitscan is not
   built.
+
+### 10.3 The RPG mode (15c, 2026-10-07)
+
+Built as section 5 says, with these readings:
+
+- **The target** is the client's (`rpg.rs`): a left click picks the body under the
+  pointer (the ray through the last frame's projection against the capsules) or the
+  ground there; Tab cycles the enemies in sight by distance; Escape lets go. The frame's
+  `target` carries it to the zone, which sends that body's health back (PROTOCOL.md 23)
+  and shows it in the frame top centre; a stranger's whole is read as the band's top,
+  1,500, a creature's as its own.
+- **Target-actions**: `1` the primary, `2` the secondary, `3`–`6` the actives; with a
+  target they wait (`Rpg::act`) until the body is within the ability's `range` (95% of
+  it) and in sight, then press; the primary repeats on the target while it is ready and
+  stops when pressed again, the target is lost or a movement key is pressed. Out of
+  range the body walks toward the target on the nav grid (`gm_ai::nav`, built on the
+  client from the map at the first click, seeded where the body stands); a click on the
+  ground is the same walk. Without a target a key presses at once, as in the action
+  mode, with the bolt flying level.
+- **The zone's part** (gm-core): an activation with a target within `range` and in
+  sight turns the body to it for the script (`lock_yaw`), a bolt is led to it
+  (`sim::aim::lead`, the companions' own) and an aimed area is put under its feet; a
+  target out of range or unseen leaves the action as it would be without one. The
+  statistics of ANTICHEAT.md 4 skip a body in this mode: the replay's roster carries the
+  mode (replay format 2).
+- **The camera** orbits the body's centre (`orbit_camera`: 240 u back and 90 up, the
+  wheel from 120 to 400, pitched between 5° and 80° down), the pointer is free, the
+  secondary button held turns it; the frames carry the camera's yaw and a level pitch,
+  the body faces where it goes (LOOK.md 13.9) or its target.
+- **Marks**: a ring where the body is going, a red one under the target.
+- Not built: a body walking round other bodies (the grid knows the map only), a
+  target kept five seconds out of sight (it is let go when it leaves the frame's
+  knowledge), the people page's and the tavern's word of the mode.

@@ -1,4 +1,4 @@
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use super::*;
 use crate::build::{Build, ContentPack};
@@ -2254,4 +2254,146 @@ fn the_knife_in_hand_swings_and_a_switch_drops_a_reload() {
     let p = zone.player(a).unwrap();
     assert!(!p.mover.guns[1].reload_until.is_some());
     assert_eq!(gun(&zone, a, 1).magazine, 7);
+}
+
+// ---------- MODES.md: the RPG mode (15c) ----------
+
+fn at(target: u32, input: Input) -> Input {
+    Input { target, ..input }
+}
+
+#[test]
+fn a_target_action_turns_the_body_and_leads_the_bolt_within_range_and_sight() {
+    // The marksman (crossbow, range 600 by content) faces away from a blade 400 u off
+    // that walks across its line; with the blade as the target the bolt is aimed by the
+    // zone, led to where the blade will be, and lands.
+    let pack = test_content::pack(RATE);
+    let world = BoxWorld::floor();
+    let mut zone = zone_with(vec![
+        (Vec3::new(0.0, 0.0, REST_Z), 180.0),
+        (Vec3::new(400.0, -60.0, REST_Z), 90.0),
+    ]);
+    let shooter = zone.add_player_at(
+        pack.build("marksman").unwrap().clone(),
+        1,
+        Vec3::new(0.0, 0.0, REST_Z),
+        180.0,
+    );
+    let runner = zone.add_player_at(
+        pack.build("blade").unwrap().clone(),
+        2,
+        Vec3::new(400.0, -60.0, REST_Z),
+        90.0,
+    );
+    // The runner gets going (90 degrees: along +y, across the line of fire).
+    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (runner, input(90.0, 1.0, 0))], 20);
+    tick(
+        &mut zone,
+        &world,
+        &[(shooter, at(runner, input(180.0, 0.0, buttons::PRIMARY))), (runner, input(90.0, 1.0, 0))],
+        0,
+    );
+    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (runner, input(90.0, 1.0, 0))], 2);
+    let p = zone.player(shooter).unwrap();
+    assert!(p.mover.lock_yaw.is_some(), "the body turned to its target");
+    assert!(p.mover.yaw.abs() < 20.0, "faces the runner, not 180: {}", p.mover.yaw);
+    // (The crossbow lets go 150 ms into its script.)
+    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (runner, input(90.0, 1.0, 0))], 10);
+    assert_eq!(bolts(&zone), 1);
+    let pr = zone.projectiles().last().expect("the bolt");
+    let dir = pr.vel.normalize();
+    assert!(dir.x > 0.9, "flies toward the runner, not where the view looked: {dir:?}");
+    assert!(dir.y > 0.0, "led ahead of it: {dir:?}");
+    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (runner, input(90.0, 1.0, 0))], 40);
+    assert_eq!(hits(&zone, HitKind::Projectile), 1, "the led bolt lands");
+}
+
+#[test]
+fn a_target_out_of_range_or_out_of_sight_is_not_aimed_at() {
+    let pack = test_content::pack(RATE);
+    // Out of range: 900 u for a crossbow of 600.
+    let mut world = BoxWorld::floor();
+    let mut zone = zone_with(vec![
+        (Vec3::new(0.0, 0.0, REST_Z), 180.0),
+        (Vec3::new(900.0, 0.0, REST_Z), 180.0),
+    ]);
+    let shooter = zone.add_player_at(pack.build("marksman").unwrap().clone(), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
+    let far = zone.add_player_at(pack.build("blade").unwrap().clone(), 2, Vec3::new(900.0, 0.0, REST_Z), 180.0);
+    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (far, input(180.0, 0.0, 0))], 2);
+    tick(&mut zone, &world, &[(shooter, at(far, input(180.0, 0.0, buttons::PRIMARY))), (far, input(180.0, 0.0, 0))], 0);
+    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (far, input(180.0, 0.0, 0))], 12);
+    let p = zone.player(shooter).unwrap();
+    assert!(p.mover.lock_yaw.is_none());
+    let dir = zone.projectiles().last().expect("a bolt").vel.normalize();
+    assert!(dir.x < -0.9, "flies where the body looks: {dir:?}");
+    // Out of sight: a wall between, at 300 u.
+    world.push(Vec3::new(140.0, -256.0, 0.0), Vec3::new(160.0, 256.0, 200.0));
+    let mut zone = zone_with(vec![
+        (Vec3::new(0.0, 0.0, REST_Z), 180.0),
+        (Vec3::new(300.0, 0.0, REST_Z), 180.0),
+    ]);
+    let shooter = zone.add_player_at(pack.build("marksman").unwrap().clone(), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
+    let hidden = zone.add_player_at(pack.build("blade").unwrap().clone(), 2, Vec3::new(300.0, 0.0, REST_Z), 180.0);
+    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (hidden, input(180.0, 0.0, 0))], 2);
+    tick(&mut zone, &world, &[(shooter, at(hidden, input(180.0, 0.0, buttons::PRIMARY))), (hidden, input(180.0, 0.0, 0))], 0);
+    run(&mut zone, &world, &[(shooter, input(180.0, 0.0, 0)), (hidden, input(180.0, 0.0, 0))], 2);
+    assert!(zone.player(shooter).unwrap().mover.lock_yaw.is_none(), "unseen: not turned to");
+}
+
+#[test]
+fn a_target_action_with_a_melee_arc_swings_at_a_body_behind() {
+    let (world, mut zone, a, b) = duel(180.0, 48.0);
+    // Facing away, the sword pressed with the other as the target: the body turns and
+    // the blow lands.
+    run(&mut zone, &world, &[(a, input(180.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 2);
+    tick(&mut zone, &world, &[(a, at(b, input(180.0, 0.0, buttons::PRIMARY))), (b, input(180.0, 0.0, 0))], 0);
+    run(&mut zone, &world, &[(a, input(180.0, 0.0, 0)), (b, input(180.0, 0.0, 0))], 16);
+    assert_eq!(hits(&zone, HitKind::Melee), 1);
+    let p = zone.player(a).unwrap();
+    assert!(p.mover.yaw.abs() < 1.0 || p.mover.lock_yaw.is_none(), "{}", p.mover.yaw);
+}
+
+#[test]
+fn an_aimed_area_goes_under_its_target() {
+    // The frostweaver's nova is aimed (`Origin::Aim`); with the dummy as the target it is
+    // put at the dummy's feet, 400 u off, though the caster looks the other way.
+    let pack = test_content::pack(RATE);
+    let world = BoxWorld::floor();
+    let mut zone = zone_with(vec![
+        (Vec3::new(0.0, 0.0, REST_Z), 180.0),
+        (Vec3::new(400.0, 0.0, REST_Z), 180.0),
+    ]);
+    let caster = zone.add_player_at(pack.build("frostweaver").unwrap().clone(), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
+    let mark = zone.add_player_at(pack.build("blade").unwrap().clone(), 2, Vec3::new(400.0, 0.0, REST_Z), 180.0);
+    let kit = &zone.player(caster).unwrap().sheet.kit;
+    let nova_slot = kit
+        .actives
+        .iter()
+        .flatten()
+        .position(|&k| {
+            kit.abilities[k as usize]
+                .steps
+                .iter()
+                .any(|s| matches!(&s.verb, crate::vocab::Verb::AreaEffect(ae) if matches!(ae.origin, crate::vocab::Origin::Aim { .. })))
+        })
+        .map(|i| i as u8 + 1);
+    let Some(slot) = nova_slot else {
+        // The fixture's nova is not aimed: nothing to test here.
+        return;
+    };
+    let range = kit.abilities[kit.actives[slot as usize - 1].unwrap() as usize].range;
+    assert!(range >= 400.0, "the nova reaches: {range}");
+    run(&mut zone, &world, &[(caster, input(180.0, 0.0, 0)), (mark, input(180.0, 0.0, 0))], 2);
+    tick(&mut zone, &world, &[(caster, at(mark, active(180.0, 0.0, slot))), (mark, input(180.0, 0.0, 0))], 0);
+    run(&mut zone, &world, &[(caster, input(180.0, 0.0, 0)), (mark, input(180.0, 0.0, 0))], 30);
+    let area = zone.areas().iter().chain(zone.areas().iter()).next();
+    let placed = zone
+        .events
+        .iter()
+        .any(|e| matches!(e, ZoneEvent::AreaSpawned { .. }));
+    assert!(placed, "the nova was cast");
+    if let Some(a) = area {
+        assert!((a.origin.truncate() - Vec2::new(400.0, 0.0)).length() < 40.0, "under the mark: {:?}", a.origin);
+    }
+    assert!(hits(&zone, HitKind::Area) >= 1, "it struck the mark");
 }

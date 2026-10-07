@@ -151,6 +151,10 @@ participant from the frames, and lists every analysed shot of a player.
 
 ## 4. Aim statistics
 
+*(Since 2026-10-07 a body in the RPG mode is skipped by everything here: its bolts are
+aimed by the zone at its target (MODES.md 5.3), so its frames say nothing about a hand.
+The replay's roster carries each body's mode, replay format 2.)*
+
 Everything here is computed per **tick** from the recorded frames: a body's position and
 view angles as the wire carries them (a quarter unit, a tenth of a degree) after the tick's
 frames ran, and the world tick those frames said they looked at. A client that sends two

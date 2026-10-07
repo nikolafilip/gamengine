@@ -17,7 +17,8 @@ use gm_net::snapshot::Snapshot;
 
 pub const MAGIC: &[u8; 4] = b"GMR1";
 /// Version of the header and frame layout.
-pub const REPLAY_VERSION: u16 = 1;
+/// 2 since 2026-10-07: the roster carries each body's mode (MODES.md).
+pub const REPLAY_VERSION: u16 = 2;
 /// Version of the snapshot records inside the frames (PROTOCOL.md 2 and 5). It is the
 /// replay's own number and not the protocol's: a new control message bumps the protocol and
 /// leaves every recorded fight readable.
@@ -54,12 +55,21 @@ pub struct RosterEntry {
     pub build: String,
     /// The hub's character id; 0 in a zone without a hub.
     pub character: i64,
+    /// The game the body plays (MODES.md 2), as `gm_core::vocab::Mode` is numbered: 0 the
+    /// gun, 1 the action, 2 the RPG, whose aim is the zone's and nobody's business.
+    pub mode: u8,
 }
 
 impl RosterEntry {
     /// Driven by a client: the only bodies whose aim is anybody's business.
     pub fn human(&self) -> bool {
         self.kind == BodyKind::Human
+    }
+
+    /// Its bolts are aimed by the zone at its target (MODES.md 5.3): the aim statistics
+    /// of ANTICHEAT.md 4 have nothing to read in them.
+    pub fn aim_is_the_zones(&self) -> bool {
+        self.mode == 2
     }
 }
 

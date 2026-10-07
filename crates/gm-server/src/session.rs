@@ -433,6 +433,7 @@ impl Session {
         };
         let see_all = see_all || row.is_empty();
         let my_party = me.party;
+        let my_target = me.target;
         // Squad sight (COMPANIONS.md 5.2): in the command stance with the button held, the
         // client also sees through each living companion's eyes.
         let commanding = commanding(me);
@@ -493,11 +494,17 @@ impl Session {
                     let scheduled = base_rec.is_none() || band_scheduled(tick, e.id, dist);
                     let rec = match base_rec {
                         Some(b) if !scheduled => *b,
-                        // Health rides along for the client's own party and for creatures.
-                        _ if e.creature || (my_party != 0 && e.party == my_party) => EntityState {
-                            health: Some(e.health),
-                            ..e.state
-                        },
+                        // Health rides along for the client's own party, for creatures,
+                        // and for the body it targets (MODES.md 5.2).
+                        _ if e.creature
+                            || (my_party != 0 && e.party == my_party)
+                            || e.id == my_target =>
+                        {
+                            EntityState {
+                                health: Some(e.health),
+                                ..e.state
+                            }
+                        }
                         _ => e.state,
                     };
                     droppable.push((e.id, dist));

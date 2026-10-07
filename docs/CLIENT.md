@@ -302,7 +302,7 @@ Decided once per frame, in this order:
 3. The game, as before (`W A S D`, the mouse, `1`–`4`, `F9` to report, and the rest
    of the Keys page), plus `Enter` and `Escape`, and since Phase 11 `I` and `E`, and since
    Phase 12 `P`, and since 2026-10-06 `K`, which open a screen. They are keys only here:
-   under rules 1 and 2 they are letters. (`Tab` for the tactical view was removed on 2026-10-06, COMPANIONS.md 6; `V` on 2026-10-07: the camera is the mode's, MODES.md 2. `Space` dodges in the action mode while the kit's dash is ready, `R` reloads in the gun mode.)
+   under rules 1 and 2 they are letters. (`Tab` for the tactical view was removed on 2026-10-06, COMPANIONS.md 6; `V` on 2026-10-07: the camera is the mode's, MODES.md 2. `Space` dodges in the action mode while the kit's dash is ready, `R` reloads in the gun mode; in the RPG mode the pointer is free, a click targets or walks, `Tab` cycles, `1`–`6` are the kit, the right button held turns the camera, MODES.md 5.5.)
 
 `Q` no longer quits (it is a letter one types): Quit
 is in the menu, and closing the window still works. In benchmarks nothing changes: no

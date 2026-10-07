@@ -27,6 +27,7 @@ mod people;
 #[cfg(not(target_arch = "wasm32"))]
 mod playback;
 mod render;
+mod rpg;
 mod script;
 mod settings;
 mod sound;

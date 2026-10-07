@@ -24,6 +24,8 @@ gm-bsp = { workspace = true }
 gm-net = { workspace = true }
 gm-hub-proto = { workspace = true }
 gm-model = { workspace = true }
+# The nav grid (COMPANIONS.md 7): a click on the ground becomes a walk (MODES.md 5.3).
+gm-ai = { workspace = true }
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -124,7 +124,10 @@ camera is the character's mode's (MODES.md 2): a gun build looks from its eyes, 
 from behind the shoulder, where the shots go where the crosshair points (VOCABULARY.md 9).
 In the action mode **Space** dodges while the kit's dash is ready and the primary pressed
 again plays the next stage of its chain; in the gun mode **R** reloads and **1 2 3** take
-the gun, the pistol and the knife in hand. Players are boxes coloured by team (blue own side, red the other), a white
+the gun, the pistol and the knife in hand. In the RPG mode the pointer is free: a **click**
+on a body targets it, on the ground walks there, **Tab** cycles the enemies in sight,
+**1**–**6** are the kit (with a target, the body walks into range first), the **right
+button** held turns the camera and the **wheel** moves it. Players are boxes coloured by team (blue own side, red the other), a white
 nose box shows their facing, blocking bodies turn blue-ish, staggered or frozen bodies darken,
 hasted ones brighten; corpses are flat grey, bolts small yellow boxes, area effects flat orange
 discs. The window title shows the build, team and viewport, health, stamina, focus, kills,

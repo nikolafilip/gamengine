@@ -684,6 +684,7 @@ mod tests {
                 party: id,
                 build: "shade".into(),
                 character: 0,
+                mode: 1,
             })
         };
         let shooter = Vec3::new(0.0, 0.0, 24.0);
@@ -770,6 +771,7 @@ mod tests {
                 party: id,
                 build: "blade".into(),
                 character: 0,
+                mode: 1,
             })
         };
         let mut table = TickTable::default();

@@ -279,7 +279,36 @@ impl Input {
     /// 3.7) `1 2 3` take the gun, the pistol and the knife in hand, `4`–`7` are the
     /// actives, Ctrl crouches, Shift walks, `R` reloads and the secondary button is the
     /// scope.
-    fn sim_input(&mut self, yaw: f32, pitch: f32, dodge: Option<u8>, gun: bool) -> SimInput {
+    fn sim_input(
+        &mut self,
+        yaw: f32,
+        pitch: f32,
+        dodge: Option<u8>,
+        gun: bool,
+        rpg: Option<crate::rpg::RpgFrame>,
+    ) -> SimInput {
+        // The RPG mode (MODES.md 5.5): `1` the primary, `2` the secondary, `3`–`6` the
+        // actives, Shift guards, Space jumps; the axes are the walk's when none is held.
+        if let Some(r) = rpg {
+            let mut b = r.buttons;
+            if self.down(KeyCode::Space) {
+                b |= buttons::JUMP;
+            }
+            if self.down(KeyCode::ShiftLeft) || self.down(KeyCode::ShiftRight) {
+                b |= buttons::GUARD;
+            }
+            self.just_pressed.clear();
+            return SimInput {
+                buttons: b,
+                yaw,
+                pitch,
+                forward: r.forward,
+                side: r.side,
+                ability: r.ability,
+                held: 0,
+                target: r.target,
+            };
+        }
         let (mut forward, mut side) = self.axes();
         let mut b = 0u16;
         let dodged = dodge.is_some() && self.just_pressed.contains(&KeyCode::Space);
@@ -466,6 +495,11 @@ struct App {
     /// The scope's zoom this frame (1 without one): the field of view is divided by it
     /// and so is the mouse.
     zoom: f32,
+    /// The RPG mode's target, walk and waiting action (MODES.md 5).
+    rpg: crate::rpg::Rpg,
+    /// The last frame's view-projection and the window's size: what a click is
+    /// unprojected through.
+    last_vp: Option<(glam::Mat4, (f32, f32))>,
     /// The yaw each body was drawn facing last frame (LOOK.md 13.9), by its key.
     facings: HashMap<u32, f32>,
     /// Per squad slot: the companion's health as last sent, and whether it lives.
@@ -748,6 +782,8 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         combo: (0, None),
         view_punch: (0.0, 0.0),
         zoom: 1.0,
+        rpg: crate::rpg::Rpg::new(),
+        last_vp: None,
         facings: HashMap::new(),
         squad_view: Vec::new(),
         target_view: None,
@@ -1445,6 +1481,24 @@ pub(crate) struct HotbarCell {
     pub stage: u8,
 }
 
+/// The other bodies as the RPG mode reads them (MODES.md 5): where they stand now, their
+/// frame, and whether they are enemies (another team; in the wild, everyone).
+fn rpg_bodies_of(c: &ClientState, my_team: u8) -> Vec<crate::rpg::Body> {
+    c.others_at(c.render_tick(0.0))
+        .iter()
+        .filter(|e| e.kind == EntityKind::Player && e.alive())
+        .filter_map(|e| match e.spawn {
+            SpawnInfo::Player { frame, team, .. } => Some(crate::rpg::Body {
+                id: e.id,
+                origin: e.pos,
+                frame: crate::rpg::frame_of(frame),
+                enemy: team != my_team || team == gm_core::sim::TEAM_WILD,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The active slot (1-based) that is a dash with an untouchable window (MODES.md 4.4),
 /// while it is ready: what Space plays in the action mode.
 pub(crate) fn dodge_slot(kit: &gm_core::build::Kit, mover: &gm_core::sim::Mover, now: u32) -> Option<u8> {
@@ -1548,10 +1602,17 @@ pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
         }
         return cells;
     }
-    cell("LMB", kit.primary, Some(build.primary));
-    cell("RMB", kit.secondary, Some(build.secondary));
-    cell("C", kit.guard, build.guard);
-    for (i, key) in ["1", "2", "3", "4"].into_iter().enumerate() {
+    // The RPG mode's keys (MODES.md 5.5): the kit on 1 to 6, the guard on Shift.
+    let rpg = kit.mode == gm_core::vocab::Mode::Rpg;
+    let keys: [&'static str; 7] = if rpg {
+        ["1", "2", "Shift", "3", "4", "5", "6"]
+    } else {
+        ["LMB", "RMB", "C", "1", "2", "3", "4"]
+    };
+    cell(keys[0], kit.primary, Some(build.primary));
+    cell(keys[1], kit.secondary, Some(build.secondary));
+    cell(keys[2], kit.guard, build.guard);
+    for (i, key) in keys[3..].iter().enumerate() {
         cell(
             key,
             kit.actives.get(i).copied().flatten(),
@@ -1729,7 +1790,8 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
         let text = format!("{} / {}", g.magazine, g.reserve);
         let print = s * 2.0;
         let tw = hud.width(print, &text);
-        let (x, y) = (w - 16.0 - tw, h - 16.0 - cap * print);
+        // (Above the corner's "Esc menu" line.)
+        let (x, y) = (w - 16.0 - tw, h - 16.0 - line - cap * print);
         hud.print(x + 1.0, y + 1.0, print, hud::SHADE, &text);
         hud.print(x, y, print, ink, &text);
         if c.mover.reloading(now) {
@@ -2430,8 +2492,18 @@ impl App {
     }
 
     /// Whether the game would hold the pointer for mouse look if it had the window.
+    /// The character plays the RPG mode (MODES.md 5): the pointer is free, the camera
+    /// turns while the secondary button is held.
+    fn rpg_mode(&self) -> bool {
+        self.online
+            .as_ref()
+            .and_then(|o| o.client.as_ref())
+            .is_some_and(|c| c.sheet.kit.mode == gm_core::vocab::Mode::Rpg)
+    }
+
     fn wants_pointer(&self) -> bool {
-        !self.screen_up()
+        !self.rpg_mode()
+            && !self.screen_up()
             && self.opts.bench_frames.is_none()
             && self.opts.script.is_none()
             && self.opts.replay.is_none()
@@ -2470,10 +2542,15 @@ impl App {
                 self.chat.open = true;
                 self.release_keys();
             }
+            // In the RPG mode a target is let go first (MODES.md 5.2).
+            Key::Escape if self.rpg_mode() && self.rpg.target.is_some() => {
+                self.rpg.clear_target();
+            }
             Key::Escape if self.opts.bench_frames.is_none() => {
                 self.menu = Some(GameMenu::default());
                 self.release_keys();
             }
+            Key::Tab if self.rpg_mode() => self.rpg_cycle(),
             Key::Inventory => self.open_inventory(),
             Key::People => self.open_people(),
             Key::Use => self.open_stall(),
@@ -3566,9 +3643,45 @@ impl App {
             .then(|| dodge_slot(&c.sheet.kit, &c.mover, c.tick))
             .flatten();
         let gun = c.sheet.kit.mode == gm_core::vocab::Mode::Gun;
+        let rpg = c.sheet.kit.mode == gm_core::vocab::Mode::Rpg;
+        // The RPG mode's keys (MODES.md 5.3): with a target they ask for a target-action;
+        // without one they press as the action mode does.
+        let rpg_bodies = if rpg { rpg_bodies_of(c, o.team) } else { Vec::new() };
+        let mut rpg_pressed = 0u16;
+        let mut rpg_ability = 0u8;
+        if rpg {
+            use crate::rpg::Act;
+            let present = |id: u32| rpg_bodies.iter().any(|b| b.id == id);
+            self.rpg.lost(present);
+            let asks = [
+                (KeyCode::Digit1, Act::Primary),
+                (KeyCode::Digit2, Act::Secondary),
+                (KeyCode::Digit3, Act::Active(1)),
+                (KeyCode::Digit4, Act::Active(2)),
+                (KeyCode::Digit5, Act::Active(3)),
+                (KeyCode::Digit6, Act::Active(4)),
+            ];
+            for (key, act) in asks {
+                if !self.input.just_pressed.remove(&key) {
+                    continue;
+                }
+                if self.rpg.target.is_some() {
+                    self.rpg.ask(act);
+                } else {
+                    match act {
+                        Act::Primary => rpg_pressed |= buttons::PRIMARY,
+                        Act::Secondary => rpg_pressed |= buttons::SECONDARY,
+                        Act::Active(n) => rpg_ability = n,
+                    }
+                }
+            }
+        }
         while o.accumulator >= dt && steps < MAX_STEPS_PER_FRAME {
             let (yaw, pitch) = match viewport {
                 Viewport::First => (self.sim.yaw, self.sim.pitch),
+                // The RPG body faces where it goes or its target; its bolts without a
+                // target fly level (MODES.md 5.3).
+                Viewport::Third if rpg => (self.sim.yaw, 0.0),
                 Viewport::Third => {
                     let eye = c.mover.eye();
                     let camera = third_person_camera(bsp, eye, self.sim.yaw, self.sim.pitch);
@@ -3576,6 +3689,23 @@ impl App {
                 }
             };
             self.aim = (yaw, pitch);
+            let rpg_frame = rpg.then(|| {
+                let mut f = self.rpg.frame(
+                    bsp,
+                    &c.sheet.kit,
+                    &c.mover,
+                    &rpg_bodies,
+                    self.input.axes(),
+                    yaw,
+                    c.tick,
+                    o.rate.hz(),
+                );
+                f.buttons |= std::mem::take(&mut rpg_pressed);
+                if f.ability == 0 {
+                    f.ability = std::mem::take(&mut rpg_ability);
+                }
+                f
+            });
             let input = if scripted {
                 let target = self
                     .script_target
@@ -3584,7 +3714,7 @@ impl App {
                 self.aim = (input.yaw, input.pitch);
                 input
             } else {
-                self.input.sim_input(yaw, pitch, dodge, gun)
+                self.input.sim_input(yaw, pitch, dodge, gun, rpg_frame)
             };
             let before = c.mover.mv.origin;
             let datagram = c.local_tick(bsp, input);
@@ -3640,6 +3770,9 @@ impl App {
         };
         let camera = match viewport {
             Viewport::First => eye,
+            Viewport::Third if rpg => {
+                crate::rpg::orbit_camera(bsp, centre, self.sim.yaw, self.sim.pitch, self.rpg.dist)
+            }
             Viewport::Third => third_person_camera(bsp, eye, self.sim.yaw, self.sim.pitch),
         };
         let others = c.others_at(t);
@@ -3707,7 +3840,20 @@ impl App {
                 })
                 .collect();
         self.target_view = None;
-        if let Some(pack) = &o.pack {
+        // The RPG mode's target frame (MODES.md 5.2): its name and the health the zone
+        // sends for a targeted body; a stranger's whole is read as the band's top.
+        if rpg && let Some(target) = self.rpg.target {
+            if let Some(e) = others.iter().find(|e| e.id == target) {
+                let name = o.names.get(&target).map_or_else(|| "?".to_string(), |n| n.0.clone());
+                let max = match (o.kinds.get(&target), &o.pack) {
+                    (Some(BodyKind::Creature { def }), Some(pack)) => {
+                        pack.creatures.get(*def as usize).map_or(1500, |d| d.health)
+                    }
+                    _ => 1500,
+                };
+                self.target_view = Some((name, e.health.unwrap_or(0), max));
+            }
+        } else if let Some(pack) = &o.pack {
             let mut best: Option<(f32, String, u16, u16)> = None;
             for e in others.iter().filter(|e| e.alive()) {
                 let (Some(BodyKind::Creature { def }), Some(health)) =
@@ -4026,6 +4172,20 @@ impl App {
         o.hits.clear();
         o.heals.clear();
         self.effects.draw(camera, &mut self.fx);
+        // The RPG mode's marks (MODES.md 5.5): where the body is going, and a ring under
+        // its target.
+        if rpg {
+            if let Some(goal) = self.rpg.walk {
+                let feet = goal + Vec3::Z * Hull::Player.mins().z;
+                self.fx.wall(feet, 10.0, 6.0, [1.0, 0.85, 0.3, 0.6], [1.0, 0.85, 0.3, 0.0]);
+            }
+            if let Some(t) = self.rpg.target
+                && let Some(e) = others.iter().find(|e| e.id == t)
+            {
+                let feet = e.pos + Vec3::Z * Hull::Player.mins().z;
+                self.fx.wall(feet, 20.0, 4.0, [1.0, 0.3, 0.2, 0.7], [1.0, 0.3, 0.2, 0.0]);
+            }
+        }
         self.effects.end();
         self.pops = self.effects.numbers();
         // (The own body's facing is kept across a frame in the first person, where it
@@ -4117,6 +4277,48 @@ impl App {
         }
     }
 
+    /// The other bodies as the RPG mode reads them (MODES.md 5): where they stand now,
+    /// their frame, and whether they are enemies (another team; in the wild, everyone).
+    fn rpg_bodies(&self) -> Vec<crate::rpg::Body> {
+        let Some(o) = &self.online else {
+            return Vec::new();
+        };
+        let Some(c) = &o.client else {
+            return Vec::new();
+        };
+        rpg_bodies_of(c, o.team)
+    }
+
+    /// A left click in the RPG mode (MODES.md 5.2, 5.5).
+    fn rpg_click(&mut self) {
+        let Some((vp, size)) = self.last_vp else { return };
+        let Some((from, dir)) = crate::rpg::Rpg::ray(vp, size, self.cursor) else {
+            return;
+        };
+        let bodies = self.rpg_bodies();
+        self.rpg.click(&self.bsp, from, dir, &bodies);
+    }
+
+    /// Tab in the RPG mode (MODES.md 5.2): the nearest enemy in sight not yet cycled.
+    fn rpg_cycle(&mut self) {
+        let Some(c) = self.online.as_ref().and_then(|o| o.client.as_ref()) else {
+            return;
+        };
+        let eye = c.mover.eye();
+        let me = c.mover.mv.origin;
+        let candidates: Vec<(u32, f32)> = self
+            .rpg_bodies()
+            .iter()
+            .filter(|b| b.enemy)
+            .filter(|b| {
+                let centre = gm_core::sim::capsule_at(b.origin, Hull::Player, b.frame).center();
+                gm_core::sim::sees(&self.bsp, eye, centre)
+            })
+            .map(|b| (b.id, (b.origin - me).length()))
+            .collect();
+        self.rpg.cycle(&candidates);
+    }
+
     /// The scope of the firearm in hand (MODES.md 3.2): its zoom, 0 without one.
     fn gun_scope(&self) -> u8 {
         let Some(c) = self.online.as_ref().and_then(|o| o.client.as_ref()) else {
@@ -4187,6 +4389,7 @@ impl App {
 
     /// Replace the world (BSP, mesh, renderer) with another map.
     fn switch_map(&mut self, bsp: Bsp, hash: u64) {
+        self.rpg.forget_map();
         self.map_hash = hash;
         // A map that says what its air is (SOUND.md 3) is believed over its name.
         if let Some(air) = ambience_of(&bsp) {
@@ -4392,7 +4595,8 @@ impl App {
             let turn = self.settings.sensitivity / self.zoom.max(1.0);
             let tilt = if self.settings.invert { -turn } else { turn };
             self.sim.yaw -= self.input.mouse_dx * turn;
-            self.sim.pitch = (self.sim.pitch + self.input.mouse_dy * tilt).clamp(-89.0, 89.0);
+            let (low, high) = if self.rpg_mode() { (5.0, 80.0) } else { (-89.0, 89.0) };
+            self.sim.pitch = (self.sim.pitch + self.input.mouse_dy * tilt).clamp(low, high);
         }
         self.sim.yaw = self.sim.yaw.rem_euclid(360.0);
         self.input.mouse_dx = 0.0;
@@ -4633,6 +4837,7 @@ impl App {
             &mut self.entities,
         );
         let vp = crate::render::view_proj_zoomed(camera, cam_yaw, cam_pitch, aspect, self.zoom);
+        self.last_vp = Some((vp, (a.config.width.max(1) as f32, a.config.height.max(1) as f32)));
         // One scale for the HUD and the screens: what the window gives, or what was chosen;
         // and the atlas made for that scale (LOOK.md 2.2), from the frame it is here.
         let scale = ui::scale_for(
@@ -5173,6 +5378,10 @@ impl ApplicationHandler for App {
                 };
                 if self.screen_up() {
                     self.ui_input.wheel += turn;
+                } else if self.rpg_mode() {
+                    // The orbit camera's distance (MODES.md 5.5).
+                    self.rpg.dist = (self.rpg.dist - turn * 20.0)
+                        .clamp(crate::rpg::DIST_MIN, crate::rpg::DIST_MAX);
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => match state {
@@ -5189,6 +5398,17 @@ impl ApplicationHandler for App {
                             self.last_press = (!double).then_some((now, self.cursor));
                             self.ui_press(self.cursor, double);
                         }
+                    } else if self.rpg_mode() {
+                        // The RPG mode (MODES.md 5.5): the left button picks a body or a
+                        // place on the ground, the right one held turns the camera.
+                        match button {
+                            MouseButton::Left => self.rpg_click(),
+                            MouseButton::Right => {
+                                self.input.mouse.insert(button);
+                                self.set_grab(true);
+                            }
+                            _ => {}
+                        }
                     } else if !self.grabbed && self.opts.bench_frames.is_none() {
                         self.set_grab(true);
                     } else {
@@ -5204,6 +5424,9 @@ impl ApplicationHandler for App {
                     self.input.mouse.remove(&button);
                     if button == MouseButton::Left && self.ui_input.down {
                         self.ui_release();
+                    }
+                    if button == MouseButton::Right && self.rpg_mode() && self.grabbed {
+                        self.set_grab(false);
                     }
                 }
             },
@@ -5284,6 +5507,7 @@ impl ApplicationHandler for App {
                             KeyCode::KeyP if !event.repeat => self.ui_key(Key::People),
                             KeyCode::KeyG if !event.repeat => self.ui_key(Key::Gm),
                             KeyCode::KeyK if !event.repeat => self.ui_key(Key::Character),
+                            KeyCode::Tab if !event.repeat => self.ui_key(Key::Tab),
                             // Outside a zone only (the fitting room, a replay): in one
                             // the character's mode is the camera (MODES.md 2).
                             KeyCode::KeyV if !event.repeat && self.online.is_none() => {

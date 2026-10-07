@@ -2758,6 +2758,7 @@ pub async fn run_with_web(
                         .find(|b| b.build == p.sheet.build)
                         .map_or_else(|| "custom".to_string(), |b| b.name.clone()),
                     character: hub_slots.get(&id).map_or(0, |h| h.character),
+                    mode: p.sheet.build.mode as u8,
                 })
             };
             // How far behind this tick each client's frames say they look.

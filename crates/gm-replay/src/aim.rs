@@ -660,7 +660,7 @@ impl Analyser {
 
     fn shot(&mut self, tick: u32, f: &Fired) {
         let owner = f.owner;
-        if !self.human(owner) {
+        if !self.human(owner) || self.entry(owner).is_some_and(|r| r.aim_is_the_zones()) {
             return;
         }
         self.stats.entry(owner).or_default().shots += 1;
