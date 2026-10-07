@@ -90,6 +90,10 @@ each the key of a file in 2:
 | `[[build]]` | `icon` | the archetype's picture on the new-character screen; absent: baked from the frame's avatar or mannequin |
 | the frame × armour table (new, `avatars.toml`, Phase 15) | `model` | `models/avatars/<frame>_<armour>.glb`: the official look, worn when a character has no model of its own |
 
+Since content v3 (2026-10-07, MODES.md 11.1) `[[template]]` has a third `kind`, `stack`:
+no layers, a `cap` (the most one holder carries, 1–1,000) and an optional `heals`; a
+firearm's `ammo` names one. A stack has no model or icon yet: a glyph of its kind.
+
 Order matters where it did before and nowhere new: `abilities.toml` is **append-only**
 (stored builds name abilities by their place; README). Items are named by their **key**
 everywhere that lasts (the database's `template_id`, `ItemSummary.template`, the hub's

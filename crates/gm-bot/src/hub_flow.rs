@@ -270,7 +270,11 @@ pub async fn run_hub_flow(cfg: HubFlowConfig) -> anyhow::Result<HubFlowReport> {
                 else {
                     continue;
                 };
-                for item in items.iter().filter(|i| !i.worn && i.place != PLACE_NONE) {
+                // What can be worn, and every stack (MODES.md 11.4: the quartermaster).
+                for item in items
+                    .iter()
+                    .filter(|i| !i.worn && (i.place != PLACE_NONE || i.cap > 0))
+                {
                     if refused
                         .get(&item.id)
                         .is_some_and(|at| at.elapsed() < Duration::from_secs(10))

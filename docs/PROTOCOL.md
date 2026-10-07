@@ -121,7 +121,7 @@ Frame:
 
 | Field | Bits | Notes |
 |---|---|---|
-| buttons | 16 | bit 0 jump, 1 crouch, 2 primary, 3 secondary, 4 guard, 5–8 ability 1–4, 9 interact, 10 unused (the viewport switch until v11: the camera is the mode's, MODES.md 2), 11 command (the command stance, COMPANIONS.md 5.1), 12 reload, 13 scope held (MODES.md 3.2), 14–15 reserved (must be 0) |
+| buttons | 16 | bit 0 jump, 1 crouch, 2 primary, 3 secondary, 4 guard, 5–8 ability 1–4, 9 interact, 10 unused (the viewport switch until v11: the camera is the mode's, MODES.md 2), 11 command (the command stance, COMPANIONS.md 5.1), 12 reload, 13 scope held (MODES.md 3.2), 14 use a kit (MODES.md 11.3, v12), 15 reserved (must be 0) |
 | yaw | 12 | 0.1° |
 | pitch | 11 | 0.1° |
 | forward | 8 | i8, −127..=127 → −1..=1 |
@@ -194,6 +194,7 @@ Own block (never delta-encoded: it is small and the client must adopt it exactly
 | per status: magnitude | svar | `round(magnitude × 16)` |
 | per status: stacks | 3 | |
 | guns | 1 | v11: 1 for a gun build (MODES.md 3.8), then for the primary and the secondary each `magazine` (uvar) and `reserve` (uvar), and 1 bit: the one in hand is being reloaded |
+| kits | uvar | v12: the kits carried (MODES.md 11.3), then 1 bit: a kit is in use |
 
 Entity record:
 
@@ -799,3 +800,16 @@ in the simulation's snapshots:
 - **The targeted body's health** (MODES.md 5.2): a snapshot carries `health` for the body
   the client's last executed frame named as its `target`, as it does for the client's
   party and for creatures; nothing else of that body changes.
+
+## 24. Changes in v12 (rounds, kits and the quartermaster)
+
+`PROTOCOL_VERSION` 12 (MODES.md 11). Nothing new in the control stream:
+
+- button 14, `use` (a kit, `F`); bit 15 stays reserved.
+- The own block carries `kits` (uvar) and one bit, a kit in use, for every build (section
+  5): the client adopts both as it adopts the rounds, and drops a use the zone refused.
+- The animation state `USE` (15).
+- The `reserve` of the own block is now what the inventory holds of the firearm's stack
+  (MODES.md 11.2); its encoding is unchanged.
+- Hub protocol 11 and the players' protocol 4 (ITEMS.md 4).
+

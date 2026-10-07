@@ -764,6 +764,14 @@ pub enum ZoneEconOp {
         character: CharacterId,
         item: ItemId,
     },
+    /// A character playing in this zone used `quantity` of a stack it carries (MODES.md
+    /// 11.2: a reload's rounds, a kit): the zone has already spent them in the
+    /// simulation and tells the hub; answered `Gear`, the reading after. v11.
+    Consume {
+        character: CharacterId,
+        item: ItemId,
+        quantity: u32,
+    },
     /// Two characters playing in this zone, standing together, both asked to trade with
     /// each other (PARTY.md 6): the zone vouches for that, and the hub opens the trade
     /// (calling off any trade either still had open). Answered `Id`.
@@ -813,6 +821,10 @@ pub struct ItemSummary {
     /// What it does, in words, the strongest first: `slash +11.0%`. A screen shows these
     /// and works nothing out.
     pub does: Vec<String>,
+    /// A stack (MODES.md 11.1): how many, and the most its holder may carry; `cap` 0 for
+    /// what is not a stack (gear, a part). v11.
+    pub quantity: u32,
+    pub cap: u32,
 }
 
 /// A reading of what a character's worn items do to damage (ITEMS.md 3.3). `seq` orders
@@ -826,6 +838,19 @@ pub struct GearReading {
     /// 6.2: keys, so that a hub and a zone on different content versions disagree about
     /// nothing but what to draw). v1.9.
     pub templates: [String; 2],
+    /// The stacks in the inventory (MODES.md 11.2): a firearm's reserve is the quantity of
+    /// the one its `ammo` names, the kits are the ones that heal. v11.
+    pub stacks: Vec<StackReading>,
+}
+
+/// One stack of a character's inventory, as the zone reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct StackReading {
+    pub item: ItemId,
+    pub template: String,
+    pub quantity: u32,
+    /// What one of it heals, when it is a kit.
+    pub heals: Option<i32>,
 }
 
 /// The states of a trade in `EconReply::TradeView`.
@@ -1123,6 +1148,13 @@ pub enum HubNotice {
     StallClosed {
         stall: i64,
     },
+    /// The inventory of a character playing in this zone changed by a request that did not
+    /// come through the zone (the storage, a trade, a stall of its own): what it wears and
+    /// carries now (MODES.md 11.2). v11.
+    Gear {
+        character: CharacterId,
+        reading: GearReading,
+    },
     /// A hire of a character playing in this zone ended early: the avatar's owner took it
     /// back, or the hirer dismissed it (COMPANIONS.md 3.3).
     HireEnded {
@@ -1173,7 +1205,7 @@ pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 /// carry); any change to them is a new one. A stream that speaks them begins with it, in
 /// a frame of one byte, and the hub answers with its own before anything else: zones,
 /// tools and bots of another build are told so instead of being garbled at.
-pub const HUB_VERSION: u8 = 10;
+pub const HUB_VERSION: u8 = 11;
 pub const HUB_PREAMBLE: [u8; 3] = [0, 1, HUB_VERSION];
 pub const HUB_BIDI_STREAMS: u32 = 1024;
 /// Password hashes running at once; more answer `Busy`.

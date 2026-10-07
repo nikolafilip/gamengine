@@ -8,7 +8,7 @@ use crate::collide::Aabb;
 use crate::geom::Capsule;
 use crate::matrix::EVADING_GRACE_TICKS;
 use crate::movement::{MoveInput, MoveVars, PlayerState, player_move, yaw_vectors};
-use crate::sim::{COMMAND_EXIT_MS, MAX_ABILITIES, REGEN_PAUSE_MS, tick_delta};
+use crate::sim::{COMMAND_EXIT_MS, KIT_USE_MS, MAX_ABILITIES, REGEN_PAUSE_MS, tick_delta};
 use crate::status::Statuses;
 use crate::tick::{Tick, TickRate};
 use crate::trace::{CollisionWorld, Hull};
@@ -33,8 +33,10 @@ pub mod buttons {
     pub const RELOAD: u16 = 1 << 12;
     /// Held: the scope is up (MODES.md 3.2), on a firearm that has one.
     pub const SCOPE: u16 = 1 << 13;
-    /// Bits 14–15 must be zero on the wire.
-    pub const RESERVED: u16 = 0xC000;
+    /// Pressed: use a kit (MODES.md 11.3), in every mode.
+    pub const USE: u16 = 1 << 14;
+    /// Bit 15 must be zero on the wire.
+    pub const RESERVED: u16 = 0x8000;
 }
 
 /// Animation states carried in snapshots (`anim`). Cosmetic; the client never simulates them.
@@ -57,6 +59,8 @@ pub mod anim {
     pub const DOWN: u8 = 13;
     /// Working the firearm's reload (MODES.md 3.2).
     pub const RELOAD: u8 = 14;
+    /// Using a kit (MODES.md 11.3): the weapon lowered, the hands at the body.
+    pub const USE: u8 = 15;
 
     /// The stances of a running script: the ones a body's `acting` ability goes with.
     pub fn acts(state: u8) -> bool {
@@ -203,6 +207,11 @@ pub struct Mover {
     /// secondary's.
     pub held: u8,
     pub guns: [GunState; 2],
+    /// The kits carried (MODES.md 11.3): the kit stack's quantity, read from the inventory
+    /// by the zone and adopted from the own block by the client; and a use under way, the
+    /// frame tick it ends at.
+    pub kits: u16,
+    pub kit_until: Option<Tick>,
 }
 
 impl Mover {
@@ -227,6 +236,8 @@ impl Mover {
             chain: None,
             held: 0,
             guns: [GunState::default(); 2],
+            kits: 0,
+            kit_until: None,
         }
     }
 
@@ -239,14 +250,15 @@ impl Mover {
         m
     }
 
-    /// Every firearm loaded and its reserve full (a spawn, a respawn: MODES.md 3.2).
+    /// Every firearm loaded once (the gun is issued full: MODES.md 11.2); the reserve is
+    /// the stack carried, which the zone sets when it reads the inventory, and a respawn
+    /// keeps both (`Zone::respawn`).
     pub fn fill_guns(&mut self, sheet: &Sheet) {
         let kit = &sheet.kit;
         for (g, slot) in self.guns.iter_mut().zip([kit.primary, kit.secondary]) {
             *g = GunState::default();
             if let Some(f) = slot.and_then(|i| kit.abilities[i as usize].firearm.as_ref()) {
                 g.magazine = f.magazine;
-                g.reserve = f.reserve;
             }
         }
     }
@@ -278,6 +290,11 @@ impl Mover {
         self.guns[self.held.min(1) as usize]
             .reload_until
             .is_some_and(|u| tick_delta(now, u) < 0)
+    }
+
+    /// A kit in use at frame tick `now` (MODES.md 11.3).
+    pub fn using_kit(&self, now: Tick) -> bool {
+        self.kit_until.is_some_and(|u| tick_delta(now, u) < 0)
     }
 
     pub fn eye(&self) -> Vec3 {
@@ -336,6 +353,7 @@ impl Mover {
             g.reload_until = None;
             g.spray = 0;
         }
+        self.kit_until = None;
     }
 }
 
@@ -431,6 +449,7 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
         for g in &mut m.guns {
             g.reload_until = None;
         }
+        m.kit_until = None;
     }
 
     // The command stance (COMPANIONS.md 5.1): it begins on a frame that holds the button
@@ -489,10 +508,12 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
     };
     if let Some(slot) = slot
         && !staggered
+        && !m.using_kit(now)
     {
         try_activate(world, sheet, m, slot as usize, now, input, company);
     }
     reload_step(sheet, m, input, pressed, now, staggered);
+    kit_step(m, pressed, now, staggered);
 
     if let Some(mut s) = m.script {
         let ab = &kit.abilities[s.ability as usize];
@@ -548,6 +569,10 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
         && let Some(i) = primary
     {
         scale *= kit.abilities[i as usize].move_scale.max(0.5);
+    }
+    // A kit is used walking (MODES.md 11.3).
+    if m.using_kit(now) {
+        scale *= 0.5;
     }
     let vars = MoveVars {
         max_speed: d.max_speed * m.statuses.speed_scale(),
@@ -698,10 +723,42 @@ fn reload_step(
                 || (input.buttons & buttons::PRIMARY != 0
                     && g.magazine == 0
                     && f.fire == FireMode::Auto);
-            if asked && !staggered && g.magazine < f.magazine && g.reserve > 0 && m.script.is_none()
+            if asked
+                && !staggered
+                && g.magazine < f.magazine
+                && g.reserve > 0
+                && m.script.is_none()
+                && m.kit_until.is_none()
             {
                 g.reload_until = Some(now.wrapping_add(f.reload.max(1)));
                 g.spray = 0;
+            }
+        }
+    }
+}
+
+/// A kit's use (MODES.md 11.3): `USE` pressed on the ground with a kit carried and the
+/// hands free begins it; it ends by itself after `KIT_USE_MS`, one kit fewer. The heal is
+/// the zone's (it knows the health): it reads the kit that went. A stagger or a knockdown
+/// drops it with the kit kept (the stagger block above).
+fn kit_step(m: &mut Mover, pressed: u16, now: Tick, staggered: bool) {
+    match m.kit_until {
+        Some(until) if tick_delta(now, until) >= 0 => {
+            m.kit_until = None;
+            m.kits = m.kits.saturating_sub(1);
+        }
+        Some(_) => {}
+        None => {
+            if pressed & buttons::USE != 0
+                && !staggered
+                && m.kits > 0
+                && m.mv.on_ground
+                && m.script.is_none()
+                && m.dash.is_none()
+                && !m.reloading(now)
+                && !m.commanding(now)
+            {
+                m.kit_until = Some(now.wrapping_add(TickRate::COMBAT.ms_to_ticks(KIT_USE_MS)));
             }
         }
     }

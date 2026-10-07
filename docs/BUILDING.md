@@ -403,6 +403,7 @@ things out with the hub's own program, on the hub's database, while the hub runs
 HUB="cargo run --release -p gm-hub -- --database-url postgres://localhost/gamengine"
 $HUB --grant-coin Aldric 15000                           # 1 g 50 s, through the ledger (reason: grant)
 $HUB --grant-item Aldric sword core/iron,frame/oak       # a made item; what the content knows, what the template has room for
+$HUB --grant-item Aldric ball 10                         # a stack (MODES.md 11): onto the stack carried, up to its cap
 $HUB --place Aldric town 200,-320,25 0                   # where an OFFLINE character stands when it next enters (x,y,z and yaw)
 $HUB --audit                                             # the books in a line; exit status 1 when they are not sound
 ```

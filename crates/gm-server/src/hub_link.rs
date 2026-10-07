@@ -245,7 +245,7 @@ impl HubLink {
         stall: i64,
         listing: i64,
         price: i64,
-    ) -> Result<(), String> {
+    ) -> Result<GearReading, String> {
         let op = ZoneEconOp::StallBuy {
             character,
             stall,
@@ -253,7 +253,7 @@ impl HubLink {
             price,
         };
         match self.client.request(&HubRequest::ZoneEcon(op)).await {
-            Ok(HubResponse::Econ(EconReply::Done)) => Ok(()),
+            Ok(HubResponse::Econ(EconReply::Gear(reading))) => Ok(reading),
             Err(HubClientError::Refused(e)) => Err(match e {
                 HubError::NotFound => "it is no longer for sale here".to_string(),
                 HubError::Insufficient => "not enough coin".to_string(),
@@ -303,6 +303,26 @@ impl HubLink {
                 other => Self::words(&other, "wear"),
             }),
             other => Err(Self::trouble("wear", &format!("{other:?}"))),
+        }
+    }
+
+    /// A character playing here spent `quantity` of a stack (MODES.md 11.2); the hub's
+    /// books follow, and its reading after is what the body carries.
+    pub async fn consume(
+        &self,
+        character: CharacterId,
+        item: i64,
+        quantity: u32,
+    ) -> Result<GearReading, String> {
+        let op = ZoneEconOp::Consume {
+            character,
+            item,
+            quantity,
+        };
+        match self.client.request(&HubRequest::ZoneEcon(op)).await {
+            Ok(HubResponse::Econ(EconReply::Gear(reading))) => Ok(reading),
+            Err(HubClientError::Refused(e)) => Err(Self::words(&e, "consume")),
+            other => Err(Self::trouble("consume", &format!("{other:?}"))),
         }
     }
 
@@ -568,6 +588,15 @@ impl HubLink {
                     }
                     HubNotice::ModelRevoked { model } => ClientEvent::HubModelRevoked { model },
                     HubNotice::StallClosed { stall } => ClientEvent::HubStallClosed { stall },
+                    // What a character carries changed without this zone's hand (MODES.md
+                    // 11.2): taken as any reading of its gear is, nobody waiting for it.
+                    HubNotice::Gear { character, reading } => ClientEvent::Worn {
+                        id: 0,
+                        character,
+                        item: 0,
+                        result: Ok(reading),
+                        tell: false,
+                    },
                     HubNotice::HireEnded { hirer, hire } => {
                         ClientEvent::HubHireEnded { hirer, hire }
                     }

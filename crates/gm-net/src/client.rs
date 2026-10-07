@@ -434,6 +434,12 @@ impl ClientState {
                     m.guns[held].reload_until = None;
                 }
             }
+            // The kits likewise (MODES.md 11.3): a use the zone refused (full health) or
+            // does not see is dropped.
+            m.kits = own_state.kits;
+            if !own_state.using_kit {
+                m.kit_until = None;
+            }
             let immune = (
                 m.statuses.chill_immune_until,
                 m.statuses.stagger_immune_until,
@@ -858,6 +864,8 @@ mod tests {
             focus: 90,
             statuses: Vec::new(),
             guns: None,
+            kits: 0,
+            using_kit: false,
         };
         s.entities = entities;
         s.normalize(None);

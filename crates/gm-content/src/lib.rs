@@ -162,7 +162,9 @@ struct ChainToml {
 #[serde(deny_unknown_fields)]
 struct FirearmToml {
     magazine: u8,
-    reserve: u16,
+    /// The stack the reserve is drawn from (MODES.md 11.2); none: the magazine once.
+    #[serde(default)]
+    ammo: String,
     reload_ms: u32,
     cycle_ms: u32,
     #[serde(default = "semi")]
@@ -953,7 +955,7 @@ fn compile_ability(
             };
             Ok(Firearm {
                 magazine: f.magazine,
-                reserve: f.reserve,
+                ammo: f.ammo.clone(),
                 reload: ctx.ticks(f.reload_ms),
                 cycle: ctx.ticks(f.cycle_ms),
                 fire,
@@ -1247,6 +1249,18 @@ pub fn load_dir(dir: &Path, rate: TickRate) -> Result<ContentPack, ContentError>
     )?;
     if dir.join("items.toml").exists() {
         let items = items::load_items(dir)?;
+        // A firearm's ammo is a stack of items.toml (MODES.md 11.2).
+        for a in &pack.abilities {
+            if let Some(f) = &a.ability.firearm
+                && !f.ammo.is_empty()
+                && items.stack(&f.ammo).is_none()
+            {
+                return Err(ContentError::Invalid(format!(
+                    "ability {}: ammo {:?} is not a stack of items.toml",
+                    a.key, f.ammo
+                )));
+            }
+        }
         for c in &pack.creatures {
             for m in c.loot.iter().flat_map(|l| l.standard.iter().chain(&l.top)) {
                 if !items.materials.iter().any(|known| &known.id == m) {

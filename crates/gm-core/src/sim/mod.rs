@@ -54,6 +54,8 @@ pub const RESPAWN_MS: u32 = 3000;
 pub const MAX_ABILITIES: usize = 12;
 /// Stamina regeneration pauses this long after a spend (MATRIX.md 6).
 pub const REGEN_PAUSE_MS: u32 = 1000;
+/// A kit's use, from the press to the heal (MODES.md 11.3).
+pub const KIT_USE_MS: u32 = 1500;
 /// Standing up from the command stance takes this long (COMPANIONS.md 5.1).
 pub const COMMAND_EXIT_MS: u32 = 400;
 /// The team of creatures in a wild zone (COMPANIONS.md 3.1).

@@ -190,9 +190,11 @@ become, not what they do.
   what they wore. The hub has taken its characters offline (HUB.md 5), and nothing that
   zone does reaches the books any more.
 
-## 4. The hub (v1.7)
+## 4. The hub (v1.7; v11 adds stacks, MODES.md 11.7)
 
-`HUB_VERSION` is 7 and `PLAYER_VERSION` 2. The requests of Phase 11:
+`HUB_VERSION` is 7 and `PLAYER_VERSION` 2 (11 and 4 since 2026-10-07: `items.quantity`,
+`GearReading.stacks`, `ZoneEconOp::Consume`, `HubNotice::Gear`, `ItemSummary.quantity`
+and `cap`; `StallBuy` answers `Gear`). The requests of Phase 11:
 
 | Request | From | Answer | |
 |---|---|---|---|
@@ -430,6 +432,8 @@ by clicking: a UI script presses the keys of screens, not of a fight.
   commit and its answer) leaves the body in what it wore while the hub holds the change;
   asking again mends it, and so does the next claim.
 - A stall is bought from through a wall, if the body is within reach of it.
+- **A stack never splits** (MODES.md 11.1): one drag moves it whole, and a stack that
+  would pass the cap of what it lands on is refused whole.
 
 ## 9. Proposed numbers and open decisions
 

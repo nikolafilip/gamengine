@@ -254,7 +254,7 @@ that scales with level (there are no levels). No ability-specific server code.
 | `MeleeArc.assist_deg` | 0–90° |
 | `Ability.range` | 0–4096 u |
 | `Chain.window` | ≤ 2 s; the next stage exists, is an `extra`, and the chain never comes round |
-| `Firearm.magazine`, `reserve` | 1–100, 0–400 |
+| `Firearm.magazine`, `ammo` | 1–100; a stack template's key of at most 48 characters, or empty (MODES.md 11.2: the reserve is the stack carried; `reserve` left the block on 2026-10-07) |
 | `Firearm.reload`, `cycle` | a tick–6 s, 50 ms–3 s |
 | `Firearm.headshot`, `scope` | 1–5, one of 0, 2, 4 |
 | `Firearm.recoil` | at most 32 pairs, each within ±6° |

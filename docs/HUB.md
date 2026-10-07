@@ -50,7 +50,7 @@ clients and zones trust exactly that file. Every request is one bidirectional st
 requester writes one framed `HubRequest` and finishes; the hub writes one framed `HubResponse`
 and finishes. Framing is PROTOCOL.md 8 (big-endian u16 length + `bitcode`). Messages over
 65,535 bytes are protocol errors. Since v1.6 a stream **begins with the version** of these
-messages in a frame of one byte (`HUB_VERSION`, 9 since Phase 14), and the hub answers with its own in the
+messages in a frame of one byte (`HUB_VERSION`, 9 since Phase 14, 11 since the stacks of MODES.md 11), and the hub answers with its own in the
 same way before anything else, going on to the response only when the two are equal: a
 zone, a tool or a bot of another build is told so ("the hub speaks version N") instead of
 failing to decode. A stream that begins with an empty frame speaks the players' messages

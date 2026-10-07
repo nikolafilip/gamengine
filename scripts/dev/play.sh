@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A world to play in by hand: a private Postgres, the hub, the town, the arena and the
-# tutorial dungeon, and bots that make the town worth visiting (a stall keeper, three
+# tutorial dungeon, and bots that make the town worth visiting (a stall keeper, a quartermaster, three
 # avatars for hire, a sociable Bojan, strollers) and the arena a fight (duelists).
 # Everything lives under $GM_PLAY_DIR (default ~/.local/share/gamengine/play) and keeps
 # its accounts and characters between runs.
@@ -14,6 +14,8 @@
 #   scripts/dev/play.sh spar [N] [BUILDS] N sparring partners in the town (stand, fight back): tune on them
 #   scripts/dev/play.sh client [ARGS...]  the windowed client on this stack (ALSA_CARD=1 for sound here)
 #   scripts/dev/play.sh web               serve the browser build against this hub on http://127.0.0.1:24510
+#   scripts/dev/play.sh push [USER@HOST]  the native client bundle of this build to a Linux machine's
+#                                         ~/Downloads/gamengine-client over ssh (default pezo@192.168.1.41)
 #
 # --lan lets other machines of the network in: the hub and the zones listen on every
 # interface and name this machine's address (found from the default route, or the IP given)
@@ -130,15 +132,48 @@ people() {
   bot owners --bots 3 --user 'owner-{i}@bots.test' --register --character 'Avatar{i}' \
     --builds ironclad,mender,frostweaver --zone town --list-for-hire 150 --secs 0
   # A stall keeper: walks to the first market tile, opens its stall, and lists whatever an
-  # operator hands it at 1 s 20 c (each start hands it five more things; --fresh forgets them).
+  # operator hands it at 1 s 20 c: every weapon of items.toml, one plain and one fine of
+  # each, twelve for the stall's twelve slots. Handed once: a keeper that still carries
+  # anything (its stall is open, or the stall closed and its stock came back) is not handed
+  # more (--fresh forgets everything).
   spawn keeper --bots 1 --user keeper@bots.test --register --character Keeper --builds ironclad --zone town \
     --stalls 1 --sell-at 120 --secs $BOT_SECS --behaviour stroll
   for _ in $(seq 1 100); do /usr/bin/grep -aq "stall stands" "$D/log/keeper.log" 2>/dev/null && break; sleep 0.2; done
-  for item in "sword core/iron,frame/oak" "sword core/dragonbone,frame/whalebone,gem/opal" "dagger core/iron,frame/oak" \
-              "cuirass core/iron,frame/oak" "cuirass core/dragonbone,frame/whalebone"; do
-    # shellcheck disable=SC2086
-    hubctl --grant-item Keeper $item >>"$D/log/grants.log" 2>&1
-  done
+  if [[ "$(psql "$URL" -Atc "select count(*) from items i join holders h on h.id = i.holder_id join characters c on c.id = h.character_id \
+      or c.id = (select owner_character from stalls s where s.holder_id = h.id) where c.name = 'Keeper'" 2>/dev/null || echo 0)" == 0 ]]; then
+    for item in "sword core/iron,frame/oak" "sword core/dragonbone,frame/whalebone,catalyst/ember,gem/opal" \
+                "dagger core/iron,frame/oak" "dagger core/dragonbone,frame/ash,catalyst/umbra,gem/opal" \
+                "hammer core/iron,frame/oak" "hammer core/dragonbone,frame/whalebone,catalyst/basalt,gem/opal" \
+                "staff core/iron,frame/ash" "staff core/dragonbone,frame/whalebone,catalyst/rime,gem/opal" \
+                "crossbow core/iron,frame/oak" "crossbow core/dragonbone,frame/whalebone,gem/opal" \
+                "musket core/iron,frame/oak" "musket core/dragonbone,frame/whalebone,gem/opal"; do
+      # shellcheck disable=SC2086
+      hubctl --grant-item Keeper $item >>"$D/log/grants.log" 2>&1
+    done
+  fi
+  # The quartermaster (MODES.md 11.4): a second stall on the square, stocked with stacks
+  # of rounds and kits at 1 s each, three stacks of each kind for its twelve slots. The
+  # buyer's stack takes them up to its cap (30 balls, 64 pistol rounds, 90 carbine rounds,
+  # 5 kits); past the cap the buy is refused in words. Handed again whenever it carries
+  # nothing (sold out, or the stall closed and its stock came back and went). Handed in
+  # three rounds, one stack of each kind a round, waiting for the bot to list them: two
+  # stacks of one kind in one inventory merge into one (the cap is the buyer's too).
+  spawn quartermaster --bots 1 --user quartermaster@bots.test --register --character Quartermaster \
+    --builds ironclad --zone town --stalls 1 --sell-at 100 --secs $BOT_SECS --behaviour stroll
+  for _ in $(seq 1 100); do /usr/bin/grep -aq "stall stands" "$D/log/quartermaster.log" 2>/dev/null && break; sleep 0.2; done
+  local qm_items="select count(*) from items i join holders h on h.id = i.holder_id join characters c on c.id = h.character_id \
+      or c.id = (select owner_character from stalls s where s.holder_id = h.id) where c.name = 'Quartermaster'"
+  local qm_carried="select count(*) from items i join holders h on h.id = i.holder_id join characters c on c.id = h.character_id \
+      where h.kind = 'character' and c.name = 'Quartermaster'"
+  if [[ "$(psql "$URL" -Atc "$qm_items" 2>/dev/null || echo 0)" == 0 ]]; then
+    for _ in 1 2 3; do
+      for stack in "ball 10" "pistol_round 16" "carbine_round 30" "kit 1"; do
+        # shellcheck disable=SC2086
+        hubctl --grant-item Quartermaster $stack >>"$D/log/grants.log" 2>&1
+      done
+      for _ in $(seq 1 50); do [[ "$(psql "$URL" -Atc "$qm_carried" 2>/dev/null || echo 1)" == 0 ]] && break; sleep 0.2; done
+    done
+  fi
   # Bojan: joins a party when asked (P → Invite), answers a party line and a whisper, trades.
   spawn bojan --bots 1 --user bojan@bots.test --register --character Bojan --builds blade --zone town \
     --secs $BOT_SECS --behaviour hold --sociable --trade-for 300
@@ -269,6 +304,18 @@ on another machine of the network:
 EOF
 }
 
+# The current build's native client to another Linux machine over ssh, unpacked into its
+# ~/Downloads/gamengine-client (after `web`, which makes the bundle; repeat after each build).
+push() {
+  local to="${1:-${GM_PLAY_PUSH:-pezo@192.168.1.41}}"
+  [[ -d "$D/bundle/gamengine-client" ]] || { echo "no bundle: run  $0 web  first"; exit 1; }
+  need
+  tar -czhf "$D/web/gamengine-client.tar.gz" -C "$D/bundle" gamengine-client || exit 1
+  scp -q "$D/web/gamengine-client.tar.gz" "$to:Downloads/" || exit 1
+  ssh "$to" 'cd ~/Downloads && rm -rf gamengine-client && tar xzf gamengine-client.tar.gz && ls -l gamengine-client/gm-client' || exit 1
+  echo "on $to:  ~/Downloads/gamengine-client/play"
+}
+
 case "${1:-}" in
   start) shift; start "$@" ;;
   stop) stop ;;
@@ -279,5 +326,6 @@ case "${1:-}" in
   spar) shift; spar "$@" ;;
   client) shift; client "$@" ;;
   web) web ;;
-  *) sed -n '2,15p' "$0"; exit 2 ;;
+  push) shift; push "$@" ;;
+  *) sed -n '2,18p' "$0"; exit 2 ;;
 esac

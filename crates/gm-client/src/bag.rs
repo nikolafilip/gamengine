@@ -331,6 +331,8 @@ fn material(id: &str) -> String {
 /// What a row calls the item: its template, or for a part what it is made of.
 pub(crate) fn name(item: &ItemSummary) -> String {
     match (item.place, item.components.first()) {
+        // A stack says how many (MODES.md 11.1).
+        _ if item.cap > 0 => format!("{} ×{}", item.template, item.quantity),
         (PLACE_NONE, Some((_, m))) => material(m),
         _ => item.template.clone(),
     }
@@ -1232,6 +1234,8 @@ mod tests {
             place: if whole { PLACE_WEAPON } else { PLACE_NONE },
             edge: [0; 8],
             worn: false,
+            quantity: 1,
+            cap: 0,
             what: if whole {
                 "a weapon, 250 of 250".to_string()
             } else {

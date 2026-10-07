@@ -126,6 +126,9 @@ pub struct Player {
     /// The body the last executed frame aimed at (MODES.md 5.2): its health goes on the
     /// wire to this one.
     pub target: EntityId,
+    /// What a kit of this body's stack heals (MODES.md 11.3), from the zone's reading of
+    /// the inventory; 0 until told.
+    pub kit_heal: i32,
 }
 
 impl Player {
@@ -285,6 +288,15 @@ pub enum ZoneEvent {
         /// Health actually restored: healing a full body is not healing.
         amount: i32,
     },
+    /// A reload took rounds off the stack carried (MODES.md 11.2): `hand` 0 the primary,
+    /// 1 the secondary. The zone's hub is told.
+    RoundsLoaded {
+        id: EntityId,
+        hand: u8,
+        rounds: u16,
+    },
+    /// A kit was used up (MODES.md 11.3); the heal is a `Healed` of its own.
+    KitUsed(EntityId),
     Killed {
         victim: EntityId,
         /// 0 = the world.
@@ -486,6 +498,7 @@ impl Zone {
             ghost: false,
             driver,
             gear: Gear::NONE,
+            kit_heal: 0,
             party: id,
             hold: false,
             unhurt: false,
@@ -510,6 +523,39 @@ impl Zone {
         if let Some(p) = self.players.get_mut(&id) {
             p.gear = gear.clamped();
         }
+    }
+
+    /// The stacks a body carries (MODES.md 11), as the hub reads them: `(template,
+    /// quantity, heals)`. A firearm's reserve is the quantity of the stack its `ammo`
+    /// names; the kits are the stacks that heal, and a kit heals what its template says.
+    /// Told at the claim and after every change the hub knows of.
+    pub fn set_stacks(&mut self, id: EntityId, stacks: &[(String, u32, Option<i32>)]) {
+        let Some(p) = self.players.get_mut(&id) else {
+            return;
+        };
+        let kit = &p.sheet.kit;
+        for (g, slot) in p.mover.guns.iter_mut().zip([kit.primary, kit.secondary]) {
+            let Some(f) = slot.and_then(|i| kit.abilities[i as usize].firearm.as_ref()) else {
+                continue;
+            };
+            g.reserve = if f.ammo.is_empty() {
+                0
+            } else {
+                stacks
+                    .iter()
+                    .filter(|(t, _, _)| *t == f.ammo)
+                    .map(|(_, q, _)| *q)
+                    .sum::<u32>()
+                    .min(u16::MAX as u32) as u16
+            };
+        }
+        p.mover.kits = stacks
+            .iter()
+            .filter(|(_, _, heals)| heals.is_some())
+            .map(|(_, q, _)| *q)
+            .sum::<u32>()
+            .min(u16::MAX as u32) as u16;
+        p.kit_heal = stacks.iter().filter_map(|(_, _, h)| *h).max().unwrap_or(0);
     }
 
     pub fn set_party(&mut self, id: EntityId, party: u32) {
@@ -773,6 +819,14 @@ impl Zone {
         for &id in &ids {
             let p = self.players.get_mut(&id).expect("id from keys");
             p.credits = (p.credits + 1.0).min(CREDIT_BURST);
+            // The stacks before the frames (MODES.md 11): what the frames took off them
+            // is told below.
+            let stacks_before = (
+                p.mover.guns[0].reserve,
+                p.mover.guns[1].reserve,
+                p.mover.kits,
+                p.mover.kit_until.is_some(),
+            );
             p.stagger = (p.stagger - STAGGER_DECAY_PER_S * dt).max(0.0);
             let depth = p.queue.len();
             let mut allowed: u32 = if depth >= DRAIN_DEPTH {
@@ -866,6 +920,39 @@ impl Zone {
                     p.mover.pitch = input.pitch;
                     p.mover.buttons_prev = input.buttons;
                 }
+            }
+            // The stacks after (MODES.md 11.2, 11.3): a reload's rounds, a kit used, and
+            // a kit use begun at full health refused before it heals nothing.
+            for hand in 0..2u8 {
+                let before = if hand == 0 {
+                    stacks_before.0
+                } else {
+                    stacks_before.1
+                };
+                let now_reserve = p.mover.guns[hand as usize].reserve;
+                if now_reserve < before {
+                    self.events.push(ZoneEvent::RoundsLoaded {
+                        id,
+                        hand,
+                        rounds: before - now_reserve,
+                    });
+                }
+            }
+            if p.mover.kits < stacks_before.2 && p.alive {
+                let before = p.health;
+                p.health = (p.health + p.kit_heal.max(0)).min(p.max_health());
+                let healed = p.health - before;
+                self.events.push(ZoneEvent::KitUsed(id));
+                if healed > 0 {
+                    self.events.push(ZoneEvent::Healed {
+                        target: id,
+                        source: id,
+                        amount: healed,
+                    });
+                }
+            }
+            if !stacks_before.3 && p.mover.kit_until.is_some() && p.health >= p.max_health() {
+                p.mover.kit_until = None;
             }
             if executed == 0 && p.driver == Driver::Client {
                 p.starved_ticks += 1;
@@ -1956,8 +2043,16 @@ impl Zone {
             p.sheet = Sheet::new(build, content, p.team());
         }
         let cooldowns = p.mover.cooldowns;
+        // The rounds in the guns and the kits carried come back with the body (MODES.md
+        // 11.2): a respawn refills nothing.
+        let (guns, kits) = (p.mover.guns, p.mover.kits);
         p.mover = Mover::spawn(origin, yaw, &p.sheet);
         p.mover.cooldowns = cooldowns;
+        p.mover.kits = kits;
+        for (g, kept) in p.mover.guns.iter_mut().zip(guns) {
+            g.magazine = kept.magazine.min(g.magazine);
+            g.reserve = kept.reserve;
+        }
         p.health = p.sheet.derived.health;
         p.alive = true;
         p.stagger = 0.0;
@@ -2144,6 +2239,9 @@ fn compute_anim(p: &Player) -> u8 {
     }
     if p.mover.reloading(p.last_input_tick) {
         return anim::RELOAD;
+    }
+    if p.mover.using_kit(p.last_input_tick) {
+        return anim::USE;
     }
     if p.mover.commanding(p.last_input_tick) {
         return anim::COMMAND;

@@ -57,7 +57,9 @@ kind: character | storage | stall | escrow | guild_chest | ground | source | sin
 - `source`, `sink`: singletons; the only way coin is created or destroyed.
 
 Capacity is enforced in the transaction that moves an item in (`count(*) < capacity`, with the
-holder row locked). Gear never stacks (PLAN.md 5.4); materials are items too in v1. Emptied
+holder row locked). Gear never stacks (PLAN.md 5.4); materials are items too in v1; **a
+`stack` template** (MODES.md 11.1, 2026-10-07: rounds and kits) is one row with a `quantity`,
+merged up to its cap by the one item mover. Emptied
 stall and escrow holders are kept: the ledger rows that name them are their history.
 
 ## 4. Items
@@ -280,7 +282,8 @@ gems 60–100 gold; a 12 h tavern hire 50 silver – 2 gold; a carry 2–10 gold
 14, in copper: a meal 5 c, gear 2–5 s, a component 10–40 s, a top item 1–3 g.)
 Death-drop in contested zones and housing remain open and are not in this version.
 
-Also proposed: stacking of materials is **not** in v1 (every component is a row and a slot);
+Also proposed: stacking of materials is **not** in v1 (every component is a row and a slot;
+the `quantity` column of 2026-10-07 could carry them, MODES.md 11.1);
 the 120 min contract timeout; the cap on a single coin grant (1 gold before Phase 14; **5
 gold** with the new scale, `MAX_GRANT` in the hub); no self-hire; one copy
 of an avatar per squad; a recipient who left the zone before its kill is reported forfeits

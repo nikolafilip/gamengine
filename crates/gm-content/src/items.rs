@@ -30,6 +30,12 @@ pub struct ItemTemplate {
     /// `elements` (the five).
     #[serde(default)]
     pub guards: Option<String>,
+    /// A stack (MODES.md 11.1): the most of it one holder carries (the strict limit), and
+    /// what one of it heals when it is a kit. No layers, no materials.
+    #[serde(default)]
+    pub cap: Option<u32>,
+    #[serde(default)]
+    pub heals: Option<i32>,
     /// The look fields (CONTENT.md 3): the prop drawn in the hand of whoever wears an item
     /// of this template, its picture (baked from the model when absent), which hand, how
     /// the file is fitted into the hand and into the first-person view, and whether the
@@ -274,6 +280,21 @@ impl ItemContent {
         Place::parse(&t.kind)
     }
 
+    /// A stack template (MODES.md 11.1): its cap and what one of it heals; `None` for
+    /// anything else.
+    pub fn stack(&self, template: &str) -> Option<(u32, Option<i32>)> {
+        let t = self.templates.iter().find(|t| t.id == template)?;
+        (t.kind == "stack").then(|| (t.cap.unwrap_or(1).max(1), t.heals))
+    }
+
+    /// What a stack of `quantity` is, in words: `balls ×12 of 30`.
+    pub fn stack_words(&self, template: &str, quantity: u32) -> String {
+        match self.stack(template) {
+            Some((cap, _)) => format!("{template} ×{quantity} of {cap}"),
+            None => template.to_string(),
+        }
+    }
+
     /// What an item of `template` made of `materials` does (ITEMS.md 3.2): where it is
     /// worn, its edge per damage type in `DamageType`'s order (per mille: a weapon's is
     /// what its wearer deals more of, an armour's what its wearer takes less of), and its
@@ -370,14 +391,24 @@ impl ItemContent {
                 ),
                 does: words(place, &edge),
             },
-            None => ItemView {
-                what: match components.into_iter().next() {
-                    Some((layer, _)) if template == "component" => {
-                        format!("a {layer}, for crafting")
-                    }
-                    _ => "nothing this world knows".to_string(),
+            None => match self.stack(template) {
+                Some((_, heals)) => ItemView {
+                    what: format!("{template}, a stack"),
+                    does: heals
+                        .into_iter()
+                        .map(|h| format!("heals {h}, used with F"))
+                        .collect(),
+                    ..ItemView::default()
                 },
-                ..ItemView::default()
+                None => ItemView {
+                    what: match components.into_iter().next() {
+                        Some((layer, _)) if template == "component" => {
+                            format!("a {layer}, for crafting")
+                        }
+                        _ => "nothing this world knows".to_string(),
+                    },
+                    ..ItemView::default()
+                },
             },
         }
     }
@@ -421,8 +452,34 @@ impl ItemContent {
             if self.templates[..i].iter().any(|o| o.id == t.id) {
                 return bad(format!("template {:?} is defined twice", t.id));
             }
-            if !["weapon", "armour"].contains(&t.kind.as_str()) {
+            if !["weapon", "armour", "stack"].contains(&t.kind.as_str()) {
                 return bad(format!("template {:?}: unknown kind {:?}", t.id, t.kind));
+            }
+            if t.kind == "stack" {
+                // A stack (MODES.md 11.1): a cap within the hub's column, a heal within
+                // reason, nothing of a craft.
+                match t.cap {
+                    Some(1..=1000) => {}
+                    _ => return bad(format!("template {:?}: a stack's cap is 1–1000", t.id)),
+                }
+                if let Some(h) = t.heals
+                    && !(1..=1000).contains(&h)
+                {
+                    return bad(format!("template {:?}: heals is 1–1000", t.id));
+                }
+                if !t.layers.is_empty() || t.strikes.is_some() || t.guards.is_some() {
+                    return bad(format!(
+                        "template {:?}: a stack has no layers, strikes with nothing and guards against nothing",
+                        t.id
+                    ));
+                }
+                continue;
+            }
+            if t.cap.is_some() || t.heals.is_some() {
+                return bad(format!(
+                    "template {:?}: only a stack has a cap or heals",
+                    t.id
+                ));
             }
             match (t.kind.as_str(), t.strikes.as_deref(), t.guards.as_deref()) {
                 ("weapon", Some(kind), None) if physical(kind).is_some() => {}
@@ -559,11 +616,22 @@ mod tests {
             .unwrap();
         assert_eq!(odd[at(DamageType::Slash)], 30);
         // Nothing an item can be made of goes past the cap in any one number.
-        for t in &items.templates {
+        for t in items.templates.iter().filter(|t| t.kind != "stack") {
             let all: Vec<&str> = items.materials.iter().map(|m| m.id.as_str()).collect();
             let (_, edges, _) = items.edges(&t.id, all).unwrap();
             assert!(edges.iter().all(|e| *e <= 250), "{}", t.id);
         }
+        // A stack (MODES.md 11.1) is worn nowhere, has a cap, and a kit heals.
+        assert_eq!(items.place("ball"), None);
+        assert_eq!(items.edges("ball", []), None);
+        assert_eq!(items.stack("ball"), Some((30, None)));
+        assert_eq!(items.stack("kit"), Some((5, Some(50))));
+        assert_eq!(items.stack("sword"), None);
+        assert_eq!(items.stack_words("ball", 12), "ball ×12 of 30");
+        assert_eq!(
+            items.view("kit", []).does,
+            vec!["heals 50, used with F".to_string()]
+        );
     }
 
     #[test]

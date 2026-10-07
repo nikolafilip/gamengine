@@ -263,6 +263,23 @@ async fn operator(db: Db, args: &Args) -> anyhow::Result<()> {
             .iter()
             .find(|t| &t.id == template)
             .ok_or_else(|| anyhow::anyhow!("no template called {template:?}"))?;
+        // A stack (MODES.md 11.4): the third word is how many, not what of.
+        if items.stack(template).is_some() {
+            let quantity: u32 = match materials.as_slice() {
+                [n] => n
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("{template}: a quantity, not {n:?}: {e}"))?,
+                _ => anyhow::bail!("{template} is a stack: --grant-item NAME {template} HOW_MANY"),
+            };
+            let mut econ = econ;
+            econ.set_stacks(&items);
+            let item = econ
+                .grant_stack(id, template, quantity)
+                .await
+                .map_err(|e| anyhow::anyhow!("the {template}: {e}"))?;
+            info!(%name, %template, quantity, item, "stack granted");
+            return Ok(());
+        }
         if let Some(m) = materials
             .iter()
             .find(|m| !items.materials.iter().any(|x| &x.id == *m))

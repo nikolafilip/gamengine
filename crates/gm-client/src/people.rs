@@ -1415,6 +1415,8 @@ mod tests {
             place: if whole { PLACE_WEAPON } else { PLACE_NONE },
             edge: [0; 8],
             worn: false,
+            quantity: 1,
+            cap: 0,
             what: if whole {
                 "a weapon, 250 of 250".to_string()
             } else {

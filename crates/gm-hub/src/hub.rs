@@ -26,8 +26,8 @@ use gm_hub_proto::protocol::{
     HiredAvatar, HubError, HubNotice, HubRequest, HubResponse, ItemSummary, ListingSummary,
     LocationSummary, MAX_REPLAY_BYTES, MAX_SESSIONS_PER_ACCOUNT, ModOp, ModelRef, PLACE_ARMOUR,
     PLACE_NONE, PLACE_WEAPON, PartyNews, PartyReply, SESSION_LIFETIMES, SayTo, SessionId,
-    StallSummary, TOKEN_VALID_SECS, TavernEntry, TradeOffer, ZoneEconOp, ZoneId, ZonePartyOp,
-    ZoneSummary, ZoneTicket, now_secs,
+    StackReading, StallSummary, TOKEN_VALID_SECS, TavernEntry, TradeOffer, ZoneEconOp, ZoneId,
+    ZonePartyOp, ZoneSummary, ZoneTicket, now_secs,
 };
 
 use crate::conduct::Conduct;
@@ -35,6 +35,7 @@ use crate::economy::{EconError, Economy, Outcome, TradeState, TradeStatus};
 use crate::models::{IngestMode, Models};
 use crate::party::{Answered, Parties};
 use gm_content::items::{ItemContent, Place};
+use gm_core::matrix::Gear;
 use gm_hub_proto::protocol::{TRADE_CANCELLED, TRADE_COMMITTED, TRADE_OPEN};
 
 /// The body of an upload must arrive within ten seconds plus its length at 64 KiB/s
@@ -221,6 +222,7 @@ pub async fn run_with_web(
     };
     let mut parties = Parties::new(db.pool().clone());
     parties.away = cfg.party_away;
+    let econ = Economy::new(db.pool().clone()).with_stacks(&cfg.items);
     let hub = Arc::new(Hub {
         conduct,
         decoy_hash,
@@ -228,7 +230,7 @@ pub async fn run_with_web(
         verifier: Mutex::new(HashMap::new()),
         models,
         cfg,
-        econ: Economy::new(db.pool().clone()),
+        econ,
         parties,
         db,
         state: Mutex::new(State::default()),
@@ -1368,19 +1370,16 @@ async fn handle(
                     .await?;
                 // Read after the character became this zone's (ITEMS.md 3.3): whatever it
                 // put on through the zone it came from is in it.
-                let (seq, gear, templates) = hub
+                let gear = hub
                     .econ
                     .gear(row.id, &hub.cfg.items)
                     .await
+                    .map(reading)
                     .map_err(econ_err)?;
                 Ok::<_, HubError>((
                     squad,
                     hub.models.worn(row.id).await?,
-                    GearReading {
-                        seq,
-                        gear,
-                        templates,
-                    },
+                    gear,
                     // As gear: read after the character became this zone's. A change
                     // that comes later is told to this zone, with a larger number.
                     hub.parties.reading(row.id).await?,
@@ -1489,7 +1488,35 @@ async fn handle(
                 LocationSummary::Zone(z) => Some(z),
                 _ => None,
             };
-            Ok(HubResponse::Econ(econ_op(hub, character, zone, op).await?))
+            // What moves items without the zone's hand (MODES.md 11.2) is told to the
+            // zone after: the storage, a stall of one's own, a craft, a trade (both sides).
+            let moves_items = matches!(
+                op,
+                EconOp::StorageDeposit { .. }
+                    | EconOp::StorageWithdraw { .. }
+                    | EconOp::StallList { .. }
+                    | EconOp::StallUnlist { .. }
+                    | EconOp::StallClose
+                    | EconOp::Craft { .. }
+                    | EconOp::Decompose { .. }
+                    | EconOp::TradeAccept { .. }
+            );
+            let trade = match &op {
+                EconOp::TradeAccept { trade, .. } => Some(*trade),
+                _ => None,
+            };
+            let reply = econ_op(hub, character, zone, op).await?;
+            if moves_items {
+                if let (Some(trade), EconReply::Trade { committed: true }) = (trade, &reply)
+                    && let Ok((a, b)) = hub.econ.trade_characters(trade).await
+                {
+                    tell_zone_of_items(hub, a).await;
+                    tell_zone_of_items(hub, b).await;
+                } else if trade.is_none() {
+                    tell_zone_of_items(hub, character).await;
+                }
+            }
+            Ok(HubResponse::Econ(reply))
         }
         HubRequest::ZoneEcon(op) => {
             let zone = hub.zone_of_conn(auth)?;
@@ -1735,13 +1762,23 @@ fn build_words(content: &ContentPack, build: &Build) -> Option<(String, String)>
 /// An item as a person is shown it: where it is worn, what it does there and the words
 /// for both are the content's to say (ITEMS.md 3.2), so that no client works them out.
 fn item_summary(content: &ItemContent, i: crate::economy::Item) -> ItemSummary {
-    let view = content.view(
+    let mut view = content.view(
         &i.template,
         i.components
             .iter()
             .map(|c| (c.layer.as_str(), c.material.as_str())),
     );
+    // A stack says how many it is (MODES.md 11.1).
+    let cap = match content.stack(&i.template) {
+        Some((cap, _)) => {
+            view.what = content.stack_words(&i.template, i.quantity);
+            cap
+        }
+        None => 0,
+    };
     ItemSummary {
+        quantity: i.quantity,
+        cap,
         id: i.id,
         template: i.template,
         place: match view.place {
@@ -1772,6 +1809,46 @@ fn trade_offer(
             .into_iter()
             .map(|i| item_summary(content, i))
             .collect(),
+    }
+}
+
+/// The hub's reading of a character's gear and stacks (ITEMS.md 3.3, MODES.md 11.2), as
+/// a zone is told it.
+fn reading(
+    (seq, gear, templates, stacks): (u64, Gear, [String; 2], Vec<crate::economy::Stack>),
+) -> GearReading {
+    GearReading {
+        seq,
+        gear,
+        templates,
+        stacks: stacks
+            .into_iter()
+            .map(|s| StackReading {
+                item: s.item,
+                template: s.template,
+                quantity: s.quantity,
+                heals: s.heals,
+            })
+            .collect(),
+    }
+}
+
+/// After a session's request moved items of `character` without its zone knowing (the
+/// storage, a stall of its own, a trade, a craft): the zone it plays in, if any, is told
+/// what it wears and carries now (MODES.md 11.2), so that a reserve is never stale.
+async fn tell_zone_of_items(hub: &Hub, character: CharacterId) {
+    let Ok(Some(zone)) = hub.db.zone_of(character).await else {
+        return;
+    };
+    if let Ok(r) = hub.econ.gear(character, &hub.cfg.items).await {
+        hub.notify(
+            &zone,
+            HubNotice::Gear {
+                character,
+                reading: reading(r),
+            },
+        )
+        .await;
     }
 }
 
@@ -2166,7 +2243,29 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
             }
             e.stall_buy(character, zone, stall, listing, price)
                 .await
-                .map(|()| EconReply::Done)
+                .map_err(econ_err)?;
+            // What it carries now (MODES.md 11.2): a stack bought is a reserve filled.
+            e.gear(character, &hub.cfg.items)
+                .await
+                .map(|r| EconReply::Gear(reading(r)))
+                .map_err(econ_err)
+        }
+        // The zone spent them already (MODES.md 11.2); the hub's books follow, and the
+        // zone takes the reading it is answered, whatever the hub found.
+        ZoneEconOp::Consume {
+            character,
+            item,
+            quantity,
+        } => {
+            if hub.db.zone_of(character).await?.as_ref() != Some(zone) {
+                return Err(HubError::Unauthorized);
+            }
+            if let Err(why) = e.consume(character, item, quantity).await {
+                tracing::info!(character, item, quantity, %why, "consume refused");
+            }
+            e.gear(character, &hub.cfg.items)
+                .await
+                .map(|r| EconReply::Gear(reading(r)))
                 .map_err(econ_err)
         }
         // That the character plays in this zone is checked inside the transaction, with
@@ -2174,24 +2273,12 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
         ZoneEconOp::Wear { character, item } => e
             .wear(character, zone, item, &hub.cfg.items)
             .await
-            .map(|(seq, gear, templates)| {
-                EconReply::Gear(GearReading {
-                    seq,
-                    gear,
-                    templates,
-                })
-            })
+            .map(|r| EconReply::Gear(reading(r)))
             .map_err(econ_err),
         ZoneEconOp::TakeOff { character, item } => e
             .take_off(character, zone, item, &hub.cfg.items)
             .await
-            .map(|(seq, gear, templates)| {
-                EconReply::Gear(GearReading {
-                    seq,
-                    gear,
-                    templates,
-                })
-            })
+            .map(|r| EconReply::Gear(reading(r)))
             .map_err(econ_err),
         // The zone saw the two stand together and both ask (PARTY.md 6); that both play in
         // it is checked again here, under their rows.

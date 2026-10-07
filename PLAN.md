@@ -1575,6 +1575,22 @@ build, none estimated):
   word of the mode, a target kept five seconds out of sight, a body walking round bodies. The director
   has not played it: the LAN stack ran the old build at the end of the day. His knobs are MODES.md 9.
 
+**2026-10-07 evening, Phase 15d: rounds, kits and the quartermaster** (`docs/MODES.md` 11; the director,
+after reading the gun as built: the scope on the right button "as in CS 1.6" (it was built, no gun in the
+content had one: the musket got `scope = 2`), an NPC in town for health kits and ammunition, and "a strict
+limit how much ammo one can carry, same as in CS"; proposed in 11.1–11.6 and approved as proposed, "do it
+that way and then redeploy"). Built: a `stack` item kind with a cap and `heals` (content v3: ball 30,
+pistol_round 64, carbine_round 90, kit 5 heals 50), `firearm.ammo` in place of `reserve`; hub v11 with
+`items.quantity` (migration 0011), the one item mover merging a stack onto its holder's up to the cap and
+refusing the rest in words before anything moves (a grant, a stall's sale, a trade alike), `Consume` from
+the zone, the stacks in the gear reading, a `Gear` notice to the zone after a session's own moves, a stack
+grant by quantity; the reserve read from the inventory and a respawn that refills nothing; the kit on `F`
+in every mode (`USE`, protocol v12, the own block's `kits`), 1.5 s, heals 50, dropped by a stagger with the
+kit kept, refused at full health; the HUD's kits line; the Quartermaster stall bot in `play.sh people`.
+MODES.md 11.7 lists the readings and what is not built (a stack never splits, no ground pickup of a stack,
+one price per bot stall, the kit borrows the reload's motion, the stranger's `USE` stance is idle until
+Phase 17).
+
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute
 set are **proposed** in `docs/MATRIX.md` 12 (implemented and measured; the director confirms or changes
@@ -1636,5 +1652,5 @@ drop and keyboard shortcuts are both musts; top gear is tens of gold. As built a
 weapon is always held (never sheathed), the two faces (Fira Sans Medium, MedievalSharp), party frames for
 members present in the zone only, the view model's place. (The marks on a body were decided on
 2026-10-03: names over heads instead of the cube, a ring instead of the plate, LOOK.md 13.)
-The three modes are **proposed** in `docs/MODES.md` 9 (2026-10-07: the presets' modes, hitscan or a bolt at 20,000 u/s, the head band, whether an RPG body's aim is the zone's, whether a mode change is a respec, the diminishing returns on controls).
+The three modes are **proposed** in `docs/MODES.md` 9 (2026-10-07: the presets' modes, hitscan or a bolt at 20,000 u/s, the head band, whether an RPG body's aim is the zone's, whether a mode change is a respec, the diminishing returns on controls); the stacks' caps and prices of MODES.md 11.6 were decided as proposed the same day.
 Death-drop in contested zones: on/off and fraction. Housing: instanced interiors vs world plots. Name.

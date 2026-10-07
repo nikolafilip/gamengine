@@ -115,6 +115,26 @@ pub struct Item {
     pub components: Vec<Component>,
     /// Somebody wears it (ITEMS.md 2): only ever true in its wearer's inventory.
     pub worn: bool,
+    /// How many (MODES.md 11.1): 1 for gear and parts, a stack's count for a stack.
+    pub quantity: u32,
+}
+
+/// A stack in a character's inventory, as a zone reads it (MODES.md 11.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stack {
+    pub item: i64,
+    pub template: String,
+    pub quantity: u32,
+    pub heals: Option<i32>,
+}
+
+/// The stack templates the hub knows (MODES.md 11.1): cap and heal by template key. Set
+/// from the content at start; a template not here is gear or a part and never merges.
+pub type StackCaps = std::collections::HashMap<String, (u32, Option<i32>)>;
+
+/// The words a buyer, a trader or an operator is told at the cap.
+pub fn at_the_cap(template: &str) -> String {
+    format!("you carry all the {template}s you can")
 }
 
 /// What a stall has for sale: the listing's id, the item and its price in silver.
@@ -212,6 +232,8 @@ pub struct Supply {
 #[derive(Clone)]
 pub struct Economy {
     pool: PgPool,
+    /// The stack templates (MODES.md 11.1), from the content.
+    pub stacks: StackCaps,
     /// The trade window's accept cooldown (ECONOMY.md 6); 3 s in production.
     pub trade_cooldown: Duration,
     /// An accept is taken only while both characters play in one zone (ECONOMY.md 6);
@@ -328,22 +350,10 @@ async fn move_coin(
     Ok(())
 }
 
-/// Move an item to another holder, checking that it is in `expect_from` and that the target
-/// has room, and write the move row (ECONOMY.md 5).
-async fn move_item(
-    tx: &mut Tx<'_>,
-    item: i64,
-    expect_from: i64,
-    to: i64,
-    reason: &str,
-    reference: i64,
-) -> Result<(), EconError> {
-    move_item_opt(tx, item, expect_from, to, reason, reference, false).await
-}
-
-/// `overflow` skips the capacity check: only a closing stall uses it, so that a full owner
-/// can never keep a tile (ECONOMY.md 7).
-async fn move_item_opt(
+/// `move_item` knowing the stack templates (MODES.md 11.1): the `Economy`'s methods pass
+/// theirs; the free functions above know none and move every row as one thing.
+#[allow(clippy::too_many_arguments)]
+async fn move_item_stacking(
     tx: &mut Tx<'_>,
     item: i64,
     expect_from: i64,
@@ -351,6 +361,7 @@ async fn move_item_opt(
     reason: &str,
     reference: i64,
     overflow: bool,
+    stacks: &StackCaps,
 ) -> Result<(), EconError> {
     // Holders first (ascending), then the item row: the same order everywhere.
     let locked = lock_holders(tx, &[expect_from, to]).await?;
@@ -372,6 +383,35 @@ async fn move_item_opt(
             .iter()
             .find(|h| h.0 == to)
             .ok_or(EconError::NotFound)?;
+        // A stack into an inventory or a storage (MODES.md 11.1): onto the stack of its
+        // template already there, up to the cap; past the cap, refused in words before
+        // anything moves; nothing of it stays separate.
+        if let Some(cap) = stacks.get(&row_template(tx, item).await?).map(|s| s.0)
+            && matches!(target.1.as_str(), "character" | "storage")
+        {
+            let quantity = row_quantity(tx, item).await?;
+            if let Some(into) = absorb_stack(tx, to, item, quantity, cap).await? {
+                sqlx::query("insert into item_moves (item_id, from_holder, to_holder, reason, ref) values ($1, $2, $3, $4, $5)")
+                    .bind(item)
+                    .bind(expect_from)
+                    .bind(to)
+                    .bind(reason)
+                    .bind(reference)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(internal)?;
+                // The moving row is spent into the one there: whatever still names it
+                // (a listing just sold, a trade just committed) lets go first.
+                unname_item(tx, item).await?;
+                sqlx::query("delete from items where id = $1")
+                    .bind(item)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(internal)?;
+                let _ = into;
+                return Ok(());
+            }
+        }
         if target.2 > 0 && !overflow {
             let count: i64 = sqlx::query("select count(*) from items where holder_id = $1")
                 .bind(to)
@@ -596,6 +636,46 @@ async fn gear_in(
     Ok((gear, templates))
 }
 
+/// The stacks of a character's inventory (MODES.md 11.2), in the same reading as its gear.
+/// A character that does not exist carries none.
+async fn stacks_in(
+    tx: &mut Tx<'_>,
+    character: i64,
+    stacks: &StackCaps,
+) -> Result<Vec<Stack>, EconError> {
+    let Some(inv) = sqlx::query(
+        "select h.id from holders h where h.character_id = $1 and h.kind = 'character'",
+    )
+    .bind(character)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?
+    else {
+        return Ok(Vec::new());
+    };
+    let inv: i64 = inv.try_get("id").map_err(internal)?;
+    let rows =
+        sqlx::query("select id, template, quantity from items where holder_id = $1 order by id")
+            .bind(inv)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(internal)?;
+    let mut out = Vec::new();
+    for r in rows {
+        let template: String = r.try_get("template").map_err(internal)?;
+        if let Some((_, heals)) = stacks.get(&template) {
+            let quantity: i32 = r.try_get("quantity").map_err(internal)?;
+            out.push(Stack {
+                item: r.try_get("id").map_err(internal)?,
+                template,
+                quantity: quantity.max(0) as u32,
+                heals: *heals,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Whether somebody wears the item (ITEMS.md 2). Asked with the item's row locked.
 async fn is_worn(tx: &mut Tx<'_>, item: i64) -> Result<bool, EconError> {
     Ok(sqlx::query("select 1 from worn where item_id = $1")
@@ -634,21 +714,119 @@ fn check_parts(
 }
 
 /// A new item of `template` made of `parts`, in `holder`. The caller writes its move.
+/// Whatever still names an item row that is about to be spent into another (a listing
+/// just sold, a trade just committed) lets go of it.
+async fn unname_item(tx: &mut Tx<'_>, item: i64) -> Result<(), EconError> {
+    sqlx::query("delete from listings where item_id = $1")
+        .bind(item)
+        .execute(&mut **tx)
+        .await
+        .map_err(internal)?;
+    sqlx::query("delete from trade_items where item_id = $1")
+        .bind(item)
+        .execute(&mut **tx)
+        .await
+        .map_err(internal)?;
+    Ok(())
+}
+
+/// The template and the quantity of an item row (the row is held by the caller).
+async fn row_template(tx: &mut Tx<'_>, item: i64) -> Result<String, EconError> {
+    sqlx::query("select template from items where id = $1")
+        .bind(item)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(internal)?
+        .ok_or(EconError::NotFound)?
+        .try_get("template")
+        .map_err(internal)
+}
+
+async fn row_quantity(tx: &mut Tx<'_>, item: i64) -> Result<u32, EconError> {
+    let q: i32 = sqlx::query("select quantity from items where id = $1")
+        .bind(item)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(internal)?
+        .ok_or(EconError::NotFound)?
+        .try_get("quantity")
+        .map_err(internal)?;
+    Ok(q.max(0) as u32)
+}
+
+/// `quantity` of a stack arrives in `holder` (MODES.md 11.1): onto the row of the same
+/// template there, if one is, up to `cap`; `Some(row)` when it was taken up, `None` when
+/// the holder has no such stack yet (the caller makes or moves a row, within the cap).
+/// Past the cap either way: refused in words, and nothing has changed. `except` is the
+/// arriving row itself, never merged into itself.
+async fn absorb_stack(
+    tx: &mut Tx<'_>,
+    holder: i64,
+    except: i64,
+    quantity: u32,
+    cap: u32,
+) -> Result<Option<i64>, EconError> {
+    let template = row_template(tx, except).await?;
+    let there = sqlx::query(
+        "select id, quantity from items where holder_id = $1 and template = $2 and id <> $3          order by id for update",
+    )
+    .bind(holder)
+    .bind(&template)
+    .bind(except)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?;
+    match there {
+        Some(r) => {
+            let id: i64 = r.try_get("id").map_err(internal)?;
+            let have: i32 = r.try_get("quantity").map_err(internal)?;
+            if have.max(0) as u32 + quantity > cap {
+                return Err(EconError::Invalid(at_the_cap(&template)));
+            }
+            sqlx::query("update items set quantity = quantity + $2 where id = $1")
+                .bind(id)
+                .bind(quantity as i32)
+                .execute(&mut **tx)
+                .await
+                .map_err(internal)?;
+            Ok(Some(id))
+        }
+        None => {
+            if quantity > cap {
+                return Err(EconError::Invalid(at_the_cap(&template)));
+            }
+            Ok(None)
+        }
+    }
+}
+
 async fn create_item(
     tx: &mut Tx<'_>,
     holder: i64,
     template: &str,
     parts: &[Component],
 ) -> Result<i64, EconError> {
-    let id: i64 =
-        sqlx::query("insert into items (template, holder_id) values ($1, $2) returning id")
-            .bind(template)
-            .bind(holder)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(internal)?
-            .try_get("id")
-            .map_err(internal)?;
+    create_item_n(tx, holder, template, parts, 1).await
+}
+
+async fn create_item_n(
+    tx: &mut Tx<'_>,
+    holder: i64,
+    template: &str,
+    parts: &[Component],
+    quantity: u32,
+) -> Result<i64, EconError> {
+    let id: i64 = sqlx::query(
+        "insert into items (template, holder_id, quantity) values ($1, $2, $3) returning id",
+    )
+    .bind(template)
+    .bind(holder)
+    .bind(quantity.clamp(1, 1000) as i32)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(internal)?
+    .try_get("id")
+    .map_err(internal)?;
     let mut pos = std::collections::HashMap::<&str, i16>::new();
     for c in parts {
         let p = pos.entry(c.layer.as_str()).or_insert(0);
@@ -715,9 +893,47 @@ impl Economy {
     pub fn new(pool: PgPool) -> Economy {
         Economy {
             pool,
+            stacks: StackCaps::new(),
             trade_cooldown: Duration::from_secs(3),
             trades_need_a_zone: true,
         }
+    }
+
+    /// Learn the stack templates from the content (MODES.md 11.1).
+    pub fn with_stacks(mut self, content: &ItemContent) -> Economy {
+        self.set_stacks(content);
+        self
+    }
+
+    pub fn set_stacks(&mut self, content: &ItemContent) {
+        self.stacks = content
+            .templates
+            .iter()
+            .filter_map(|t| content.stack(&t.id).map(|s| (t.id.clone(), s)))
+            .collect();
+    }
+
+    /// The one item mover, knowing this economy's stacks (MODES.md 11.1).
+    async fn mv(
+        &self,
+        tx: &mut Tx<'_>,
+        item: i64,
+        expect_from: i64,
+        to: i64,
+        reason: &str,
+        reference: i64,
+    ) -> Result<(), EconError> {
+        move_item_stacking(
+            tx,
+            item,
+            expect_from,
+            to,
+            reason,
+            reference,
+            false,
+            &self.stacks,
+        )
+        .await
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -761,7 +977,7 @@ impl Economy {
             .try_get("coin")
             .map_err(internal)?;
         let rows = sqlx::query(
-            "select id, template, exists (select 1 from worn w where w.item_id = items.id) as worn \
+            "select id, template, quantity, exists (select 1 from worn w where w.item_id = items.id) as worn \
              from items where holder_id = $1 order by id",
         )
         .bind(holder)
@@ -771,11 +987,13 @@ impl Economy {
         let mut items = Vec::with_capacity(rows.len());
         for r in rows {
             let id: i64 = r.try_get("id").map_err(internal)?;
+            let quantity: i32 = r.try_get("quantity").map_err(internal)?;
             items.push(Item {
                 id,
                 template: r.try_get("template").map_err(internal)?,
                 components: components_of(tx, id).await?,
                 worn: r.try_get("worn").map_err(internal)?,
+                quantity: quantity.max(0) as u32,
             });
         }
         Ok((coin, items))
@@ -798,7 +1016,7 @@ impl Economy {
         zone: &str,
         item: i64,
         content: &ItemContent,
-    ) -> Result<(u64, Gear, [String; 2]), EconError> {
+    ) -> Result<(u64, Gear, [String; 2], Vec<Stack>), EconError> {
         let mut tx = self.begin().await?;
         playing_in(&mut tx, character, zone).await?;
         let inv = character_holder(&mut tx, character).await?;
@@ -858,7 +1076,7 @@ impl Economy {
         zone: &str,
         item: i64,
         content: &ItemContent,
-    ) -> Result<(u64, Gear, [String; 2]), EconError> {
+    ) -> Result<(u64, Gear, [String; 2], Vec<Stack>), EconError> {
         let mut tx = self.begin().await?;
         playing_in(&mut tx, character, zone).await?;
         let inv = character_holder(&mut tx, character).await?;
@@ -886,7 +1104,7 @@ impl Economy {
         &self,
         character: i64,
         content: &ItemContent,
-    ) -> Result<(u64, Gear, [String; 2]), EconError> {
+    ) -> Result<(u64, Gear, [String; 2], Vec<Stack>), EconError> {
         let mut conn = self.pool.acquire().await.map_err(internal)?;
         let seq: i64 = sqlx::query("select nextval('gear_seq') as seq")
             .fetch_one(&mut *conn)
@@ -896,8 +1114,9 @@ impl Economy {
             .map_err(internal)?;
         let mut tx = sqlx::Acquire::begin(&mut *conn).await.map_err(internal)?;
         let (gear, templates) = gear_in(&mut tx, character, content).await?;
+        let stacks = stacks_in(&mut tx, character, &self.stacks).await?;
         tx.commit().await.map_err(internal)?;
-        Ok((seq as u64, gear, templates))
+        Ok((seq as u64, gear, templates, stacks))
     }
 
     /// Money supply (ECONOMY.md 1.2).
@@ -1115,6 +1334,128 @@ impl Economy {
         Ok(id)
     }
 
+    /// An operator hands a character `quantity` of a stack (MODES.md 11.4): onto the stack
+    /// it carries, up to the cap, or a new row within it; refused in words at the cap, and
+    /// for a full inventory. Out of the source under `grant`, as every grant.
+    pub async fn grant_stack(
+        &self,
+        character: i64,
+        template: &str,
+        quantity: u32,
+    ) -> Result<i64, EconError> {
+        let (cap, _) = *self
+            .stacks
+            .get(template)
+            .ok_or_else(|| EconError::Invalid(format!("{template:?} is not a stack")))?;
+        if quantity == 0 {
+            return Err(EconError::Invalid("a quantity is more than nothing".into()));
+        }
+        let mut tx = self.begin().await?;
+        let source = singleton(&mut tx, "source").await?;
+        let inv = character_holder(&mut tx, character).await?;
+        lock_holders(&mut tx, &[inv]).await?;
+        let there = sqlx::query(
+            "select id, quantity from items where holder_id = $1 and template = $2 order by id for update",
+        )
+        .bind(inv)
+        .bind(template)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?;
+        let id = match there {
+            Some(r) => {
+                let id: i64 = r.try_get("id").map_err(internal)?;
+                let have: i32 = r.try_get("quantity").map_err(internal)?;
+                if have.max(0) as u32 + quantity > cap {
+                    return Err(EconError::Invalid(at_the_cap(template)));
+                }
+                sqlx::query("update items set quantity = quantity + $2 where id = $1")
+                    .bind(id)
+                    .bind(quantity as i32)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(internal)?;
+                id
+            }
+            None => {
+                if quantity > cap {
+                    return Err(EconError::Invalid(at_the_cap(template)));
+                }
+                if !has_room(&mut tx, inv, 1).await? {
+                    return Err(EconError::Full);
+                }
+                create_item_n(&mut tx, inv, template, &[], quantity).await?
+            }
+        };
+        sqlx::query("insert into item_moves (item_id, from_holder, to_holder, reason, ref) values ($1, $2, $3, 'grant', $4)")
+            .bind(id)
+            .bind(source)
+            .bind(inv)
+            .bind(quantity as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        tx.commit().await.map_err(internal)?;
+        Ok(id)
+    }
+
+    /// A character spent `quantity` of a stack it carries (MODES.md 11.2: a reload's
+    /// rounds, a kit used), as its zone says: the stack is that much smaller, gone at
+    /// nothing, under `consume` in the item log (the one item sink beside decomposition).
+    /// Refused when the stack is not the character's or holds less: the zone then takes
+    /// the reading it is answered.
+    pub async fn consume(&self, character: i64, item: i64, quantity: u32) -> Result<(), EconError> {
+        if quantity == 0 {
+            return Ok(());
+        }
+        let mut tx = self.begin().await?;
+        let inv = character_holder(&mut tx, character).await?;
+        lock_holders(&mut tx, &[inv]).await?;
+        let r =
+            sqlx::query("select holder_id, template, quantity from items where id = $1 for update")
+                .bind(item)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal)?
+                .ok_or(EconError::NotFound)?;
+        let holder: i64 = r.try_get("holder_id").map_err(internal)?;
+        let template: String = r.try_get("template").map_err(internal)?;
+        let have: i32 = r.try_get("quantity").map_err(internal)?;
+        if holder != inv {
+            return Err(EconError::Forbidden);
+        }
+        if !self.stacks.contains_key(&template) {
+            return Err(EconError::Invalid(format!("{template:?} is not a stack")));
+        }
+        if (have.max(0) as u32) < quantity {
+            return Err(EconError::State(format!(
+                "only {have} of the {template}s are carried"
+            )));
+        }
+        sqlx::query("insert into item_moves (item_id, from_holder, to_holder, reason, ref) values ($1, $2, null, 'consume', $3)")
+            .bind(item)
+            .bind(inv)
+            .bind(quantity as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        if have.max(0) as u32 == quantity {
+            sqlx::query("delete from items where id = $1")
+                .bind(item)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?;
+        } else {
+            sqlx::query("update items set quantity = quantity - $2 where id = $1")
+                .bind(item)
+                .bind(quantity as i32)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?;
+        }
+        tx.commit().await.map_err(internal)
+    }
+
     /// The same under another reason in the ledger (`grant`: an operator's hand).
     pub async fn grant_coin_as(
         &self,
@@ -1139,7 +1480,7 @@ impl Economy {
         let mut tx = self.begin().await?;
         let inv = character_holder(&mut tx, character).await?;
         let sto = storage_holder(&mut tx, character).await?;
-        move_item(&mut tx, item, inv, sto, "deposit", 0).await?;
+        self.mv(&mut tx, item, inv, sto, "deposit", 0).await?;
         tx.commit().await.map_err(internal)
     }
 
@@ -1147,7 +1488,7 @@ impl Economy {
         let mut tx = self.begin().await?;
         let inv = character_holder(&mut tx, character).await?;
         let sto = storage_holder(&mut tx, character).await?;
-        move_item(&mut tx, item, sto, inv, "withdraw", 0).await?;
+        self.mv(&mut tx, item, sto, inv, "withdraw", 0).await?;
         tx.commit().await.map_err(internal)
     }
 
@@ -1156,7 +1497,7 @@ impl Economy {
         let mut tx = self.begin().await?;
         let inv = character_holder(&mut tx, character).await?;
         let ground = ground_holder(&mut tx, zone).await?;
-        move_item(&mut tx, item, inv, ground, "ground", 0).await?;
+        self.mv(&mut tx, item, inv, ground, "ground", 0).await?;
         tx.commit().await.map_err(internal)
     }
 
@@ -1164,7 +1505,7 @@ impl Economy {
         let mut tx = self.begin().await?;
         let inv = character_holder(&mut tx, character).await?;
         let ground = ground_holder(&mut tx, zone).await?;
-        move_item(&mut tx, item, ground, inv, "pickup", 0).await?;
+        self.mv(&mut tx, item, ground, inv, "pickup", 0).await?;
         tx.commit().await.map_err(internal)
     }
 
@@ -1250,7 +1591,7 @@ impl Economy {
         let mut tx = self.begin().await?;
         Self::chest_access(&mut tx, chest, character).await?;
         let inv = character_holder(&mut tx, character).await?;
-        move_item(&mut tx, item, inv, chest, "deposit", 0).await?;
+        self.mv(&mut tx, item, inv, chest, "deposit", 0).await?;
         tx.commit().await.map_err(internal)
     }
 
@@ -1266,7 +1607,7 @@ impl Economy {
             return Err(EconError::Forbidden);
         }
         let inv = character_holder(&mut tx, character).await?;
-        move_item(&mut tx, item, chest, inv, "withdraw", 0).await?;
+        self.mv(&mut tx, item, chest, inv, "withdraw", 0).await?;
         tx.commit().await.map_err(internal)
     }
 
@@ -1642,7 +1983,7 @@ impl Economy {
         }
         // Both offers' items, then every component of all of them, in one statement each.
         let rows = sqlx::query(
-            "select t.side, i.id, i.template from trade_items t join items i on i.id = t.item_id \
+            "select t.side, i.id, i.template, i.quantity from trade_items t join items i on i.id = t.item_id \
              where t.trade_id = $1 order by t.side, i.id",
         )
         .bind(trade)
@@ -1659,6 +2000,7 @@ impl Economy {
                     components: Vec::new(),
                     // A worn item is in no offer: wearing it took it out of every one.
                     worn: false,
+                    quantity: row.try_get::<i32, _>("quantity").map_err(internal)?.max(0) as u32,
                 },
             ));
         }
@@ -1754,6 +2096,20 @@ impl Economy {
     }
 
     /// The offer version to show and to accept.
+    /// The two characters of a trade (MODES.md 11.2: both zones are told what moved).
+    pub async fn trade_characters(&self, trade: i64) -> Result<(i64, i64), EconError> {
+        let r = sqlx::query("select a_character, b_character from trades where id = $1")
+            .bind(trade)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(internal)?
+            .ok_or(EconError::NotFound)?;
+        Ok((
+            r.try_get("a_character").map_err(internal)?,
+            r.try_get("b_character").map_err(internal)?,
+        ))
+    }
+
     pub async fn trade_version(&self, trade: i64) -> Result<i32, EconError> {
         sqlx::query("select version from trades where id = $1")
             .bind(trade)
@@ -1935,12 +2291,19 @@ impl Economy {
         }
         for (ids, from, to) in [(&from_a, ha, hb), (&from_b, hb, ha)] {
             for &id in ids.iter() {
-                sqlx::query("update items set holder_id = $2 where id = $1")
-                    .bind(id)
-                    .bind(to)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(internal)?;
+                // A stack goes onto the other's stack, up to the cap (MODES.md 11.1); past
+                // it the trade is refused whole, nothing of it done.
+                let mut absorbed = false;
+                if let Some(cap) = self
+                    .stacks
+                    .get(&row_template(&mut tx, id).await?)
+                    .map(|s| s.0)
+                {
+                    let quantity = row_quantity(&mut tx, id).await?;
+                    absorbed = absorb_stack(&mut tx, to, id, quantity, cap)
+                        .await?
+                        .is_some();
+                }
                 sqlx::query("insert into item_moves (item_id, from_holder, to_holder, reason, ref) values ($1, $2, $3, 'trade', $4)")
                     .bind(id)
                     .bind(from)
@@ -1949,6 +2312,21 @@ impl Economy {
                     .execute(&mut *tx)
                     .await
                     .map_err(internal)?;
+                if absorbed {
+                    unname_item(&mut tx, id).await?;
+                    sqlx::query("delete from items where id = $1")
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(internal)?;
+                } else {
+                    sqlx::query("update items set holder_id = $2 where id = $1")
+                        .bind(id)
+                        .bind(to)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(internal)?;
+                }
             }
         }
         move_coin(&mut tx, ha, hb, a_coin, "trade", trade).await?;
@@ -2046,7 +2424,8 @@ impl Economy {
                 .ok_or(EconError::NotFound)?
                 .try_get("item_id")
                 .map_err(internal)?;
-        move_item(&mut tx, item, holder, inv, "withdraw", stall).await?;
+        self.mv(&mut tx, item, holder, inv, "withdraw", stall)
+            .await?;
         sqlx::query("delete from listings where id = $1")
             .bind(listing)
             .execute(&mut *tx)
@@ -2069,7 +2448,8 @@ impl Economy {
         let mut tx = self.begin().await?;
         let (stall, holder) = Self::stall_of_owner(&mut tx, character, Some(zone)).await?;
         let inv = character_holder(&mut tx, character).await?;
-        move_item(&mut tx, item, inv, holder, "deposit", stall).await?;
+        self.mv(&mut tx, item, inv, holder, "deposit", stall)
+            .await?;
         let id: i64 = sqlx::query(
             "insert into listings (stall_id, item_id, price) values ($1, $2, $3) returning id",
         )
@@ -2099,7 +2479,7 @@ impl Economy {
         .map_err(internal)?
         .ok_or(EconError::NotFound)?;
         let rows = sqlx::query(
-            "select l.id, l.price, l.item_id, i.template from listings l \
+            "select l.id, l.price, l.item_id, i.template, i.quantity from listings l \
              join items i on i.id = l.item_id where l.stall_id = $1 order by l.id",
         )
         .bind(stall)
@@ -2117,6 +2497,7 @@ impl Economy {
                     template: row.try_get("template").map_err(internal)?,
                     components: components_of(&mut tx, item).await?,
                     worn: false,
+                    quantity: row.try_get::<i32, _>("quantity").map_err(internal)?.max(0) as u32,
                 },
             });
         }
@@ -2186,7 +2567,8 @@ impl Economy {
             return Err(EconError::State("the price changed".into()));
         }
         move_coin(&mut tx, buyer_h, owner_h, price, "stall_sale", stall).await?;
-        move_item(&mut tx, item, stall_holder, buyer_h, "stall_sale", stall).await?;
+        self.mv(&mut tx, item, stall_holder, buyer_h, "stall_sale", stall)
+            .await?;
         sqlx::query("delete from listings where id = $1")
             .bind(listing)
             .execute(&mut *tx)
@@ -2288,7 +2670,8 @@ impl Economy {
                 "the item does not match the order".into(),
             ));
         }
-        move_item(&mut tx, item, seller_h, stall_holder, "buy_order", order).await?;
+        self.mv(&mut tx, item, seller_h, stall_holder, "buy_order", order)
+            .await?;
         move_coin(&mut tx, stall_holder, seller_h, price, "buy_order", order).await?;
         sqlx::query("update buy_orders set quantity = quantity - 1 where id = $1")
             .bind(order)
@@ -2376,7 +2759,17 @@ impl Economy {
             } else {
                 sto
             };
-            move_item_opt(&mut tx, item, holder, target, "withdraw", stall, true).await?;
+            move_item_stacking(
+                &mut tx,
+                item,
+                holder,
+                target,
+                "withdraw",
+                stall,
+                true,
+                &self.stacks,
+            )
+            .await?;
         }
         sqlx::query("delete from buy_orders where stall_id = $1")
             .bind(stall)

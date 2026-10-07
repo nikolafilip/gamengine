@@ -129,6 +129,9 @@ pub struct OwnState {
     /// magazine and reserve, and whether the one in hand is being reloaded. `None` for a
     /// build without one: a bit.
     pub guns: Option<GunsWire>,
+    /// The kits carried and whether one is in use (MODES.md 11.3), in every mode. v12.
+    pub kits: u16,
+    pub using_kit: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -331,6 +334,8 @@ fn write_own(w: &mut BitWriter, own: &OwnState) {
             w.write_bits(g.reloading as u64, 1);
         }
     }
+    w.write_uvar(own.kits as u64);
+    w.write_bits(own.using_kit as u64, 1);
 }
 
 fn read_own(r: &mut BitReader<'_>) -> Result<OwnState, NetError> {
@@ -366,7 +371,11 @@ fn read_own(r: &mut BitReader<'_>) -> Result<OwnState, NetError> {
     } else {
         None
     };
+    let kits = u16::try_from(r.read_uvar()?).map_err(|_| NetError::Malformed("kits"))?;
+    let using_kit = r.read_bits(1)? == 1;
     Ok(OwnState {
+        kits,
+        using_kit,
         stamina,
         focus,
         statuses,
@@ -655,6 +664,8 @@ mod tests {
                 reserve: [23, 32],
                 reloading: true,
             }),
+            kits: 3,
+            using_kit: true,
         };
         s.entities.push(player(1, shift, true));
         for i in 2..17 {

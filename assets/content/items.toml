@@ -93,6 +93,34 @@ kind = "armour"
 guards = "elements"
 layers = ["shard", "core", "catalyst", "frame", "gem"]
 
+# Stacks (MODES.md 11.1): one row and one slot, merged up to the cap, which is the strict
+# limit of what a body carries. A firearm names the stack its reserve is drawn from
+# (`ammo` in abilities.toml); a kit heals. Bought at the quartermaster's stall in town.
+[[template]]
+id = "ball"               # the musket's: the root's AWP carries 30
+kind = "stack"
+layers = []
+cap = 30
+
+[[template]]
+id = "pistol_round"
+kind = "stack"
+layers = []
+cap = 64
+
+[[template]]
+id = "carbine_round"      # the root's rifles carry 90
+kind = "stack"
+layers = []
+cap = 90
+
+[[template]]
+id = "kit"                # used with F, in every mode
+kind = "stack"
+layers = []
+cap = 5
+heals = 50
+
 # Cores: weight and physical bias.
 [[material]]
 id = "core/tin"

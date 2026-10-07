@@ -30,7 +30,7 @@ use crate::recorder::{Recorder, RecorderConfig, Written};
 use crate::session::{PvsCache, Session, TickTable};
 use gm_hub_proto::protocol::{
     CharacterId, CharacterState, GearReading, ModelId, ModelRef, PartyNews, PartyReply, SayTo,
-    StallSummary, ZonePartyOp, now_secs,
+    StackReading, StallSummary, ZonePartyOp, now_secs,
 };
 use gm_replay::RosterEntry;
 
@@ -227,6 +227,56 @@ fn replay_written(w: &Written) {
 /// its primary ability, else nothing; as an index into the pack's prop list. In the gun
 /// mode (MODES.md 3.7) the hand is the weapon switched to, `1 2 3`, whatever is worn:
 /// the prop of the ability in hand.
+/// The stacks of a reading, as the simulation takes them (MODES.md 11.2).
+fn stacks_of(reading: &GearReading) -> Vec<(String, u32, Option<i32>)> {
+    reading
+        .stacks
+        .iter()
+        .map(|s| (s.template.clone(), s.quantity, s.heals))
+        .collect()
+}
+
+/// The body `id` spent `quantity` of the first of its stacks that `which` picks (MODES.md
+/// 11.2): the zone's copy is lowered at once (the next spend picks the right row), and
+/// the hub is told; its reading comes back as a `Worn` nobody waits for.
+fn consume_stack(
+    cfg: &ZoneConfig,
+    hub_slots: &mut BTreeMap<EntityId, HubSlot>,
+    event_tx: &mpsc::Sender<ClientEvent>,
+    id: EntityId,
+    which: impl Fn(&StackReading) -> bool,
+    quantity: u32,
+) {
+    let Some(link) = cfg.hub.clone() else {
+        return;
+    };
+    let Some(slot) = hub_slots.get_mut(&id) else {
+        return;
+    };
+    let Some(stack) = slot.stacks.iter_mut().find(|s| s.quantity > 0 && which(s)) else {
+        return;
+    };
+    let item = stack.item;
+    stack.quantity = stack.quantity.saturating_sub(quantity);
+    let character = slot.character;
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        let result = link.consume(character, item, quantity).await;
+        if let Err(why) = &result {
+            warn!(character, item, quantity, %why, "consume");
+        }
+        let _ = tx
+            .send(ClientEvent::Worn {
+                id,
+                character,
+                item: 0,
+                result,
+                tell: false,
+            })
+            .await;
+    });
+}
+
 fn look_of(
     looks: &gm_content::looks::Looks,
     zone: &Zone,
@@ -326,6 +376,9 @@ struct HubSlot {
     gear_seq: u64,
     /// The templates worn by place, from the same reading (LOOK.md 6.2): what it holds.
     worn: [String; 2],
+    /// The stacks it carries, from the same reading (MODES.md 11.2): the firearms'
+    /// reserves and the kits, and which item row each is, for the hub's books.
+    stacks: Vec<StackReading>,
 }
 
 /// An invitation for a character that has no body here yet is kept this long (the
@@ -784,6 +837,7 @@ pub async fn run_with_web(
                                 seq: slot.gear_seq,
                                 gear: p.gear,
                                 templates: slot.worn.clone(),
+                                stacks: slot.stacks.clone(),
                             };
                             gear_kept.insert(h.character, (reading, Instant::now()));
                         }
@@ -880,6 +934,7 @@ pub async fn run_with_web(
                             reading = kept;
                         }
                         zone.set_gear(id, reading.gear);
+                        zone.set_stacks(id, &stacks_of(&reading));
                         // Its party (PARTY.md 4): the claim's reading, or a newer one the
                         // zone was told of before the body was here. The number its body
                         // carries follows before this tick is simulated, unless its
@@ -890,6 +945,7 @@ pub async fn run_with_web(
                             HubSlot {
                                 gear_seq: reading.seq,
                                 worn: reading.templates.clone(),
+                                stacks: reading.stacks.clone(),
                                 character: h.character,
                                 joined: Instant::now(),
                                 play_seconds_before: h.play_seconds,
@@ -1504,9 +1560,21 @@ pub async fn run_with_web(
                                 let done = ClientEvent::StallBought {
                                     id,
                                     listing,
-                                    result,
+                                    result: result.as_ref().map(|_| ()).map_err(Clone::clone),
                                 };
                                 let _ = tx.send(done).await;
+                                // What it carries now (MODES.md 11.2): a stack bought is a
+                                // reserve filled, taken as any reading of its gear is.
+                                if let Ok(reading) = result {
+                                    let carried = ClientEvent::Worn {
+                                        id,
+                                        character,
+                                        item: 0,
+                                        result: Ok(reading),
+                                        tell: false,
+                                    };
+                                    let _ = tx.send(carried).await;
+                                }
                             });
                         }
                         Err(why) => {
@@ -1621,8 +1689,10 @@ pub async fn run_with_web(
                                     if let Some(slot) = hub_slots.get_mut(&body) {
                                         slot.gear_seq = reading.seq;
                                         slot.worn = reading.templates.clone();
+                                        slot.stacks = reading.stacks.clone();
                                     }
                                     zone.set_gear(body, reading.gear);
+                                    zone.set_stacks(body, &stacks_of(reading));
                                     info!(
                                         character,
                                         dealt = ?reading.gear.dealt,
@@ -2693,6 +2763,40 @@ pub async fn run_with_web(
                 ZoneEvent::GuardBroken(_) => report.guard_breaks += 1,
                 ZoneEvent::Staggered(_) => report.staggers += 1,
                 ZoneEvent::StatusApplied { .. } => report.statuses_applied += 1,
+                // Rounds loaded and kits used (MODES.md 11.2, 11.3): the simulation spent
+                // them; the hub's books follow, and its reading after is adopted as any.
+                ZoneEvent::RoundsLoaded { id, hand, rounds } => {
+                    let spent = zone.player(id).and_then(|p| {
+                        let kit = &p.sheet.kit;
+                        let slot = if hand == 0 {
+                            kit.primary
+                        } else {
+                            kit.secondary
+                        };
+                        let f = kit.abilities[slot? as usize].firearm.as_ref()?;
+                        Some(f.ammo.clone())
+                    });
+                    if let Some(template) = spent {
+                        consume_stack(
+                            &cfg,
+                            &mut hub_slots,
+                            &event_tx,
+                            id,
+                            |s| s.template == template,
+                            rounds as u32,
+                        );
+                    }
+                }
+                ZoneEvent::KitUsed(id) => {
+                    consume_stack(
+                        &cfg,
+                        &mut hub_slots,
+                        &event_tx,
+                        id,
+                        |s| s.heals.is_some(),
+                        1,
+                    );
+                }
                 ZoneEvent::Healed {
                     target,
                     source,

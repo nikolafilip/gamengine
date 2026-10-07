@@ -318,6 +318,9 @@ impl Input {
         if self.just_pressed.contains(&KeyCode::KeyR) {
             b |= buttons::RELOAD;
         }
+        if self.just_pressed.contains(&KeyCode::KeyF) {
+            b |= buttons::USE;
+        }
         if self.mouse.contains(&MouseButton::Left) {
             b |= buttons::PRIMARY;
         }
@@ -724,13 +727,24 @@ fn gun_hand_prop(
 /// none is under way, rising to 1 as it ends.
 fn reload_progress(c: &gm_net::client::ClientState) -> f32 {
     let Some((f, g)) = c.mover.gun_in_hand(&c.sheet.kit) else {
-        return 0.0;
+        return kit_progress(c);
     };
     let Some(until) = g.reload_until else {
-        return 0.0;
+        return kit_progress(c);
     };
     let left = gm_core::sim::tick_delta(until, c.tick).max(0) as f32;
     (1.0 - left / f.reload.max(1) as f32).clamp(0.0, 1.0)
+}
+
+/// How far along a kit's use is (MODES.md 11.3), 0 when none: the view model is lowered
+/// and worked as for a reload.
+fn kit_progress(c: &gm_net::client::ClientState) -> f32 {
+    let Some(until) = c.mover.kit_until else {
+        return 0.0;
+    };
+    let whole = TickRate::COMBAT.ms_to_ticks(gm_core::sim::KIT_USE_MS);
+    let left = gm_core::sim::tick_delta(until, c.tick).max(0) as f32;
+    (1.0 - left / whole.max(1) as f32).clamp(0.0, 1.0)
 }
 
 fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start) -> App {
@@ -1876,6 +1890,33 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
             let tw = hud.width(s, word);
             hud.label(w - 16.0 - tw, y - line, s, hud::YELLOW, word);
         }
+    }
+    // The kits carried (MODES.md 11.3), bottom right in every mode, above the ammo where
+    // there is ammo: `F` uses one; "using a kit" while the hands are at it.
+    {
+        let gun = c.mover.gun_in_hand(&c.sheet.kit).is_some();
+        let base = h
+            - 16.0
+            - line
+            - if gun {
+                cap * s * 2.0 + line * 2.0
+            } else {
+                line
+            };
+        let text = if c.mover.using_kit(c.tick) {
+            "using a kit".to_string()
+        } else {
+            format!("kits {}  F", c.mover.kits)
+        };
+        let ink = if c.mover.using_kit(c.tick) {
+            hud::YELLOW
+        } else if c.mover.kits == 0 {
+            hud::SHADE
+        } else {
+            hud::WHITE
+        };
+        let tw = hud.width(s, &text);
+        hud.label(w - 16.0 - tw, base, s, ink, &text);
     }
 
     // The own body, top left (LOOK.md 3.1): a portrait in its frame, the name, the three

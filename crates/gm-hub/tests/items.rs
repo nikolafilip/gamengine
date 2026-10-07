@@ -210,8 +210,12 @@ fn config(
     }
 }
 
+/// The two tests share one database: one at a time.
+static DATABASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
+    let _database = DATABASE.lock().await;
     let Ok(url) = std::env::var("GM_TEST_DATABASE_URL") else {
         eprintln!("SKIPPED: set GM_TEST_DATABASE_URL to a Postgres this test may wipe");
         return;
@@ -747,7 +751,7 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
             both += 1;
         }
         let latest = readings.iter().max_by_key(|r| r.seq).unwrap();
-        let (_, held, _) = direct.gear(smith, &items).await.unwrap();
+        let (_, held, _, _) = direct.gear(smith, &items).await.unwrap();
         assert_eq!(
             latest.gear, held,
             "round {round}: the readings {readings:?} against what the hub holds"
@@ -861,4 +865,204 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
         econ(&client, session, other, EconOp::Inventory).await,
         Err(HubError::Busy)
     );
+}
+
+/// Stacks (MODES.md 11): a grant lands on the stack carried and stops at the cap; the
+/// inventory says how many; the hub's reading carries the stacks; a zone's `Consume` lowers
+/// them and answers the reading; a stall sells a stack onto the buyer's, and past the
+/// buyer's cap the sale is refused in words with nothing moved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stacks_merge_to_the_cap_and_are_spent_through_the_zone() {
+    let _database = DATABASE.lock().await;
+    let Ok(url) = std::env::var("GM_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set GM_TEST_DATABASE_URL to a Postgres this test may wipe");
+        return;
+    };
+    let db = Db::connect(&url).await.expect("database");
+    db.migrate().await.expect("migrations");
+    db.wipe().await.expect("wipe");
+    let content = gm_content::load_dir(Path::new(CONTENT), TickRate::COMBAT).expect("content");
+    let items = gm_content::items::load_items(Path::new(CONTENT)).expect("items");
+    let identity = Identity::generate(&[gm_hub::HUB_SERVER_NAME, "localhost"]).unwrap();
+    let cert = identity.cert_der().to_vec();
+    let endpoint = quinn::Endpoint::server(
+        hub_server_config(&identity).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let _hub = tokio::spawn(gm_hub::run(
+        config(content.clone(), &items),
+        db.clone(),
+        endpoint,
+        std::future::pending(),
+    ));
+    let direct = Economy::new(db.pool().clone()).with_stacks(&items);
+
+    let town = zone(addr, &cert, "town").await;
+    let (smith_conn, smith_s, smith, _) = player(addr, &cert, &town, "town", "Smith").await;
+    let (other_conn, other_s, other, _) = player(addr, &cert, &town, "town", "Other").await;
+
+    // A grant lands on the stack carried, up to the cap of 30 balls.
+    let balls = direct.grant_stack(smith, "ball", 10).await.unwrap();
+    assert_eq!(direct.grant_stack(smith, "ball", 15).await.unwrap(), balls);
+    assert_eq!(
+        direct.grant_stack(smith, "ball", 10).await,
+        Err(EconError::Invalid(gm_hub::economy::at_the_cap("ball")))
+    );
+    let kits = direct.grant_stack(smith, "kit", 2).await.unwrap();
+    assert!(matches!(
+        direct.grant_stack(smith, "sword", 1).await,
+        Err(EconError::Invalid(_))
+    ));
+    let EconReply::Holder { items: carried, .. } =
+        econ(&smith_conn, smith_s, smith, EconOp::Inventory)
+            .await
+            .unwrap()
+    else {
+        panic!("inventory")
+    };
+    assert_eq!(carried.len(), 2, "one row a stack: {carried:?}");
+    let ball = carried.iter().find(|i| i.id == balls).unwrap();
+    assert_eq!((ball.quantity, ball.cap), (25, 30));
+    assert_eq!(ball.what, "ball ×25 of 30");
+    assert_eq!(ball.place, PLACE_NONE);
+    let kit = carried.iter().find(|i| i.id == kits).unwrap();
+    assert_eq!((kit.quantity, kit.cap), (2, 5));
+    assert_eq!(kit.does, vec!["heals 50, used with F".to_string()]);
+
+    // The reading carries the stacks, as a zone takes them.
+    let (_, _, _, stacks) = direct.gear(smith, &items).await.unwrap();
+    let find = |stacks: &[gm_hub::economy::Stack], t: &str| {
+        stacks
+            .iter()
+            .find(|s| s.template == t)
+            .map(|s| (s.quantity, s.heals))
+    };
+    assert_eq!(find(&stacks, "ball"), Some((25, None)));
+    assert_eq!(find(&stacks, "kit"), Some((2, Some(50))));
+
+    // The zone spent rounds: the hub follows and answers the reading after. More than is
+    // carried: refused (logged), and the reading says what is.
+    let consume = |item: i64, quantity: u32| {
+        zone_econ(
+            &town,
+            ZoneEconOp::Consume {
+                character: smith,
+                item,
+                quantity,
+            },
+        )
+    };
+    let EconReply::Gear(reading) = consume(balls, 5).await.unwrap() else {
+        panic!("consume")
+    };
+    let read = |r: &GearReading, t: &str| {
+        r.stacks
+            .iter()
+            .find(|s| s.template == t)
+            .map(|s| s.quantity)
+    };
+    assert_eq!(read(&reading, "ball"), Some(20));
+    let EconReply::Gear(reading) = consume(balls, 25).await.unwrap() else {
+        panic!("consume")
+    };
+    assert_eq!(
+        read(&reading, "ball"),
+        Some(20),
+        "nothing moved past what is carried"
+    );
+    let EconReply::Gear(reading) = consume(balls, 20).await.unwrap() else {
+        panic!("consume")
+    };
+    assert_eq!(read(&reading, "ball"), None, "a stack spent is gone");
+    assert_eq!(read(&reading, "kit"), Some(2));
+
+    // The quartermaster: a stack listed at a stall goes onto the buyer's stack; past the
+    // buyer's cap the sale is refused before any coin moves.
+    let EconReply::Stall(stall) = zone_econ(
+        &town,
+        ZoneEconOp::StallOpen {
+            character: other,
+            tile_x: 1,
+            tile_y: 1,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("stall")
+    };
+    let first = direct.grant_stack(other, "pistol_round", 16).await.unwrap();
+    let EconReply::Id(listing) = econ(
+        &other_conn,
+        other_s,
+        other,
+        EconOp::StallList {
+            item: first,
+            price: 1,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("list")
+    };
+    // A second stack for the stall: the first is listed (its holder is the stall's), so
+    // the grant makes a new row, which is then listed too.
+    let second = direct.grant_stack(other, "pistol_round", 16).await.unwrap();
+    assert_ne!(first, second);
+    let EconReply::Id(listing2) = econ(
+        &other_conn,
+        other_s,
+        other,
+        EconOp::StallList {
+            item: second,
+            price: 1,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("list")
+    };
+    direct.grant_coin(smith, 100, 0).await.unwrap();
+    direct.grant_stack(smith, "pistol_round", 40).await.unwrap();
+    let buy = |listing: i64| {
+        zone_econ(
+            &town,
+            ZoneEconOp::StallBuy {
+                character: smith,
+                stall: stall.id,
+                listing,
+                price: 1,
+            },
+        )
+    };
+    let EconReply::Gear(reading) = buy(listing).await.unwrap() else {
+        panic!("buy")
+    };
+    assert_eq!(read(&reading, "pistol_round"), Some(56), "16 onto 40");
+    assert_eq!(
+        reading
+            .stacks
+            .iter()
+            .filter(|s| s.template == "pistol_round")
+            .count(),
+        1,
+        "one row"
+    );
+    assert_eq!(
+        buy(listing2).await,
+        Err(HubError::Invalid(gm_hub::economy::at_the_cap(
+            "pistol_round"
+        ))),
+        "56 + 16 is past 64"
+    );
+    let EconReply::Holder { coin, .. } = econ(&smith_conn, smith_s, smith, EconOp::Inventory)
+        .await
+        .unwrap()
+    else {
+        panic!("inventory")
+    };
+    assert_eq!(coin, 99, "one sale paid, the refused one not");
+    let audit = direct.audit().await.unwrap();
+    assert_eq!(audit, 0, "the books balance");
 }

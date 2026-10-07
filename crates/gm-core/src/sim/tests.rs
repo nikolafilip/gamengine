@@ -2137,6 +2137,16 @@ fn gun_duel(yaw: f32, apart: f32) -> (BoxWorld, Zone, EntityId, EntityId) {
     let blade = zone.content.build("blade").expect("blade").clone();
     let a = zone.add_player_at(gunner, 1, Vec3::new(0.0, 0.0, REST_Z), yaw);
     let b = zone.add_player_at(blade, 2, Vec3::new(apart, 0.0, REST_Z), 180.0);
+    // What the hub would read from its inventory (MODES.md 11): the stacks the two
+    // firearms name, and two kits.
+    zone.set_stacks(
+        a,
+        &[
+            ("ball".to_string(), 24, None),
+            ("pistol_round".to_string(), 32, None),
+            ("kit".to_string(), 2, Some(50)),
+        ],
+    );
     (world, zone, a, b)
 }
 

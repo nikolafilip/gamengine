@@ -1,4 +1,4 @@
-# The three modes — v0 (2026-10-07), proposed
+# The three modes — v0 (2026-10-07), proposed; section 11 (rounds, kits, the quartermaster) built the same evening (15d)
 
 Status: a design, nothing built. The director on 2026-10-07: "The Action type (GTA style) /
 FPS / 3rd person RPG should be 3 different modes that are not interchangeable during play,
@@ -94,7 +94,7 @@ projectile = { speed = 20000, gravity = 0.02, ... spread = 0 }
 
 | field | means | range |
 |---|---|---|
-| `magazine`, `reserve` | rounds in the weapon and carried; the reserve refills at a respawn and at an ammo pickup (ITEMS.md: a stack of rounds is an item) | 1–100, 0–400 |
+| `magazine`, `reserve` | rounds in the weapon and carried; the reserve refills at a respawn and at an ammo pickup (ITEMS.md: a stack of rounds is an item). Section 11 proposes the reserve becomes a stack carried and bought, with a hard cap | 1–100, 0–400 |
 | `reload_ms` | the reload, a script of its own: `R` or an empty magazine with the trigger held; a stagger interrupts it and the rounds are not lost; a switch of weapon cancels it | 500–6,000 |
 | `cycle_ms` | the time between two shots; replaces the primary's cooldown | 50–3,000 |
 | `fire` | `auto` (held), `semi` (a click a shot), `bolt` (a click a shot and the body works the action for the cycle; no shot while moving faster than a walk) | |
@@ -373,7 +373,8 @@ Built as section 3 says, with these readings:
   the reload lowers and works the view model (LOOK.md 6.4);
   Ctrl crouches; the secondary mouse button toggles the scope of a firearm that has one
   (2 or 4: the field of view and the mouse divided by it, the view model hidden, a
-  mask with its lines); the own block of the snapshot carries both hands' rounds and
+  mask with its lines; no gun in content had one until 2026-10-07, when the musket got
+  `scope = 2`, the root's Scout, so the button did nothing the director could see); the own block of the snapshot carries both hands' rounds and
   whether the one in hand is being reloaded, and the client adopts them.
 - **The HUD**: the four lines of the crosshair at the cone's angle, the magazine over
   the reserve bottom right (red under half a magazine), "reloading", the hotbar as the
@@ -414,3 +415,169 @@ Built as section 5 says, with these readings:
 - Not built: a body walking round other bodies (the grid knows the map only), a
   target kept five seconds out of sight (it is let go when it leaves the frame's
   knowledge), the people page's and the tavern's word of the mode.
+
+## 11. Rounds, kits and the quartermaster (2026-10-07, built as 15d: 11.7)
+
+The director, after reading 10.2: "lets put NPC in town for potions (health kits) and
+ammunition. Also there should be strict limit how much ammo one can carry, same as in CS,
+it's a trade of for FPS, they do still have knife option though." The root's buy menu is
+a town stall here, and the root's carry limit is a stack's cap. Proposed and approved the
+same evening ("I agree, do it that way and then redeploy"); 11.7 says what was built.
+
+### 11.1 A stack is an item
+
+A third item kind in items.toml beside `weapon` and `armour`: `stack`, with no layers,
+no materials and a cap. Four templates:
+
+```toml
+[[template]]
+id = "ball"          # the musket's
+kind = "stack"
+cap = 30             # the root's AWP carries 30; the musket drops a body in one or two
+[[template]]
+id = "pistol_round"
+kind = "stack"
+cap = 64
+[[template]]
+id = "carbine_round"
+kind = "stack"
+cap = 90             # the root's rifles carry 90
+[[template]]
+id = "kit"
+kind = "stack"
+cap = 5
+heals = 50           # health, over the use (11.3)
+```
+
+A firearm names its stack: `firearm = { ammo = "ball", ... }` replaces `reserve`
+(VOCABULARY.md 11 and the validator: the stack must exist and be `kind = "stack"`).
+
+The hub (ECONOMY.md, ITEMS.md 4) gets one column, `items.quantity` (1–1,000, default 1).
+A stack is one row and one slot; `move_item` into a holder that already carries a stack
+of the template **merges** up to the cap and refuses the rest in words ("you carry all
+the balls you can"): that is the strict limit, and it holds for a stall's sale, a trade
+and a grant alike. A stack never splits in v1 (one drag moves it whole). Gear keeps
+`quantity = 1` and never merges. The same column answers ECONOMY.md 9's open question on
+stacking materials, if the director wants it answered the same way; nothing here needs it.
+
+### 11.2 The reserve is the stack
+
+The mover's `reserve` is read from the inventory: the quantity of the stack the firearm
+names, zero when none is carried. A **reload takes rounds off the stack** and the zone
+tells the hub once per reload (`EconOp::Consume { item, n }`, one of the five requests a
+second an account has; a reload is never that frequent). The magazine stays with the
+body: a respawn **no longer fills anything**; the body comes back with the rounds it died
+with in the gun and whatever the stack holds. When both are empty the trigger clicks and
+`3` is the knife, as the director says. A spawn into a zone with no stack carried: the
+magazine is full once (the gun was issued loaded), and that is all.
+
+The own block of the snapshot already carries `magazine` and `reserve`; the HUD changes
+nothing but what the reserve means. The stranger sees the stance only, as now.
+
+### 11.3 The kit
+
+`F` uses a kit in every mode (the potion of the action and the RPG modes, the medkit of the
+gun; it is a `buttons::USE` bit, protocol v12, in bit 14 of the two reserved). It is a
+script of **1,500 ms**: the hand lowers the weapon (the view model as the reload), the body
+walks at half speed, a stagger or a knockdown interrupts it and keeps the kit; it ends with
+a `Healed` event of `heals` (the numbers of LOOK.md 13.8 show it) and one kit fewer on the
+stack (`Consume` to the hub). Refused at full health and in the air. Kits carried show
+beside the ammo, bottom right, in every mode. No regeneration still (3.1).
+
+### 11.4 The quartermaster
+
+A second stall bot in `play.sh people`, **Quartermaster**, on the market tile next to the
+Keeper's, strolling as the Keeper does. Its twelve slots list stacks: three stacks of each
+kind, granted by `hubctl --grant-item Quartermaster ball 10` (the grant takes a quantity
+for a `stack`), and `people` grants again whenever its stall stands empty, as it does for
+the Keeper today. Prices in silver, proposed: ten balls 1 s, sixteen pistol rounds 1 s,
+thirty carbine rounds 1 s 50 c, one kit 2 s. A buy that would pass the cap is refused in
+words before any coin moves; the root sells the remainder at full price, we do not.
+
+The ledger keeps its principles (ECONOMY.md 1): the stacks come from `source` as every
+grant does, the coin goes to the bot's purse, not to the sink; the player's stall sells a
+stack as the Keeper's does, so a player who buys cheap in town and sells dear at the arena
+is doing what the economy is for. A fixed NPC price is a ceiling the players' market lives
+under, as the root's buy menu is.
+
+### 11.5 Phase 15d and acceptance
+
+Content v3 (the stack templates, `ammo` on the three firearms), hub v1.8 (the column, the
+merge, `Consume`, the grant's quantity), protocol v12 (`USE`, kits on the own block),
+the bot's `--sell-at` listing stacks, the quartermaster in `people`, `F` and the kit
+script on both sides. Played when: a musketeer buys thirty balls, a thirty-first is
+refused in words, spends them in the arena, the counter runs to 0, the trigger clicks, the
+knife kills; dies with two in the magazine and comes back with two; a kit at a third
+health heals 50 over a second and a half and a hit during it keeps the kit.
+
+### 11.6 Open for the director (decided 2026-10-07: as proposed)
+
+The caps (30, 64, 90, 5) and the prices; whether a death keeps the magazine (as proposed)
+or empties it, the root's way; whether the kit works in all three modes or the gun's only;
+`F` for the kit; whether materials stack by the same column now; whether a body dropped
+to the ground drops its stacks (ITEMS.md 9 asks the same of gear).
+
+### 11.7 As built (15d, 2026-10-07)
+
+Built as 11.1–11.5 say, with these readings:
+
+- **Content v3**: `kind = "stack"` with `cap` and `heals` in items.toml (ball 30,
+  pistol_round 64, carbine_round 90, kit 5 heals 50; `layers = []`); `firearm.ammo`
+  names the stack and `reserve` is gone from the firearm block (VOCABULARY.md 11:
+  `Firearm.ammo`, a key of at most 48 characters, and `load_dir` refuses an ammo that is
+  not a stack of items.toml). The musket got `scope = 2` the same day.
+- **Hub v11**: migration 0011 (`items.quantity`, 1–1,000). The one item mover
+  (`move_item_stacking`) merges a stack arriving in a `character` or `storage` holder
+  onto the row of its template there and refuses past the cap in words ("you carry all
+  the balls you can"), **before** anything moves; the trade commit does the same per
+  item and refuses the trade whole; the spent row lets go of whatever still names it (a
+  listing just sold, a trade just committed). A stack arriving where no stack of its
+  template is stays a row, within the cap. Stacks into a stall or escrow never merge (a
+  listing is a row). `ZoneEconOp::Consume { character, item, quantity }` lowers a stack
+  (gone at nothing, `consume` in the item log, the second item sink) and answers the
+  reading; a refusal (not carried, fewer than asked) is logged and the reading answers
+  anyway. `StallBuy` answers `Gear` (the reading after the buy) instead of `Done`.
+  `GearReading.stacks` (item, template, quantity, heals) rides with the gear at the
+  claim, after a wear, a buy and a consume, and `HubNotice::Gear { character, reading }`
+  goes to the character's zone after a session's request moved items without the zone's
+  hand (the storage, a stall of its own, a craft, a decomposition, a trade: both sides).
+  `gm-hub --grant-item NAME STACK HOW_MANY` grants a stack (`grant_stack`: onto the stack
+  carried, up to the cap). `PLAYER_VERSION` 4: `ItemSummary.quantity` and `cap` (0 for
+  what is not a stack); a stack's `what` is `ball ×25 of 30`, a kit's `does` is
+  `heals 50, used with F`.
+- **The simulation**: `GunState.reserve` is set by `Zone::set_stacks` from the reading
+  (the quantity of the stack the firearm's `ammo` names; the kits are the stacks that
+  heal, `Player.kit_heal` what one heals); `fill_guns` fills the magazine only. A
+  reload moves rounds from the reserve to the magazine as before; the zone compares the
+  reserve before and after a body's frames and says `ZoneEvent::RoundsLoaded { id, hand,
+  rounds }`, the server tells the hub `Consume` on the row the slot remembers and lowers
+  its copy at once. A respawn keeps the magazines and the kits (`Zone::respawn`); a body
+  that joins a zone has its guns issued full once.
+- **The kit**: `buttons::USE` (bit 14; bit 15 stays reserved), `F` on the client, in
+  every mode. `Mover.kits` and `kit_until`; `kit_step` begins a use on the press when a
+  kit is carried, on the ground, with no script, dash, reload or command stance under
+  way; `KIT_USE_MS` 1,500; a stagger or a knockdown drops it with the kit kept; it ends
+  with one kit fewer, the zone heals `kit_heal` (a `Healed` with the body as its own
+  source: the green number), says `KitUsed` and tells the hub. A use begun at full
+  health is cleared by the zone the same tick and the client drops it on the next
+  snapshot (`using_kit` false). The body walks at half speed meanwhile and fires
+  nothing; the stance `anim::USE` (15); the view model is lowered and worked as for a
+  reload (`kit_progress`). The own block carries `kits` and `using_kit` (protocol v12).
+- **The HUD**: "kits N  F" bottom right in every mode, above the ammo in the gun mode,
+  dim at none, "using a kit" in yellow while the hands are at it. The inventory names a
+  stack `ball ×25`.
+- **The quartermaster**: `play.sh people` spawns a second stall bot, Quartermaster, on
+  the square (`--sell-at 100`: a silver a listing), granted twelve stacks (three of ten
+  balls, three of sixteen pistol rounds, three of thirty carbine rounds, three kits of
+  one) whenever it carries nothing; a keeper bot lists every stack it carries beside
+  what can be worn. The prices of 11.4 are approximated: every listing is 1 s (a kit
+  included) until the bot's `--sell-at` takes a price per template.
+- Tests: `gm-hub` `stacks_merge_to_the_cap_and_are_spent_through_the_zone` (the grant
+  onto the stack and at the cap, the inventory's words, the reading, `Consume` and its
+  refusal, a stall's sale onto the buyer's stack, the refusal past the buyer's cap with
+  no coin moved, the books balanced); the gun tests of `gm-core` set the duel's stacks.
+- Not built: a stack that splits (one drag moves it whole); a ground pickup of a stack
+  (ITEMS.md knows no ground screen); a price per template at a bot's stall; the kit's
+  own motion (the reload's is borrowed); the stranger's `USE` stance drawn (it reads as
+  idle until the body's look, Phase 17).
+

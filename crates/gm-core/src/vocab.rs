@@ -592,7 +592,10 @@ pub struct Cone {
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct Firearm {
     pub magazine: u8,
-    pub reserve: u16,
+    /// The stack the reserve is drawn from (MODES.md 11.2): the key of a `stack` template
+    /// of items.toml. The rounds carried are that stack's quantity, read by the zone from
+    /// the inventory; empty: no stack, the magazine is issued full once and that is all.
+    pub ammo: String,
     pub reload: Tick,
     /// Ticks between two shots; the ability's cooldown is this.
     pub cycle: Tick,
@@ -654,7 +657,9 @@ pub mod limits {
     pub const MAX_ASSIST_DEG: f32 = 90.0;
     pub const MAX_CHAIN_WINDOW_S: f32 = 2.0;
     pub const MAX_MAGAZINE: u8 = 100;
-    pub const MAX_RESERVE: u16 = 400;
+    /// A content key named by another (a firearm's `ammo`): the hub's item templates
+    /// are at most this long too.
+    pub const MAX_KEY_LEN: usize = 48;
     pub const MAX_RELOAD_S: f32 = 6.0;
     pub const MIN_CYCLE_S: f32 = 0.05;
     pub const MAX_CYCLE_S: f32 = 3.0;
@@ -713,8 +718,8 @@ impl Ability {
             if !(1..=limits::MAX_MAGAZINE).contains(&f.magazine) {
                 return Err(err("magazine outside 1..=100"));
             }
-            if f.reserve > limits::MAX_RESERVE {
-                return Err(err("reserve past 400"));
+            if f.ammo.len() > limits::MAX_KEY_LEN {
+                return Err(err("ammo key past 48 characters"));
             }
             if f.reload == 0 || f.reload > max_ticks(limits::MAX_RELOAD_S) {
                 return Err(err("reload outside a tick..=6 s"));

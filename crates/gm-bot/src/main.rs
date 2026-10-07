@@ -75,7 +75,7 @@ const USAGE: &str = "gm-bot (--connect ADDR --cert PATH | --web https://HOST:POR
 [--bots N: one account each, {i} in --user and --character is the bot's number] [--stalls N: the first N open a stall] \
 [--list-for-hire SILVER: list the character in the tavern; with --secs 0 it then stays offline] \
 [--hire N: hire up to N avatars from the tavern before entering] \
-[--sell-at SILVER: a bot that keeps a stall lists whatever it carries that can be worn, at this price] \
+[--sell-at SILVER: a bot that keeps a stall lists whatever it carries that can be worn, and every stack, at this price] \
 [--invite NAME: the first bot asks that character into a party] [--sociable: join whoever invites, trade with whoever asks, answer lines] \
 [--trade-for SILVER: in a trade, offer one thing carried and accept for that much coin]";
 
