@@ -244,24 +244,39 @@ impl Area {
 /// Recent origins per entity for melee rewinds.
 #[derive(Clone, Debug, Default)]
 pub struct History {
-    frames: VecDeque<(Tick, Vec<(EntityId, Vec3)>)>,
+    /// Per recorded tick: each living body's hull origin and whether it was crouched
+    /// (MODES.md 3.5: the rewound capsule is as short as the body was).
+    frames: VecDeque<(Tick, Vec<Recorded>)>,
 }
 
+/// One body in a tick of the history: its id, its hull origin, whether it crouched.
+pub type Recorded = (EntityId, Vec3, bool);
+
 impl History {
-    pub fn record(&mut self, tick: Tick, origins: Vec<(EntityId, Vec3)>) {
-        self.frames.push_back((tick, origins));
+    pub fn record(&mut self, tick: Tick, bodies: Vec<Recorded>) {
+        self.frames.push_back((tick, bodies));
         while self.frames.len() > HISTORY_TICKS {
             self.frames.pop_front();
         }
     }
 
-    /// Origin of `id` at `tick`, or at the nearest later recorded tick.
-    pub fn origin_at(&self, tick: Tick, id: EntityId) -> Option<Vec3> {
+    /// Origin and posture of `id` at `tick`, or at the nearest later recorded tick.
+    pub fn body_at(&self, tick: Tick, id: EntityId) -> Option<(Vec3, bool)> {
         self.frames
             .iter()
             .filter(|(t, _)| tick_delta(*t, tick) >= 0)
             .min_by_key(|(t, _)| tick_delta(*t, tick))
-            .and_then(|(_, origins)| origins.iter().find(|(e, _)| *e == id).map(|(_, o)| *o))
+            .and_then(|(_, bodies)| {
+                bodies
+                    .iter()
+                    .find(|(e, _, _)| *e == id)
+                    .map(|(_, o, c)| (*o, *c))
+            })
+    }
+
+    /// Origin of `id` at `tick`, or at the nearest later recorded tick.
+    pub fn origin_at(&self, tick: Tick, id: EntityId) -> Option<Vec3> {
+        self.body_at(tick, id).map(|(o, _)| o)
     }
 }
 
@@ -1050,7 +1065,7 @@ impl Zone {
             self.players
                 .values()
                 .filter(|p| p.alive)
-                .map(|p| (p.id, p.mover.mv.origin))
+                .map(|p| (p.id, p.mover.mv.origin, p.mover.crouched))
                 .collect(),
         );
 
@@ -1133,11 +1148,11 @@ impl Zone {
                 if s.hit.len() >= s.arc.max_targets as usize {
                     break;
                 }
-                let origin = self
+                let (origin, crouched) = self
                     .history
-                    .origin_at(s.view_tick, target.id)
-                    .unwrap_or(target.mover.mv.origin);
-                let cap = capsule_at(origin, target.mover.mv.hull, target.frame());
+                    .body_at(s.view_tick, target.id)
+                    .unwrap_or((target.mover.mv.origin, target.mover.crouched));
+                let cap = capsule_at(origin, target.mover.mv.hull, target.frame(), crouched);
                 let Some(point) = melee_hit_point(eye, yaw, &s.arc, &cap) else {
                     continue;
                 };
@@ -1363,8 +1378,10 @@ impl Zone {
             if target.id == proj.owner && grace {
                 continue;
             }
-            let cap = match rewind_to.and_then(|at| self.history.origin_at(at, target.id)) {
-                Some(origin) => capsule_at(origin, target.mover.mv.hull, target.frame()),
+            let cap = match rewind_to.and_then(|at| self.history.body_at(at, target.id)) {
+                Some((origin, crouched)) => {
+                    capsule_at(origin, target.mover.mv.hull, target.frame(), crouched)
+                }
                 None => target.capsule(),
             };
             if let Some(t) = sweep_sphere_capsule(start, end, proj.def.radius, &cap)
@@ -1388,8 +1405,10 @@ impl Zone {
                 if proj.headshot > 1.0
                     && let Some(tp) = self.players.get(&target)
                 {
-                    let cap = match rewind_to.and_then(|at| self.history.origin_at(at, target)) {
-                        Some(origin) => capsule_at(origin, tp.mover.mv.hull, tp.frame()),
+                    let cap = match rewind_to.and_then(|at| self.history.body_at(at, target)) {
+                        Some((origin, crouched)) => {
+                            capsule_at(origin, tp.mover.mv.hull, tp.frame(), crouched)
+                        }
                         None => tp.capsule(),
                     };
                     let top = cap.b.z.max(cap.a.z) + cap.radius;

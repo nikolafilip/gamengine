@@ -240,6 +240,7 @@ impl Playback {
                         yaw: e.yaw,
                         pitch: e.pitch,
                         anim: e.anim,
+                        crouched: e.flags & gm_net::snapshot::flags::CROUCHED != 0,
                         frame,
                         armour,
                         aspects,

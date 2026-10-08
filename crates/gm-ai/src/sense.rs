@@ -28,6 +28,8 @@ pub struct Body {
     pub alive: bool,
     /// `gm_core::sim::anim` state: a windup is visible.
     pub anim: u8,
+    /// Crouched (MODES.md 3.5): the body and its hitbox are `CROUCH_DROP` lower.
+    pub crouched: bool,
     /// Status mask, a bit per `Status` index (the aura).
     pub status: u16,
     /// Health in per mille of its maximum, for bodies whose health the wire shows (the own
@@ -42,7 +44,12 @@ pub struct Body {
 impl Body {
     /// The middle of the hitbox, give or take: what a mind looks at and shoots at.
     pub fn centre(&self) -> Vec3 {
-        self.pos + Vec3::Z * 4.0
+        let drop = if self.crouched {
+            gm_core::sim::CROUCH_DROP * 0.5
+        } else {
+            0.0
+        };
+        self.pos + Vec3::Z * (4.0 - drop)
     }
 
     pub fn feet(&self) -> Vec3 {

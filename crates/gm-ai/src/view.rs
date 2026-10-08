@@ -38,6 +38,7 @@ impl ZoneView {
                 party: p.party,
                 alive: p.alive && !p.ghost,
                 anim: p.anim,
+                crouched: p.mover.crouched,
                 status: p.mover.statuses.mask(),
                 health: Some((p.health.max(0) as i64 * 1000 / p.max_health().max(1) as i64) as u16),
                 creature: creature_of(p.id),

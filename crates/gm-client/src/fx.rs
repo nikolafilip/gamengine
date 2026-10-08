@@ -262,7 +262,8 @@ pub struct Swing {
 pub struct Fighter {
     pub key: u32,
     pub feet: Vec3,
-    /// How far over the feet a blade passes.
+    /// How far over the feet a blade passes (`chest_of`); the name and the numbers hang
+    /// over it.
     pub chest: f32,
     pub yaw: f32,
     pub anim: u8,
@@ -271,6 +272,17 @@ pub struct Fighter {
     pub side: Side,
     /// Its health, when the frame knows it.
     pub health: Option<u16>,
+}
+
+/// How far over the feet a body's chest is: a standing body's, or a crouched one's,
+/// `CROUCH_DROP` lower (MODES.md 3.5), so the name and the numbers over the head come
+/// down with it.
+pub fn chest_of(crouched: bool) -> f32 {
+    if crouched {
+        32.0 - gm_core::sim::CROUCH_DROP
+    } else {
+        32.0
+    }
 }
 
 struct Seen {

@@ -61,6 +61,8 @@ pub struct Body {
     pub pitch: f32,
     /// `gm_core::sim::anim` state.
     pub anim: u8,
+    /// Crouched (MODES.md 3.5): the squat over the stance, the body `CROUCH_DROP` lower.
+    pub crouched: bool,
     /// Frame, armour class and aspect mask as in the snapshot's spawn info.
     pub frame: u8,
     pub armour: u8,
@@ -278,8 +280,9 @@ impl Avatars {
         }
         track.last = body.origin;
         track.seen = self.frame;
-        let pose = track.animator.advance(
+        let pose = track.animator.advance_posture(
             body.anim,
+            body.crouched,
             dt,
             moved,
             body.pitch,
@@ -434,6 +437,7 @@ impl Avatars {
                 yaw,
                 pitch: 0.0,
                 anim: state,
+                crouched: false,
                 frame,
                 armour,
                 aspects: 1 << (i % 5),
@@ -544,6 +548,7 @@ pub fn stall_keeper(stall: &gm_net::control::StallEntry, camera: Vec3) -> Body {
         yaw: stall.yaw,
         pitch: 0.0,
         anim: anim::IDLE,
+        crouched: false,
         frame: stall.frame,
         armour: stall.armour,
         aspects: 0,

@@ -879,17 +879,20 @@ pub fn build(dir: &Path) -> Result<Bundle> {
     })
 }
 
-/// The stances of the fitting room: the snapshot's state and the moment it is drawn at.
-const STANCES: [(u8, f32, f32); 9] = [
-    (gm_core::sim::anim::IDLE, 0.0, 0.0),
-    (gm_core::sim::anim::RUN, 1.0, 1.2),
-    (gm_core::sim::anim::WINDUP, 0.3, 0.0),
-    (gm_core::sim::anim::SWING, 0.3, 0.0),
-    (gm_core::sim::anim::RECOVER, 0.3, 0.0),
-    (gm_core::sim::anim::GUARD, 0.3, 0.0),
-    (gm_core::sim::anim::PARRY, 0.3, 0.0),
-    (gm_core::sim::anim::CAST, 0.3, 0.0),
-    (gm_core::sim::anim::DASH, 0.3, 0.0),
+/// The stances of the fitting room: the snapshot's state, the moment it is drawn at, and
+/// whether the body crouches (MODES.md 3.5: the last two columns, still and creeping).
+const STANCES: [(u8, f32, f32, bool); 11] = [
+    (gm_core::sim::anim::IDLE, 0.0, 0.0, false),
+    (gm_core::sim::anim::RUN, 1.0, 1.2, false),
+    (gm_core::sim::anim::WINDUP, 0.3, 0.0, false),
+    (gm_core::sim::anim::SWING, 0.3, 0.0, false),
+    (gm_core::sim::anim::RECOVER, 0.3, 0.0, false),
+    (gm_core::sim::anim::GUARD, 0.3, 0.0, false),
+    (gm_core::sim::anim::PARRY, 0.3, 0.0, false),
+    (gm_core::sim::anim::CAST, 0.3, 0.0, false),
+    (gm_core::sim::anim::DASH, 0.3, 0.0, false),
+    (gm_core::sim::anim::IDLE, 0.0, 0.0, true),
+    (gm_core::sim::anim::RUN, 1.0, 1.2, true),
 ];
 
 /// The striker's mannequin holding `prop` in every stance, seen from the front (top row)
@@ -914,7 +917,7 @@ fn fitting_room(prop: &Model) -> (u32, u32, Vec<u8>) {
         px.copy_from_slice(&[58, 62, 70, 255]);
     }
     let cut = prop.cutout();
-    for (col, (state, t, cycle)) in STANCES.iter().enumerate() {
+    for (col, (state, t, cycle, crouched)) in STANCES.iter().enumerate() {
         let pose = gm_model::anim::pose(&gm_model::anim::AnimInput {
             state: *state,
             t: *t,
@@ -923,6 +926,7 @@ fn fitting_room(prop: &Model) -> (u32, u32, Vec<u8>) {
             pitch: 0.0,
             hips_z: mesh.pivots[rig::bone::HIPS].z,
             weight: 0.0,
+            crouched: *crouched,
         });
         let skin = gm_model::skin_matrices(&mesh.pivots, mesh.bone_mask, &pose);
         let body: Vec<glam::Vec3> = (0..mesh.positions.len())

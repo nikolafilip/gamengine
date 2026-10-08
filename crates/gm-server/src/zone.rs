@@ -237,9 +237,12 @@ fn stacks_of(reading: &GearReading) -> Vec<(String, u32, Option<i32>)> {
         .collect()
 }
 
-/// The body `id` spent `quantity` of the first of its stacks that `which` picks (MODES.md
-/// 11.2): the zone's copy is lowered at once (the next spend picks the right row), and
-/// the hub is told; its reading comes back as a `Worn` nobody waits for.
+/// The body `id` spent `quantity` of its stacks that `which` picks (MODES.md 11.2), the
+/// first first: the zone's copy is lowered at once (the next spend picks the right rows),
+/// and the hub is told once per row; each reading comes back as a `Worn` nobody waits for.
+/// The simulation's reserve is the sum of the stacks, so a spend may span two of them;
+/// asked of one row for more than it holds, the hub would refuse and its reading would
+/// hand the rounds back.
 fn consume_stack(
     cfg: &ZoneConfig,
     hub_slots: &mut BTreeMap<EntityId, HubSlot>,
@@ -254,28 +257,37 @@ fn consume_stack(
     let Some(slot) = hub_slots.get_mut(&id) else {
         return;
     };
-    let Some(stack) = slot.stacks.iter_mut().find(|s| s.quantity > 0 && which(s)) else {
-        return;
-    };
-    let item = stack.item;
-    stack.quantity = stack.quantity.saturating_sub(quantity);
     let character = slot.character;
-    let tx = event_tx.clone();
-    tokio::spawn(async move {
-        let result = link.consume(character, item, quantity).await;
-        if let Err(why) = &result {
-            warn!(character, item, quantity, %why, "consume");
+    let mut left = quantity;
+    for stack in slot.stacks.iter_mut().filter(|s| s.quantity > 0 && which(s)) {
+        if left == 0 {
+            break;
         }
-        let _ = tx
-            .send(ClientEvent::Worn {
-                id,
-                character,
-                item: 0,
-                result,
-                tell: false,
-            })
-            .await;
-    });
+        let take = left.min(stack.quantity);
+        let item = stack.item;
+        stack.quantity -= take;
+        left -= take;
+        let link = link.clone();
+        let tx = event_tx.clone();
+        tokio::spawn(async move {
+            let result = link.consume(character, item, take).await;
+            if let Err(why) = &result {
+                warn!(character, item, quantity = take, %why, "consume");
+            }
+            let _ = tx
+                .send(ClientEvent::Worn {
+                    id,
+                    character,
+                    item: 0,
+                    result,
+                    tell: false,
+                })
+                .await;
+        });
+    }
+    if left > 0 {
+        warn!(character, quantity, left, "consume: more spent than the stacks carried");
+    }
 }
 
 fn look_of(

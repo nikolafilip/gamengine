@@ -49,6 +49,10 @@ pub struct AnimInput {
     pub hips_z: f32,
     /// Armour weight, 0 (cloth) to 1 (plate): armour class is in the gait (MODELS.md 9).
     pub weight: f32,
+    /// Crouched (MODES.md 3.5): the squat is laid over the stance, the body
+    /// `CROUCH_DROP` lower, so a crouch reads from across the arena as it does in the
+    /// root, and the body stands where its shortened hitbox is.
+    pub crouched: bool,
 }
 
 /// Armour weight of an armour-class index (cloth, leather, mail, plate).
@@ -259,6 +263,9 @@ pub fn pose(i: &AnimInput) -> Pose {
             p.rot[HIPS] = rx(0.8 * (t * 0.8).sin());
         }
     }
+    if i.crouched && i.state != anim::COMMAND {
+        crouch(&mut p, i);
+    }
     // Where the player looks: the chest and the head follow the pitch.
     let pitch = i.pitch.clamp(-60.0, 60.0);
     p.rot[CHEST] = ry(pitch * 0.2) * p.rot[CHEST];
@@ -266,10 +273,36 @@ pub fn pose(i: &AnimInput) -> Pose {
     p
 }
 
+/// The squat (MODES.md 3.5), over whatever the arms and the torso are doing: the thighs
+/// swung forward and the knees folded so the hips come down by `CROUCH_DROP` with the feet
+/// where they were (the thigh and the shin are each 0.225 of the frame's height: at 75°
+/// forward and 62° back from the upright they give up 1.27 of their length, 16 u of a
+/// striker's 12.6), the torso leant into it. A crouch that walks (the RUN stance) rocks
+/// the legs a little with the cycle instead of striding; the kneeling command stance is
+/// left alone.
+fn crouch(p: &mut Pose, i: &AnimInput) {
+    let rock = if i.state == anim::RUN {
+        6.0 * i.cycle.sin()
+    } else {
+        0.0
+    };
+    legs(p, -75.0 - rock, 137.0 - rock, -75.0 + rock, 137.0 + rock);
+    p.rot[HIPS] = ry(6.0) * p.rot[HIPS];
+    p.rot[SPINE] = ry(6.0) * p.rot[SPINE];
+    // Arms that hang would reach the knees: the elbows bend and the hands rest at the
+    // thighs. Arms that do something (a creep's swing, a cast, a reload) are left to it.
+    if i.state == anim::IDLE {
+        p.rot[FOREARM_L] = rz(-35.0) * p.rot[FOREARM_L];
+        p.rot[FOREARM_R] = rz(35.0) * p.rot[FOREARM_R];
+    }
+    p.offset.z -= gm_core::sim::CROUCH_DROP;
+}
+
 /// Per-entity animation state: the running clock, the run phase and the cross-fade.
 #[derive(Clone, Copy, Debug)]
 pub struct Animator {
     state: u8,
+    crouched: bool,
     t: f32,
     cycle: f32,
     from: Pose,
@@ -289,6 +322,7 @@ impl Animator {
     pub fn new(state: u8) -> Animator {
         Animator {
             state,
+            crouched: false,
             t: 0.0,
             cycle: 0.0,
             from: Pose::REST,
@@ -314,12 +348,34 @@ impl Animator {
         hips_z: f32,
         weight: f32,
     ) -> Pose {
+        self.advance_posture(state, false, dt, moved, pitch, hips_z, weight)
+    }
+
+    /// `advance`, with the posture: a crouch going down or coming up is cross-faded like
+    /// a change of stance, over `FADE_SECS`, without restarting the stance's clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_posture(
+        &mut self,
+        state: u8,
+        crouched: bool,
+        dt: f32,
+        moved: Vec3,
+        pitch: f32,
+        hips_z: f32,
+        weight: f32,
+    ) -> Pose {
         if state != self.state {
             self.from = self.current;
             self.fade = 0.0;
             self.fade_over = fade_secs(state);
             self.t = 0.0;
             self.state = state;
+            self.crouched = crouched;
+        } else if crouched != self.crouched {
+            self.from = self.current;
+            self.fade = 0.0;
+            self.fade_over = FADE_SECS;
+            self.crouched = crouched;
         }
         let dt = dt.clamp(0.0, 0.25);
         let distance = moved.truncate().length();
@@ -335,6 +391,7 @@ impl Animator {
             pitch,
             hips_z,
             weight,
+            crouched,
         });
         self.current = if self.fade >= 1.0 {
             target
@@ -377,7 +434,58 @@ mod tests {
             pitch: 0.0,
             hips_z: 29.0,
             weight: 0.0,
+            crouched: false,
         })
+    }
+
+    #[test]
+    fn a_crouch_brings_the_head_down_by_the_drop_and_keeps_the_feet_on_the_ground() {
+        use gm_core::sim::CROUCH_DROP;
+        for frame in rig::FRAMES {
+            let pivots = rig::rest_pivots(frame);
+            let (standing, crouched) = {
+                let mut i = AnimInput {
+                    state: anim::IDLE,
+                    t: 0.0,
+                    cycle: 0.0,
+                    speed: 0.0,
+                    pitch: 0.0,
+                    hips_z: pivots[HIPS].z,
+                    weight: 0.0,
+                    crouched: false,
+                };
+                let up = skin_matrices(&pivots, ALL_BONES, &pose(&i));
+                i.crouched = true;
+                (up, skin_matrices(&pivots, ALL_BONES, &pose(&i)))
+            };
+            let at = |m: &[glam::Mat4; rig::BONES], b: usize| m[b].transform_point3(pivots[b]);
+            let drop = at(&standing, HEAD).z - at(&crouched, HEAD).z;
+            assert!(
+                (drop - CROUCH_DROP).abs() < 2.5,
+                "{frame:?}: the head came down {drop} for a drop of {CROUCH_DROP}"
+            );
+            for foot in [FOOT_L, FOOT_R] {
+                let f = at(&crouched, foot);
+                assert!(
+                    (f.z - at(&standing, foot).z).abs() < 3.0,
+                    "{frame:?}: the foot is at {f:?}"
+                );
+            }
+        }
+        // The posture fades like a stance: the first frame down is still the standing pose.
+        let mut a = Animator::new(anim::IDLE);
+        a.advance(anim::IDLE, 0.016, Vec3::ZERO, 0.0, 29.0, 0.0);
+        let first = a.advance_posture(anim::IDLE, true, 0.001, Vec3::ZERO, 0.0, 29.0, 0.0);
+        assert!(first.offset.z > -1.0, "{}", first.offset.z);
+        let mut last = first;
+        for _ in 0..12 {
+            last = a.advance_posture(anim::IDLE, true, 0.016, Vec3::ZERO, 0.0, 29.0, 0.0);
+        }
+        assert!(
+            (last.offset.z + CROUCH_DROP).abs() < 0.01,
+            "{}",
+            last.offset.z
+        );
     }
 
     #[test]
@@ -505,6 +613,7 @@ mod tests {
                 pitch: 0.0,
                 hips_z: 29.0,
                 weight,
+                crouched: false,
             });
             let hang = pose(&AnimInput {
                 state: anim::RUN,
@@ -514,6 +623,7 @@ mod tests {
                 pitch: 0.0,
                 hips_z: 29.0,
                 weight,
+                crouched: false,
             });
             p.rot[UPPER_ARM_L].angle_between(hang.rot[UPPER_ARM_L])
         };

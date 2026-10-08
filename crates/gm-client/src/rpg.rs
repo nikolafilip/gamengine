@@ -28,12 +28,18 @@ pub struct Body {
     /// The hull origin.
     pub origin: Vec3,
     pub frame: ArchetypeFrame,
+    /// Crouched (MODES.md 3.5): its capsule is `CROUCH_DROP` shorter.
+    pub crouched: bool,
     pub enemy: bool,
 }
 
 impl Body {
+    pub fn capsule(&self) -> gm_core::geom::Capsule {
+        capsule_at(self.origin, Hull::Player, self.frame, self.crouched)
+    }
+
     fn centre(&self) -> Vec3 {
-        capsule_at(self.origin, Hull::Player, self.frame).center()
+        self.capsule().center()
     }
 }
 
@@ -134,7 +140,7 @@ impl Rpg {
         let reach = PICK_REACH * wall.fraction;
         let mut best: Option<(f32, u32)> = None;
         for b in bodies {
-            let cap = capsule_at(b.origin, Hull::Player, b.frame);
+            let cap = b.capsule();
             if let Some(t) = ray_capsule(from, dir, reach, &cap)
                 && best.is_none_or(|(bt, _)| t < bt)
             {

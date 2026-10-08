@@ -55,20 +55,25 @@ impl SpawnInfo {
 
 /// Entity flag bits (PROTOCOL.md 5).
 pub mod flags {
-    pub const ALIVE: u8 = 1 << 0;
-    pub const ON_GROUND: u8 = 1 << 1;
-    pub const GUARDING: u8 = 1 << 2;
-    pub const DASHING: u8 = 1 << 3;
-    pub const JUMP_HELD: u8 = 1 << 4;
+    pub const ALIVE: u16 = 1 << 0;
+    pub const ON_GROUND: u16 = 1 << 1;
+    pub const GUARDING: u16 = 1 << 2;
+    pub const DASHING: u16 = 1 << 3;
+    pub const JUMP_HELD: u16 = 1 << 4;
     /// An ability script is running (own entity: the client drops a predicted script the
     /// server has interrupted).
-    pub const SCRIPT: u8 = 1 << 5;
+    pub const SCRIPT: u16 = 1 << 5;
     /// A parry window is open or its whiff recovery runs (own entity: a successful parry on
     /// the server ends the window at once, and the client must follow).
-    pub const PARRY: u8 = 1 << 6;
+    pub const PARRY: u16 = 1 << 6;
     /// In the command stance (own entity: a client whose prediction disagrees adopts the
     /// server's state, COMPANIONS.md 5.1).
-    pub const COMMANDING: u8 = 1 << 7;
+    pub const COMMANDING: u16 = 1 << 7;
+    /// Crouched (MODES.md 3.5, v14): the body is drawn in its squat and its hitbox is
+    /// `CROUCH_DROP` shorter; every body carries it.
+    pub const CROUCHED: u16 = 1 << 8;
+    /// How many bits of flags the wire carries.
+    pub const BITS: u32 = 9;
 }
 
 mod mask {
@@ -101,7 +106,8 @@ pub struct EntityState {
     pub acting: u16,
     /// Own entity (Phase 5: party) only.
     pub health: Option<u16>,
-    pub flags: u8,
+    /// `flags`: `BITS` bits on the wire.
+    pub flags: u16,
     /// Active statuses, a bit per `gm_core::vocab::Status` index (cosmetic for others).
     pub status: u16,
 }
@@ -521,7 +527,7 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
         w.write_uvar(e.health.unwrap_or(0) as u64);
     }
     if m & mask::FLAGS != 0 {
-        w.write_bits(e.flags as u64, 8);
+        w.write_bits(e.flags as u64, flags::BITS);
     }
     if m & mask::STATUS != 0 {
         w.write_bits(e.status as u64, 16);
@@ -611,7 +617,7 @@ fn read_entity(
         e.health = Some(u16::try_from(h).map_err(|_| NetError::Malformed("health too large"))?);
     }
     if m & mask::FLAGS != 0 {
-        e.flags = r.read_bits(8)? as u8;
+        e.flags = r.read_bits(flags::BITS)? as u16;
     }
     if m & mask::STATUS != 0 {
         e.status = r.read_bits(16)? as u16;

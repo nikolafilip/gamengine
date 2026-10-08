@@ -611,7 +611,7 @@ pub fn frame_from_index(i: u8) -> ArchetypeFrame {
 /// Wire state of a player; `own` adds velocity, health and the jump and script flags
 /// (PROTOCOL.md 5).
 pub fn player_state(p: &Player, own: bool) -> EntityState {
-    let mut f = 0u8;
+    let mut f = 0u16;
     if p.alive {
         f |= flags::ALIVE;
     }
@@ -638,6 +638,10 @@ pub fn player_state(p: &Player, own: bool) -> EntityState {
     }
     if own && p.mover.commanding(p.last_input_tick) {
         f |= flags::COMMANDING;
+    }
+    // Everyone sees a crouch (MODES.md 3.5): the body squats and its hitbox is shorter.
+    if p.mover.crouched {
+        f |= flags::CROUCHED;
     }
     EntityState {
         id: p.id,

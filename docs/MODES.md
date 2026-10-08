@@ -95,7 +95,7 @@ projectile = { speed = 20000, gravity = 0.02, ... spread = 0 }
 | field | means | range |
 |---|---|---|
 | `magazine`, `reserve` | rounds in the weapon and carried; the reserve refills at a respawn and at an ammo pickup (ITEMS.md: a stack of rounds is an item). Section 11 proposes the reserve becomes a stack carried and bought, with a hard cap | 1–100, 0–400 |
-| `reload_ms` | the reload, a script of its own: `R` or an empty magazine with the trigger held; a stagger interrupts it and the rounds are not lost; a switch of weapon cancels it | 500–6,000 |
+| `reload_ms` | the reload, a script of its own: `R`, or an empty magazine with rounds carried begins it by itself (since 2026-10-08; before, the trigger had to be pulled on the empty magazine); a stagger interrupts it and the rounds are not lost; a switch of weapon cancels it | 500–6,000 |
 | `cycle_ms` | the time between two shots; replaces the primary's cooldown | 50–3,000 |
 | `fire` | `auto` (held), `semi` (a click a shot), `bolt` (a click a shot and the body works the action for the cycle; no shot while moving faster than a walk) | |
 | `headshot` | the multiplier for a hit in the head band (3.5) | 1–5 |
@@ -129,7 +129,9 @@ the square of its count, a pause forgets it):
 base  +  move × share(speed / max speed)  +  air (while airborne)  +  shot × min((n / 4)², 4)
 ```
 
-- `base` is `stand`; `crouch` while the crouch button is held on the ground; `scoped`
+- `base` is `stand`; `crouch` while the crouch button is held on the ground (the body
+  comes down `CROUCH_DROP` = 16 u: the eye, the top of its hitbox and the drawn body
+  alike, 3.5); `scoped`
   while the scope is up (the scope is what makes the shot: the musket's is 0.05°, its
   `stand` 6°, so a shot without the scope is the root's no-scope).
 - `share(s)` is 0 up to half the body's speed (Shift's walk, a crouched creep), 1 from
@@ -150,8 +152,15 @@ the client predicts the kick and the opening, never the shot.
 The hull is a cylinder (MATRIX.md 3); CS has hit groups, we have none. **The head band is the
 top 12 units of the hull** (a sixth of a striker). A bolt that enters the hull within the band
 is a headshot: the packet is multiplied by `headshot` **before** armour (MATRIX.md 7 gets a
-step: hit zone). Melee arcs and areas have no head. Crouching lowers the hull, so the band
-moves with it: a crouched body is the harder headshot, as in the root.
+step: hit zone). Melee arcs and areas have no head. **Crouching shortens the hitbox**: the
+capsule loses `CROUCH_DROP` (16 u) off its top while the button is held on the ground, so
+the band moves down with the body and a shot at a standing head passes over a crouched one;
+the rewind of PROTOCOL.md 7.4 remembers the posture with the position, so the capsule a bolt
+or a blade is resolved against is as short as the body was when the shooter saw it. The
+world hull (32 × 32 × 56, MATRIX.md 3) does not change: a crouch does not fit under
+anything a stand does not. Everyone sees it: the body squats (the shared animation set lays
+the squat over any stance, MODELS.md 9) and its name and numbers come down with it; the
+`CROUCHED` flag of the entity record carries it (PROTOCOL.md 26).
 
 ### 3.6 Bullets are bolts, fast
 
@@ -354,8 +363,7 @@ Built as sections 2 and 4 say, with these readings:
   `cancel = "recovery"`; Space plays the kit's dash while it is ready, else jumps.
 - **Knockdown and Launched** are statuses 14 and 15: no action, guard or movement; the
   `DOWN` stance; diminishing returns per kind (`Player::controls`, ten seconds), creatures
-  under them too. A crouch has no hull of its own yet, so the head band of 3.5 does not
-  move with it.
+  under them too. (A crouch had no hull of its own until 2026-10-08: 10.2.)
 - **The combo counter**: the own blows within two seconds of each other, right of the aim.
 - The input frame carries `held` and `target` for every mode (PROTOCOL.md 23), so the
   wire changes once for the three parts.
@@ -378,15 +386,17 @@ Built as section 3 says, with these readings:
   before it rolls the cone. The frames sent carry the mouse's aim, never the punch.
 - **The cone** (`gm_core::sim::cone_deg`) is the same function on both sides: the HUD's
   crosshair opens by it, the zone rolls in it, added to the bolt's own spread. A crouch
-  is the button held on the ground (Ctrl or C): the eye drops 10 u (`CROUCH_DROP`,
-  `Mover::crouched`, the own camera eases to it) and the body creeps at half speed;
-  there is no crouching hull yet, so the head band does not move with it and a stranger
-  is drawn standing. Walking is Shift at half the axes.
+  is the button held on the ground (Ctrl or C): the body comes down 16 u (`CROUCH_DROP`,
+  `Mover::crouched`: the eye, the hitbox's top and the drawn body; the own camera eases
+  to it) and creeps at half speed; the head band moves down with the hitbox (3.5, since
+  2026-10-08). Walking is Shift at half the axes.
 - **The head band** (`HEAD_BAND` = 12 u, ×`headshot`, before armour) is read where the
   bolt's sweep meets the capsule, against the rewound capsule as the hit itself is.
-- **The reload**: `R`, or the trigger on an empty magazine (and the trigger held, on an
-  auto); it ends by itself; a stagger or a knockdown drops it and keeps the rounds; a
-  switch of weapon drops it. The stance `RELOAD`. The bolt action fires standing or
+- **The reload**: `R`, or an empty magazine with rounds carried, which begins the reload
+  by itself the tick after the last shot (since 2026-10-08: the director asked for it;
+  before, the trigger had to be pulled on the empty magazine, held on an auto); it ends
+  by itself; a stagger or a knockdown drops it and keeps the rounds, and the empty
+  magazine begins it again once the body can; a switch of weapon drops it. The stance `RELOAD`. The bolt action fires standing or
   walking, never above half the body's speed.
 - **In hand** `1 2 3` (the gun, the pistol, the knife) and the actives on `4`–`7`;
   the hand is what everyone sees held (LOOK.md 6.2: the zone says a `Look` when it
@@ -457,6 +467,35 @@ Built as section 3 says, with these readings:
     on the ground, on both sides (`Mover::crouched`); the own camera eases the drop
     over about a tenth of a second. The hull does not change (the head band stays), a
     stranger is drawn standing.
+- **The crouch seen (2026-10-08)**: "can we do crouch animation and target resize so all
+  can see and have different hit zone for players who are crouching? so it looks and
+  feels more like CS 1.6". Built as 3.5 now says (protocol v14):
+  - **The hitbox shortens**: `capsule_at` takes the posture and drops `CROUCH_DROP` off
+    the capsule's top; `Mover::capsule` passes its own, the zone's `History` records
+    (origin, crouched) per body per tick and the bolt's sweep, the head band's reading
+    and the melee wedge all take the rewound posture with the rewound origin. The band
+    is read against the shortened top, so a crouched head is a headshot at the crouched
+    height and nothing at the standing one (the test: a level musket shot that was a
+    headshot on a standing blade at 300 u flies over it crouched; aimed 2.1° down it is
+    a headshot again).
+  - **The drop is 16 u** (was 10): the eye, the capsule's top and the drawn body all by
+    the same number, so the body stands where its hitbox is. A striker's 56 becomes 40
+    (the root halves 72 to 36; a capsule of our radius cannot lose that much and stay a
+    body). The director may want it deeper or shallower: it is one constant.
+  - **Everyone sees it**: `flags::CROUCHED` (bit 8; the flags are nine bits now) on
+    every body's record; the client draws the squat (`gm_model::anim::crouch`: the
+    thighs 75° forward, the knees folded 137°, the body lowered by the drop, the feet
+    where they were; the idle's hanging arms bend to the thighs; a creep rocks the legs
+    with the cycle instead of striding) over any stance but the kneeling command, cross-
+    faded like a change of stance; a name, a health bar and a hit's number hang 16 u
+    lower (`fx::chest_of`). The own body in the third person squats from its prediction
+    and is no longer sunk into the floor by the eye's drop (it was lowered twice before:
+    the hull origin was taken from the dropped eye). The RPG target pick and the bots'
+    aim (`sense::Body::centre`) use the shortened capsule. The fitting room of
+    `gm-tools content look` has two crouched columns at the end (still, creeping).
+  - **Not changed**: the world hull (no crouching under things), the crouch in the air
+    (the button counts on the ground only), the cone's `crouch` value (content, as it
+    was).
 
 ### 10.3 The RPG mode (15c, 2026-10-07)
 

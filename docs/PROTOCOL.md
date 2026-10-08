@@ -1,6 +1,6 @@
 # Wire Protocol
 
-Status: v9 (after Phase 14: the ability a stance belongs to, section 21; v8 of Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+Status: v14 (the crouch seen, section 26; v13 and before as the sections say; v9 after Phase 14: the ability a stance belongs to, section 21; v8 of Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
 and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
@@ -210,7 +210,7 @@ Entity record:
 | vel | 3 × svar | VEL. Absolute when SPAWN (or the baseline record has no velocity), delta otherwise |
 | anim | 8 (+ uvar) | ANIM. When the stance is a script's (windup 3, swing 4, recovery 5, cast 10), the **acting ability** follows as a uvar: the `AbilityId` of the script (the pack's index and one). ANIM is set when either changes (v9, section 21) |
 | health | uvar | HEALTH |
-| flags | 8 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only) |
+| flags | 9 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only), 8 crouched (MODES.md 3.5; v14, every body) |
 | status | 16 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras) |
 
 Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infiltrator), `team`
@@ -824,3 +824,15 @@ in the simulation's snapshots:
   the world there; the client leaves a dark mark on the wall for twenty seconds. To every
   session of the zone, a few bytes a shot.
 
+## 26. Changes in v14 (the crouch seen, 2026-10-08)
+
+`PROTOCOL_VERSION` 14 (MODES.md 3.5, 10.2). One bit in the snapshot's entity record:
+
+- `flags` is **nine** bits, not eight: bit 8 `CROUCHED`, set on every body whose crouch
+  button is held on the ground (`Mover::crouched`). A client draws that body squatting and
+  hangs its name and numbers lower; the RPG target pick and a bot's aim read its hitbox
+  `CROUCH_DROP` (16 u) shorter, as the zone does. It is cosmetic for the own entity: the
+  client recomputes its own posture from its input every tick and adopts nothing.
+- The zone's rewind (7.4) records the posture with the position, so a bolt or a blade is
+  resolved against a capsule as short as the body was at the shooter's view tick. Nothing
+  of that is on the wire.

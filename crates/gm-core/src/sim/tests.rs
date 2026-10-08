@@ -3,6 +3,7 @@ use glam::{Vec2, Vec3};
 use super::*;
 use crate::build::{Build, ContentPack};
 use crate::collide::{Aabb, BoxWorld};
+use crate::geom::Capsule;
 use crate::matrix::{ArmourClass, Aspects, Attributes, Element};
 use crate::sim::test_content::{self, phase2_build};
 use crate::tick::TickRate;
@@ -466,9 +467,10 @@ fn death_and_respawn() {
 fn history_rewinds_to_the_nearest_recorded_tick() {
     let mut h = History::default();
     for t in 1..=40u32 {
-        h.record(t, vec![(1, Vec3::new(t as f32, 0.0, 0.0))]);
+        h.record(t, vec![(1, Vec3::new(t as f32, 0.0, 0.0), t > 30)]);
     }
     assert_eq!(h.origin_at(10, 1), Some(Vec3::new(10.0, 0.0, 0.0)));
+    assert_eq!(h.body_at(35, 1), Some((Vec3::new(35.0, 0.0, 0.0), true)));
     assert_eq!(h.origin_at(2, 1), Some(Vec3::new(9.0, 0.0, 0.0)));
     assert_eq!(h.origin_at(41, 1), None);
     assert_eq!(h.origin_at(10, 2), None);
@@ -2210,8 +2212,10 @@ fn the_musket_fires_one_round_then_reloads_by_itself_and_r_reloads_a_pistol() {
     quiet(&mut zone, &world, 2, 0);
     assert_eq!(bolts(&zone), 1);
     assert_eq!(gun(&zone, a, 0).magazine, 0);
-    // The trigger on an empty magazine: the reload begins (2.8 s), nothing flies.
+    // The empty magazine reloads by itself (2.8 s), no trigger needed; a pull flies nothing.
     quiet(&mut zone, &world, 80, 0);
+    let p = zone.player(a).unwrap();
+    assert!(p.mover.reloading(p.last_input_tick), "reloads with no key pressed");
     tick(
         &mut zone,
         &world,
@@ -2559,6 +2563,167 @@ fn a_crouch_lowers_the_eye_and_halves_the_pace() {
     );
     let m = &zone.player(a).unwrap().mover;
     assert!(!m.crouched && (m.eye().z - standing.z).abs() < 0.01);
+}
+
+#[test]
+fn a_crouched_body_is_shorter_and_a_shot_at_its_standing_head_passes_over() {
+    // MODES.md 3.5: the hitbox loses CROUCH_DROP off its top while crouched, on the live
+    // body and in the rewind, so the head band comes down with the body.
+    let (world, mut zone, a, b) = gun_duel(0.0, 300.0);
+    let standing = zone.player(b).unwrap().capsule();
+    run(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, 0, 0)),
+            (b, input(180.0, 0.0, buttons::CROUCH)),
+        ],
+        4,
+    );
+    let crouched = zone.player(b).unwrap().capsule();
+    let top = |c: &Capsule| c.a.z.max(c.b.z) + c.radius;
+    assert!(
+        ((top(&standing) - top(&crouched)) - CROUCH_DROP).abs() < 0.01,
+        "the top: {} standing, {} crouched",
+        top(&standing),
+        top(&crouched)
+    );
+    assert_eq!(
+        standing.a.z.min(standing.b.z),
+        crouched.a.z.min(crouched.b.z)
+    );
+    assert_eq!(
+        zone.history().body_at(zone.tick, b).map(|(_, c)| c),
+        Some(true),
+        "the history remembers the posture"
+    );
+    // A's eye is 46 u over the feet, B's standing band from 44 up and B's crouched top at
+    // 40: the level shot that was a headshot flies over the crouched body (the eye is
+    // level, so the bolt is at 46 u at 300 u, over a top of 40).
+    let aim = Input {
+        pitch: 0.0,
+        ..held(0.0, 0.0, buttons::PRIMARY | buttons::SCOPE, 0)
+    };
+    tick(
+        &mut zone,
+        &world,
+        &[(a, aim), (b, input(180.0, 0.0, buttons::CROUCH))],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, buttons::SCOPE, 0)),
+            (b, input(180.0, 0.0, buttons::CROUCH)),
+        ],
+        6,
+    );
+    assert_eq!(bolts(&zone), 1, "the shot was fired");
+    assert!(
+        !zone
+            .events
+            .iter()
+            .any(|e| matches!(e, ZoneEvent::Hit { target, .. } if *target == b)),
+        "a level shot passes over a crouched body"
+    );
+    // Aimed a little down it enters the crouched hull near its top: the head band.
+    let (world, mut zone, a, b) = gun_duel(0.0, 300.0);
+    run(
+        &mut zone,
+        &world,
+        &[
+            (a, held(0.0, 0.0, 0, 0)),
+            (b, input(180.0, 0.0, buttons::CROUCH)),
+        ],
+        4,
+    );
+    // 46 - 300 tan(2.1°) = 35: inside the top 12 of a 40 u hull.
+    let aim = Input {
+        pitch: 2.1,
+        ..held(0.0, 0.0, buttons::PRIMARY | buttons::SCOPE, 0)
+    };
+    tick(
+        &mut zone,
+        &world,
+        &[(a, aim), (b, input(180.0, 0.0, buttons::CROUCH))],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[
+            (
+                a,
+                Input {
+                    pitch: 2.1,
+                    ..held(0.0, 0.0, buttons::SCOPE, 0)
+                },
+            ),
+            (b, input(180.0, 0.0, buttons::CROUCH)),
+        ],
+        6,
+    );
+    let hit = zone
+        .events
+        .iter()
+        .find_map(|e| match e {
+            ZoneEvent::Hit { target, amount, .. } if *target == b => Some(*amount),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let body = {
+        // The same shot into a standing body enters at 35 u: under its band of 44.
+        let (world, mut zone, a, b) = gun_duel(0.0, 300.0);
+        run(
+            &mut zone,
+            &world,
+            &[(a, held(0.0, 0.0, 0, 0)), (b, input(180.0, 0.0, 0))],
+            4,
+        );
+        tick(
+            &mut zone,
+            &world,
+            &[
+                (
+                    a,
+                    Input {
+                        pitch: 2.1,
+                        ..held(0.0, 0.0, buttons::PRIMARY | buttons::SCOPE, 0)
+                    },
+                ),
+                (b, input(180.0, 0.0, 0)),
+            ],
+            0,
+        );
+        run(
+            &mut zone,
+            &world,
+            &[
+                (
+                    a,
+                    Input {
+                        pitch: 2.1,
+                        ..held(0.0, 0.0, buttons::SCOPE, 0)
+                    },
+                ),
+                (b, input(180.0, 0.0, 0)),
+            ],
+            6,
+        );
+        zone.events
+            .iter()
+            .find_map(|e| match e {
+                ZoneEvent::Hit { target, amount, .. } if *target == b => Some(*amount),
+                _ => None,
+            })
+            .unwrap_or(0)
+    };
+    assert!(body > 0, "the shot lands on a standing body: {body}");
+    assert!(
+        hit >= body * 3,
+        "the crouched band is where the crouched head is: {hit} against {body}"
+    );
 }
 
 #[test]

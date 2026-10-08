@@ -138,6 +138,7 @@ impl Raid {
                         party,
                         alive: e.alive(),
                         anim: e.anim,
+                        crouched: e.flags & gm_net::snapshot::flags::CROUCHED != 0,
                         status: e.status,
                         // Per mille of its maximum, where the zone sends health at all.
                         health: e.health.zip(max_health).map(|(h, max)| {

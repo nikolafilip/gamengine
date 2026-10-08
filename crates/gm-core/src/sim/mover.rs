@@ -212,8 +212,9 @@ pub struct Mover {
     /// frame tick it ends at.
     pub kits: u16,
     pub kit_until: Option<Tick>,
-    /// Crouching (MODES.md 3.4, 10.2): the button held on the ground. The eye is lower by
-    /// `CROUCH_DROP` and the body walks at half speed; the hull does not change yet.
+    /// Crouching (MODES.md 3.4, 3.5, 10.2): the button held on the ground. The eye, the
+    /// top of the hitbox and the body are lower by `CROUCH_DROP`, the head band with
+    /// them, and the body walks at half speed; the world hull does not change.
     pub crouched: bool,
 }
 
@@ -319,9 +320,10 @@ impl Mover {
         Aabb::around(self.mv.origin, self.mv.hull)
     }
 
-    /// Hitbox capsule for `frame`, standing on the hull's feet.
+    /// Hitbox capsule for `frame`, standing on the hull's feet, `CROUCH_DROP` shorter
+    /// while crouched (MODES.md 3.5).
     pub fn capsule(&self, frame: ArchetypeFrame) -> Capsule {
-        capsule_at(self.mv.origin, self.mv.hull, frame)
+        capsule_at(self.mv.origin, self.mv.hull, frame, self.crouched)
     }
 
     pub fn ground_speed(&self) -> f32 {
@@ -372,8 +374,16 @@ pub fn view_dir(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(cp * cy, cp * sy, -sp)
 }
 
-pub fn capsule_at(origin: Vec3, hull: Hull, frame: ArchetypeFrame) -> Capsule {
+/// The hitbox capsule of a body of `frame` whose hull origin is `origin`: standing on the
+/// hull's feet, its top `CROUCH_DROP` lower while `crouched` (MODES.md 3.5), so the head
+/// band moves down with the body and a shot at a standing head passes over a crouched one.
+pub fn capsule_at(origin: Vec3, hull: Hull, frame: ArchetypeFrame, crouched: bool) -> Capsule {
     let (radius, height) = frame.capsule();
+    let height = if crouched {
+        height - CROUCH_DROP
+    } else {
+        height
+    };
     Capsule::upright(origin + Vec3::new(0.0, 0.0, hull.mins().z), radius, height)
 }
 
@@ -524,7 +534,7 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
     {
         try_activate(world, sheet, m, slot as usize, now, input, company);
     }
-    reload_step(sheet, m, input, pressed, now, staggered);
+    reload_step(sheet, m, pressed, now, staggered);
     kit_step(m, pressed, now, staggered);
 
     if let Some(mut s) = m.script {
@@ -705,12 +715,12 @@ fn guard_step(
     }
 }
 
-/// The reload of the firearm in hand (MODES.md 3.2): `R`, or the trigger on an empty
-/// magazine; it ends by itself, a stagger drops it and the rounds are kept.
+/// The reload of the firearm in hand (MODES.md 3.2): `R`, or an empty magazine with
+/// rounds carried, which reloads by itself; it ends by itself, a stagger drops it and the
+/// rounds are kept (and the empty magazine begins it again once the body can).
 fn reload_step(
     sheet: &Sheet,
     m: &mut Mover,
-    input: &Input,
     pressed: u16,
     now: Tick,
     staggered: bool,
@@ -736,11 +746,8 @@ fn reload_step(
         }
         Some(_) => {}
         None => {
-            let asked = pressed & buttons::RELOAD != 0
-                || (pressed & buttons::PRIMARY != 0 && g.magazine == 0)
-                || (input.buttons & buttons::PRIMARY != 0
-                    && g.magazine == 0
-                    && f.fire == FireMode::Auto);
+            // An empty magazine with rounds carried reloads by itself, trigger or not.
+            let asked = pressed & buttons::RELOAD != 0 || g.magazine == 0;
             if asked
                 && !staggered
                 && g.magazine < f.magazine
@@ -840,8 +847,11 @@ pub const RUN_SPEED: f32 = 0.8;
 /// (MODES.md 3.4).
 pub const SCOPED_CONE: f32 = 0.25;
 
-/// How far the eye drops in a crouch, in units (MODES.md 3.4).
-pub const CROUCH_DROP: f32 = 10.0;
+/// How far a crouch brings the body down, in units (MODES.md 3.4, 3.5): the eye, the top
+/// of the hitbox capsule (and so the head band) and the drawn body, all by the same
+/// amount. Two sevenths of a striker's 56 (the root halves its 72; a capsule of our
+/// radius cannot shorten that far and stay a body).
+pub const CROUCH_DROP: f32 = 16.0;
 
 /// Line of sight from `eye` to a body's `centre` through the mover's world, which holds
 /// the other bodies as solids: the trace stops a little short of the body, so the body

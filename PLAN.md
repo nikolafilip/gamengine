@@ -1571,7 +1571,7 @@ build, none estimated):
   43 : 11, frostweaver : ironclad 51 : 3, blade : frostweaver 21 : 16 over 3 × 60 s).
 - **Sizes and counts**: `gm-client` 9,956,048 (+112,608 over 9,843,440: the three modes, the nav grid in the client; baseline updated), WebGPU wasm 1,227,562 (+65,298; the cap 2 MiB), WebGL2 3,218,784; 418 workspace tests outside the hub's database ones, 0 failed (the dungeon-over-the-protocol test failed once while a release build and the smoke run shared the machine, and passed alone). **Run, not only tested**: the arena with twelve duelist bots (ironclad, blade, frostweaver, shade, musketeer) and a scripted client per mode for 25 s each on an Xvfb at 1080p under llvmpipe, 79–81 fps, 209–212 MB peak RSS, 21 kills, no panic; screenshots in `~/.local/share/gamengine/play/shots/2026-10-07-modes/` (the musketeer from its eyes with the ammo and the weapons, the blade knocked down by a bot's chain, the frostweaver from the orbit camera). The RPG mode's clicks and walks are exercised by hand only: the scripted fighter does not click.
 - **Not done, written down** (MODES.md 10): an ammo item and a pickup (the reserve refills at a respawn),
-  a crouching hull (the head band does not move with a crouch), a scope model, hitscan, the people page's
+  a crouching hull (the head band does not move with a crouch; done 2026-10-08, MODES.md 3.5), a scope model, hitscan, the people page's
   word of the mode, a target kept five seconds out of sight, a body walking round bodies. The director
   has not played it: the LAN stack ran the old build at the end of the day. His knobs are MODES.md 9.
 
@@ -1599,7 +1599,11 @@ scoped crosshair was two shifts, the kick applied to the shot that fired it (the
 every time) and the bolt flying parallel to the look from a muzzle beside the eye; now the first shot of a
 spray is turned by nothing and the bolt leaves the muzzle for the point the eye ray meets. The cone took the
 root's shape (3.4: `scoped` in content, a walk as good as standing, the spray's share squared, forgotten after
-`recover_ms`) and the crouch (Ctrl, as it was) drops the eye 10 u and halves the pace.
+`recover_ms`) and the crouch (Ctrl, as it was) drops the eye 10 u and halves the pace. **2026-10-08**: the
+crouch seen (MODES.md 3.5, 10.2; protocol v14): the hitbox loses 16 u off its top while crouched, live and in
+the rewind, so the head band moves with the body; the drop is 16 u for the eye, the hitbox and the drawn body
+alike; every body carries a `CROUCHED` flag and is drawn squatting, its name and numbers lower; the world
+hull is unchanged.
 
 ## 12. Open decisions
 License split (recommend GPLv3 client / AGPLv3 server / CC-BY-SA content). The type matrix and attribute

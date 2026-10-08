@@ -88,7 +88,7 @@ pub struct RenderEntity {
     pub anim: u8,
     /// The ability the stance belongs to (`AbilityId`; 0: none).
     pub acting: u16,
-    pub flags: u8,
+    pub flags: u16,
     /// Active statuses, a bit per `Status` index.
     pub status: u16,
     /// Health, for the bodies whose health the zone sends: the own party and creatures.
@@ -829,7 +829,7 @@ mod tests {
     }
 
     fn own_state(pos: Vec3, vel: Vec3, alive: bool, on_ground: bool) -> EntityState {
-        let mut f = flags::ON_GROUND * on_ground as u8;
+        let mut f = flags::ON_GROUND * on_ground as u16;
         if alive {
             f |= flags::ALIVE;
         }

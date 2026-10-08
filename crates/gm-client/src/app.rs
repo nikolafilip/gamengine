@@ -1566,6 +1566,7 @@ fn rpg_bodies_of(c: &ClientState, my_team: u8) -> Vec<crate::rpg::Body> {
                 id: e.id,
                 origin: e.pos,
                 frame: crate::rpg::frame_of(frame),
+                crouched: e.flags & gm_net::snapshot::flags::CROUCHED != 0,
                 enemy: team != my_team || team == gm_core::sim::TEAM_WILD,
             }),
             _ => None,
@@ -3892,12 +3893,13 @@ impl App {
             0.0
         };
         self.eye_drop += (drop - self.eye_drop) * (frame_dt * 12.0).min(1.0);
-        let eye = {
+        // The own hull origin as drawn, and the eye over it less the drop: the body
+        // itself is lowered by its squat (the animator's), not by the eye.
+        let centre = {
             let alpha = (o.accumulator / o.rate.dt()).clamp(0.0, 1.0);
             o.prev_origin.lerp(o.curr_origin, alpha)
-                + Vec3::Z * (c.mover.mv.hull.eye_height() - self.eye_drop)
         };
-        let centre = eye - Vec3::Z * (c.mover.mv.hull.eye_height() - self.eye_drop);
+        let eye = centre + Vec3::Z * (c.mover.mv.hull.eye_height() - self.eye_drop);
         // The recoil's punch (MODES.md 3.3): the firearm's kick for this shot lands on the
         // view at once and decays over 150 ms; the frames sent carry the mouse's aim,
         // the zone kicks the bolt by the same pair.
@@ -4070,7 +4072,9 @@ impl App {
                             &crate::fx::Fighter {
                                 key: e.id,
                                 feet: e.pos + feet_under,
-                                chest: 32.0,
+                                chest: crate::fx::chest_of(
+                                    e.flags & gm_net::snapshot::flags::CROUCHED != 0,
+                                ),
                                 yaw: e.yaw,
                                 anim: e.anim,
                                 swing,
@@ -4132,6 +4136,7 @@ impl App {
                         yaw,
                         pitch: e.pitch,
                         anim: e.anim,
+                        crouched: e.flags & gm_net::snapshot::flags::CROUCHED != 0,
                         frame,
                         armour,
                         aspects,
@@ -4274,7 +4279,7 @@ impl App {
                     key: OWN,
                     feet: centre + feet_under,
                     // Under the eye in the first person, so the slash crosses the view.
-                    chest: 32.0,
+                    chest: crate::fx::chest_of(c.mover.crouched),
                     yaw: c.mover.yaw,
                     anim: own_anim,
                     swing: own_script.and_then(|(ability, _)| swing_of(ability, dt)),
@@ -4417,10 +4422,11 @@ impl App {
                 self.facings.insert(OWN, yaw);
                 self.bodies.push(Body {
                     key: OWN,
-                    origin: eye - Vec3::Z * c.mover.mv.hull.eye_height(),
+                    origin: centre,
                     yaw,
                     pitch: self.sim.pitch,
                     anim: own_anim,
+                    crouched: c.mover.crouched,
                     frame: gm_model::rig::frame_index(build.frame),
                     armour: build.armour as u8,
                     aspects: build.aspects.0,
@@ -4475,10 +4481,7 @@ impl App {
             .rpg_bodies()
             .iter()
             .filter(|b| b.enemy)
-            .filter(|b| {
-                let centre = gm_core::sim::capsule_at(b.origin, Hull::Player, b.frame).center();
-                gm_core::sim::sees(&self.bsp, eye, centre)
-            })
+            .filter(|b| gm_core::sim::sees(&self.bsp, eye, b.capsule().center()))
             .map(|b| (b.id, (b.origin - me).length()))
             .collect();
         self.rpg.cycle(&candidates);
@@ -4910,6 +4913,10 @@ impl App {
                         } else {
                             gm_core::sim::anim::IDLE
                         },
+                        crouched: self.sim.curr.on_ground
+                            && (self.input.down(KeyCode::ControlLeft)
+                                || self.input.down(KeyCode::ControlRight)
+                                || self.input.down(KeyCode::KeyC)),
                         frame: 1,
                         armour: 0,
                         aspects: 0,
@@ -5318,6 +5325,7 @@ impl App {
                         yaw: 180.0 + doll.turn * 360.0,
                         pitch: 0.0,
                         anim: gm_core::sim::anim::IDLE,
+                        crouched: false,
                         frame: gm_model::rig::frame_index(build.frame),
                         armour: build.armour as u8,
                         aspects: build.aspects.0,
