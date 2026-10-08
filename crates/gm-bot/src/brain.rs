@@ -489,6 +489,7 @@ impl Brain {
             ability,
             held: 0,
             target: 0,
+            use_slot: 0,
         }
     }
 }
