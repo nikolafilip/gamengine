@@ -272,8 +272,9 @@ An action pressed with a target:
 
 - **in range and seen**: it fires, aimed by the zone at the target. A `melee_arc` turns the
   body to face it; a `projectile` is launched with the mind's lead (`gm_ai::fighter::lead`,
-  the companions' own) and the content's spread; an aimed `area_effect` is put on the
-  target. The frame's yaw and pitch stay the camera's for the view: **the aim of an RPG body
+  the companions' own, from where the target was at the attacker's view tick, where the
+  bolt is spawned and stepped forward) and the content's spread; an aimed `area_effect`
+  is put on the target. The frame's yaw and pitch stay the camera's for the view: **the aim of an RPG body
   is never the client's** (ANTICHEAT.md 4's statistics skip it: there is nothing to measure);
 - **out of range or unseen**: the body turns and walks toward the target along the nav grid
   (COMPANIONS.md 7, built on the client from the same map in 14 ms) until it is in range,
@@ -545,7 +546,12 @@ Built as section 5 says, with these readings:
   from the hand at the launch (the zone's bolt shows a round trip later) is led to the
   target as the zone leads its bolt, within the ability's range and in sight; it flew
   the look's way, the camera's in this mode, and the director saw the shard leave for
-  the horizon.
+  the horizon. The zone's lead is taken from where the target was at the tick the
+  attacker saw (the history's), as the forward step of PROTOCOL.md 7.4 spawns the bolt
+  there: until 2026-10-08 it was led from where the target stood now, so the bolt got
+  to the point a round trip before the target did and missed every walker, while the
+  tracer, led from the client's older picture, flew true, and the director saw his
+  shard go to the target and the zone's bolt fly on elsewhere.
 - **Marks**: a ring where the body is going, a red one under the target.
 - **The buttons** (2026-10-08, the director: "LMB and RMB now seem completely removed
   from 3rd person mouse rpg ... maybe first click highlights target and then cursor
