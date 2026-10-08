@@ -3,6 +3,7 @@
 
 const statusLine = document.getElementById("status");
 const stage = document.getElementById("stage");
+const view = document.getElementById("view");
 const panel = document.getElementById("panel");
 const canvas = document.getElementById("gm-canvas");
 const fullscreen = document.getElementById("fullscreen");
@@ -132,6 +133,14 @@ async function start(options, build) {
       form(false);
       return;
     }
+    if (kind === "field") {
+      keyboardFor(text);
+      return;
+    }
+    if (kind === "no-field") {
+      keyboardFor(null);
+      return;
+    }
     if (kind === "error") {
       console.log("GM-ERROR " + text);
       // The WebGPU build could not get a device after all: once, try the other build on
@@ -177,6 +186,90 @@ async function start(options, build) {
 // Not while the login form is up (nothing is being played), and not in a scripted run.
 addEventListener("beforeunload", (e) => {
   if (running && panel.hidden && !query.has("script") && !query.has("ui-script")) e.preventDefault();
+});
+
+// A phone's keyboard (docs/WEB.md 3.6). The browser shows one only for a field of its own,
+// and the canvas has text fields of the client's (a new character's name). So the client
+// says which of its fields has the keys and what it holds (`field`, `no-field`) and where
+// its fields are (`globalThis.gmFields`, CSS pixels), and the page keeps an invisible text
+// box: a finger that lands on a field focuses it, in the gesture, which brings the keyboard
+// up (the browser allows it only there; the client's own word comes a frame later and is
+// tried too). What the box types is sent to the client as text and keys on
+// `globalThis.gmTyped`: the box mirrors the field, and a change of its value is the
+// backspaces and the text that turn the old value into the new, so that a word replaced
+// whole by the keyboard's correction arrives right. The client says the field's value
+// whenever it changes, and the box takes it when it differs (a character the field did not
+// take) unless a composition is under way.
+const keys = field("keys");
+const coarse = matchMedia("(pointer: coarse)").matches;
+let fieldValue = null;
+let composing = false;
+globalThis.gmTyped = [];
+globalThis.gmFields = new Float32Array(0);
+function fieldUnderFinger(x, y) {
+  const r = globalThis.gmFields;
+  for (let i = 0; i + 3 < r.length; i += 4) {
+    if (x >= r[i] && x <= r[i] + r[i + 2] && y >= r[i + 1] && y <= r[i + 1] + r[i + 3]) return true;
+  }
+  return false;
+}
+function keyboardFor(value) {
+  fieldValue = value;
+  if (value === null) {
+    keys.value = "";
+    if (document.activeElement === keys) keys.blur();
+    return;
+  }
+  if (!composing && keys.value !== value) keys.value = value;
+  if (coarse && document.activeElement !== keys) keys.focus({ preventScroll: true });
+}
+keys.addEventListener("compositionstart", () => { composing = true; });
+keys.addEventListener("compositionend", () => { composing = false; });
+keys.addEventListener("input", () => {
+  if (fieldValue === null) return;
+  const was = [...fieldValue];
+  const now = [...keys.value];
+  let same = 0;
+  while (same < was.length && same < now.length && was[same] === now[same]) same++;
+  for (let i = same; i < was.length; i++) globalThis.gmTyped.push("kBackspace");
+  if (same < now.length) globalThis.gmTyped.push("t" + now.slice(same).join(""));
+  fieldValue = keys.value;
+});
+keys.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === "Escape" || e.key === "Tab") {
+    e.preventDefault();
+    globalThis.gmTyped.push("k" + e.key);
+  }
+});
+// A finger on a field, down and up: winit focuses the canvas on the press, which would
+// send the keyboard away, so the box takes the focus back in the same gesture.
+for (const kind of ["pointerdown", "pointerup"]) {
+  canvas.addEventListener(kind, (e) => {
+    if (e.pointerType !== "touch") return;
+    if (fieldUnderFinger(e.clientX, e.clientY)) keys.focus({ preventScroll: true });
+  });
+}
+
+// The view is the visible viewport: a phone's keyboard shortens it (docs/WEB.md 3.6), so
+// the canvas, and the form over it, keep to what is seen. Browsers that shrink the layout
+// viewport themselves (`interactive-widget=resizes-content`) agree with this; the rest,
+// and every browser in fullscreen, get it from here.
+function fitView() {
+  const vv = visualViewport;
+  if (!vv) return;
+  const short = vv.height < innerHeight - 1 || vv.width < innerWidth - 1;
+  view.style.width = short ? `${vv.width}px` : "";
+  view.style.height = short ? `${vv.height}px` : "";
+  view.style.left = short ? `${vv.offsetLeft}px` : "";
+  view.style.top = short ? `${vv.offsetTop}px` : "";
+}
+if (globalThis.visualViewport) {
+  visualViewport.addEventListener("resize", fitView);
+  visualViewport.addEventListener("scroll", fitView);
+}
+// The form's field the keyboard types in is scrolled into the form's view.
+panel.addEventListener("focusin", (e) => {
+  if (e.target.scrollIntoView) e.target.scrollIntoView({ block: "center" });
 });
 
 // Fullscreen takes the pointer and, where the browser has the Keyboard Lock API (Chromium),

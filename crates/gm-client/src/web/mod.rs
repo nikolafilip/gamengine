@@ -131,6 +131,29 @@ pub fn take_login() -> Option<(String, String, bool)> {
     Some((text("user")?, text("password")?, register))
 }
 
+/// What the page's keyboard typed since the last frame (WEB.md 3.6), in order: `t` and a
+/// text, or `k` and the name of a key (`Enter`, `Backspace`, CLIENT.md 9). The page pushes
+/// them on `globalThis.gmTyped`; they are taken off it here.
+pub fn take_typed() -> Vec<String> {
+    let global = js_sys::global();
+    let Ok(typed) = Reflect::get(&global, &"gmTyped".into()) else {
+        return Vec::new();
+    };
+    let Ok(typed) = typed.dyn_into::<js_sys::Array>() else {
+        return Vec::new();
+    };
+    let items: Vec<String> = typed.iter().filter_map(|v| v.as_string()).collect();
+    typed.set_length(0);
+    items
+}
+
+/// Where the text fields of the canvas are (WEB.md 3.6), four numbers each in CSS
+/// pixels: `globalThis.gmFields`, for the page's finger to find one.
+pub fn tell_fields(rects: &[f32]) {
+    let array = js_sys::Float32Array::from(rects);
+    let _ = Reflect::set(&js_sys::global(), &"gmFields".into(), &array);
+}
+
 thread_local! {
     /// What a refusal of the pointer falls into: nothing.
     static REFUSED: Closure<dyn FnMut(JsValue)> = Closure::new(|_why: JsValue| {});

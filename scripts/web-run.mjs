@@ -287,6 +287,27 @@ async function main() {
         } catch (e) { said("error " + e.message); }
       })`, awaitPromise: true, returnByValue: true })).result?.value;
       console.log(`web-run: touched (the canvas is ${seen})`);
+      // The phone's keyboard (docs/WEB.md 3.6): the page is told a field of the canvas has
+      // the keys and holds "ab"; its box is focused and holds the same; the keyboard
+      // corrects the word to "abc", backspaces one and presses Enter; what reaches the
+      // client's queue is the text, the key and the key, in order; and when the client
+      // says the field is gone the box lets the keyboard go.
+      const typed = (await send("Runtime.evaluate", { expression: `(() => {
+        const keys = document.getElementById("keys");
+        if (!keys) return "no box";
+        const fire = (type, init) => keys.dispatchEvent(new (type === "keydown" ? KeyboardEvent : InputEvent)(type, { bubbles: true, ...init }));
+        gmStatus("field", "ab");
+        const got = [];
+        got.push(document.activeElement === keys ? "focused" : "unfocused", keys.value);
+        keys.value = "abc"; fire("input", { inputType: "insertText", data: "c" });
+        keys.value = "ab"; fire("input", { inputType: "deleteContentBackward" });
+        fire("keydown", { key: "Enter" });
+        got.push(JSON.stringify(gmTyped));
+        gmStatus("no-field", "");
+        got.push(document.activeElement === keys ? "still focused" : "let go", keys.value === "" ? "empty" : keys.value);
+        return got.join(" ");
+      })()`, returnByValue: true })).result?.value;
+      console.log(`web-run: keyboard ${typed}`);
     }
     if (!shot && (Date.now() - started >= shotAt * 1000 || verdict !== null)) {
       shot = true;

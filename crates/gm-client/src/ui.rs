@@ -368,7 +368,14 @@ impl UiState {
     /// Whether a text field has the keyboard.
     #[cfg(test)]
     pub fn typing(&self) -> bool {
-        self.focus.as_ref().is_some_and(|f| f.starts_with("field:"))
+        self.typing_in().is_some()
+    }
+
+    /// The label of the text field that has the keyboard, if one has it (a page tells its
+    /// browser, which has the phone's keyboard, WEB.md 3.6).
+    #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+    pub fn typing_in(&self) -> Option<&str> {
+        self.focus.as_deref().and_then(|f| f.strip_prefix("field:"))
     }
 
     #[cfg(test)]

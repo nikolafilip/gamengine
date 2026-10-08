@@ -601,6 +601,12 @@ struct App {
     /// What the page was last told about the screens (CLIENT.md 4.1).
     #[cfg(target_arch = "wasm32")]
     told: String,
+    /// What the page was last told of the text field with the keyboard (WEB.md 3.6): its
+    /// value, or `None` for no field; and where the fields were, in CSS pixels.
+    #[cfg(target_arch = "wasm32")]
+    told_field: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    told_fields: Vec<f32>,
     /// The hash of the map that is loaded: what a zone's `Welcome` is compared with.
     map_hash: u64,
     /// The zone's connection ended and a person is at the client: the reason, for the
@@ -826,6 +832,10 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         was_locked: false,
         #[cfg(target_arch = "wasm32")]
         told: String::new(),
+        #[cfg(target_arch = "wasm32")]
+        told_field: None,
+        #[cfg(target_arch = "wasm32")]
+        told_fields: Vec::new(),
         zone_ended: None,
         opts,
         window: None,
@@ -3134,6 +3144,7 @@ impl App {
                 front.page_login(email, password, register);
             }
         }
+        self.page_keyboard();
         // The pointer: Escape gives it back to the browser and never reaches the page, so
         // losing it is what Escape is here: the menu opens, or the chat line is dropped.
         let locked = crate::web::pointer_locked();
@@ -3158,6 +3169,75 @@ impl App {
             self.grabbed = true;
         }
         self.was_locked = locked;
+    }
+
+    /// The phone's keyboard is the browser's (WEB.md 3.6): the page is told which text
+    /// field of the canvas has the keys and what it holds, and where the fields are, so
+    /// that a finger on one brings the keyboard up; what the keyboard typed comes back
+    /// through the page as the keys and text a keyboard of the window's would have sent.
+    #[cfg(target_arch = "wasm32")]
+    fn page_keyboard(&mut self) {
+        for typed in crate::web::take_typed() {
+            match typed.strip_prefix('k') {
+                Some(name) => {
+                    if let Some(key) = Key::parse(name) {
+                        self.ui_key(key);
+                    }
+                }
+                None => {
+                    if let Some(text) = typed.strip_prefix('t') {
+                        self.ui_text(text);
+                    }
+                }
+            }
+        }
+        let field = if self.capturing() {
+            self.ui.typing_in().map(|label| {
+                let head = format!("{label}: ");
+                self.ui
+                    .seen
+                    .iter()
+                    .filter(|s| s.kind == ui::SeenKind::Field)
+                    .find_map(|s| s.text.strip_prefix(&head))
+                    .unwrap_or("")
+                    .to_string()
+            })
+        } else {
+            None
+        };
+        if field != self.told_field {
+            match &field {
+                Some(value) => crate::web::tell_page("field", value),
+                None => crate::web::tell_page("no-field", ""),
+            }
+            self.told_field = field;
+        }
+        // The fields' places, for a finger (a mouse needs no keyboard brought up).
+        let mut rects = Vec::new();
+        if self.fingers.seen && self.capturing() {
+            let dpr = self
+                .active
+                .as_ref()
+                .map_or(1.0, |a| a.window.scale_factor() as f32)
+                .max(0.5);
+            for s in self
+                .ui
+                .seen
+                .iter()
+                .filter(|s| s.kind == ui::SeenKind::Field)
+            {
+                rects.extend([
+                    s.rect.x / dpr,
+                    s.rect.y / dpr,
+                    s.rect.w / dpr,
+                    s.rect.h / dpr,
+                ]);
+            }
+        }
+        if rects != self.told_fields {
+            crate::web::tell_fields(&rects);
+            self.told_fields = rects;
+        }
     }
 
     /// What the script does this frame goes in where a person's events would (CLIENT.md 9).
