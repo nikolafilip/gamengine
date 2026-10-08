@@ -38,7 +38,7 @@ impl Body {
         capsule_at(self.origin, Hull::Player, self.frame, self.crouched)
     }
 
-    fn centre(&self) -> Vec3 {
+    pub fn centre(&self) -> Vec3 {
         self.capsule().center()
     }
 }

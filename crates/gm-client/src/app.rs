@@ -4292,19 +4292,19 @@ impl App {
         // A bolt the own body let go this frame flies from the hand at once (the zone's
         // bolt shows a round trip later, well on its way).
         for action in &own_actions {
-            if let gm_core::sim::Action::Fire { ability, step, .. } = action
-                && let Some(gm_core::vocab::Verb::Projectile(p)) = c
-                    .sheet
-                    .kit
-                    .abilities
-                    .get(*ability as usize)
-                    .and_then(|a| a.steps.get(*step as usize))
-                    .map(|s| &s.verb)
+            if let gm_core::sim::Action::Fire {
+                ability,
+                step,
+                target,
+                ..
+            } = action
+                && let Some(ab) = c.sheet.kit.abilities.get(*ability as usize)
+                && let Some(gm_core::vocab::Verb::Projectile(p)) =
+                    ab.steps.get(*step as usize).map(|s| &s.verb)
             {
                 // From where the zone spawns it (`resolve_origin`): the weapon's offset in
                 // the body's frame, else the eyes. Not the camera: in the third person
                 // the eye of the body is well in front of it.
-                let dir = gm_core::sim::view_dir(c.mover.yaw, c.mover.pitch);
                 let from = match p.spawn {
                     gm_core::vocab::Origin::Weapon { offset } => {
                         let (fwd, right) = gm_core::movement::yaw_vectors(c.mover.yaw);
@@ -4312,6 +4312,37 @@ impl App {
                     }
                     _ => eye,
                 };
+                // Where the zone sends it (MODES.md 5.3): led to its target when that is
+                // within the ability's range and in sight, as the zone leads it; else
+                // along the body's look. (Until 2026-10-08 the tracer always flew the
+                // look's way, which in the RPG mode is the camera's: the director saw
+                // the shard leave toward the camera's horizon while the zone's bolt
+                // went for the dummy.)
+                let led = rpg_bodies
+                    .iter()
+                    .find(|b| *target != 0 && b.id == *target)
+                    .filter(|b| {
+                        let centre = b.centre();
+                        ab.range > 0.0
+                            && (centre - c.mover.mv.origin).truncate().length() <= ab.range
+                            && gm_core::sim::sees(bsp, c.mover.eye(), centre)
+                    })
+                    .map(|b| {
+                        let vel = others
+                            .iter()
+                            .find(|e| e.id == b.id)
+                            .map_or(Vec3::ZERO, |e| e.vel);
+                        let point = gm_core::sim::aim::lead(
+                            from,
+                            b.centre(),
+                            vel,
+                            p.speed,
+                            p.gravity_scale,
+                        );
+                        (point - from).normalize_or_zero()
+                    })
+                    .filter(|d| d.length_squared() > 0.5);
+                let dir = led.unwrap_or_else(|| gm_core::sim::view_dir(c.mover.yaw, c.mover.pitch));
                 self.effects
                     .launch(from, dir * p.speed, p.radius, damage_ink(&p.damage));
             }
@@ -4412,16 +4443,12 @@ impl App {
             _ => {
                 // The own body, posed by the server's animation state. It faces where
                 // the mover does while a turn holds it (toward its target for a
-                // target-action, MODES.md 5.3; the magnet's turn, 4.2); an RPG body with
-                // a target faces it between actions too; otherwise the camera's way.
+                // target-action, MODES.md 5.3; the magnet's turn, 4.2) and the camera's
+                // way otherwise: between actions an RPG body does not face its target
+                // (the director, 2026-10-08).
                 let build = &c.sheet.build;
                 let look = if c.mover.lock_yaw.is_some() {
                     c.mover.yaw
-                } else if rpg
-                    && let Some(t) = self.rpg.target
-                    && let Some(e) = others.iter().find(|e| e.id == t)
-                {
-                    gm_core::sim::yaw_toward(centre, e.pos)
                 } else {
                     self.sim.yaw
                 };
