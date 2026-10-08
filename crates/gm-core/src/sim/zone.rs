@@ -1233,11 +1233,16 @@ impl Zone {
         } else {
             origin
         };
+        let lag = tick_delta(self.tick, view_tick).clamp(0, p.max_rewind as i32) as Tick;
         // Where the bolt goes: at a target, led as a mind leads (MODES.md 5.3), when the
         // target is within the ability's range and in sight; else at the point the eye
         // ray meets, turned by the spray so far (3.3): the bolt leaves the muzzle, beside
         // and below the eye, toward the crosshair's point, so it lands there and not a
-        // hand's width to its side (the director 2026-10-07, 10.2).
+        // hand's width to its side (the director 2026-10-07, 10.2). The lead is taken
+        // from where the target was at the tick the attacker saw, as the forward step
+        // below spawns the bolt there: led from where the target stands now, the bolt
+        // got to the point `lag` ticks before the target did and missed every walker
+        // (the director 2026-10-08, 10.3).
         let led = self.lead_at(
             world,
             p,
@@ -1246,6 +1251,7 @@ impl Zone {
             origin,
             def.speed,
             def.gravity_scale,
+            self.tick.wrapping_sub(lag),
         );
         let dir = match led {
             Some(d) => d,
@@ -1263,7 +1269,6 @@ impl Zone {
             dir
         };
         let owner_vel = p.mover.mv.velocity;
-        let lag = tick_delta(self.tick, view_tick).clamp(0, p.max_rewind as i32) as Tick;
         let view_lag =
             tick_delta(self.tick, p.view_claimed).clamp(0, MAX_CLAIMED_VIEW_LAG as i32) as Tick;
         let spread_deg = def.spread_deg + shot.cone_deg;
@@ -1565,8 +1570,9 @@ impl Zone {
     }
 
     /// The direction from `origin` to where `target` will be when a bolt of `speed` and
-    /// `gravity` gets there (MODES.md 5.3: the lead a mind takes), or `None` without a
-    /// target in range.
+    /// `gravity` let go at tick `at` gets there (MODES.md 5.3: the lead a mind takes), or
+    /// `None` without a target in range. The target is taken where the history has it at
+    /// `at` (where it stands now when the history does not reach), moving as it does now.
     #[allow(clippy::too_many_arguments)]
     fn lead_at(
         &self,
@@ -1577,9 +1583,13 @@ impl Zone {
         origin: Vec3,
         speed: f32,
         gravity: f32,
+        at: Tick,
     ) -> Option<Vec3> {
         let t = self.target_in_range(world, p, target, range)?;
-        let centre = t.capsule().center();
+        let centre = match self.history.body_at(at, t.id) {
+            Some((o, crouched)) => capsule_at(o, t.mover.mv.hull, t.frame(), crouched).center(),
+            None => t.capsule().center(),
+        };
         let point = crate::sim::aim::lead(origin, centre, t.mover.mv.velocity, speed, gravity);
         Some((point - origin).normalize_or_zero())
     }

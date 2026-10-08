@@ -3321,3 +3321,58 @@ fn a_frostweavers_shard_with_a_standing_target_flies_at_it() {
     );
     assert_eq!(hits(&zone, HitKind::Projectile), 1, "the shard lands");
 }
+
+#[test]
+fn a_frostweavers_shard_lands_on_a_walking_target_seen_a_round_trip_ago() {
+    // The blade walks across the frostweaver's front, 300 u out, at its full pace. The
+    // caster's inputs claim a view 8 ticks old, as a client's do (a 6-tick interpolation
+    // delay and the half round trip), so the zone spawns the shard at that tick and steps
+    // it forward. Until 2026-10-08 the lead was taken from where the target stood *now*
+    // while the bolt left from 8 ticks ago: it arrived 8 ticks before the target did, a
+    // body's width short of a walker, and the director saw his shards miss anyone who
+    // moved (while the client's tracer, led from the same old view, flew true).
+    let pack = test_content::pack(RATE);
+    let world = BoxWorld::floor();
+    let mut zone = zone_with(vec![
+        (Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        (Vec3::new(300.0, 0.0, REST_Z), 90.0),
+    ]);
+    let caster = zone.add_player_at(
+        pack.build("frostweaver").unwrap().clone(),
+        1,
+        Vec3::new(0.0, 0.0, REST_Z),
+        0.0,
+    );
+    let walker = zone.add_player_at(
+        pack.build("blade").unwrap().clone(),
+        2,
+        Vec3::new(300.0, 0.0, REST_Z),
+        90.0,
+    );
+    let walk = input(90.0, 1.0, 0);
+    let idle = input(0.0, 0.0, 0);
+    // The walker gets up to pace.
+    run(&mut zone, &world, &[(caster, idle), (walker, walk)], 30);
+    let pace = zone.player(walker).unwrap().mover.mv.velocity.length();
+    assert!(pace > 200.0, "the blade walks at {pace}");
+    let viewed = |zone: &Zone| zone.tick.wrapping_sub(8);
+    let v = viewed(&zone);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (caster, at(walker, input(0.0, 0.0, buttons::PRIMARY))),
+            (walker, walk),
+        ],
+        v,
+    );
+    for _ in 0..60 {
+        let v = viewed(&zone);
+        tick(&mut zone, &world, &[(caster, idle), (walker, walk)], v);
+    }
+    assert_eq!(
+        hits(&zone, HitKind::Projectile),
+        1,
+        "the shard lands on the walker"
+    );
+}
