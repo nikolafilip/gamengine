@@ -198,6 +198,13 @@ phone() {
     || { echo "FAIL: the camera did not turn (yaw $(f yaw "$first") then $(f yaw "$done_line"))"; status=1; }
   [[ -n "$(f pos "$first")" && "$(f pos "$first")" != "$(f pos "$done_line")" ]] && echo "OK: the stick walked the body ($(f pos "$first") to $(f pos "$done_line"))" \
     || { echo "FAIL: the body did not walk (pos $(f pos "$first") then $(f pos "$done_line"))"; status=1; }
+  # The page's keyboard box (WEB.md 3.6): told of a field holding "ab" it takes the focus
+  # and the value; a correction to "abc", a backspace and Enter reach the client's queue as
+  # text, key, key; told the field is gone it lets the keyboard go, emptied.
+  local keyboard; keyboard="$(/usr/bin/grep -a '^web-run: keyboard' "$tmp/browser-phone.log" | tail -1 || true)"
+  [[ "$keyboard" == 'web-run: keyboard focused ab ["tc","kBackspace","kEnter"] let go empty' ]] \
+    && echo "OK: the page's box relays the phone's keyboard" \
+    || { echo "FAIL: the page's keyboard box: ${keyboard:-nothing reported}"; status=1; }
 }
 phone
 

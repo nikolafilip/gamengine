@@ -269,6 +269,46 @@ pushed forward for 1.5 s, a swipe across the right, a tap), then reads the clien
 last (the report carries them since this change). The screenshot is `browser-phone.png`
 under `KEEP`. What a phone cannot do yet is listed in 10.
 
+### 3.6 The phone's keyboard, and the keyboard over the page (2026-10-08, evening)
+
+The director played the cloud page (2.2) on his phone in fullscreen and stopped at the new
+character: its name is a field of the canvas, and a phone shows a keyboard only for a field
+of the browser's own, so nothing came up; and at the login form the keyboard that did come
+up covered the fields, so he typed blind. Two things, both in the page:
+
+- **The box.** The page keeps an invisible text box (`#keys`, a pixel wide, transparent).
+  The client tells the page which of its text fields has the keys and what it holds
+  (`gmStatus("field", value)` whenever either changes, `no-field` when none has them;
+  `app::page_keyboard`, `UiState::typing_in`) and leaves where its fields are, in CSS
+  pixels, in `globalThis.gmFields` (while a finger has been seen and a screen is up). On a
+  coarse pointer a finger that lands on a field focuses the box *in the gesture*, down and
+  up (winit focuses the canvas on the press, which would send the keyboard away; a browser
+  brings a keyboard up for a programmatic focus only in a gesture, Firefox apart), and the
+  client's word a frame later tries the same. The box mirrors the field: what the keyboard
+  types changes the box's value, and the page sends the client the backspaces and the text
+  that turn the old value into the new (`globalThis.gmTyped`: `t` and a text, `k` and a
+  key's name; `web::take_typed` empties it each frame into the same `ui_text` and `ui_key`
+  a keyboard of the window's reaches), so a word a phone's correction replaces whole
+  arrives right; Enter, Escape and Tab are keys. When the field's value differs from the
+  box's (a character the field did not take: a space in a name, a letter in an amount) the
+  box takes the field's, unless a composition is under way. `no-field` empties the box and
+  lets the keyboard go. A mouse never focuses the box: the canvas keeps its keyboard.
+- **The view.** The stage holds a `#view`, and everything is placed in that. When the
+  visual viewport is shorter than the window (a keyboard up) the page sizes the view to it
+  (`visualViewport` resize and scroll, `fitView`): the canvas shrinks, so the client's UI
+  fits what is left (CLIENT.md 3's fit rule; a 412-CSS-pixel phone with a keyboard leaves
+  about 200, scale 1 of the 360-unit panels), and the form, centred in the view with
+  `max-height: 100%` and a scroll of its own, stays above the keyboard with its focused
+  field scrolled into view. The viewport also asks the browser for the same
+  (`interactive-widget=resizes-content`, Chromium 108+; Firefox's default); the view is
+  sized by the page because a browser sizes a fullscreen element to the screen whatever it
+  is told, and fullscreen is where the director met it.
+
+The phone step of `check-web.sh` (3.5) also probes the box: told of a field holding `ab`
+the box is focused with that value, a correction to `abc`, a backspace and Enter reach
+`gmTyped` as `tc`, `kBackspace`, `kEnter`, and `no-field` lets it go, emptied
+(`web-run: keyboard ...`). The page grew by 4,428 bytes (9, `max_js_bytes`).
+
 ## 4. The model cache without a filesystem
 
 MODELS.md 8 holds, with the Cache API in place of the directory
@@ -308,7 +348,9 @@ asks for the password a second time), a status line and a fullscreen control; fu
 takes the stage, so the form and the status line are there when the client asks for them. `boot.js` picks the build (3.2), reads `config.json` and the query
 string, leaves the options in `globalThis.gmOptions` and imports the build; the client
 reports to the page through `globalThis.gmStatus(kind, text)` (`status`, `error`, `stats`,
-`done`, and since Phase 10 `login`, `login-wait`, `screen` and `say`).
+`done`, since Phase 10 `login`, `login-wait`, `screen` and `say`, and since 3.6 `field` and
+`no-field`, the text field of the canvas that has the keys); and what the client leaves for
+the page (`globalThis.gmFields`) and the page for the client (`gmLogin`, `gmTyped`).
 
 **The form is the client's login screen** (CLIENT.md 4.1), so that the browser can fill and
 remember what goes into it. The client starts at once, behind the form, and says when it
@@ -452,12 +494,14 @@ atlases per density (LOOK.md 2.2 and 11.4) the builds are **1,112,187 bytes (376
 packed)** and 3,103,848 (948,678); with the fight's effects and protocol v9 (LOOK.md 13)
 **1,136,246 (383,589 packed)** and 3,128,065 (956,743); with the fingers and the
 canvas's device pixels (3.5, 2026-10-08) **1,249,355 (421,092 packed)**, +12,000 over the
-1,237,363 before it, and 3,240,891 (991,920).
+1,237,363 before it, and 3,240,891 (991,920). The page's JavaScript (glue, loader, page)
+is 184,786 bytes with the phone's keyboard (3.6), 170,358 before it; `max_js_bytes` 192 KiB.
 
 ## 10. Deliberately absent
 
-- On a phone (3.5): the chat line and the stall's prices (no keyboard without a field the
-  browser knows); the hotbar past eight cells; a second stick for the camera in the gun
+- On a phone (3.5): the chat line (it is not a field of the toolkit, so the keyboard box of
+  3.6 does not reach it; the stall's prices are fields, and type since 3.6); the hotbar
+  past eight cells; a second stick for the camera in the gun
   mode (the right drag is the look there, and a tap the shot); the look's sensitivity for
   fingers as a setting of its own (the gain is a number in `touch.rs`); iOS, where
   Safari has no fullscreen on a phone and WebTransport only since 2025 (untried).

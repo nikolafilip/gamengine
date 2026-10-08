@@ -324,8 +324,9 @@ ratio as the scale, so a cell is finger-sized), and the controls appear from the
 finger seen. **Proposed numbers**, for the director to play: the stick's rim at 56 dots and
 its dead zone of an eighth; a long press at 0.45 s; a tap's primary held 0.12 s; a swipe
 across the width half a turn (`touch::LOOK_GAIN` 3 counts a CSS pixel); the stick's share
-of the width 45 %. The chat line and the stall's prices have no keyboard on a phone yet
-(WEB.md 10).
+of the width 45 %. The canvas's text fields (a new character's name, the stall's prices)
+type from the phone's keyboard through a box of the page's (WEB.md 3.6); the chat line is
+not a field of the toolkit and has no keyboard on a phone yet (WEB.md 10).
 
 ## 6. What goes
 

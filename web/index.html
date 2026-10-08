@@ -2,16 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, interactive-widget=resizes-content">
 <title>gamengine</title>
 <style>
-  html, body, #stage { margin: 0; height: 100%; background: #101014; color: #d8d8e0; font: 14px/1.4 monospace; overflow: hidden; overscroll-behavior: none; }
+  html, body { margin: 0; height: 100%; background: #101014; color: #d8d8e0; font: 14px/1.4 monospace; overflow: hidden; overscroll-behavior: none; }
+  /* The view inside the stage is the visible viewport: everything is placed in it, and
+     boot.js shortens it while a phone's keyboard is up (docs/WEB.md 3.6), so the canvas and
+     the form stay in view above the keyboard. (The stage itself is what goes fullscreen,
+     and a browser sizes a fullscreen element to the screen whatever it is told.) */
+  #stage { position: fixed; inset: 0; overflow: hidden; }
+  #view { position: absolute; inset: 0; }
   /* A finger on the canvas is the game's (docs/WEB.md 3.5): no scrolling, no zooming, no
      selection and no tap flash of the browser's. */
-  #gm-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none;
+  #gm-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none;
                touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
-  #panel { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 21em; padding: 1.2em 1.4em;
+  #panel { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 21em; padding: 1.2em 1.4em;
+           max-height: 100%; box-sizing: border-box; overflow-y: auto;
            background: #1a1a22; border: 1px solid #3a3a4a; z-index: 2; }
+  /* The phone's keyboard types into this box, which nobody sees; what it types goes to the
+     canvas's text field (docs/WEB.md 3.6). */
+  #keys { position: absolute; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; z-index: 1; }
   #panel h1 { margin: 0 0 .6em; font-size: 16px; }
   #panel label { display: block; margin: .5em 0 .1em; color: #9a9aaa; }
   #panel input[type=text], #panel input[type=email], #panel input[type=password] {
@@ -20,9 +30,9 @@
   #notice { margin: .8em 0 0; min-height: 1.4em; color: #ffb060; }
   button { padding: .4em .9em; background: #2c2c3c; color: #e8e8f0; border: 1px solid #50506a; font: inherit; cursor: pointer; }
   button:hover { background: #3a3a50; }
-  #status { position: fixed; left: 12px; bottom: 10px; z-index: 3; text-shadow: 0 0 3px #000; white-space: pre-wrap; max-width: 90vw; pointer-events: none; }
+  #status { position: absolute; left: 12px; bottom: 10px; z-index: 3; text-shadow: 0 0 3px #000; white-space: pre-wrap; max-width: 90vw; pointer-events: none; }
   #status.error { color: #ff8070; }
-  #fullscreen { position: fixed; right: 10px; bottom: 8px; z-index: 3; opacity: .55; }
+  #fullscreen { position: absolute; right: 10px; bottom: 8px; z-index: 3; opacity: .55; }
   #fullscreen:hover { opacity: 1; }
   [hidden] { display: none !important; }
   /* A touch screen: the fullscreen control large enough for a finger, the form no wider
@@ -41,6 +51,7 @@
 <!-- Everything a person looks at is inside the stage: fullscreen takes the stage, so the
      form and the status line are still there when the client asks for them. -->
 <div id="stage">
+<div id="view">
 <canvas id="gm-canvas" tabindex="0"></canvas>
 <form id="panel" hidden>
   <h1>gamengine</h1>
@@ -55,6 +66,8 @@
 </form>
 <div id="status" role="status"></div>
 <button id="fullscreen" type="button" hidden>fullscreen</button>
+<input id="keys" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="done" aria-hidden="true" tabindex="-1">
+</div>
 </div>
 <script type="module" src="boot.js"></script>
 </body>
