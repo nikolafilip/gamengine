@@ -141,6 +141,12 @@ async function start(options, build) {
       keyboardFor(null);
       return;
     }
+    if (kind === "fullscreen") {
+      const on = !!document.fullscreenElement;
+      if (text === "toggle" ? !on : text === "on") enterFullscreen();
+      else leaveFullscreen();
+      return;
+    }
     if (kind === "error") {
       console.log("GM-ERROR " + text);
       // The WebGPU build could not get a device after all: once, try the other build on
@@ -276,7 +282,9 @@ panel.addEventListener("focusin", (e) => {
 // the keys a tab normally keeps: Ctrl+W, Tab, Esc (leaving is then a long press of Esc).
 // On a phone, fullscreen also turns the screen to landscape where the browser allows
 // (docs/WEB.md 3.5): the game is wide, and a phone held upright shows little of it.
-fullscreen.addEventListener("click", async () => {
+// The game's menu asks for the same, and for the way back (docs/WEB.md 3.7): the tap on
+// its button is a gesture the browser still honours a frame later.
+async function enterFullscreen() {
   try {
     await stage.requestFullscreen();
     if (navigator.keyboard && navigator.keyboard.lock) await navigator.keyboard.lock();
@@ -286,11 +294,21 @@ fullscreen.addEventListener("click", async () => {
     return;
   }
   try {
-    if (screen.orientation && screen.orientation.lock && matchMedia("(pointer: coarse)").matches) {
+    if (screen.orientation && screen.orientation.lock && coarse) {
       await screen.orientation.lock("landscape");
     }
   } catch { /* a desktop, or a browser that keeps the orientation to itself */ }
-});
+}
+async function leaveFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+  } catch (e) {
+    say("leaving fullscreen refused: " + e.message, true);
+  }
+  canvas.focus();
+}
+fullscreen.addEventListener("click", enterFullscreen);
+if (coarse) fullscreen.textContent = "tap here for fullscreen";
 
 (async () => {
   if (typeof WebTransport === "undefined") {

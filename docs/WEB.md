@@ -309,6 +309,22 @@ the box is focused with that value, a correction to `abc`, a backspace and Enter
 `gmTyped` as `tc`, `kBackspace`, `kEnter`, and `no-field` lets it go, emptied
 (`web-run: keyboard ...`). The page grew by 4,428 bytes (9, `max_js_bytes`).
 
+### 3.7 Fullscreen in the way, and from the menu (2026-10-08, late)
+
+The director asked for the fullscreen control to be "more invasive" on a phone, and for a
+way to switch in the game: a phone's browser bars take a third of the game and a small
+control top left was missed. On a coarse pointer the page's control is now a bar across
+the top (`#fullscreen`, 18 px bold, "tap here for fullscreen"), stopping 64 px short of the
+right edge where the game's own menu button sits, and gone in fullscreen as before. The
+game's menu has a **Fullscreen** / **Leave fullscreen** button in a browser
+(`Offers::page_fullscreen`, `MenuAction::PageFullscreen`): the client tells the page
+(`gmStatus("fullscreen", "toggle")`, also `on` and `off`), and the page enters or leaves
+as its own control does (`enterFullscreen`, `leaveFullscreen`), which the browser allows
+because the tap that pressed the button, a frame before, is still a gesture. The button's
+label follows `document.fullscreenElement` (`web::fullscreen_on`). Natively the menu keeps
+its fullscreen setting. Before the game (the characters) the way back is the phone's own
+(back, or a swipe), as it was.
+
 ## 4. The model cache without a filesystem
 
 MODELS.md 8 holds, with the Cache API in place of the directory
@@ -349,7 +365,7 @@ takes the stage, so the form and the status line are there when the client asks 
 string, leaves the options in `globalThis.gmOptions` and imports the build; the client
 reports to the page through `globalThis.gmStatus(kind, text)` (`status`, `error`, `stats`,
 `done`, since Phase 10 `login`, `login-wait`, `screen` and `say`, and since 3.6 `field` and
-`no-field`, the text field of the canvas that has the keys); and what the client leaves for
+`no-field`, the text field of the canvas that has the keys, and since 3.7 `fullscreen`); and what the client leaves for
 the page (`globalThis.gmFields`) and the page for the client (`gmLogin`, `gmTyped`).
 
 **The form is the client's login screen** (CLIENT.md 4.1), so that the browser can fill and
