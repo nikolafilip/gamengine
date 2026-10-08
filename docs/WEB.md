@@ -116,6 +116,10 @@ A pinned hash does not make the *page* servable from anywhere: WebTransport need
 context, so the page itself must come from `https://` or from `http://localhost`. A LAN
 party by IP address therefore needs a real certificate for the page's host or a tunnel;
 pinned hashes are for development on one machine and for zones behind a properly served page.
+`scripts/dev/cloud.sh` is the second case for friends over the internet (2026-10-08): the play
+stack of `scripts/dev/play.sh` on the cheapest Hetzner Cloud server (static musl binaries, the
+browser build), the page at a real name over https (Caddy, Let's Encrypt), the hub's and the
+zones' endpoints on their pinned certificates; `up`, `deploy`, `status`, `logs`, `play`, `down`.
 
 The QUIC endpoint's certificate is unchanged (long-lived, self-signed, pinned by DER).
 
