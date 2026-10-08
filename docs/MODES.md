@@ -305,6 +305,28 @@ secondary at it; wheel: 120–400 u; `Tab`, `Esc`; the hotbar on `1`–`8` (the 
 guards; `Space` jumps. A ground marker where the body is going; the target frame top
 centre; a ring under the target (LOOK.md 13).
 
+### 5.6 On a phone (2026-10-08)
+
+The director opened the page on a phone and nothing answered a tap (WEB.md 3.5). A touch
+screen plays every mode now, with the RPG mode the one made for it:
+
+| | RPG | action and gun |
+|---|---|---|
+| walk | a tap on the ground (5.5); the stick is not drawn | a stick on the left of the frame, around where the finger landed |
+| camera | a drag anywhere; two fingers for the distance | a drag on the right |
+| target / primary | a tap on a body, then on the target | a tap on the right: one blow, one shot |
+| secondary | a long press on the target, or the `2` button bottom right | the `2` button bottom right, held |
+| jump, guard, abilities | the hotbar's cells, as their keys; Shift's cell guards while held | `jump` bottom right; the hotbar's cells (`C` guards, `LMB`/`RMB` fire) |
+| menu, Tab | `menu` top right (Escape); no Tab: tap the next body | `menu` top right |
+
+The HUD and the screens are drawn larger on a touch screen (WEB.md 3.5: the device's pixel
+ratio as the scale, so a cell is finger-sized), and the controls appear from the first
+finger seen. **Proposed numbers**, for the director to play: the stick's rim at 56 dots and
+its dead zone of an eighth; a long press at 0.45 s; a tap's primary held 0.12 s; a swipe
+across the width half a turn (`touch::LOOK_GAIN` 3 counts a CSS pixel); the stick's share
+of the width 45 %. The chat line and the stall's prices have no keyboard on a phone yet
+(WEB.md 10).
+
 ## 6. What goes
 
 `Viewport` in the client (`app.rs`) becomes `Mode`, read from the build. `V`, `buttons::
