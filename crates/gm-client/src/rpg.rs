@@ -70,8 +70,6 @@ pub struct Rpg {
     pub walk: Option<Vec3>,
     /// The action waiting for the body to be in range of its target.
     pub act: Option<(Act, u32)>,
-    /// The primary repeats on the target every cooldown (MODES.md 5.3).
-    pub repeat: bool,
     /// The bodies Tab has been through since it last came round.
     cycled: Vec<u32>,
     nav: Option<NavGrid>,
@@ -107,14 +105,12 @@ impl Rpg {
     pub fn clear_target(&mut self) {
         self.target = None;
         self.act = None;
-        self.repeat = false;
     }
 
     /// Movement keys: the walk and the waiting action end, the target stays.
     pub fn moved_by_hand(&mut self) {
         self.walk = None;
         self.act = None;
-        self.repeat = false;
         self.navigator.clear();
     }
 
@@ -161,7 +157,6 @@ impl Rpg {
             let goal = if down.start_solid { at } else { down.end };
             self.walk = Some(goal + Vec3::Z * (-Hull::Player.mins().z));
             self.act = None;
-            self.repeat = false;
             self.navigator.clear();
         }
     }
@@ -186,17 +181,12 @@ impl Rpg {
         }
     }
 
-    /// A key with a target (MODES.md 5.3): the action waits for the range; the primary
-    /// pressed with a target repeats, pressed again it stops.
+    /// A key with a target (MODES.md 5.3): the action waits for the range and is pressed
+    /// once; another press is another action. Nothing repeats by itself: the pace of a
+    /// fight is the player's (the director, 2026-10-08).
     pub fn ask(&mut self, act: Act) {
         let Some(t) = self.target else { return };
-        if act == Act::Primary && self.repeat {
-            self.repeat = false;
-            self.act = None;
-            return;
-        }
         self.act = Some((act, t));
-        self.repeat = act == Act::Primary;
         self.walk = None;
     }
 
@@ -211,7 +201,6 @@ impl Rpg {
             && !present(t)
         {
             self.act = None;
-            self.repeat = false;
         }
     }
 
@@ -265,19 +254,14 @@ impl Rpg {
                                 Act::Secondary => out.buttons |= buttons::SECONDARY,
                                 Act::Active(n) => out.ability = n,
                             }
-                            if !self.repeat {
-                                self.act = None;
-                            }
+                            self.act = None;
                         }
                         goal = None;
                     } else {
                         goal = Some(b.origin);
                     }
                 }
-                _ => {
-                    self.act = None;
-                    self.repeat = false;
-                }
+                _ => self.act = None,
             }
         }
         if let Some(g) = goal {
@@ -291,7 +275,6 @@ impl Rpg {
                 }
                 if steer.blocked {
                     self.act = None;
-                    self.repeat = false;
                 }
             } else {
                 let wish = (steer.toward - pos).truncate().normalize_or_zero();

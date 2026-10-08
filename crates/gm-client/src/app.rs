@@ -4410,11 +4410,24 @@ impl App {
                 ))
             }
             _ => {
-                // The own body, posed by the server's animation state.
+                // The own body, posed by the server's animation state. It faces where
+                // the mover does while a turn holds it (toward its target for a
+                // target-action, MODES.md 5.3; the magnet's turn, 4.2); an RPG body with
+                // a target faces it between actions too; otherwise the camera's way.
                 let build = &c.sheet.build;
+                let look = if c.mover.lock_yaw.is_some() {
+                    c.mover.yaw
+                } else if rpg
+                    && let Some(t) = self.rpg.target
+                    && let Some(e) = others.iter().find(|e| e.id == t)
+                {
+                    gm_core::sim::yaw_toward(centre, e.pos)
+                } else {
+                    self.sim.yaw
+                };
                 let yaw = facing(
                     self.facings.get(&OWN).copied(),
-                    self.sim.yaw,
+                    look,
                     c.mover.mv.velocity,
                     own_anim,
                     frame_dt,
