@@ -91,7 +91,10 @@ focus, the scroll positions, the carets and the widget the button went down on.
   The bundle has an atlas made for each scale and the client draws with that one (LOOK.md
   2.2): a dot is 1 to 4 pixels, a texel always one.
 - **Widgets.** A panel (a plate with a title), a label, a paragraph (wrapped at words), a
-  button (also one that is off: drawn faint, takes no click and no focus), a row of buttons
+  button (also one that is off: drawn faint, takes no click and no focus; one that is off
+  for a reason says the reason beside the pointer once the pointer has rested on it for
+  the tooltip's 150 ms, and for two seconds after a press on it, a tap on a phone, so
+  that a click on a grey button never looks like a click that did nothing), a row of buttons
   as wide as their words, a text field (one line; optionally shown as stars; a maximum in
   characters and in bytes; left, right, home, end, backspace, delete; no selection), a list
   (rows of columns, one selected; wheel, arrows, Page Up and Down, Home, End; a click
@@ -122,7 +125,8 @@ focus, the scroll positions, the carets and the widget the button went down on.
 - **What it records.** Everything a frame showed (labels, buttons that are on, fields with
   their values unless secret, rows, boxes, sliders) is kept with its rectangle until the
   next frame: a UI script (9) finds a button by its text, and a test asks what a screen
-  said. So is every text that had no room to be drawn whole: a test asks that there is
+  said. A button that is off for a reason is kept as a label, `Wear it (off: ...)`, so
+  that no script finds it and a test reads why it is off. So is every text that had no room to be drawn whole: a test asks that there is
   none. The cells of a list that were cut to their column are recorded apart (a long name
   in the characters' list may be cut; a price may not, and the screens of ITEMS.md 6 are
   tested for none).
@@ -207,7 +211,15 @@ The HUD as before, and:
   buys, the frame, the armour, the aspects and the kit, edited anywhere; "Wear it" is
   offered beside the trainer (the client knows one by a body nothing hurts), or anywhere
   in a zone with none, where the zone wears it at the next respawn (the arena) or says why
-  not (the dungeon). The zone's answer is the page's note. Its shape since the evening of
+  not (the dungeon). Away from the trainer, with nothing changed, or with a draft the
+  pack refuses, "Wear it" is grey and **says why on itself** (3: the reason beside the
+  pointer when it rests on the button or presses it; since 2026-10-08, when the director
+  pressed the grey button and took the nothing that followed for a change that did not
+  stick). The zone's answer is the page's note and a line on the HUD, so that it is read
+  with the page up or closed: `worn, and saved` or `saved; worn at the next respawn`
+  (MATRIX.md 9.1: the zone answers once the hub holds the build), else the zone's words
+  (`stand by the trainer in the town`, `not in a fight: wait a moment`, `worn here, but
+  not saved: ...`). Its shape since the evening of
   2026-10-06 (the director: "confusing and can't even read everything"; Gemini's review of
   a capture against Ether Saga's and Tales of Pirates' sheets agreed on every point): a
   panel 820 units wide where the frame allows, two columns under a row of presets. Left,

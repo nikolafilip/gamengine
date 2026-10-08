@@ -229,6 +229,20 @@ impl Online {
         }
     }
 
+    /// Somebody nothing hurts stands in this zone: a trainer, where a build is worn at
+    /// once (MATRIX.md 9.1). The client is not told whether a zone is of the world: one
+    /// without a trainer (the arena) wears a build at the next respawn; the dungeon has
+    /// neither, and the zone says so when asked.
+    fn has_trainer(&self) -> bool {
+        let Some(pack) = &self.pack else {
+            return false;
+        };
+        self.kinds.values().any(|k| {
+            matches!(k, BodyKind::Creature { def }
+                if pack.creatures.get(*def as usize).is_some_and(|d| d.npc))
+        })
+    }
+
     fn build_name_of(&self, pack: &ContentPack, build: &gm_core::build::Build) -> String {
         pack.builds
             .iter()
@@ -2694,16 +2708,13 @@ impl App {
         let (Some(c), Some(pack)) = (&o.client, &o.pack) else {
             return false;
         };
-        // The client is not told whether the zone is of the world: one with somebody
-        // nothing hurts in it has a trainer; one without (the arena) wears a build at
-        // the next respawn; the dungeon has neither, and the zone says so when asked.
+        if !o.has_trainer() {
+            return true;
+        }
         let npc = |id: &u32| {
             matches!(o.kinds.get(id), Some(BodyKind::Creature { def })
                 if pack.creatures.get(*def as usize).is_some_and(|d| d.npc))
         };
-        if !o.kinds.keys().any(npc) {
-            return true;
-        }
         let me = c.mover.mv.origin;
         c.others_at(c.render_tick(0.0))
             .iter()
@@ -3641,11 +3652,17 @@ impl App {
                         }
                     }
                     FromZone::RespecResult(result) => {
-                        o.respec_note = match result {
-                            Ok(()) => "respec accepted (next respawn)".into(),
-                            Err(e) => format!("respec refused: {e}"),
+                        // The zone's word is the page's note and a line on the HUD, so
+                        // that it is read with the page up or closed (MATRIX.md 9.1).
+                        let (note, colour) = match result {
+                            Ok(()) if o.has_trainer() => {
+                                ("worn, and saved".to_string(), hud::GREEN)
+                            }
+                            Ok(()) => ("saved; worn at the next respawn".to_string(), hud::GREEN),
+                            Err(e) => (e, hud::ORANGE),
                         };
-                        log::info!("{}", o.respec_note);
+                        o.respec_note = note.clone();
+                        o.say(note, colour);
                     }
                     FromZone::TravelTicket {
                         zone,

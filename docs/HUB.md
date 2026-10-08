@@ -68,7 +68,8 @@ enum HubRequest {
     // accounts (session: the Login response's session id, 24 h, in-memory)
     Characters { session: SessionId },
     CreateCharacter { session: SessionId, name: String, build: BuildChoice },  // preset name or full build
-    SetBuild { session: SessionId, character: CharacterId, build: BuildChoice },
+    SetBuild { session: SessionId, character: CharacterId, build: BuildChoice },  // an offline character's (NotFound while it plays);
+                                                                                // no screen calls it: a build worn in a zone comes with that zone's Save (3.2)
     ListZones { session: SessionId },
     Content { session: SessionId },                              // the pack and the presets' blurbs (3.8)
     Trials { session: SessionId, character: CharacterId },       // what it has passed (3.5)
@@ -199,7 +200,9 @@ CharacterState {
 }
 ```
 
-The zone saves every **30 s**, on `Bye`, on disconnect, on handoff, and when it stops. The hub
+The zone saves every **30 s**, on `Bye`, on disconnect, on handoff, when it stops, and at once
+when it takes a respec (MATRIX.md 9.1), telling the player only after the hub answered; `build`
+is the one the character chose, a build pending its respawn in a team zone included. The hub
 accepts a `Save` or `Handoff` only from the zone the character is in (`location.zone` equals the
 zone authenticated by `ZoneHello`); a late save from an origin zone after a handoff, or a rogue
 zone writing someone else's character, is refused with `NotFound`. Streams are unordered, so this

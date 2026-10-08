@@ -1,7 +1,7 @@
-//! The character's page (MATRIX.md 9.1, CLIENT.md 4.6): the thirty attribute points and the
+//! The character's page (MATRIX.md 9.1, CLIENT.md 4.5): the thirty attribute points and the
 //! kit, edited here and worn at the trainer in the town. The editor itself is shared with
 //! the game master's page (GM.md 4), which wears any build at once, anywhere. Nothing is
-//! decided here: the zone validates and answers (`FromZone::RespecResult`).
+//! decided here: the zone validates, saves and answers (`FromZone::RespecResult`).
 
 use gm_core::build::{AbilityDef, BUDGET, Build, ContentPack, MAX_ACTIVES, Slot};
 use gm_core::matrix::{ArmourClass, Aspects, Attributes, Element};
@@ -662,6 +662,10 @@ pub struct CharacterView<'a> {
     pub note: &'a str,
 }
 
+/// Why "Wear it" is off away from the trainer: the page's note, and the button's own
+/// word when it is pointed at or pressed.
+pub const AWAY: &str = "to wear it, stand by the trainer at the town board";
+
 #[derive(Default)]
 pub struct CharacterPage {
     draft: Option<Build>,
@@ -721,7 +725,17 @@ impl CharacterPage {
         } else if v.at_trainer {
             ""
         } else {
-            "to wear it, stand by the trainer at the town board"
+            AWAY
+        };
+        // Why the build cannot be worn, when it cannot: the grey button says so itself.
+        let off = if !valid {
+            Some(words.as_str())
+        } else if *b == *v.own {
+            Some("this is what you wear")
+        } else if !v.at_trainer {
+            Some(AWAY)
+        } else {
+            None
         };
         ui.label(
             row.x + row.w * 0.42,
@@ -734,7 +748,7 @@ impl CharacterPage {
             Rect::new(row.x, row.y, row.w * 0.4, row.h),
             &["Wear it", "Back to worn", "Close"],
         );
-        if ui.button_if(buttons[0], "Wear it", valid && b != v.own && v.at_trainer) {
+        if ui.button_or(buttons[0], "Wear it", off) {
             return CharacterAction::Wear(b.clone());
         }
         if ui.button_if(buttons[1], "Back to worn", b != v.own) {
@@ -904,5 +918,93 @@ mod tests {
         frame(&mut page, &mut st, &UiInput::default(), &here);
         assert!(st.shows("kit costs 52 of 40 points"), "{:?}", st.seen);
         assert!(st.find("Wear it").is_none());
+    }
+
+    /// A grey "Wear it" says why it is grey, on the button itself: pointed at for a
+    /// moment, or pressed (a tap on a phone), the reason comes up beside the pointer; a
+    /// script never finds the button. The zone's refusal is the page's note.
+    #[test]
+    fn the_grey_button_explains_itself() {
+        let pack = test_content::pack(TickRate::TOWN);
+        let own = pack.builds[1].build.clone();
+        let away = CharacterView {
+            pack: &pack,
+            own: &own,
+            rate: TickRate::TOWN,
+            at_trainer: false,
+            note: "",
+        };
+        let (mut page, mut st) = (CharacterPage::default(), UiState::default());
+        // A changed draft, away from the trainer: the button is off and says where to go.
+        click_attr(&mut page, &mut st, "STR", "-", &away);
+        frame(&mut page, &mut st, &UiInput::default(), &away);
+        assert!(st.find("Wear it").is_none(), "{:?}", st.seen);
+        assert!(st.shows(&format!("Wear it (off: {AWAY})")), "{:?}", st.seen);
+        assert!(!st.shows("tooltip:"), "{:?}", st.seen);
+        let at = st
+            .seen
+            .iter()
+            .find(|s| s.text.starts_with("Wear it (off"))
+            .unwrap()
+            .rect
+            .centre();
+        // The pointer rests on it: after the tooltip's 150 ms the reason is beside it.
+        for time in [1.0, 1.1] {
+            let rest = UiInput {
+                cursor: at,
+                time,
+                ..Default::default()
+            };
+            frame(&mut page, &mut st, &rest, &away);
+        }
+        assert!(!st.shows("tooltip:"), "{:?}", st.seen);
+        let rest = UiInput {
+            cursor: at,
+            time: 1.2,
+            ..Default::default()
+        };
+        frame(&mut page, &mut st, &rest, &away);
+        assert!(st.shows(&format!("tooltip: {AWAY}")), "{:?}", st.seen);
+        // A press on it (a tap): the reason stays up two seconds after the finger left.
+        let (mut page, mut st) = (CharacterPage::default(), UiState::default());
+        click_attr(&mut page, &mut st, "STR", "-", &away);
+        assert_eq!(
+            click_at(&mut page, &mut st, at, &away),
+            CharacterAction::None
+        );
+        assert!(st.shows(&format!("tooltip: {AWAY}")), "{:?}", st.seen);
+        let later = UiInput {
+            cursor: (0.0, 0.0),
+            time: 1.5,
+            ..Default::default()
+        };
+        frame(&mut page, &mut st, &later, &away);
+        assert!(st.shows(&format!("tooltip: {AWAY}")), "{:?}", st.seen);
+        let gone = UiInput {
+            cursor: (0.0, 0.0),
+            time: 2.5,
+            ..Default::default()
+        };
+        frame(&mut page, &mut st, &gone, &away);
+        assert!(!st.shows("tooltip:"), "{:?}", st.seen);
+        // By the trainer with nothing changed: off too, and says so.
+        let (mut page, mut st) = (CharacterPage::default(), UiState::default());
+        let here = CharacterView {
+            at_trainer: true,
+            ..away
+        };
+        frame(&mut page, &mut st, &UiInput::default(), &here);
+        assert!(
+            st.shows("Wear it (off: this is what you wear)"),
+            "{:?}",
+            st.seen
+        );
+        // The zone's word is the page's note, as it came.
+        let refused = CharacterView {
+            note: "not in a fight: wait a moment",
+            ..here
+        };
+        frame(&mut page, &mut st, &UiInput::default(), &refused);
+        assert!(st.shows("not in a fight: wait a moment"), "{:?}", st.seen);
     }
 }
