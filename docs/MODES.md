@@ -528,11 +528,16 @@ Built as section 5 says, with these readings:
 - **The camera** orbits the body's centre (`orbit_camera`: 240 u back and 90 up, the
   wheel from 120 to 400, pitched between 5° and 80° down), the pointer is free, the
   secondary button held turns it; the frames carry the camera's yaw and a level pitch,
-  the body faces where it goes (LOOK.md 13.9) or its target. The own body is drawn
-  facing where the mover does while the zone's turn holds it (`lock_yaw`, predicted on
-  the client with the nearby bodies) and its target between actions; until 2026-10-08 it
-  was drawn at the camera's yaw, so the frostweaver cast its shard facing away from the
-  dummy while everyone else saw it turn.
+  the body faces where it goes (LOOK.md 13.9), or its target while a target-action's
+  turn holds it (and only then: between actions it faces the camera's way, the
+  director's call). The own body is drawn facing where the mover does while that turn
+  holds it (`lock_yaw`, predicted on the client with the nearby bodies); until
+  2026-10-08 it was drawn at the camera's yaw, so the frostweaver cast its shard facing
+  away from the dummy while everyone else saw it turn. The tracer the client lets fly
+  from the hand at the launch (the zone's bolt shows a round trip later) is led to the
+  target as the zone leads its bolt, within the ability's range and in sight; it flew
+  the look's way, the camera's in this mode, and the director saw the shard leave for
+  the horizon.
 - **Marks**: a ring where the body is going, a red one under the target.
 - Not built: a body walking round other bodies (the grid knows the map only), a
   target kept five seconds out of sight (it is let go when it leaves the frame's

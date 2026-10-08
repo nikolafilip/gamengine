@@ -3260,3 +3260,64 @@ fn an_aimed_area_goes_under_its_target() {
     }
     assert!(hits(&zone, HitKind::Area) >= 1, "it struck the mark");
 }
+
+#[test]
+fn a_frostweavers_shard_with_a_standing_target_flies_at_it() {
+    // The frostweaver faces away (180) from a blade standing 300 u along +x; the shard
+    // pressed with the blade as the target leaves toward the blade. (The director saw
+    // it fly the camera's way on 2026-10-08: that was the client's tracer, the zone's
+    // bolt was led as this says.)
+    let pack = test_content::pack(RATE);
+    let world = BoxWorld::floor();
+    let mut zone = zone_with(vec![
+        (Vec3::new(0.0, 0.0, REST_Z), 180.0),
+        (Vec3::new(300.0, 0.0, REST_Z), 180.0),
+    ]);
+    let caster = zone.add_player_at(
+        pack.build("frostweaver").unwrap().clone(),
+        1,
+        Vec3::new(0.0, 0.0, REST_Z),
+        180.0,
+    );
+    let dummy = zone.add_player_at(
+        pack.build("blade").unwrap().clone(),
+        2,
+        Vec3::new(300.0, 0.0, REST_Z),
+        180.0,
+    );
+    let idle = |_: u32| input(180.0, 0.0, 0);
+    run(&mut zone, &world, &[(caster, idle(0)), (dummy, idle(0))], 2);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (caster, at(dummy, input(180.0, 0.0, buttons::PRIMARY))),
+            (dummy, idle(0)),
+        ],
+        0,
+    );
+    // The body turns to the dummy for the script; the shard leaves 150 ms into it.
+    run(&mut zone, &world, &[(caster, idle(0)), (dummy, idle(0))], 2);
+    let p = zone.player(caster).unwrap();
+    assert!(p.mover.yaw.abs() < 5.0, "faces the dummy: {}", p.mover.yaw);
+    run(
+        &mut zone,
+        &world,
+        &[(caster, idle(0)), (dummy, idle(0))],
+        12,
+    );
+    let dir = zone
+        .projectiles()
+        .last()
+        .expect("the shard")
+        .vel
+        .normalize();
+    assert!(dir.x > 0.95, "flies at the dummy: {dir:?}");
+    run(
+        &mut zone,
+        &world,
+        &[(caster, idle(0)), (dummy, idle(0))],
+        20,
+    );
+    assert_eq!(hits(&zone, HitKind::Projectile), 1, "the shard lands");
+}
