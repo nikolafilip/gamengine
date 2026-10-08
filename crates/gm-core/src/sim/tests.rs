@@ -2215,7 +2215,10 @@ fn the_musket_fires_one_round_then_reloads_by_itself_and_r_reloads_a_pistol() {
     // The empty magazine reloads by itself (2.8 s), no trigger needed; a pull flies nothing.
     quiet(&mut zone, &world, 80, 0);
     let p = zone.player(a).unwrap();
-    assert!(p.mover.reloading(p.last_input_tick), "reloads with no key pressed");
+    assert!(
+        p.mover.reloading(p.last_input_tick),
+        "reloads with no key pressed"
+    );
     tick(
         &mut zone,
         &world,

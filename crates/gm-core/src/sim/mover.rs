@@ -718,13 +718,7 @@ fn guard_step(
 /// The reload of the firearm in hand (MODES.md 3.2): `R`, or an empty magazine with
 /// rounds carried, which reloads by itself; it ends by itself, a stagger drops it and the
 /// rounds are kept (and the empty magazine begins it again once the body can).
-fn reload_step(
-    sheet: &Sheet,
-    m: &mut Mover,
-    pressed: u16,
-    now: Tick,
-    staggered: bool,
-) {
+fn reload_step(sheet: &Sheet, m: &mut Mover, pressed: u16, now: Tick, staggered: bool) {
     let kit = &sheet.kit;
     if kit.mode != Mode::Gun || m.held > 1 {
         return;

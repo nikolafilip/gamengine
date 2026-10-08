@@ -152,6 +152,7 @@ async fn the_economy_over_the_wire() {
             party_sweep: std::time::Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: items.clone(),
+            looks: gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks"),
             max_coin_grant: 10_000, // this test grants 900 at once: the cap is a knob, the production default is 500 (ECONOMY.md 12)
             models_dir: std::env::temp_dir().join(format!("gm-hub-models-{}", std::process::id())),
             ingest: gm_hub::IngestMode::InProcess,
@@ -501,7 +502,15 @@ async fn the_economy_over_the_wire() {
     );
     assert_eq!(listings[0].item.place, PLACE_WEAPON);
     assert_eq!(listings[0].item.edge, [40, 0, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(listings[0].item.does, ["slash +2.0%"]);
+    // The viewer is an ironclad: the listing says its hands are not for this (ITEMS.md 2).
+    assert!(!listings[0].item.fits);
+    assert_eq!(
+        listings[0].item.does,
+        [
+            "slash +2.0%",
+            "this build's hands are for the hammer: not a sword"
+        ]
+    );
     // Buying is done standing at the stall (ITEMS.md 5): the zone the buyer plays in asks,
     // and names the stall it saw the buyer at.
     let buy = |zone: &HubClient, stall: i64| {

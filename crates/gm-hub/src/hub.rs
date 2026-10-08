@@ -71,6 +71,9 @@ pub struct HubConfig {
     /// The item content (`assets/content/items.toml`): the templates a craft may name
     /// (none listed: any), and what a worn item does (ITEMS.md 3.2).
     pub items: gm_content::items::ItemContent,
+    /// The looks of the content (CONTENT.md 3), loaded beside the pack as a zone loads
+    /// them: the prop each ability holds says which weapons a build may wear (ITEMS.md 2).
+    pub looks: gm_content::looks::Looks,
     /// The largest coin drop a zone may report in one grant, in silver (ECONOMY.md 9).
     pub max_coin_grant: i64,
     /// Where ingested models, their previews and the uploads live (MODELS.md 6.1).
@@ -1759,11 +1762,46 @@ fn build_words(content: &ContentPack, build: &Build) -> Option<(String, String)>
     Some((format!("{name}: {frame} in {armour}"), role.to_string()))
 }
 
+/// What a build's hands hold (ITEMS.md 2): the props of its slotted abilities, in kit
+/// order, each once. A weapon whose model is not among them is not worn by this build.
+pub fn hands(cfg: &HubConfig, build: &Build) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (index, _) in build.slots() {
+        let Some(def) = cfg.content.abilities.get(index as usize) else {
+            continue;
+        };
+        let prop = cfg
+            .looks
+            .abilities
+            .iter()
+            .find(|a| a.key == def.key)
+            .and_then(|a| a.prop.clone());
+        if let Some(prop) = prop
+            && !out.contains(&prop)
+        {
+            out.push(prop);
+        }
+    }
+    out
+}
+
+/// The hands of a character's stored build, read now.
+async fn hands_of(hub: &Hub, character: CharacterId) -> Result<Vec<String>, HubError> {
+    let row = hub
+        .db
+        .character(character)
+        .await?
+        .ok_or(HubError::NotFound)?;
+    Ok(hands(&hub.cfg, &row.build))
+}
+
 /// An item as a person is shown it: where it is worn, what it does there and the words
 /// for both are the content's to say (ITEMS.md 3.2), so that no client works them out.
+/// `hands` are the asking character's (ITEMS.md 2): a weapon they do not hold says so.
 fn item_summary(
     content: &ItemContent,
     pack: &gm_core::build::ContentPack,
+    hands: &[String],
     i: crate::economy::Item,
 ) -> ItemSummary {
     let mut view = content.view(
@@ -1802,9 +1840,14 @@ fn item_summary(
         }
         None => 0,
     };
+    let fits = crate::economy::fits(content, hands, &i.template, view.place).is_ok();
+    if let Err(why) = crate::economy::fits(content, hands, &i.template, view.place) {
+        view.does.push(why);
+    }
     ItemSummary {
         quantity: i.quantity,
         cap,
+        fits,
         id: i.id,
         template: i.template,
         place: match view.place {
@@ -1827,6 +1870,7 @@ fn item_summary(
 fn trade_offer(
     content: &ItemContent,
     pack: &gm_core::build::ContentPack,
+    hands: &[String],
     (coin, accepted, items): (i64, bool, Vec<crate::economy::Item>),
 ) -> TradeOffer {
     TradeOffer {
@@ -1834,7 +1878,7 @@ fn trade_offer(
         accepted,
         items: items
             .into_iter()
-            .map(|i| item_summary(content, pack, i))
+            .map(|i| item_summary(content, pack, hands, i))
             .collect(),
     }
 }
@@ -1882,13 +1926,14 @@ async fn tell_zone_of_items(hub: &Hub, character: CharacterId) {
 fn holder_reply(
     content: &ItemContent,
     pack: &gm_core::build::ContentPack,
+    hands: &[String],
     (coin, items): (i64, Vec<crate::economy::Item>),
 ) -> EconReply {
     EconReply::Holder {
         coin,
         items: items
             .into_iter()
-            .map(|i| item_summary(content, pack, i))
+            .map(|i| item_summary(content, pack, hands, i))
             .collect(),
     }
 }
@@ -1909,16 +1954,24 @@ async fn econ_op(
     };
     let done = |r: Result<(), EconError>| r.map(|()| EconReply::Done).map_err(econ_err);
     let id = |r: Result<i64, EconError>| r.map(EconReply::Id).map_err(econ_err);
+    // What this character's hands hold, for the answers that show items (ITEMS.md 2).
+    let hands = match &op {
+        EconOp::Inventory
+        | EconOp::Storage
+        | EconOp::TradeView { .. }
+        | EconOp::StallView { .. } => hands_of(hub, me).await?,
+        _ => Vec::new(),
+    };
     match op {
         EconOp::Inventory => e
             .inventory(me)
             .await
-            .map(|h| holder_reply(items, &hub.cfg.content, h))
+            .map(|h| holder_reply(items, &hub.cfg.content, &hands, h))
             .map_err(econ_err),
         EconOp::Storage => e
             .storage(me)
             .await
-            .map(|h| holder_reply(items, &hub.cfg.content, h))
+            .map(|h| holder_reply(items, &hub.cfg.content, &hands, h))
             .map_err(econ_err),
         EconOp::StorageDeposit { item } => done(e.storage_deposit(me, item).await),
         EconOp::StorageWithdraw { item } => done(e.storage_withdraw(me, item).await),
@@ -1965,8 +2018,8 @@ async fn econ_op(
                 wait_ms: seen.wait_ms,
                 with: seen.with,
                 together: seen.together,
-                mine: trade_offer(items, &hub.cfg.content, seen.mine),
-                theirs: trade_offer(items, &hub.cfg.content, seen.theirs),
+                mine: trade_offer(items, &hub.cfg.content, &hands, seen.mine),
+                theirs: trade_offer(items, &hub.cfg.content, &hands, seen.theirs),
             })
             .map_err(econ_err),
         // A stall is kept where it stands: its keeper lists and unlists while playing in
@@ -1983,7 +2036,7 @@ async fn econ_op(
                     .into_iter()
                     .map(|l| ListingSummary {
                         id: l.id,
-                        item: item_summary(items, &hub.cfg.content, l.item),
+                        item: item_summary(items, &hub.cfg.content, &hands, l.item),
                         price: l.price,
                     })
                     .collect(),
@@ -2298,11 +2351,13 @@ async fn zone_econ_op(hub: &Hub, zone: &ZoneId, op: ZoneEconOp) -> Result<EconRe
         }
         // That the character plays in this zone is checked inside the transaction, with
         // its row held: a claim elsewhere sees the change or comes first (ITEMS.md 3.3).
-        ZoneEconOp::Wear { character, item } => e
-            .wear(character, zone, item, &hub.cfg.items)
-            .await
-            .map(|r| EconReply::Gear(reading(r)))
-            .map_err(econ_err),
+        ZoneEconOp::Wear { character, item } => {
+            let hands = hands_of(hub, character).await?;
+            e.wear(character, zone, item, &hub.cfg.items, &hands)
+                .await
+                .map(|r| EconReply::Gear(reading(r)))
+                .map_err(econ_err)
+        }
         ZoneEconOp::TakeOff { character, item } => e
             .take_off(character, zone, item, &hub.cfg.items)
             .await

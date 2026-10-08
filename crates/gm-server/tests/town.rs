@@ -124,6 +124,7 @@ async fn avatars_and_stalls_in_the_town() {
             party_sweep: std::time::Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: Default::default(),
+            looks: gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks"),
             max_coin_grant: 500,
             models_dir: models_dir.clone(),
             ingest: IngestMode::InProcess,
