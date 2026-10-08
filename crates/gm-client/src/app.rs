@@ -36,7 +36,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 #[cfg(not(target_arch = "wasm32"))]
 use winit::window::CursorGrabMode;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::avatars::{Avatars, Body, DOLL, OWN, stall_boxes, stall_keeper};
 use crate::bag::{Bag, BagAction};
@@ -508,6 +508,11 @@ struct App {
     /// The last frame's view-projection and the window's size: what a click is
     /// unprojected through.
     last_vp: Option<(glam::Mat4, (f32, f32))>,
+    /// The cursor the window shows (MODES.md 5.5): set again only when it changes.
+    cursor_icon: CursorIcon,
+    /// A right press in the RPG mode: when and where, and the camera's yaw and pitch
+    /// then, to tell a tap on the target (the secondary) from a drag of the orbit.
+    rpg_right: Option<(Instant, (f32, f32), f32, f32)>,
     /// The yaw each body was drawn facing last frame (LOOK.md 13.9), by its key.
     facings: HashMap<u32, f32>,
     /// Per squad slot: the companion's health as last sent, and whether it lives.
@@ -856,6 +861,8 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         zoom: 1.0,
         rpg: crate::rpg::Rpg::new(),
         last_vp: None,
+        cursor_icon: CursorIcon::Default,
+        rpg_right: None,
         facings: HashMap::new(),
         squad_view: Vec::new(),
         target_view: None,
@@ -4516,7 +4523,8 @@ impl App {
         rpg_bodies_of(c, o.team)
     }
 
-    /// A left click in the RPG mode (MODES.md 5.2, 5.5).
+    /// A left click in the RPG mode (MODES.md 5.2, 5.5): a target, the primary at the
+    /// target, or a walk.
     fn rpg_click(&mut self) {
         let Some((vp, size)) = self.last_vp else {
             return;
@@ -4526,6 +4534,47 @@ impl App {
         };
         let bodies = self.rpg_bodies();
         self.rpg.click(&self.bsp, from, dir, &bodies);
+    }
+
+    /// The body under a pixel in the RPG mode, by the last frame's view.
+    fn rpg_under(&self, cursor: (f32, f32)) -> Option<u32> {
+        let (vp, size) = self.last_vp?;
+        let (from, dir) = crate::rpg::Rpg::ray(vp, size, cursor)?;
+        crate::rpg::Rpg::pick(&self.bsp, from, dir, &self.rpg_bodies())
+    }
+
+    /// The right button let go in the RPG mode: a tap on the target (no drag of the
+    /// orbit, quick) is the secondary at it (MODES.md 5.5); a drag was the camera's.
+    fn rpg_right_release(&mut self) {
+        let Some((at, cursor, yaw, pitch)) = self.rpg_right.take() else {
+            return;
+        };
+        let quick = at.elapsed().as_secs_f32() < DOUBLE_CLICK_SECS;
+        let turned = (self.sim.yaw - yaw).abs() > 1.0 || (self.sim.pitch - pitch).abs() > 1.0;
+        if quick && !turned && self.rpg.hover(self.rpg_under(cursor)) == crate::rpg::Hover::Attack {
+            self.rpg.ask(crate::rpg::Act::Secondary);
+        }
+    }
+
+    /// The cursor the pointer shows (MODES.md 5.5): in the RPG mode with the pointer
+    /// free, a crosshair over the target (a click attacks), a hand over another body (a
+    /// click targets), the arrow elsewhere; the arrow everywhere else.
+    fn show_cursor(&mut self) {
+        let want = if self.rpg_mode() && !self.grabbed && !self.screen_up() {
+            match self.rpg.hover(self.rpg_under(self.cursor)) {
+                crate::rpg::Hover::Attack => CursorIcon::Crosshair,
+                crate::rpg::Hover::Body => CursorIcon::Pointer,
+                crate::rpg::Hover::Ground => CursorIcon::Default,
+            }
+        } else {
+            CursorIcon::Default
+        };
+        if want != self.cursor_icon {
+            self.cursor_icon = want;
+            if let Some(a) = self.active.as_ref() {
+                a.window.set_cursor(want);
+            }
+        }
     }
 
     /// Tab in the RPG mode (MODES.md 5.2): the nearest enemy in sight not yet cycled.
@@ -5677,6 +5726,12 @@ impl ApplicationHandler for App {
                         match button {
                             MouseButton::Left => self.rpg_click(),
                             MouseButton::Right => {
+                                self.rpg_right = Some((
+                                    Instant::now(),
+                                    self.cursor,
+                                    self.sim.yaw,
+                                    self.sim.pitch,
+                                ));
                                 self.input.mouse.insert(button);
                                 self.set_grab(true);
                             }
@@ -5700,6 +5755,7 @@ impl ApplicationHandler for App {
                     }
                     if button == MouseButton::Right && self.rpg_mode() && self.grabbed {
                         self.set_grab(false);
+                        self.rpg_right_release();
                     }
                 }
             },
@@ -5798,7 +5854,10 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::RedrawRequested => self.frame(event_loop),
+            WindowEvent::RedrawRequested => {
+                self.show_cursor();
+                self.frame(event_loop);
+            }
             _ => {}
         }
     }
