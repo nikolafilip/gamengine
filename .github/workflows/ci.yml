@@ -32,7 +32,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: System packages (ALSA's headers: the client links the sound device, SOUND.md 4)
+      - name: "System packages (ALSA's headers: the client links the sound device, SOUND.md 4)"
         run: sudo apt-get update -q && sudo apt-get install -y -q unzip libasound2-dev
       - name: Format
         run: cargo fmt --all -- --check
@@ -54,7 +54,7 @@ jobs:
         run: scripts/check-budgets.sh --self-test
       - name: Netcode gate (turmoil, 16 bots, 150 ms, 3% loss; bytes/player/s budget)
         run: scripts/check-netcode.sh
-      - name: Matrix gate (8v8 arena: a dominant build is countered by re-speccing)
+      - name: "Matrix gate (8v8 arena: a dominant build is countered by re-speccing)"
         run: scripts/check-matrix.sh
       - name: Swarm smoke (32 bots over real UDP; the 200-bot gate runs on the reference machine)
         run: BOTS=32 SECS=10 scripts/check-swarm.sh
@@ -185,7 +185,7 @@ jobs:
           name: party-browser
           path: ${{ runner.temp }}/party
           if-no-files-found: ignore
-      - name: Sound gate in the browser (the fight in both builds: the context running after a click, cues started, the patches hashing as native)
+      - name: "Sound gate in the browser (the fight in both builds: the context running after a click, cues started, the patches hashing as native)"
         run: CHROME=google-chrome SKIP_TESTS=1 KEEP="$RUNNER_TEMP/sound" scripts/check-sound.sh --browser --software
       - name: The sound gate's logs, when it failed
         if: failure()
