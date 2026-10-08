@@ -240,7 +240,11 @@ treats what it did as it treats the mouse and the keys (MODES.md 5.6 has the con
   the menu, or the target let go first in the RPG mode), and bottom right `jump` with the
   secondary (`2`) in the action and gun modes, the secondary alone in the RPG mode; every
   cell of the hotbar is a button for its key (`1`–`8`, Shift, C, the mouse buttons), held
-  while the finger is. The look's pointer lock is never asked for by a finger.
+  while the finger is. The look's pointer lock is never asked for by a finger, nor by a
+  screen going down once a finger has been seen: Chrome on a phone granted it to the tap
+  that left the character screen and took it back at the next touch, and losing the lock
+  is Escape (3.4), so every tap in the game opened the menu until a refused asking broke
+  the chain (found 2026-10-08).
 - **The scale**: with `ui_scale` 0 a touch screen is drawn at the device's pixel ratio
   rounded, at least 2 and at most 4 (`ui::touch_scale`): an S23 at 2.625 asks for 3, and
   gets it in fullscreen (2340 by 1080 device pixels: the tallest panel, 360 units, is the
