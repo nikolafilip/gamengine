@@ -14,6 +14,7 @@
 //! the transport there is the browser's `WebTransport`.
 #![forbid(unsafe_code)]
 
+pub mod bands;
 pub mod bits;
 pub mod client;
 pub mod control;

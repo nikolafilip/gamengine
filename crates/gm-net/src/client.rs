@@ -68,10 +68,16 @@ pub struct ClientStats {
     pub replayed_ticks: u64,
 }
 
-/// Samples of one other entity.
+/// Samples of one other entity (PROTOCOL.md 7.3): the record at each tick it changed on the
+/// wire, never the carry-forward of a tick its distance band skipped. Interpolating between
+/// two real updates is what makes a far body glide; between a real update and its five
+/// carried copies it would stand for five ticks and cross the whole gap in one.
 #[derive(Clone, Debug, Default)]
 pub struct Track {
     pub samples: VecDeque<(u32, EntityState)>,
+    /// The newest server tick whose table held the entity, changed or not. A body standing
+    /// still gets no samples, and this is what keeps it shown.
+    pub seen: u32,
     /// Server tick at which the entity was removed for us (leaves at render time).
     pub removed_at: Option<u32>,
 }
@@ -297,13 +303,33 @@ impl ClientState {
         self.newest_tick = snap.server_tick;
         self.adapt_delay();
 
+        let my_eye = self.mover.eye();
         for e in &snap.entities {
             if e.id == self.my_id {
                 continue;
             }
             let track = self.tracks.entry(e.id).or_default();
             track.removed_at = None;
-            track.samples.push_back((snap.server_tick, *e));
+            track.seen = snap.server_tick;
+            match track.samples.back() {
+                // Carried forward, or truly unchanged: either way nothing new is known.
+                Some(&(_, last)) if last == *e => {}
+                Some(&(t_last, last)) => {
+                    // The first change in a while. The body was where it was through the
+                    // last tick its band listed it, which is at most one interval back:
+                    // a rest sample there makes the move start late and slow rather than
+                    // snap to where it already is.
+                    let dist = (Vec3::from(quant::dequantize_pos3(last.pos)) - my_eye).length();
+                    let interval = crate::bands::band_interval(self.rate, dist);
+                    if tick_delta(snap.server_tick, t_last) > interval as i32 {
+                        track
+                            .samples
+                            .push_back((snap.server_tick.wrapping_sub(interval), last));
+                    }
+                    track.samples.push_back((snap.server_tick, *e));
+                }
+                None => track.samples.push_back((snap.server_tick, *e)),
+            }
             while track.samples.len() > TRACK_SAMPLES {
                 track.samples.pop_front();
             }
@@ -668,10 +694,10 @@ impl ClientState {
             if track.removed_at.is_some_and(|r| t >= r as f32) {
                 continue;
             }
-            let Some(&(t_last, last)) = track.samples.back() else {
+            let Some(&(_, last)) = track.samples.back() else {
                 continue;
             };
-            if (t_last as f32) < t - 4.0 * max_delay(self.rate) as f32 {
+            if (track.seen as f32) < t - 4.0 * max_delay(self.rate) as f32 {
                 continue; // long stale, nothing to show
             }
             // Bracket t: a = newest sample at or before t, b = oldest sample after t.
@@ -1001,6 +1027,66 @@ mod tests {
         assert_eq!(c.others_at(103.0).len(), 0);
         c.prune(103.0);
         assert!(c.tracks().is_empty());
+    }
+
+    #[test]
+    fn far_bodies_glide_between_their_real_updates() {
+        // A body beyond 1,536 u is listed every sixth tick; the snapshots between carry its
+        // last record forward. The track keeps only the real updates and glides between them.
+        let world = BoxWorld::floor();
+        let mut c = client(1);
+        let mk = |tick: u32, x: f32| {
+            let mut other = own_state(Vec3::new(x, 0.0, 24.0), Vec3::ZERO, true, true);
+            other.id = 2;
+            other.vel = None;
+            other.health = None;
+            snap(
+                tick,
+                0,
+                0,
+                vec![own_state(Vec3::ZERO, Vec3::ZERO, true, true), other],
+            )
+        };
+        let feed = |c: &mut ClientState, tick: u32, x: f32| {
+            c.on_snapshot(&world, &mk(tick, x).encode(None)).unwrap();
+        };
+        feed(&mut c, 100, 3000.0);
+        for t in 101..106 {
+            feed(&mut c, t, 3000.0);
+        }
+        feed(&mut c, 106, 3060.0);
+        for t in 107..112 {
+            feed(&mut c, t, 3060.0);
+        }
+        feed(&mut c, 112, 3120.0);
+        assert_eq!(
+            c.tracks()[&2].samples.len(),
+            3,
+            "one sample per real update"
+        );
+        let e = &c.others_at(103.0)[0];
+        assert!((e.pos.x - 3030.0).abs() < 0.1, "{}", e.pos.x);
+        assert!(e.vel.x > 0.0, "walking, not standing");
+        let e = &c.others_at(109.0)[0];
+        assert!((e.pos.x - 3090.0).abs() < 0.1, "{}", e.pos.x);
+
+        // Standing still for a long while: no samples, but still shown where it is.
+        for t in 113..=300 {
+            feed(&mut c, t, 3120.0);
+        }
+        assert_eq!(c.tracks()[&2].samples.len(), 3);
+        let e = &c.others_at(290.0)[0];
+        assert!((e.pos.x - 3120.0).abs() < 0.1);
+        // The first move after the rest starts from a rest sample one interval back (six
+        // ticks in the far band), not from the sample of the stop long ago.
+        for t in 301..306 {
+            feed(&mut c, t, 3120.0);
+        }
+        feed(&mut c, 306, 3180.0);
+        let samples: Vec<u32> = c.tracks()[&2].samples.iter().map(|s| s.0).collect();
+        assert_eq!(samples, [100, 106, 112, 300, 306]);
+        let e = &c.others_at(303.0)[0];
+        assert!((e.pos.x - 3150.0).abs() < 0.1, "{}", e.pos.x);
     }
 
     #[test]

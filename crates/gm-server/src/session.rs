@@ -25,9 +25,7 @@ use crate::world::ZoneWorld;
 /// Snapshots kept per client; acks older than this get a full snapshot.
 pub const HISTORY: usize = 64;
 pub const MAX_BASELINE_AGE: i32 = 60;
-/// Distance bands (PROTOCOL.md 5).
-pub const FULL_RATE_DIST: f32 = 512.0;
-pub const HALF_RATE_DIST: f32 = 1536.0;
+pub use gm_net::bands::{FULL_RATE_DIST, HALF_RATE_DIST, band_scheduled};
 /// Bodies this close are always sent, PVS or not: they can block the client's movement and
 /// its prediction must know about them (PROTOCOL.md 5).
 pub const TOUCH_DIST: f32 = 128.0;
@@ -491,7 +489,8 @@ impl Session {
                     if !mine && dist > TOUCH_DIST && (!visible || dist > e.stealth) {
                         continue;
                     }
-                    let scheduled = base_rec.is_none() || band_scheduled(tick, e.id, dist);
+                    let scheduled =
+                        base_rec.is_none() || band_scheduled(zone.rate, tick, e.id, dist);
                     let rec = match base_rec {
                         Some(b) if !scheduled => *b,
                         // Health rides along for the client's own party, for creatures,
@@ -577,17 +576,6 @@ pub fn commanding(p: &Player) -> bool {
     p.alive
         && p.mover.commanding(p.last_input_tick)
         && p.mover.buttons_prev & gm_core::sim::buttons::COMMAND != 0
-}
-
-/// Whether an entity in a distance band is listed this tick (PROTOCOL.md 5).
-pub fn band_scheduled(tick: u32, id: EntityId, dist: f32) -> bool {
-    if dist <= FULL_RATE_DIST {
-        true
-    } else if dist <= HALF_RATE_DIST {
-        (tick.wrapping_add(id)).is_multiple_of(2)
-    } else {
-        (tick.wrapping_add(id)).is_multiple_of(6)
-    }
 }
 
 pub fn frame_index(frame: ArchetypeFrame) -> u8 {
@@ -786,15 +774,5 @@ mod tests {
             })
             .count();
         assert_eq!(passed, 0);
-    }
-
-    #[test]
-    fn bands_schedule_by_distance() {
-        assert!(band_scheduled(1, 1, 100.0));
-        assert!(band_scheduled(2, 1, 100.0));
-        let half: Vec<bool> = (0..4).map(|t| band_scheduled(t, 1, 1000.0)).collect();
-        assert_eq!(half, [false, true, false, true]);
-        let far = (0..12).filter(|&t| band_scheduled(t, 1, 3000.0)).count();
-        assert_eq!(far, 2);
     }
 }
