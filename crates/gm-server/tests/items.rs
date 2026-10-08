@@ -403,6 +403,7 @@ async fn stand_up(url: &str) -> Town {
             party_sweep: std::time::Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: items.clone(),
+            looks: gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks"),
             max_coin_grant: 500,
             models_dir: std::env::temp_dir()
                 .join(format!("gm-items-models-{}", std::process::id())),

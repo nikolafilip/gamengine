@@ -84,7 +84,10 @@ focus, the scroll positions, the carets and the widget the button went down on.
   inventory filled the frame: LOOK.md 11.4), and never so large that the widest and the
   tallest panel (340 by 360 units since Phase 14's trade window, LOOK.md 4; 300 before)
   would not fit the window. The setting `ui_scale` (1 to 4; 0, the default: by the
-  window) chooses one instead, and gives way the same. The smallest window is 640×360.
+  window) chooses one instead, and gives way the same. On a touch screen (WEB.md 3.5,
+  since 2026-10-08) the default is the device's pixel ratio rounded, 2 to 4, because a
+  finger is wider than a mouse; the fit rule applies to it too. The smallest window is
+  640×360.
   The bundle has an atlas made for each scale and the client draws with that one (LOOK.md
   2.2): a dot is 1 to 4 pixels, a texel always one.
 - **Widgets.** A panel (a plate with a title), a label, a paragraph (wrapped at words), a

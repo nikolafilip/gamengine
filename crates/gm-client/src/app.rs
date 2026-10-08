@@ -30,7 +30,7 @@ use gm_net::snapshot::{EntityKind, SpawnInfo};
 use gm_net::transport::fnv1a64;
 use winit::application::ApplicationHandler;
 use winit::event::{
-    DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
+    DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -56,6 +56,7 @@ use crate::settings::Settings;
 use crate::stats::FrameStats;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::stats::{print_bench, print_bench_avatars};
+use crate::touch::{self, Button as TouchButton, Event as TouchEvent, Fingers, Zone};
 use crate::ui::{self, Key, Ui, UiInput, UiState};
 use crate::world::{self, WorldMesh};
 use crate::{Error, Options};
@@ -244,6 +245,9 @@ struct Input {
     mouse: HashSet<MouseButton>,
     mouse_dx: f32,
     mouse_dy: f32,
+    /// A finger's stick (MODES.md 5.6): forward and side, while one holds it; the keys
+    /// are taken first.
+    stick: Option<(f32, f32)>,
     /// The gun mode (MODES.md 3.7): the weapon in hand (0 the gun, 1 the pistol, 2 the
     /// knife) and whether the scope is up (the secondary button toggles it).
     held: u8,
@@ -257,10 +261,14 @@ impl Input {
 
     fn axes(&self) -> (f32, f32) {
         let axis = |neg, pos| (self.down(pos) as i32 - self.down(neg) as i32) as f32;
-        (
+        let keys = (
             axis(KeyCode::KeyS, KeyCode::KeyW) + axis(KeyCode::ArrowDown, KeyCode::ArrowUp),
             axis(KeyCode::KeyA, KeyCode::KeyD) + axis(KeyCode::ArrowLeft, KeyCode::ArrowRight),
-        )
+        );
+        match self.stick {
+            Some(stick) if keys == (0.0, 0.0) => stick,
+            _ => keys,
+        }
     }
 
     fn move_input(&self, yaw: f32) -> MoveInput {
@@ -513,6 +521,11 @@ struct App {
     /// A right press in the RPG mode: when and where, and the camera's yaw and pitch
     /// then, to tell a tap on the target (the secondary) from a drag of the orbit.
     rpg_right: Option<(Instant, (f32, f32), f32, f32)>,
+    /// The fingers on the screen (MODES.md 5.6), the controls drawn for them this frame
+    /// (where a finger may land on one), and a tap's primary, held a moment.
+    fingers: Fingers,
+    touch_buttons: Vec<(TouchButton, ui::Rect)>,
+    tap_fire: Option<Instant>,
     /// The yaw each body was drawn facing last frame (LOOK.md 13.9), by its key.
     facings: HashMap<u32, f32>,
     /// Per squad slot: the companion's health as last sent, and whether it lives.
@@ -863,6 +876,9 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         last_vp: None,
         cursor_icon: CursorIcon::Default,
         rpg_right: None,
+        fingers: Fingers::default(),
+        touch_buttons: Vec::new(),
+        tap_fire: None,
         facings: HashMap::new(),
         squad_view: Vec::new(),
         target_view: None,
@@ -1467,6 +1483,16 @@ pub(crate) struct HudView<'a> {
     pub zoom: f32,
     /// The scope is up: the cone the crosshair shows shrinks with it (MODES.md 10.2).
     pub scoped: bool,
+    /// A finger's controls (MODES.md 5.6): the buttons and which are held, and the
+    /// stick's centre and knob while one holds it.
+    pub touch: TouchHud<'a>,
+}
+
+#[derive(Default)]
+pub(crate) struct TouchHud<'a> {
+    pub buttons: &'a [(TouchButton, ui::Rect)],
+    pub held: Vec<TouchButton>,
+    pub stick: Option<((f32, f32), (f32, f32))>,
 }
 
 /// A name over a body (LOOK.md 13): where its head is, what it is called, the colour of
@@ -1728,6 +1754,74 @@ pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
     cells
 }
 
+/// The frame's size in device pixels: the window's natively. In a browser the page owns
+/// the canvas's CSS size and winit never sets its backing size (WEB.md 3.5), so a canvas
+/// on a phone of 2.6 device pixels a CSS pixel was drawn at a third of its pixels, and
+/// fingers (reported in device pixels) landed outside the frame: the backing is the CSS
+/// size times the device pixel ratio, which configuring the surface sets on the canvas.
+fn frame_size(window: &Window) -> winit::dpi::PhysicalSize<u32> {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(size) = crate::web::canvas_device_size() {
+        return size;
+    }
+    window.inner_size()
+}
+
+/// The hotbar's cells (LOOK.md 3.2): `n` squares of 40 dots, 3 apart, bottom centre.
+pub(crate) fn hotbar_rects(size: (f32, f32), s: f32, n: usize) -> Vec<ui::Rect> {
+    let side = 40.0 * s;
+    let gap = 3.0 * s;
+    let total = n as f32 * (side + gap) - gap;
+    let x0 = ((size.0 - total) * 0.5).round();
+    let y0 = size.1 - 16.0 - side;
+    (0..n)
+        .map(|i| ui::Rect::new(x0 + i as f32 * (side + gap), y0, side, side))
+        .collect()
+}
+
+/// The controls a finger may land on (MODES.md 5.6): the menu top right; in the action
+/// and gun modes the jump and the secondary bottom right, over the hotbar's line; and
+/// the hotbar's cells while a kit is played. Nothing without a finger seen.
+pub(crate) fn touch_controls(
+    size: (f32, f32),
+    s: f32,
+    online: Option<&Online>,
+    rpg: bool,
+) -> Vec<(TouchButton, ui::Rect)> {
+    let (w, h) = size;
+    let mut out = Vec::new();
+    let menu = 36.0 * s;
+    out.push((
+        TouchButton::Menu,
+        ui::Rect::new(w - 16.0 - menu, 16.0, menu, menu),
+    ));
+    let side = 60.0 * s;
+    let gap = 12.0 * s;
+    let y = h - 16.0 - side;
+    if rpg {
+        out.push((
+            TouchButton::Secondary,
+            ui::Rect::new(w - 16.0 - side, y, side, side),
+        ));
+    } else {
+        out.push((
+            TouchButton::Jump,
+            ui::Rect::new(w - 16.0 - side, y, side, side),
+        ));
+        out.push((
+            TouchButton::Secondary,
+            ui::Rect::new(w - 16.0 - side - gap - side, y, side, side),
+        ));
+    }
+    if let Some(o) = online {
+        let n = hotbar(o).len();
+        for (i, r) in hotbar_rects(size, s, n).into_iter().enumerate() {
+            out.push((TouchButton::Hot(i as u8), r));
+        }
+    }
+    out
+}
+
 /// Where a world point is on a screen of `size` pixels; `None` behind the camera.
 pub(crate) fn project(view_proj: glam::Mat4, size: (f32, f32), point: Vec3) -> Option<(f32, f32)> {
     let clip = view_proj * point.extend(1.0);
@@ -1755,12 +1849,59 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
         crouched,
         zoom,
         scoped,
+        touch,
     } = view;
     let (w, h) = hud.size;
     // The HUD's words: the text face of the bundle, the small one without it.
     let cap = hud.cap();
     let line = (cap + 5.0) * s;
     let skinned = hud.skinned;
+    // A finger's controls (MODES.md 5.6): the stick where the finger landed, and the
+    // buttons in the corners, lit while held. The hotbar's cells are their own buttons.
+    if let Some((centre, knob)) = touch.stick {
+        let reach = touch::STICK_DOTS * s;
+        let c = Vec2::new(centre.0, centre.1);
+        hud.wedge(c, reach, 0.0, 1.0, [1.0, 1.0, 1.0, 0.12]);
+        let len = (knob.0 * knob.0 + knob.1 * knob.1).sqrt();
+        let k = if len > reach {
+            Vec2::new(knob.0 / len * reach, knob.1 / len * reach)
+        } else {
+            Vec2::new(knob.0, knob.1)
+        };
+        hud.wedge(c + k, reach * 0.4, 0.0, 1.0, [1.0, 1.0, 1.0, 0.35]);
+    }
+    for (button, r) in touch.buttons {
+        let word = match button {
+            TouchButton::Menu => "menu",
+            TouchButton::Jump => "jump",
+            TouchButton::Secondary => "2",
+            TouchButton::Hot(_) => continue,
+        };
+        let held = touch.held.contains(button);
+        let fill = if held {
+            [1.0, 0.85, 0.3, 0.55]
+        } else {
+            [0.0, 0.0, 0.0, 0.35]
+        };
+        if !hud.frame(r.x, r.y, r.w, r.h, "hotbar_cell", s, hud::PLAIN) {
+            hud.rect(r.x, r.y, r.w, r.h, [0.1, 0.1, 0.12, 0.6]);
+        }
+        hud.rect(
+            r.x + 2.0 * s,
+            r.y + 2.0 * s,
+            r.w - 4.0 * s,
+            r.h - 4.0 * s,
+            fill,
+        );
+        let tw = hud.width(s, word);
+        hud.print(
+            r.x + (r.w - tw) * 0.5,
+            r.y + (r.h - cap * s) * 0.5,
+            s,
+            hud::WHITE,
+            word,
+        );
+    }
     // As much of `text` as fits in `room` pixels.
     let fit = |hud: &Hud, text: &str, room: f32| -> String {
         let mut out = String::new();
@@ -2053,11 +2194,10 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
     // its glyph, its key, and its state from the predicted mover; the own statuses above it.
     if skinned {
         let cells = hotbar(o);
+        let rects = hotbar_rects((w, h), s, cells.len());
         let side = 40.0 * s;
         let gap = 3.0 * s;
-        let total = cells.len() as f32 * (side + gap) - gap;
-        let x0 = ((w - total) * 0.5).round();
-        let y0 = h - 16.0 - side;
+        let (x0, y0) = rects.first().map_or((0.0, h - 16.0 - side), |r| (r.x, r.y));
         // The cells without a picture show their ability's name (LOOK.md 3.4), whole and
         // all in one size: small print when any of them is wider than a cell.
         let name_room = side - 8.0 * s;
@@ -2328,7 +2468,7 @@ impl App {
         surface: wgpu::Surface<'static>,
         gpu: Gpu,
     ) -> Result<(), Error> {
-        let size = window.inner_size();
+        let size = frame_size(&window);
         let caps = surface.get_capabilities(&gpu.adapter);
         let mut config = surface
             .get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1))
@@ -3102,7 +3242,7 @@ impl App {
 
     fn configure_surface(&mut self) {
         let Some(a) = &mut self.active else { return };
-        let size = a.window.inner_size();
+        let size = frame_size(&a.window);
         if size.width == 0 || size.height == 0 {
             return;
         }
@@ -4557,6 +4697,196 @@ impl App {
         }
     }
 
+    /// What a finger landing at `at` is for (MODES.md 5.6): the pointer while a screen
+    /// is up; a control it lands on; the world in the RPG mode; else the stick on the
+    /// left of the frame and the look on the right.
+    fn touch_zone(&self, at: (f32, f32)) -> Zone {
+        if self.screen_up() {
+            return Zone::Ui;
+        }
+        if let Some((b, _)) = self.touch_buttons.iter().find(|(_, r)| r.contains(at)) {
+            return Zone::Button(*b);
+        }
+        if self.rpg_mode() {
+            return Zone::World;
+        }
+        let w = self.active.as_ref().map_or(0.0, |a| a.config.width as f32);
+        if at.0 < w * touch::STICK_SHARE {
+            Zone::Stick
+        } else {
+            Zone::Look
+        }
+    }
+
+    /// The scale the HUD and the screens are drawn at this frame (CLIENT.md 3).
+    fn ui_scale(&self) -> f32 {
+        let size = self.active.as_ref().map_or((1280.0, 720.0), |a| {
+            (a.config.width as f32, a.config.height as f32)
+        });
+        ui::scale_for(size, PANEL_UNITS, self.ui_scale_choice())
+    }
+
+    /// The scale asked for: the setting; by the window when it is 0, except on a touch
+    /// screen, whose pixels are small under a finger: there by the device's pixel ratio
+    /// (CLIENT.md 3, MODES.md 5.6), still never larger than the panels can fit.
+    fn ui_scale_choice(&self) -> u8 {
+        if self.settings.ui_scale != 0 || !self.fingers.seen {
+            return self.settings.ui_scale;
+        }
+        let dpr = self
+            .active
+            .as_ref()
+            .map_or(1.0, |a| a.window.scale_factor() as f32);
+        ui::touch_scale(dpr)
+    }
+
+    /// A mouse button pressed in the game with the pointer held: the secondary toggles
+    /// the scope of a scoped firearm (MODES.md 3.2).
+    fn press_in_game(&mut self, button: MouseButton) {
+        if self.input.mouse.insert(button) && button == MouseButton::Right && self.gun_scope() > 1 {
+            self.input.scoped = !self.input.scoped;
+        }
+    }
+
+    /// A key held by a finger (a control, a cell of the hotbar).
+    fn hold_key(&mut self, code: KeyCode, down: bool) {
+        if down {
+            if self.input.keys.insert(code) {
+                self.input.just_pressed.insert(code);
+            }
+        } else {
+            self.input.keys.remove(&code);
+        }
+    }
+
+    /// A control pressed or let go by a finger (MODES.md 5.6).
+    fn touch_button(&mut self, button: TouchButton, down: bool) {
+        match button {
+            TouchButton::Menu => {
+                if down {
+                    self.ui_key(Key::Escape);
+                }
+            }
+            TouchButton::Jump => self.hold_key(KeyCode::Space, down),
+            TouchButton::Secondary => {
+                if self.rpg_mode() {
+                    if down {
+                        self.rpg.ask(crate::rpg::Act::Secondary);
+                    }
+                } else if down {
+                    self.press_in_game(MouseButton::Right);
+                } else {
+                    self.input.mouse.remove(&MouseButton::Right);
+                }
+            }
+            TouchButton::Hot(i) => {
+                let key = self
+                    .online
+                    .as_ref()
+                    .and_then(|o| hotbar(o).get(i as usize).map(|c| c.key));
+                match key {
+                    Some("Shift") => self.hold_key(KeyCode::ShiftLeft, down),
+                    Some("C") => self.hold_key(KeyCode::KeyC, down),
+                    Some("LMB") if down => self.press_in_game(MouseButton::Left),
+                    Some("LMB") => {
+                        self.input.mouse.remove(&MouseButton::Left);
+                    }
+                    Some("RMB") if down => self.press_in_game(MouseButton::Right),
+                    Some("RMB") => {
+                        self.input.mouse.remove(&MouseButton::Right);
+                    }
+                    Some(k) => {
+                        let digits = [
+                            KeyCode::Digit1,
+                            KeyCode::Digit2,
+                            KeyCode::Digit3,
+                            KeyCode::Digit4,
+                            KeyCode::Digit5,
+                            KeyCode::Digit6,
+                            KeyCode::Digit7,
+                            KeyCode::Digit8,
+                        ];
+                        if let Some(n) = k.parse::<usize>().ok().filter(|n| (1..=8).contains(n)) {
+                            self.hold_key(digits[n - 1], down);
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    /// What the fingers did since the last frame (MODES.md 5.6), as the mouse and the
+    /// keys would have done it: before the look, which turns by a finger's drag.
+    fn fingers_frame(&mut self, up: bool) {
+        if let Some(at) = self.tap_fire
+            && at.elapsed().as_secs_f32() > touch::TAP_HOLD_SECS
+        {
+            self.tap_fire = None;
+            self.input.mouse.remove(&MouseButton::Left);
+        }
+        if !self.fingers.seen {
+            return;
+        }
+        let dpr = self
+            .active
+            .as_ref()
+            .map_or(1.0, |a| a.window.scale_factor() as f32)
+            .max(0.5);
+        let reach = touch::STICK_DOTS * self.ui_scale();
+        self.input.stick = self.fingers.stick(reach);
+        for event in self.fingers.drain() {
+            match event {
+                TouchEvent::Press(Zone::Ui, at) => {
+                    let now = Instant::now();
+                    let double = self.last_press.is_some_and(|(when, where_)| {
+                        now.duration_since(when).as_secs_f32() < DOUBLE_CLICK_SECS
+                            && (where_.0 - at.0).abs() < DOUBLE_CLICK_PIXELS * dpr
+                            && (where_.1 - at.1).abs() < DOUBLE_CLICK_PIXELS * dpr
+                    });
+                    self.last_press = (!double).then_some((now, at));
+                    self.ui_press(at, double);
+                }
+                TouchEvent::Move(Zone::Ui, at) => self.cursor = at,
+                TouchEvent::Release(Zone::Ui, at) => {
+                    self.cursor = at;
+                    if self.ui_input.down {
+                        self.ui_release();
+                    }
+                }
+                TouchEvent::Press(Zone::Button(b), _) => self.touch_button(b, true),
+                TouchEvent::Release(Zone::Button(b), _) => self.touch_button(b, false),
+                TouchEvent::Press(..) | TouchEvent::Move(..) | TouchEvent::Release(..) => {}
+                TouchEvent::Tap(Zone::World, at) if !up => {
+                    self.cursor = at;
+                    self.rpg_click();
+                }
+                TouchEvent::Tap(Zone::Look, _) if !up => {
+                    self.input.mouse.insert(MouseButton::Left);
+                    self.tap_fire = Some(Instant::now());
+                }
+                TouchEvent::Tap(..) => {}
+                TouchEvent::LongPress(Zone::World, at) if !up => {
+                    if self.rpg.hover(self.rpg_under(at)) == crate::rpg::Hover::Attack {
+                        self.rpg.ask(crate::rpg::Act::Secondary);
+                    }
+                }
+                TouchEvent::LongPress(..) => {}
+                TouchEvent::Drag(dx, dy) => {
+                    let gain = touch::LOOK_GAIN / dpr;
+                    self.input.mouse_dx += dx * gain;
+                    self.input.mouse_dy += dy * gain;
+                }
+                TouchEvent::Pinch(ratio) => {
+                    if self.rpg_mode() && ratio > 0.0 {
+                        self.rpg.dist = (self.rpg.dist / ratio)
+                            .clamp(crate::rpg::DIST_MIN, crate::rpg::DIST_MAX);
+                    }
+                }
+            }
+        }
+    }
+
     /// The cursor the pointer shows (MODES.md 5.5): in the RPG mode with the pointer
     /// free, a crosshair over the target (a click attacks), a hand over another body (a
     /// click targets), the arrow elsewhere; the arrow everywhere else.
@@ -4772,21 +5102,36 @@ impl App {
                     .filter(|p| matches!(p, crate::content::PropState::Loaded(_)))
                     .count()
             ));
-            // The UI's scale and the density of the atlas it is drawn with (LOOK.md 2.2):
-            // the same number when the bundle has that atlas.
-            if let Some(a) = &self.active {
-                line.push_str(&format!(
-                    " ui_scale={} atlas_density={}",
-                    ui::scale_for(a.renderer.hud.size, PANEL_UNITS, self.settings.ui_scale),
-                    a.renderer.hud.density()
-                ));
-            }
             #[cfg(target_arch = "wasm32")]
             {
                 let (rx, tx) = o.net.bytes();
                 line.push_str(&format!(" rx_bytes={rx} tx_bytes={tx}"));
             }
         }
+        // The UI's scale and the density of the atlas it is drawn with (LOOK.md 2.2):
+        // the same number when the bundle has that atlas. Offline too (the phone gate).
+        if let Some(a) = &self.active {
+            line.push_str(&format!(
+                " ui_scale={} atlas_density={} size={}x{} dpr={:.3}",
+                ui::scale_for(a.renderer.hud.size, PANEL_UNITS, self.ui_scale_choice()),
+                a.renderer.hud.density(),
+                a.config.width,
+                a.config.height,
+                a.window.scale_factor()
+            ));
+        }
+        // Where the body is and looks (offline, the local walk's), and whether a finger
+        // has touched the screen: what the phone gate reads (WEB.md 3.5).
+        let pos = self
+            .online
+            .as_ref()
+            .and_then(|o| o.client.as_ref())
+            .map_or(self.sim.curr.origin, |c| c.mover.mv.origin);
+        let axes = self.input.axes();
+        line.push_str(&format!(
+            " yaw={:.0} pos={:.0},{:.0},{:.0} touch={} axes={:.2},{:.2}",
+            self.sim.yaw, pos.x, pos.y, pos.z, self.fingers.seen as u8, axes.0, axes.1
+        ));
         #[cfg(target_arch = "wasm32")]
         line.push_str(&format!(
             " wasm_memory_bytes={} first_frame_ms={:.0}",
@@ -4859,6 +5204,7 @@ impl App {
             // Whatever was held is not held for the game while the toolkit has the keys.
             self.release_keys();
         }
+        self.fingers_frame(up);
 
         // Mouse look is applied per frame for responsiveness; movement uses it at tick time.
         let bench = self.opts.bench_frames.is_some();
@@ -4867,7 +5213,7 @@ impl App {
             self.sim.yaw = self.bench_yaw0 + BENCH_CROWD_SWING_DEG * (t * 0.7).sin();
         } else if bench {
             self.sim.yaw += BENCH_YAW_DEG_PER_S * frame_dt;
-        } else if self.grabbed && !up {
+        } else if (self.grabbed || self.fingers.turning()) && !up {
             let turn = self.settings.sensitivity / self.zoom.max(1.0);
             let tilt = if self.settings.invert { -turn } else { turn };
             self.sim.yaw -= self.input.mouse_dx * turn;
@@ -5052,6 +5398,18 @@ impl App {
         // Whether the character's page may wear its draft here, read before the renderer
         // is borrowed for the frame.
         let at_trainer = self.at_trainer();
+        // The UI's scale this frame, and the controls a finger may land on (MODES.md
+        // 5.6), which the HUD draws where they are hit: read before the renderer is
+        // borrowed too.
+        let chosen = self.ui_scale_choice();
+        self.touch_buttons = if self.fingers.seen && !watching && !bench && !self.screen_up() {
+            let size = self.active.as_ref().map_or((1.0, 1.0), |a| {
+                (a.config.width.max(1) as f32, a.config.height.max(1) as f32)
+            });
+            touch_controls(size, self.ui_scale(), self.online.as_ref(), self.rpg_mode())
+        } else {
+            Vec::new()
+        };
         let Some(a) = &mut self.active else { return };
         // The world is drawn from the camera's leaf.
         let leaves = vec![self.bsp.leaf_for_point(camera)];
@@ -5164,7 +5522,7 @@ impl App {
         let scale = ui::scale_for(
             (a.config.width.max(1) as f32, a.config.height.max(1) as f32),
             PANEL_UNITS,
-            self.settings.ui_scale,
+            chosen,
         );
         self.content.want_atlas(scale as u8);
         if let Some(atlas) = self.content.take_atlas() {
@@ -5201,6 +5559,16 @@ impl App {
                         || self.input.down(KeyCode::KeyC),
                     zoom: self.zoom,
                     scoped: self.input.scoped,
+                    touch: TouchHud {
+                        buttons: &self.touch_buttons,
+                        held: self
+                            .touch_buttons
+                            .iter()
+                            .map(|(b, _)| *b)
+                            .filter(|b| self.fingers.holds(*b))
+                            .collect(),
+                        stick: self.fingers.stick_drawn(),
+                    },
                 },
             );
         }
@@ -5245,7 +5613,7 @@ impl App {
                 &self.ui_input,
                 screen,
                 PANEL_UNITS,
-                self.settings.ui_scale,
+                chosen,
             );
             if let Some(title) = &self.title {
                 match crate::menu::title(&mut ui, title) {
@@ -5679,6 +6047,7 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => {
                 self.input.keys.clear();
                 self.input.mouse.clear();
+                self.fingers.clear();
                 self.set_grab(false);
             }
             WindowEvent::ModifiersChanged(held) => {
@@ -5693,6 +6062,19 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
+            }
+            WindowEvent::Touch(t) => {
+                let at = (t.location.x as f32, t.location.y as f32);
+                let phase = match t.phase {
+                    TouchPhase::Started => touch::Phase::Started,
+                    TouchPhase::Moved => touch::Phase::Moved,
+                    TouchPhase::Ended => touch::Phase::Ended,
+                    TouchPhase::Cancelled => touch::Phase::Cancelled,
+                };
+                let zone = self.touch_zone(at);
+                let slop = touch::SLOP_DOTS * self.ui_scale();
+                self.fingers
+                    .touch(t.id, phase, at, Instant::now(), slop, |_| zone);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let turn = match delta {
@@ -5741,12 +6123,7 @@ impl ApplicationHandler for App {
                     } else if !self.grabbed && self.opts.bench_frames.is_none() {
                         self.set_grab(true);
                     } else {
-                        if self.input.mouse.insert(button)
-                            && button == MouseButton::Right
-                            && self.gun_scope() > 1
-                        {
-                            self.input.scoped = !self.input.scoped;
-                        }
+                        self.press_in_game(button);
                     }
                 }
                 ElementState::Released => {

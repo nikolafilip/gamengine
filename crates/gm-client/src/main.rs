@@ -32,6 +32,7 @@ mod script;
 mod settings;
 mod sound;
 mod stats;
+mod touch;
 mod ui;
 #[cfg(target_arch = "wasm32")]
 mod web;

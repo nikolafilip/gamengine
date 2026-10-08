@@ -181,6 +181,8 @@ addEventListener("beforeunload", (e) => {
 
 // Fullscreen takes the pointer and, where the browser has the Keyboard Lock API (Chromium),
 // the keys a tab normally keeps: Ctrl+W, Tab, Esc (leaving is then a long press of Esc).
+// On a phone, fullscreen also turns the screen to landscape where the browser allows
+// (docs/WEB.md 3.5): the game is wide, and a phone held upright shows little of it.
 fullscreen.addEventListener("click", async () => {
   try {
     await stage.requestFullscreen();
@@ -188,7 +190,13 @@ fullscreen.addEventListener("click", async () => {
     canvas.focus();
   } catch (e) {
     say("fullscreen refused: " + e.message, true);
+    return;
   }
+  try {
+    if (screen.orientation && screen.orientation.lock && matchMedia("(pointer: coarse)").matches) {
+      await screen.orientation.lock("landscape");
+    }
+  } catch { /* a desktop, or a browser that keeps the orientation to itself */ }
 });
 
 (async () => {

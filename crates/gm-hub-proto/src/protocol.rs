@@ -825,6 +825,11 @@ pub struct ItemSummary {
     /// what is not a stack (gear, a part). v11.
     pub quantity: u32,
     pub cap: u32,
+    /// Whether the asking character's build holds a weapon like it (ITEMS.md 2: an
+    /// ability of the build has the template's model as its prop); true for anything that
+    /// is not a weapon. False, `does` ends with the hub's words for it, and the hub
+    /// refuses to wear it. Player protocol v5.
+    pub fits: bool,
 }
 
 /// A reading of what a character's worn items do to damage (ITEMS.md 3.3). `seq` orders

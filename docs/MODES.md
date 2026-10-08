@@ -272,8 +272,9 @@ An action pressed with a target:
 
 - **in range and seen**: it fires, aimed by the zone at the target. A `melee_arc` turns the
   body to face it; a `projectile` is launched with the mind's lead (`gm_ai::fighter::lead`,
-  the companions' own) and the content's spread; an aimed `area_effect` is put on the
-  target. The frame's yaw and pitch stay the camera's for the view: **the aim of an RPG body
+  the companions' own, from where the target was at the attacker's view tick, where the
+  bolt is spawned and stepped forward) and the content's spread; an aimed `area_effect`
+  is put on the target. The frame's yaw and pitch stay the camera's for the view: **the aim of an RPG body
   is never the client's** (ANTICHEAT.md 4's statistics skip it: there is nothing to measure);
 - **out of range or unseen**: the body turns and walks toward the target along the nav grid
   (COMPANIONS.md 7, built on the client from the same map in 14 ms) until it is in range,
@@ -303,6 +304,28 @@ target, a hand over another body); right drag: the camera, a right tap on the ta
 secondary at it; wheel: 120–400 u; `Tab`, `Esc`; the hotbar on `1`–`8` (the primary and secondary join it: the root's bar is one bar); `Shift`
 guards; `Space` jumps. A ground marker where the body is going; the target frame top
 centre; a ring under the target (LOOK.md 13).
+
+### 5.6 On a phone (2026-10-08)
+
+The director opened the page on a phone and nothing answered a tap (WEB.md 3.5). A touch
+screen plays every mode now, with the RPG mode the one made for it:
+
+| | RPG | action and gun |
+|---|---|---|
+| walk | a tap on the ground (5.5); the stick is not drawn | a stick on the left of the frame, around where the finger landed |
+| camera | a drag anywhere; two fingers for the distance | a drag on the right |
+| target / primary | a tap on a body, then on the target | a tap on the right: one blow, one shot |
+| secondary | a long press on the target, or the `2` button bottom right | the `2` button bottom right, held |
+| jump, guard, abilities | the hotbar's cells, as their keys; Shift's cell guards while held | `jump` bottom right; the hotbar's cells (`C` guards, `LMB`/`RMB` fire) |
+| menu, Tab | `menu` top right (Escape); no Tab: tap the next body | `menu` top right |
+
+The HUD and the screens are drawn larger on a touch screen (WEB.md 3.5: the device's pixel
+ratio as the scale, so a cell is finger-sized), and the controls appear from the first
+finger seen. **Proposed numbers**, for the director to play: the stick's rim at 56 dots and
+its dead zone of an eighth; a long press at 0.45 s; a tap's primary held 0.12 s; a swipe
+across the width half a turn (`touch::LOOK_GAIN` 3 counts a CSS pixel); the stick's share
+of the width 45 %. The chat line and the stall's prices have no keyboard on a phone yet
+(WEB.md 10).
 
 ## 6. What goes
 
@@ -545,7 +568,12 @@ Built as section 5 says, with these readings:
   from the hand at the launch (the zone's bolt shows a round trip later) is led to the
   target as the zone leads its bolt, within the ability's range and in sight; it flew
   the look's way, the camera's in this mode, and the director saw the shard leave for
-  the horizon.
+  the horizon. The zone's lead is taken from where the target was at the tick the
+  attacker saw (the history's), as the forward step of PROTOCOL.md 7.4 spawns the bolt
+  there: until 2026-10-08 it was led from where the target stood now, so the bolt got
+  to the point a round trip before the target did and missed every walker, while the
+  tracer, led from the client's older picture, flew true, and the director saw his
+  shard go to the target and the zone's bolt fly on elsewhere.
 - **Marks**: a ring where the body is going, a red one under the target.
 - **The buttons** (2026-10-08, the director: "LMB and RMB now seem completely removed
   from 3rd person mouse rpg ... maybe first click highlights target and then cursor

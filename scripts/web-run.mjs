@@ -3,6 +3,7 @@
 //   node scripts/web-run.mjs --url URL [--seconds N] [--screenshot FILE [--at S]] [--software]
 //                            [--chrome BIN] [--size WxH] [--profile DIR] [--cache NAME]
 //                            [--login EMAIL --password PW [--register]] [--click-canvas S]
+//                            [--mobile [WxH@DPR]] [--touch S]
 // --cache NAME reads every entry of that Cache API cache back at the end and prints
 // "GM-CACHE entries=N bytes=M": what the browser holds, whatever the page believes.
 // --login fills the page's own form as a person would (docs/CLIENT.md 4.1): a click into the
@@ -10,6 +11,12 @@
 // --click-canvas S clicks the middle of the game's canvas S seconds in, as a person's first
 // click would, and prints "web-run: after a click the pointer is held by: ID" (the element
 // the browser gave the pointer to, or "nothing"): the game asks for the pointer on a click.
+// --mobile makes the page a phone's (docs/WEB.md 3.5): a touch screen of W by H CSS pixels at
+// DPR device pixels each (a Galaxy S23 held sideways by default: 892x412@2.625, which is
+// 2340 by 1080 device pixels), with the browser's touch emulation. --touch S plays the
+// phone's controls S seconds in, as fingers: the stick on the left held forward for a
+// second and a half, a swipe across the right, a tap on the right; and prints
+// "web-run: touched". The client's report then shows the body moved and the camera turned.
 // Console lines go to stdout as they come. Exit 0 when the page reported GM-DONE, 1 on
 // GM-ERROR, on a timeout, and on anything that goes wrong on the way (the browser is ended
 // and its files removed in every case). Needs Node 22+ (its built-in WebSocket) and a Chromium.
@@ -34,6 +41,14 @@ const shotAt = Number(opt("--at", String(Math.max(1, seconds - 2))));
 const size = opt("--size", "1280x720").replace("x", ",");
 const chrome = opt("--chrome", process.env.CHROME || "chromium");
 const software = args.includes("--software");
+const mobile = args.includes("--mobile")
+  ? (() => {
+      const spec = args[args.indexOf("--mobile") + 1];
+      const m = /^(\d+)x(\d+)@([\d.]+)$/.exec(spec || "");
+      return m ? { width: +m[1], height: +m[2], dpr: +m[3] } : { width: 892, height: 412, dpr: 2.625 };
+    })()
+  : null;
+const touchAt = opt("--touch");
 
 // --profile DIR keeps the browser's storage between runs (the model cache lives there).
 const kept = opt("--profile");
@@ -157,6 +172,14 @@ async function main() {
   await send("Runtime.enable");
   await send("Log.enable");
   await send("Page.enable");
+  if (mobile) {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: mobile.width, height: mobile.height, deviceScaleFactor: mobile.dpr, mobile: true,
+      screenOrientation: { type: "landscapePrimary", angle: 90 },
+    });
+    await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+    console.log(`web-run: a phone of ${mobile.width}x${mobile.height} CSS pixels at ${mobile.dpr}`);
+  }
   await send("Page.navigate", { url });
   const started = Date.now();
 
@@ -208,6 +231,22 @@ async function main() {
       console.log(`web-run: the login form was filled and sent (the form says: ${said})`);
     }
   }
+  // Fingers, as the browser's touch events: a finger down, moved along a line over a
+  // time, lifted.
+  const finger = async (id, from, to, ms) => {
+    const point = (x, y) => ({ x, y, id, radiusX: 4, radiusY: 4, force: 1 });
+    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point(from[0], from[1])] });
+    const steps = Math.max(1, Math.round(ms / 25));
+    for (let i = 1; i <= steps; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      const t = i / steps;
+      await send("Input.dispatchTouchEvent", {
+        type: "touchMove", touchPoints: [point(from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t)],
+      });
+    }
+    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  };
+  let touched = touchAt === undefined;
   const clickAt = opt("--click-canvas");
   let clicked = clickAt === undefined;
   let shot = !screenshot;
@@ -234,6 +273,30 @@ async function main() {
         const holder = await value(`document.pointerLockElement ? (document.pointerLockElement.id || "an element without an id") : "nothing"`);
         console.log(`web-run: after a click the pointer is held by: ${holder}`);
       }
+    }
+    if (!touched && Date.now() - started >= Number(touchAt) * 1000) {
+      touched = true;
+      const w = mobile ? mobile.width : Number(size.split(",")[0]);
+      const h = mobile ? mobile.height : Number(size.split(",")[1]);
+      // The stick: landed at a fifth of the width, pushed up, held.
+      await finger(1, [w * 0.2, h * 0.7], [w * 0.2, h * 0.45], 1500);
+      // The look: a swipe across the right half.
+      await finger(2, [w * 0.6, h * 0.5], [w * 0.9, h * 0.5], 400);
+      // A tap on the right: the primary.
+      await finger(3, [w * 0.75, h * 0.5], [w * 0.75, h * 0.5], 50);
+      const seen = (await send("Runtime.evaluate", { expression: `new Promise((resolve) => {
+        const c = document.getElementById("gm-canvas");
+        if (!c) return resolve("no canvas");
+        const said = (box) => resolve(c.width + "x" + c.height + " backing, " + c.clientWidth + "x" + c.clientHeight + " CSS, dpr " + devicePixelRatio + ", device-pixel box " + box);
+        try {
+          new ResizeObserver((entries) => {
+            const b = entries[0].devicePixelContentBoxSize;
+            said(b && b[0] ? b[0].inlineSize + "x" + b[0].blockSize : "none");
+          }).observe(c, { box: "device-pixel-content-box" });
+          setTimeout(() => said("no answer"), 1000);
+        } catch (e) { said("error " + e.message); }
+      })`, awaitPromise: true, returnByValue: true })).result?.value;
+      console.log(`web-run: touched (the canvas is ${seen})`);
     }
     if (!shot && (Date.now() - started >= shotAt * 1000 || verdict !== null)) {
       shot = true;

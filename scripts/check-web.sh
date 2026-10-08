@@ -5,7 +5,8 @@
 #                                            transport tests (QUIC and WebTransport in one zone)
 #   scripts/check-web.sh --browser           also: an arena zone with a web listener, 15 native
 #                                            duelist bots and headless Chromium playing by script,
-#                                            once per build (WebGPU, WebGL2)
+#                                            once per build (WebGPU, WebGL2); then the page as a
+#                                            phone's touch screen, fingers on its controls (WEB.md 3.5)
 #   scripts/check-web.sh --browser --software   the same on Chromium's software GPU (CI): the
 #                                            frame rate is reported, not gated
 #   scripts/check-web.sh --browser --hub     also the whole path: a hub with a web listener, a
@@ -166,6 +167,39 @@ run() { # build name, query flag
 }
 run webgpu ""
 run webgl "&gl=1"
+
+# 4b. A phone (WEB.md 3.5): the page as a touch screen of a Galaxy S23 held sideways,
+#     the WebGL2 build (a phone's Firefox has no WebGPU), the offline arena, and fingers
+#     on the controls: the stick walks the body, a swipe turns the camera, the UI is drawn
+#     at the scale the device's pixel ratio asks for.
+phone() {
+  local page="http://127.0.0.1:$http/?offline=1&map=arena&report=1&gl=1&seconds=16"
+  local soft=(); [[ "$SOFTWARE" == 1 ]] && soft=(--software)
+  timeout 120 node scripts/web-run.mjs --url "$page" --seconds 16 --mobile --touch 6 \
+    --screenshot "$tmp/browser-phone.png" --at 12 ${CHROME:+--chrome "$CHROME"} "${soft[@]}" > "$tmp/browser-phone.log" 2>&1 || true
+  local done_line first
+  done_line="$(/usr/bin/grep -a '^GM-DONE' "$tmp/browser-phone.log" | tail -1 || true)"
+  first="$(/usr/bin/grep -a '^GM-STATS' "$tmp/browser-phone.log" | head -1 || true)"
+  if [[ -z "$done_line" || -z "$first" ]]; then
+    tail -15 "$tmp/browser-phone.log"; echo "FAIL: the phone run did not finish (or reported nothing)"; status=1; return
+  fi
+  echo "phone: $done_line"
+  if /usr/bin/grep -aq '^\[ERROR\]\|^EXCEPTION' "$tmp/browser-phone.log"; then
+    echo "FAIL: the phone run logged an error: $(/usr/bin/grep -a -m1 '^\[ERROR\]\|^EXCEPTION' "$tmp/browser-phone.log" | cut -c1-200)"; status=1
+  fi
+  f() { echo "$2" | sed -n "s/.* $1=\([-0-9.,A-Za-z]*\).*/\1/p"; }
+  /usr/bin/grep -aq '^web-run: touched' "$tmp/browser-phone.log" && echo "OK: the fingers were played" \
+    || { echo "FAIL: web-run never played the fingers"; status=1; }
+  [[ "$(f touch "$done_line")" == 1 ]] && echo "OK: the client saw the fingers" \
+    || { echo "FAIL: the client saw no finger (touch=$(f touch "$done_line"))"; status=1; }
+  [[ "$(f ui_scale "$done_line")" == 3 ]] && echo "OK: the UI is drawn at scale 3 on the phone" \
+    || { echo "FAIL: the UI is at scale $(f ui_scale "$done_line") on the phone, not 3"; status=1; }
+  [[ -n "$(f yaw "$first")" && "$(f yaw "$first")" != "$(f yaw "$done_line")" ]] && echo "OK: the swipe turned the camera ($(f yaw "$first") to $(f yaw "$done_line"))" \
+    || { echo "FAIL: the camera did not turn (yaw $(f yaw "$first") then $(f yaw "$done_line"))"; status=1; }
+  [[ -n "$(f pos "$first")" && "$(f pos "$first")" != "$(f pos "$done_line")" ]] && echo "OK: the stick walked the body ($(f pos "$first") to $(f pos "$done_line"))" \
+    || { echo "FAIL: the body did not walk (pos $(f pos "$first") then $(f pos "$done_line"))"; status=1; }
+}
+phone
 
 # 5. The whole path through the hub (WEB.md 4, 8).
 hub_run() {

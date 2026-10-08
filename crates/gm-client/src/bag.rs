@@ -857,10 +857,12 @@ impl Bag {
         self.notice_lines(ui, col.take(2.0 * line));
         let ready = self.ready();
         let worn = picked.as_ref().is_some_and(|i| i.worn);
-        // What is worn comes off whatever it is; what is not must have a place to go.
+        // What is worn comes off whatever it is; what is not must have a place to go and
+        // fit this build's hands (ITEMS.md 2: the hub said so, and its words are in the
+        // item's lines above).
         let wearable = picked
             .as_ref()
-            .is_some_and(|i| i.worn || i.place != PLACE_NONE);
+            .is_some_and(|i| i.worn || (i.place != PLACE_NONE && i.fits));
         let wear = if worn { "Take off" } else { "Wear" };
         let row = ui.buttons(col.take(h), &[wear, "Sell", "Store", "Storage", "Close"]);
         let may_change = ready && self.wearing.free(self.now);
@@ -900,7 +902,7 @@ impl Bag {
                 .filter(|(from, _)| from == "items")
                 .map(|(_, id)| id)
                 .and_then(|id| items.iter().find(|i| i.id == id))
-                .filter(|i| !i.worn && i.place == place)
+                .filter(|i| !i.worn && i.place == place && i.fits)
                 .cloned()
         };
         let dropped_to_wear =
@@ -1236,6 +1238,7 @@ mod tests {
             worn: false,
             quantity: 1,
             cap: 0,
+            fits: true,
             what: if whole {
                 "a weapon, 250 of 250".to_string()
             } else {
@@ -1482,6 +1485,27 @@ mod tests {
                 "{silver}: {row} of {whole}"
             );
         }
+    }
+
+    /// A weapon the build's hands do not hold (ITEMS.md 2): the hub says so in the item's
+    /// lines and the screen offers no Wear for it, nor takes it dropped on the weapon slot.
+    #[test]
+    fn a_weapon_the_build_does_not_hold_is_not_offered_to_wear() {
+        let hub = shop();
+        let mut staff = item(4, "staff", &["blunt +9.0%"], &["core/iron", "frame/oak"]);
+        staff.fits = false;
+        staff
+            .does
+            .push("this build's hands are for the sword: not a staff".into());
+        hub.0.borrow_mut().items.push(staff);
+        let mut run = Run::new(false);
+        let mut bag = Bag::inventory(&hub, S, ME, run.t);
+        run.look(&mut bag, &hub);
+        assert!(run.offers("Wear"), "the sword is worn as before");
+        run.click(&mut bag, "staff  blunt +9.0%", &hub);
+        run.look(&mut bag, &hub);
+        assert!(run.shows("this build's hands are for the sword: not a staff"));
+        assert!(!run.offers("Wear") && run.offers("Store"));
     }
 
     #[test]

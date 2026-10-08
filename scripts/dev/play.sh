@@ -42,7 +42,10 @@ B="${GM_PLAY_BIN:-$R/target/release}"
 SECRET=play
 mkdir -p "$D" "$SOCK" "$D/log"
 
-need() { for b in gm-hub gm-server gm-bot gm-client; do [[ -x "$B/$b" ]] || { echo "missing $B/$b: run  cargo build --release  first"; exit 1; }; done; }
+# The stack needs the hub, the zones and the bots; the client only `client` and `push` (a
+# server in the cloud has none: scripts/dev/cloud.sh).
+need() { for b in gm-hub gm-server gm-bot; do [[ -x "$B/$b" ]] || { echo "missing $B/$b: run  cargo build --release  first"; exit 1; }; done; }
+need_client() { [[ -x "$B/gm-client" ]] || { echo "missing $B/gm-client: run  cargo build --release  first"; exit 1; }; }
 pg_up() { pg_ctl -D "$PG" status >/dev/null 2>&1; }
 hub_up() { [[ -f "$D/pids" ]] && kill -0 "$(head -1 "$D/pids")" 2>/dev/null; }
 psql_play() { psql -h "$SOCK" -p "$PGPORT" -U gm -d postgres "$@"; }
@@ -241,7 +244,7 @@ gm() {
   hubctl --grant-moderator "$email" && echo "$email: a game master from the next zone entered (G opens the page)"
 }
 
-client() { cd "$R" && exec env ALSA_CARD="${ALSA_CARD:-1}" "$B/gm-client" --settings "$D/settings.toml" "$@"; }
+client() { need_client; cd "$R" && exec env ALSA_CARD="${ALSA_CARD:-1}" "$B/gm-client" --settings "$D/settings.toml" "$@"; }
 
 # The page's server: Python's, with every file told "no-cache" (revalidate: 304 when the
 # file is the same), so a browser never plays last build's client against this build's zone
@@ -283,7 +286,9 @@ web() {
   fi
   # The native client for another Linux machine, and the hub's certificate it pins (a new
   # one at every start of the hub: the launcher fetches it each time).
-  rm -rf "${D:?}/bundle"; mkdir -p "$D/bundle/gamengine-client"
+  rm -rf "${D:?}/bundle" "$D/web/gamengine-client.tar.gz"
+  if [[ -x "$B/gm-client" ]]; then
+  mkdir -p "$D/bundle/gamengine-client"
   ln -s "$B/gm-client" "$R/assets" "$D/bundle/gamengine-client/"
   cat >"$D/bundle/gamengine-client/play" <<EOF
 #!/usr/bin/env bash
@@ -294,6 +299,7 @@ exec ./gm-client --hub "$ip:24500" --hub-cert hub.der "\$@"
 EOF
   chmod +x "$D/bundle/gamengine-client/play"
   tar -czhf "$D/web/gamengine-client.tar.gz" -C "$D/bundle" gamengine-client
+  fi
   ln -s "$D/hub.der" "$D/web/hub.der"
   (cd "$D/web" && exec python3 -c "$WEB_SERVER" "$ip" 24510 "$crt" "$key" >>"$D/log/https.log" 2>&1) &
   echo $! >>"$D/web.pid"
@@ -309,7 +315,7 @@ EOF
 push() {
   local to="${1:-${GM_PLAY_PUSH:-pezo@192.168.1.41}}"
   [[ -d "$D/bundle/gamengine-client" ]] || { echo "no bundle: run  $0 web  first"; exit 1; }
-  need
+  need; need_client
   tar -czhf "$D/web/gamengine-client.tar.gz" -C "$D/bundle" gamengine-client || exit 1
   scp -q "$D/web/gamengine-client.tar.gz" "$to:Downloads/" || exit 1
   ssh "$to" 'cd ~/Downloads && rm -rf gamengine-client && tar xzf gamengine-client.tar.gz && ls -l gamengine-client/gm-client' || exit 1

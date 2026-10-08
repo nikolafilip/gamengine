@@ -114,6 +114,14 @@ pub fn scale_for(size: (f32, f32), need: f32, chosen: u8) -> f32 {
     s
 }
 
+/// The scale a touch screen asks for when none is chosen (MODES.md 5.6): a dot per
+/// device pixel of the browser's ratio (a phone's 2.6 to 3.5 is 3; a tablet's 2 is 2),
+/// at least 2, because a finger is wider than a mouse. `scale_for` still shrinks it to
+/// what the panels can fit.
+pub fn touch_scale(device_pixel_ratio: f32) -> u8 {
+    (device_pixel_ratio.round() as u8).clamp(2, 4)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -2758,6 +2766,14 @@ pub mod tests {
 
     #[test]
     fn the_scale_grows_with_the_frame_and_keeps_a_panel_inside_it() {
+        // A phone (2.625 at 2340 by 1080 lines) asks for 3 and gets it in fullscreen; a
+        // tablet at 2 gets 2; a desktop's 1 is still 2, a finger being wide.
+        assert_eq!(touch_scale(2.625), 3);
+        assert_eq!(touch_scale(2.0), 2);
+        assert_eq!(touch_scale(1.0), 2);
+        assert_eq!(touch_scale(4.5), 4);
+        assert_eq!(scale_for((2340.0, 1080.0), 340.0, touch_scale(2.625)), 3.0);
+        assert_eq!(scale_for((2340.0, 980.0), 340.0, touch_scale(2.625)), 2.0);
         assert_eq!(scale_for((640.0, 360.0), 300.0, 0), 1.0);
         assert_eq!(scale_for((1280.0, 720.0), 300.0, 0), 2.0);
         assert_eq!(scale_for((1920.0, 1080.0), 300.0, 0), 2.0);
