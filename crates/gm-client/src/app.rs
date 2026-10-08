@@ -1483,15 +1483,32 @@ const FACING_BACKPEDAL_DEG: f32 = 100.0;
 /// travel, so that a side-step is a run to the side and not a slide of a body running
 /// ahead; in every other stance where it looks, which is where its blow lands. `drawn` is
 /// the yaw it was drawn at last frame: the turn is quick, not a snap.
-pub(crate) fn facing(drawn: Option<f32>, view_yaw: f32, vel: Vec3, anim: u8, dt: f32) -> f32 {
+///
+/// An RPG body (`free`, MODES.md 5.1) does not turn with its camera: it runs facing its
+/// travel whichever way that is (no backpedal: `S` walks it toward the camera), turns to
+/// where it looks only for an action (the zone fires there, or at its target while the
+/// turn holds it, in which case the caller passes that yaw and `free` false), and in
+/// every other stance stands as it was left.
+pub(crate) fn facing(
+    drawn: Option<f32>,
+    view_yaw: f32,
+    vel: Vec3,
+    anim: u8,
+    free: bool,
+    dt: f32,
+) -> f32 {
     use gm_core::sim::anim;
     let flat = vel.truncate();
     let mut target = view_yaw;
     if matches!(anim, anim::RUN | anim::AIR) && flat.length() > 10.0 {
         let travel = flat.y.atan2(flat.x).to_degrees();
         let off = (travel - view_yaw + 180.0).rem_euclid(360.0) - 180.0;
-        if off.abs() <= FACING_BACKPEDAL_DEG {
+        if free || off.abs() <= FACING_BACKPEDAL_DEG {
             target = travel;
+        }
+    } else if free && !anim::acts(anim) {
+        if let Some(drawn) = drawn {
+            return drawn;
         }
     }
     let Some(drawn) = drawn else {
@@ -4127,6 +4144,7 @@ impl App {
                         e.yaw,
                         e.vel,
                         e.anim,
+                        e.flags & gm_net::snapshot::flags::RPG != 0,
                         frame_dt,
                     );
                     self.facings.insert(e.id, yaw);
@@ -4444,19 +4462,19 @@ impl App {
                 // The own body, posed by the server's animation state. It faces where
                 // the mover does while a turn holds it (toward its target for a
                 // target-action, MODES.md 5.3; the magnet's turn, 4.2) and the camera's
-                // way otherwise: between actions an RPG body does not face its target
-                // (the director, 2026-10-08).
+                // way otherwise; an RPG body is free of the camera between actions
+                // (MODES.md 5.1): it stands the way it last went or was turned, where
+                // until 2026-10-08 it swung round with the orbit (the director).
                 let build = &c.sheet.build;
-                let look = if c.mover.lock_yaw.is_some() {
-                    c.mover.yaw
-                } else {
-                    self.sim.yaw
-                };
+                let locked = c.mover.lock_yaw.is_some();
+                let look = if locked { c.mover.yaw } else { self.sim.yaw };
+                let rpg = c.sheet.kit.mode == gm_core::vocab::Mode::Rpg;
                 let yaw = facing(
                     self.facings.get(&OWN).copied(),
                     look,
                     c.mover.mv.velocity,
                     own_anim,
+                    rpg && !locked,
                     frame_dt,
                 );
                 self.facings.insert(OWN, yaw);
@@ -5814,28 +5832,60 @@ mod tests {
         let side = Vec3::new(0.0, 200.0, 0.0);
         // Looking along +x and stepping to the left (+y): drawn running that way, turned
         // to it over a few frames rather than at once.
-        assert_eq!(facing(None, 0.0, side, anim::RUN, 0.016), 90.0);
-        let turned = facing(Some(0.0), 0.0, side, anim::RUN, 0.05);
+        assert_eq!(facing(None, 0.0, side, anim::RUN, false, 0.016), 90.0);
+        let turned = facing(Some(0.0), 0.0, side, anim::RUN, false, 0.05);
         assert!(turned > 30.0 && turned < 40.0, "{turned}");
-        let there = facing(Some(turned), 0.0, side, anim::RUN, 0.25);
+        let there = facing(Some(turned), 0.0, side, anim::RUN, false, 0.25);
         assert_eq!(there, 90.0);
         // Winding up a blow: back to the aim, where the blow lands. In the air, the travel.
-        assert_eq!(facing(Some(90.0), 0.0, side, anim::WINDUP, 0.25), 0.0);
-        assert_eq!(facing(Some(90.0), 0.0, side, anim::AIR, 0.25), 90.0);
+        assert_eq!(
+            facing(Some(90.0), 0.0, side, anim::WINDUP, false, 0.25),
+            0.0
+        );
+        assert_eq!(facing(Some(90.0), 0.0, side, anim::AIR, false, 0.25), 90.0);
         // Standing still, or guarding: the aim. Backing off: a backpedal, the aim kept.
-        assert_eq!(facing(None, 30.0, Vec3::ZERO, anim::RUN, 0.016), 30.0);
-        assert_eq!(facing(None, 30.0, side, anim::GUARD, 0.016), 30.0);
+        assert_eq!(
+            facing(None, 30.0, Vec3::ZERO, anim::RUN, false, 0.016),
+            30.0
+        );
+        assert_eq!(facing(None, 30.0, side, anim::GUARD, false, 0.016), 30.0);
         let back = Vec3::new(-200.0, 50.0, 0.0);
-        assert_eq!(facing(None, 0.0, back, anim::RUN, 0.016), 0.0);
+        assert_eq!(facing(None, 0.0, back, anim::RUN, false, 0.016), 0.0);
         // The turn takes the short way round.
         let near = facing(
             Some(350.0),
             0.0,
             Vec3::new(200.0, 60.0, 0.0),
             anim::RUN,
+            false,
             0.01,
         );
         assert!(!(10.0..=350.0).contains(&near), "{near}");
+    }
+
+    #[test]
+    fn an_rpg_body_stands_as_it_was_left_and_turns_only_for_an_action() {
+        use gm_core::sim::anim;
+        let still = Vec3::ZERO;
+        // Standing, the camera orbits (the look turns): the body stays where it was drawn.
+        assert_eq!(facing(Some(90.0), 0.0, still, anim::IDLE, true, 0.25), 90.0);
+        assert_eq!(
+            facing(Some(90.0), 180.0, still, anim::GUARD, true, 0.25),
+            90.0
+        );
+        // Never drawn yet: the look, once.
+        assert_eq!(facing(None, 30.0, still, anim::IDLE, true, 0.016), 30.0);
+        // Walking toward the camera (S): a run that way, not a backpedal.
+        let back = Vec3::new(-200.0, 0.0, 0.0);
+        assert_eq!(facing(Some(180.0), 0.0, back, anim::RUN, true, 0.25), 180.0);
+        assert_eq!(facing(Some(180.0), 0.0, back, anim::RUN, false, 0.25), 0.0);
+        // An action without a target fires the camera's way: the body turns to it.
+        assert_eq!(facing(Some(90.0), 0.0, still, anim::CAST, true, 0.25), 0.0);
+        // A target-action's turn: the caller passes the mover's yaw and no freedom.
+        assert_eq!(
+            facing(Some(90.0), 45.0, still, anim::IDLE, false, 0.25),
+            45.0
+        );
     }
 
     #[test]
