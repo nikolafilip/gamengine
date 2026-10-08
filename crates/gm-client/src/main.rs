@@ -118,6 +118,9 @@ pub struct Options {
     pub ui_script: Option<String>,
     /// Walk around the map offline without being asked (CLIENT.md 2).
     pub offline: bool,
+    /// The screen is a touch screen (the page's coarse pointer, WEB.md 3.5): the HUD is a
+    /// finger's and the UI at the touch scale from the first frame, not the first tap.
+    pub touch: bool,
     /// Render the sound into this WAV from the frame clock instead of a device
     /// (SOUND.md 7).
     pub sound_dump: Option<PathBuf>,
@@ -183,6 +186,7 @@ impl Default for Options {
             settings: None,
             ui_script: None,
             offline: false,
+            touch: false,
             sound_dump: None,
         }
     }

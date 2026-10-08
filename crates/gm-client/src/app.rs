@@ -783,6 +783,7 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
     } else {
         Viewport::First
     };
+    let touch = opts.touch;
     let mut app = App {
         view_kick: 0.0,
         view_swing: 0.0,
@@ -886,7 +887,7 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         last_vp: None,
         cursor_icon: CursorIcon::Default,
         rpg_right: None,
-        fingers: Fingers::default(),
+        fingers: Fingers::expecting(touch),
         touch_buttons: Vec::new(),
         tap_fire: None,
         facings: HashMap::new(),
@@ -1214,6 +1215,7 @@ pub async fn run_web() -> Result<(), String> {
         connect_web: web_addr("connect", "cert")?,
         assets: page.string("assets").unwrap_or_else(|| "assets".into()),
         ui_script: page.string("ui-script"),
+        touch: page.flag("touch"),
         ..Options::default()
     };
     if let Some(zone) = page.string("zone") {
