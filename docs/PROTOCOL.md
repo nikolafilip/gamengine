@@ -210,7 +210,7 @@ Entity record:
 | vel | 3 × svar | VEL. Absolute when SPAWN (or the baseline record has no velocity), delta otherwise |
 | anim | 8 (+ uvar) | ANIM. When the stance is a script's (windup 3, swing 4, recovery 5, cast 10), the **acting ability** follows as a uvar: the `AbilityId` of the script (the pack's index and one). ANIM is set when either changes (v9, section 21) |
 | health | uvar | HEALTH |
-| flags | 9 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only), 8 crouched (MODES.md 3.5; v14, every body) |
+| flags | 10 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only), 8 crouched (MODES.md 3.5; v14, every body), 9 in the RPG mode (MODES.md 5.1; v15, every body) |
 | status | 16 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras) |
 
 Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infiltrator), `team`
@@ -846,3 +846,14 @@ in the simulation's snapshots:
 - The zone's rewind (7.4) records the posture with the position, so a bolt or a blade is
   resolved against a capsule as short as the body was at the shooter's view tick. Nothing
   of that is on the wire.
+
+## 27. Changes in v15 (the RPG body stands as it was left, 2026-10-08)
+
+`PROTOCOL_VERSION` 15 (MODES.md 5.1, 10.3). One bit in the snapshot's entity record:
+
+- `flags` is **ten** bits, not nine: bit 9 `RPG`, set on every body whose kit is in the RPG
+  mode. That body's frames carry its camera's yaw, which says nothing of where it stands
+  facing: a client draws it running the way it goes (toward the camera too: no backpedal),
+  turning to its `yaw` only for an action, and standing otherwise as it was left
+  (`app::facing`). Nothing else reads the bit; the zone's aim, hitboxes and ledger are as
+  before.

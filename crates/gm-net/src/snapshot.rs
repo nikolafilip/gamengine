@@ -72,8 +72,11 @@ pub mod flags {
     /// Crouched (MODES.md 3.5, v14): the body is drawn in its squat and its hitbox is
     /// `CROUCH_DROP` shorter; every body carries it.
     pub const CROUCHED: u16 = 1 << 8;
+    /// In the RPG mode (MODES.md 5.1, v15): the body does not turn with its camera, so a
+    /// client draws it standing the way it last went or was turned, not the frame's yaw.
+    pub const RPG: u16 = 1 << 9;
     /// How many bits of flags the wire carries.
-    pub const BITS: u32 = 9;
+    pub const BITS: u32 = 10;
 }
 
 mod mask {

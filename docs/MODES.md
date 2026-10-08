@@ -529,11 +529,17 @@ Built as section 5 says, with these readings:
   wheel from 120 to 400, pitched between 5° and 80° down), the pointer is free, the
   secondary button held turns it; the frames carry the camera's yaw and a level pitch,
   the body faces where it goes (LOOK.md 13.9), or its target while a target-action's
-  turn holds it (and only then: between actions it faces the camera's way, the
-  director's call). The own body is drawn facing where the mover does while that turn
-  holds it (`lock_yaw`, predicted on the client with the nearby bodies); until
-  2026-10-08 it was drawn at the camera's yaw, so the frostweaver cast its shard facing
-  away from the dummy while everyone else saw it turn. The tracer the client lets fly
+  turn holds it, and **between actions it stands as it was left**: facing the way it last
+  walked, or the target it last turned to, while the camera orbits (the director,
+  2026-10-08 midday: "char should face direction it last stopped at, or was left at";
+  it was drawn at the camera's yaw, swinging round with every drag of the orbit). An
+  action without a target fires the camera's way, so the body turns to it for the
+  script and keeps that facing after. Every body in this mode is drawn by the rule, the
+  own and the ones seen (snapshot flag `RPG`, protocol v15); `S` walks the body toward
+  the camera facing that way, not a backpedal. The own body is drawn facing where the
+  mover does while a target-action's turn holds it (`lock_yaw`, predicted on the client
+  with the nearby bodies); until 2026-10-08 it was drawn at the camera's yaw, so the
+  frostweaver cast its shard facing away from the dummy while everyone else saw it turn. The tracer the client lets fly
   from the hand at the launch (the zone's bolt shows a round trip later) is led to the
   target as the zone leads its bolt, within the ability's range and in sight; it flew
   the look's way, the camera's in this mode, and the director saw the shard leave for
