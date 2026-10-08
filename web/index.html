@@ -38,9 +38,11 @@
   /* A touch screen: the fullscreen control large enough for a finger, the form no wider
      than the screen. */
   @media (pointer: coarse) {
-    /* Top left, away from the game's own buttons (the menu top right, jump and the
-       secondary bottom right); gone once fullscreen is on. */
-    #fullscreen { opacity: .85; font-size: 16px; padding: .6em 1.2em; left: 10px; top: 10px; right: auto; bottom: auto; }
+    /* A bar across the top, in the way on purpose (docs/WEB.md 3.7): a phone's browser
+       bars take a third of the game, and the game's menu offers the way back; gone once
+       fullscreen is on. It stops short of the game's menu button, top right. */
+    #fullscreen { opacity: .95; font-size: 18px; font-weight: bold; padding: .8em 1em; left: 0; top: 0; right: 64px; bottom: auto;
+                  border-width: 0 1px 1px 0; background: #3a3a60; text-align: center; }
     #stage:fullscreen #fullscreen { display: none; }
     #panel { width: min(21em, 90vw); }
     button { padding: .6em 1.1em; }

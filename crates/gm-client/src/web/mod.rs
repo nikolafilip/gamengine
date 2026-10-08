@@ -205,6 +205,13 @@ pub fn canvas_device_size() -> Option<winit::dpi::PhysicalSize<u32>> {
     ))
 }
 
+/// Whether the page is fullscreen (WEB.md 3.7): the menu offers the other.
+pub fn fullscreen_on() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .is_some_and(|d| d.fullscreen_element().is_some())
+}
+
 /// Give the pointer back to the browser.
 pub fn give_pointer_back() {
     if let Some(d) = web_sys::window().and_then(|w| w.document()) {

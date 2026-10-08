@@ -51,6 +51,8 @@ pub enum MenuAction {
     Quit,
     /// A setting changed: apply it now.
     Changed,
+    /// A page's fullscreen, on or off (WEB.md 3.7): the browser is asked by the page.
+    PageFullscreen,
 }
 
 /// What the menu may offer: a client that joined a zone directly has no hub to travel
@@ -64,6 +66,9 @@ pub struct Offers {
     pub travel: bool,
     pub leave: bool,
     pub fullscreen: bool,
+    /// In a browser: whether the page is fullscreen now, so that the menu offers the
+    /// other (WEB.md 3.7). `None` natively, where fullscreen is a setting.
+    pub page_fullscreen: Option<bool>,
     /// Not in a browser: its tab is closed by the browser.
     pub quit: bool,
 }
@@ -116,7 +121,7 @@ impl GameMenu {
         let s = ui.scale;
         let gap = 5.0 * s;
         let h = ui.button_height();
-        let rows = if offers.gm { 10.0 } else { 9.0 };
+        let rows = if offers.gm { 10.0 } else { 9.0 } + offers.page_fullscreen.map_or(0.0, |_| 1.0);
         let inner = rows * (h + gap) + 2.0 * ui.line();
         let panel = Rect::centred(ui.size(), 160.0 * s, ui.panel_height(inner, true));
         let inner = ui.panel(panel, "menu");
@@ -142,6 +147,14 @@ impl GameMenu {
             self.page = Page::Travel;
             self.notice.clear();
             self.wait = Some(hub.call(PlayerRequest::ListZones { session }));
+        }
+        if let Some(on) = offers.page_fullscreen
+            && ui.button(
+                col.take(h),
+                if on { "Leave fullscreen" } else { "Fullscreen" },
+            )
+        {
+            return MenuAction::PageFullscreen;
         }
         if ui.button(col.take(h), "Settings") {
             self.page = Page::Settings;
@@ -760,6 +773,7 @@ mod tests {
         travel: true,
         leave: true,
         fullscreen: true,
+        page_fullscreen: None,
         quit: true,
     };
 
@@ -935,6 +949,7 @@ mod tests {
             travel: false,
             leave: false,
             fullscreen: false,
+            page_fullscreen: None,
             quit: true,
         };
         frame(

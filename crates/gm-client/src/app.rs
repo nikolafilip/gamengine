@@ -3097,6 +3097,12 @@ impl App {
             MenuAction::Leave => self.leave_zone(""),
             MenuAction::Quit => event_loop.exit(),
             MenuAction::Changed => self.apply_settings(),
+            // The tap that pressed the button is a gesture the browser still honours.
+            MenuAction::PageFullscreen => {
+                #[cfg(target_arch = "wasm32")]
+                crate::web::tell_page("fullscreen", "toggle");
+                self.menu = None;
+            }
         }
         match front {
             Action::None => {}
@@ -5828,6 +5834,10 @@ impl App {
                             travel: playing && hub.is_some(),
                             leave: returns && self.online.is_some(),
                             fullscreen: cfg!(not(target_arch = "wasm32")),
+                            #[cfg(target_arch = "wasm32")]
+                            page_fullscreen: Some(crate::web::fullscreen_on()),
+                            #[cfg(not(target_arch = "wasm32"))]
+                            page_fullscreen: None,
                             quit: cfg!(not(target_arch = "wasm32")),
                         };
                         let here = self.online.as_ref().map_or("", |o| o.zone_name.as_str());
