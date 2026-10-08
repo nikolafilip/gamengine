@@ -12,6 +12,17 @@ use gm_core::sim::{Mover, buttons, capsule_at, sees};
 use gm_core::trace::{CollisionWorld, Hull};
 use gm_core::vocab::ArchetypeFrame;
 
+/// What the pointer is over in the RPG mode (MODES.md 5.5), which picks the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hover {
+    /// The ground, or nothing: a click walks there.
+    Ground,
+    /// A body that is not the target: a click targets it.
+    Body,
+    /// The target: a click is the primary at it, a right tap the secondary.
+    Attack,
+}
+
 /// What a key asks for with a target (MODES.md 5.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Act {
@@ -131,7 +142,8 @@ impl Rpg {
 
     /// A left click (MODES.md 5.2, 5.5): the body under the pointer becomes the target;
     /// else the ground there becomes where the body walks.
-    pub fn click(&mut self, world: &dyn CollisionWorld, from: Vec3, dir: Vec3, bodies: &[Body]) {
+    /// The body under the pointer: the nearest capsule the ray meets before a wall.
+    pub fn pick(world: &dyn CollisionWorld, from: Vec3, dir: Vec3, bodies: &[Body]) -> Option<u32> {
         let wall = world.trace(Hull::Point, from, from + dir * PICK_REACH);
         let reach = PICK_REACH * wall.fraction;
         let mut best: Option<(f32, u32)> = None;
@@ -143,13 +155,33 @@ impl Rpg {
                 best = Some((t, b.id));
             }
         }
-        if let Some((_, id)) = best {
-            if self.target != Some(id) {
+        best.map(|(_, id)| id)
+    }
+
+    /// What the pointer would do where it is (MODES.md 5.5): the cursor says so.
+    pub fn hover(&self, under: Option<u32>) -> Hover {
+        match under {
+            Some(id) if self.target == Some(id) => Hover::Attack,
+            Some(_) => Hover::Body,
+            None => Hover::Ground,
+        }
+    }
+
+    /// A left click (MODES.md 5.2, 5.5): on a body not yet the target, it is targeted;
+    /// on the target, the primary at it (Tales of Pirates, Ether Saga: the first click
+    /// picks, the next attacks; the director, 2026-10-08); on the ground, a walk there.
+    pub fn click(&mut self, world: &dyn CollisionWorld, from: Vec3, dir: Vec3, bodies: &[Body]) {
+        if let Some(id) = Self::pick(world, from, dir, bodies) {
+            if self.target == Some(id) {
+                self.ask(Act::Primary);
+            } else {
                 self.clear_target();
                 self.target = Some(id);
             }
             return;
         }
+        let wall = world.trace(Hull::Point, from, from + dir * PICK_REACH);
+        let reach = PICK_REACH * wall.fraction;
         if wall.fraction < 1.0 {
             // Just short of the surface, then down to the floor under it.
             let at = from + dir * (reach - 4.0).max(0.0);
@@ -305,5 +337,52 @@ pub fn orbit_camera(
         tr.end + back * 6.0
     } else {
         desired
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gm_core::collide::BoxWorld;
+
+    fn dummy(id: u32, x: f32, y: f32) -> Body {
+        Body {
+            id,
+            origin: Vec3::new(x, y, 0.0),
+            frame: ArchetypeFrame::Striker,
+            crouched: false,
+            enemy: true,
+        }
+    }
+
+    #[test]
+    fn the_first_click_targets_and_the_next_attacks() {
+        let world = BoxWorld::floor();
+        let bodies = [dummy(7, 200.0, 0.0), dummy(8, 300.0, 200.0)];
+        let from = Vec3::new(0.0, 0.0, 40.0);
+        let at = |b: &Body| (b.centre() - from).normalize();
+        let mut rpg = Rpg::new();
+        assert_eq!(Rpg::pick(&world, from, at(&bodies[0]), &bodies), Some(7));
+        assert_eq!(rpg.hover(Some(7)), Hover::Body);
+        rpg.click(&world, from, at(&bodies[0]), &bodies);
+        assert_eq!(rpg.target, Some(7));
+        assert_eq!(rpg.act, None, "the first click only picks");
+        assert_eq!(rpg.hover(Some(7)), Hover::Attack);
+        assert_eq!(rpg.hover(Some(8)), Hover::Body);
+        assert_eq!(rpg.hover(None), Hover::Ground);
+        rpg.click(&world, from, at(&bodies[0]), &bodies);
+        assert_eq!(
+            rpg.act,
+            Some((Act::Primary, 7)),
+            "the next is the primary at it"
+        );
+        // Another body: a new target, the waiting action let go.
+        rpg.click(&world, from, at(&bodies[1]), &bodies);
+        assert_eq!(rpg.target, Some(8));
+        assert_eq!(rpg.act, None);
+        // The ground: a walk, the target kept.
+        rpg.click(&world, from, Vec3::new(0.6, 0.0, -0.8).normalize(), &bodies);
+        assert!(rpg.walk.is_some());
+        assert_eq!(rpg.target, Some(8));
     }
 }

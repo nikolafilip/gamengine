@@ -297,8 +297,10 @@ the sight the zone's trace.
 
 ### 5.5 Controls and HUD
 
-Left button: target or move; right drag: the camera; wheel: 120–400 u; `Tab`, `Esc`; the
-hotbar on `1`–`8` (the primary and secondary join it: the root's bar is one bar); `Shift`
+Left button: target or move, and on the target the primary at it (the first click picks,
+the next attacks, as in Tales of Pirates and Ether Saga: the cursor is a crosshair over the
+target, a hand over another body); right drag: the camera, a right tap on the target the
+secondary at it; wheel: 120–400 u; `Tab`, `Esc`; the hotbar on `1`–`8` (the primary and secondary join it: the root's bar is one bar); `Shift`
 guards; `Space` jumps. A ground marker where the body is going; the target frame top
 centre; a ring under the target (LOOK.md 13).
 
@@ -545,6 +547,16 @@ Built as section 5 says, with these readings:
   the look's way, the camera's in this mode, and the director saw the shard leave for
   the horizon.
 - **Marks**: a ring where the body is going, a red one under the target.
+- **The buttons** (2026-10-08, the director: "LMB and RMB now seem completely removed
+  from 3rd person mouse rpg ... maybe first click highlights target and then cursor
+  changes into attack cursor which activates normal attack? it does so in tales of
+  pirates and ether saga"): a left click on a body that is not the target picks it; on
+  the target it asks for the primary at it, the same target-action `1` asks for (the
+  walk into range, one press); on the ground a walk. The pointer shows what a click
+  would do (`Rpg::hover`, the window's own cursors: a crosshair over the target, a hand
+  over another body, the arrow elsewhere). A right tap on the target, let go within 0.4 s
+  without turning the orbit by a degree, is the secondary at it; a right drag is the
+  camera as before.
 - Not built: a body walking round other bodies (the grid knows the map only), a
   target kept five seconds out of sight (it is let go when it leaves the frame's
   knowledge), the people page's and the tavern's word of the mode.
