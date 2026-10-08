@@ -226,6 +226,8 @@ pub enum Key {
     Character,
     /// And `G`: the game master's page (GM.md 4), for whom the zone granted it.
     Gm,
+    /// And `F`: the kit (MODES.md 11.3), the one key of the game itself a script presses.
+    Kit,
 }
 
 impl Key {
@@ -251,6 +253,7 @@ impl Key {
             "P" => Key::People,
             "K" => Key::Character,
             "G" => Key::Gm,
+            "F" => Key::Kit,
             _ => return None,
         })
     }

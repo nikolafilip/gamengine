@@ -542,7 +542,18 @@ impl ClientState {
                             GuardState::Parry { .. } | GuardState::Whiff { .. }
                         )
                     || (own.flags & flags::COMMANDING != 0)
-                        != predicted.commanding(last_input_tick);
+                        != predicted.commanding(last_input_tick)
+                    // The stacks (MODES.md 11): kits bought at a stall, rounds the zone
+                    // read after a buy, a use it refused at full health; the HUD counts
+                    // them and the prediction begins a use only with a kit in hand.
+                    || own_state.kits != predicted.kits
+                    || (!own_state.using_kit && predicted.using_kit(last_input_tick))
+                    || own_state.guns.is_some_and(|g| {
+                        (0..2).any(|i| {
+                            g.magazine[i] != predicted.guns[i].magazine
+                                || g.reserve[i] != predicted.guns[i].reserve
+                        })
+                    });
                 if self.synced && !respawned {
                     if !mismatch && !soft {
                         self.drop_acked(last_input_tick);

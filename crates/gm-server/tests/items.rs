@@ -54,6 +54,9 @@ struct Shared {
     say: Vec<FromClient>,
     health: i32,
     alive: bool,
+    /// The kits the own block says it carries, and whether one is in use (MODES.md 11.3).
+    kits: u16,
+    using_kit: bool,
     synced: bool,
     heard: Vec<FromZone>,
     stalls: Vec<StallEntry>,
@@ -119,6 +122,8 @@ impl Hand {
                             let mut s = seen.lock().unwrap();
                             s.health = client.own_health;
                             s.alive = client.own_alive;
+                            s.kits = client.mover.kits;
+                            s.using_kit = client.mover.using_kit(client.tick);
                             s.synced = client.synced();
                             let input = Input {
                                 buttons: s.buttons,
@@ -249,6 +254,13 @@ impl Hand {
     async fn swing(&self) {
         self.shared.lock().unwrap().buttons = buttons::PRIMARY;
         tokio::time::sleep(Duration::from_millis(200)).await;
+        self.shared.lock().unwrap().buttons = 0;
+    }
+
+    /// One press of `F` (MODES.md 11.3): `USE` held for a tenth of a second.
+    async fn press_kit(&self) {
+        self.shared.lock().unwrap().buttons = buttons::USE;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         self.shared.lock().unwrap().buttons = 0;
     }
 
@@ -855,4 +867,174 @@ async fn the_weapon_switched_to_is_what_everyone_sees_in_the_hand() {
         .filter(|m| matches!(m, FromZone::Look { id, .. } if *id == gunner_id))
         .count();
     assert_eq!(said, 1, "one look for the switch back");
+}
+
+/// The kit (MODES.md 11.3) over the real protocol: bought at a stall (the zone learns the
+/// stack from the reading after the buy), used with a press of `USE` when hurt (a use of a
+/// second and a half, the heal at its end, one kit fewer at the hub), and begun for nothing
+/// at full health (cleared by the zone the same tick, the kit kept).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kit_bought_at_a_stall_heals_on_a_press_and_is_kept_at_full_health() {
+    let Ok(url) = std::env::var("GM_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set GM_TEST_DATABASE_URL to a Postgres this test may wipe");
+        return;
+    };
+    let _one_at_a_time = DATABASE.lock().await;
+    if let Ok(filter) = std::env::var("GM_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    }
+    let Town {
+        db,
+        hub_addr,
+        hub_cert,
+        world: _,
+        map,
+        grid,
+    } = stand_up(&url).await;
+    let smith = Someone::new(hub_addr, &hub_cert, "Smith", "ironclad").await;
+    let buyer = Someone::new(hub_addr, &hub_cert, "Buyer", "blade").await;
+    let tile = grid.centre(grid.base_x, grid.base_y).expect("a tile");
+    let up = Vec3::Z * (1.0 - Hull::Player.mins().z);
+    let (sin, cos) = grid.yaw.to_radians().sin_cos();
+    let front = tile + Vec3::new(cos, sin, 0.0) * 52.0;
+    assert!(
+        db.place(smith.character, "town", (tile + up).into(), grid.yaw)
+            .await
+            .unwrap()
+    );
+    assert!(
+        db.place(
+            buyer.character,
+            "town",
+            (front + up).into(),
+            grid.yaw + 180.0
+        )
+        .await
+        .unwrap()
+    );
+    let smith_hand = Hand::join(&smith.ticket().await, "Smith", grid.yaw, map.clone()).await;
+    let buyer_hand = Hand::join(
+        &buyer.ticket().await,
+        "Buyer",
+        grid.yaw + 180.0,
+        map.clone(),
+    )
+    .await;
+    let full = buyer_hand.health();
+    assert!(full > 0);
+
+    // Three kits on the keeper's stall; the buyer, who carries none, buys them.
+    assert_eq!(smith_hand.ask(FromClient::StallOpen).await, Ok(()));
+    let stall = buyer_hand
+        .until("the stall", |s| {
+            s.stalls.iter().find(|x| x.owner == "Smith").map(|x| x.id)
+        })
+        .await
+        .unwrap();
+    let items = gm_content::items::load_items(Path::new(CONTENT)).expect("items");
+    let direct = Economy::new(db.pool().clone()).with_stacks(&items);
+    let kits = direct.grant_stack(smith.character, "kit", 3).await.unwrap();
+    direct
+        .grant_coin_as(buyer.character, 2_500, "grant", 0)
+        .await
+        .unwrap();
+    let EconReply::Id(listing) = smith
+        .econ(EconOp::StallList {
+            item: kits,
+            price: 600,
+        })
+        .await
+    else {
+        panic!("list")
+    };
+    assert_eq!(buyer_hand.shared.lock().unwrap().kits, 0);
+    assert_eq!(
+        buyer_hand
+            .ask_when_calm(FromClient::StallBuy {
+                stall,
+                listing,
+                price: 600
+            })
+            .await,
+        Ok(())
+    );
+    // The zone read the stack after the buy, and the own block carries it (MODES.md 11.7).
+    buyer_hand
+        .until("the zone to learn of the kits", |s| s.kits == 3)
+        .await;
+    let heals = buyer
+        .inventory()
+        .await
+        .1
+        .iter()
+        .find(|i| i.template == "kit")
+        .map(|i| {
+            assert_eq!((i.quantity, i.cap), (3, 5));
+            i.does
+                .iter()
+                .find_map(|d| d.strip_prefix("heals ").and_then(|r| r.split(',').next()))
+                .and_then(|n| n.parse::<i32>().ok())
+                .expect("what a kit heals, in its words")
+        })
+        .expect("the kits in the inventory");
+
+    // At full health a press begins nothing that lasts: the kit is kept.
+    buyer_hand.press_kit().await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    {
+        let s = buyer_hand.shared.lock().unwrap();
+        assert!(!s.using_kit, "at full health the zone clears the use");
+        assert_eq!(s.kits, 3);
+    }
+
+    // Hurt by the keeper's hammer, the press heals: a second and a half later, the kit's
+    // worth (to full), one kit fewer.
+    smith_hand.swing().await;
+    let hurt = buyer_hand
+        .until("the blow to land", |s| {
+            (s.health < full).then_some(s.health)
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    buyer_hand.press_kit().await;
+    buyer_hand.until("the use to begin", |s| s.using_kit).await;
+    let began = Instant::now();
+    let (healed_to, kits_left) = buyer_hand
+        .until("the heal", |s| {
+            (s.health > hurt).then_some((s.health, s.kits))
+        })
+        .await
+        .unwrap();
+    let took = began.elapsed();
+    assert!(
+        took >= Duration::from_millis(1_200) && took <= Duration::from_millis(2_500),
+        "a kit takes a second and a half, not {took:?}"
+    );
+    assert_eq!(healed_to, (hurt + heals).min(full));
+    assert_eq!(kits_left, 2, "one kit fewer at the end");
+    assert!(!buyer_hand.shared.lock().unwrap().using_kit);
+    // The hub was told (Consume): the stack is two.
+    let started = Instant::now();
+    loop {
+        let (_, has) = buyer.inventory().await;
+        let kit = has.iter().find(|i| i.template == "kit").expect("the stack");
+        if kit.quantity == 2 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the hub still holds {} kits",
+            kit.quantity
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    println!(
+        "items: a kit bought for 6 s, pressed at {hurt} of {full}, healed {heals} to {healed_to} in {:.2} s, two left",
+        took.as_secs_f32()
+    );
+    assert_eq!(direct.audit().await, Ok(0));
 }

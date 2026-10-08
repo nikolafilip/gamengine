@@ -857,7 +857,7 @@ impl Zone {
                 p.mover.guns[0].reserve,
                 p.mover.guns[1].reserve,
                 p.mover.kits,
-                p.mover.kit_until.is_some(),
+                p.mover.kit_until,
             );
             p.stagger = (p.stagger - STAGGER_DECAY_PER_S * dt).max(0.0);
             let depth = p.queue.len();
@@ -983,7 +983,13 @@ impl Zone {
                     });
                 }
             }
-            if !stacks_before.3 && p.mover.kit_until.is_some() && p.health >= p.max_health() {
+            // A use begun this step at full health is cleared (MODES.md 11.3): a new one,
+            // whether or not the frames ended an earlier one first (a press as one ends
+            // began the next at full health and spent a kit for nothing).
+            if p.mover.kit_until.is_some()
+                && p.mover.kit_until != stacks_before.3
+                && p.health >= p.max_health()
+            {
                 p.mover.kit_until = None;
             }
             if executed == 0 && p.driver == Driver::Client {

@@ -394,7 +394,8 @@ wait screen characters        until that screen is up
 field email                   give the field with that label the keyboard (a click on it)
 type someone@example.com      characters, as if typed
 key Enter                     Enter | Escape | Tab | BackTab | Backspace | Delete | Left | Right | Up | Down | Home | End | PageUp | PageDown
-                              | I | E | P (the game's own three that open a screen)
+                              | I | E | P | K | G (the game's own keys that open a screen)
+                              | F (the kit, MODES.md 11.3: pressed for one frame of the game, as a person's key is)
 click "New character"         the button, row, box or grid cell with that text
 dclick "Aldric"               the same, twice
 hover "sword  slash +2.0%"    the pointer over it, and left there (a tooltip after 150 ms)

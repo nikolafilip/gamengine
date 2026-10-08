@@ -535,7 +535,7 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
         try_activate(world, sheet, m, slot as usize, now, input, company);
     }
     reload_step(sheet, m, pressed, now, staggered);
-    kit_step(m, pressed, now, staggered);
+    kit_step(m, pressed, now, dt, staggered);
 
     if let Some(mut s) = m.script {
         let ab = &kit.abilities[s.ability as usize];
@@ -756,11 +756,56 @@ fn reload_step(sheet: &Sheet, m: &mut Mover, pressed: u16, now: Tick, staggered:
     }
 }
 
+/// Why a press of `USE` begins no kit (MODES.md 11.3), in the words the HUD says. The
+/// zone's own refusal, at full health, is not the mover's to know: it clears the use the
+/// same tick (`Zone::step`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KitRefusal {
+    /// No kit is carried.
+    NoKit,
+    /// The body is in the air.
+    InTheAir,
+    /// A script, a dash, a reload or the command stance has the hands.
+    HandsBusy,
+    /// Staggered or down.
+    Staggered,
+}
+
+impl KitRefusal {
+    /// The word the HUD shows for a second (MODES.md 11.3).
+    pub fn word(self) -> &'static str {
+        match self {
+            KitRefusal::NoKit => "no kit",
+            KitRefusal::InTheAir => "not in the air",
+            KitRefusal::HandsBusy => "hands busy",
+            KitRefusal::Staggered => "staggered",
+        }
+    }
+}
+
+/// Why a kit pressed now would be refused, `None` when it would begin (MODES.md 11.3):
+/// what `kit_step` asks before it begins one, and what the client says of a press that
+/// began nothing. `staggered` is the body's stagger or knockdown.
+pub fn kit_refusal(m: &Mover, now: Tick, staggered: bool) -> Option<KitRefusal> {
+    if m.kits == 0 {
+        Some(KitRefusal::NoKit)
+    } else if staggered {
+        Some(KitRefusal::Staggered)
+    } else if !m.mv.on_ground {
+        Some(KitRefusal::InTheAir)
+    } else if m.script.is_some() || m.dash.is_some() || m.reloading(now) || m.commanding(now) {
+        Some(KitRefusal::HandsBusy)
+    } else {
+        None
+    }
+}
+
 /// A kit's use (MODES.md 11.3): `USE` pressed on the ground with a kit carried and the
 /// hands free begins it; it ends by itself after `KIT_USE_MS`, one kit fewer. The heal is
 /// the zone's (it knows the health): it reads the kit that went. A stagger or a knockdown
-/// drops it with the kit kept (the stagger block above).
-fn kit_step(m: &mut Mover, pressed: u16, now: Tick, staggered: bool) {
+/// drops it with the kit kept (the stagger block above). A press that is refused is not
+/// kept: `USE` is a press, not a wish (the HUD says why, and the player presses again).
+fn kit_step(m: &mut Mover, pressed: u16, now: Tick, dt: f32, staggered: bool) {
     match m.kit_until {
         Some(until) if tick_delta(now, until) >= 0 => {
             m.kit_until = None;
@@ -768,19 +813,17 @@ fn kit_step(m: &mut Mover, pressed: u16, now: Tick, staggered: bool) {
         }
         Some(_) => {}
         None => {
-            if pressed & buttons::USE != 0
-                && !staggered
-                && m.kits > 0
-                && m.mv.on_ground
-                && m.script.is_none()
-                && m.dash.is_none()
-                && !m.reloading(now)
-                && !m.commanding(now)
-            {
-                m.kit_until = Some(now.wrapping_add(TickRate::COMBAT.ms_to_ticks(KIT_USE_MS)));
+            if pressed & buttons::USE != 0 && kit_refusal(m, now, staggered).is_none() {
+                m.kit_until = Some(now.wrapping_add(kit_use_ticks(dt)));
             }
         }
     }
+}
+
+/// Frames a kit's use takes (`KIT_USE_MS`) at the tick length `dt`: 1.5 s in a town at
+/// 20 Hz as in a fight at 64.
+pub fn kit_use_ticks(dt: f32) -> Tick {
+    (KIT_USE_MS as f32 / 1000.0 / dt).ceil() as Tick
 }
 
 fn regen_pause_ticks() -> Tick {
