@@ -254,8 +254,11 @@ Rules:
   the nearest squad member. Nothing is sent that no squad member could see.
 - Distance bands (PLAN.md 1.2), measured from the client's eye to the entity's origin:
   full rate to 512 u; every second tick to 1,536 u; every sixth tick beyond (≈ 10.7 Hz).
-  Projectiles, the own entity and any entity absent from the baseline (first sight) are always
-  full rate.
+  Those are ticks of the 64 Hz combat rate; at another rate a band keeps its time, not its
+  count, rounded to the nearest tick and never under one (`gm_net::bands`): a 20 Hz town lists
+  the half band every tick and the far band every second tick (100 ms), so the far interval
+  never exceeds the client's interpolation delay (7.3). Projectiles, the own entity and any
+  entity absent from the baseline (first sight) are always full rate.
 
 Client rules:
 - The client keeps the last 64 reconstructed snapshots keyed by `server_tick`. A snapshot whose
@@ -323,9 +326,16 @@ of the 64 Hz combat rate; at another rate the delay keeps the time, not the coun
 a ceiling at least 2 above the floor. A 20 Hz town shows others 2 ticks (100 ms) behind, 5
 (250 ms) at worst. The delay shrinks
 by one tick per second without gaps. Positions and angles are interpolated between the two
-reconstructed snapshots bracketing the render time. When only the older sample exists (a gap),
-the entity holds its last position; no extrapolation. (Draining the buffer by time-scaling
-instead of stepping is a Phase 3 refinement.)
+**samples** bracketing the render time. A sample is the entity's record at a tick on which it
+changed; a snapshot that carries the record forward unchanged (the band skipped the tick, or
+the body did nothing) adds none, it only marks the entity seen. Interpolating between the
+carried copies instead would hold a far body for five ticks and cross the whole gap in one:
+the walk cycle stalling and the body jumping forward. When a body changes after more than one
+band interval of rest, a rest sample one interval back is added first (the body was where it
+was through the last tick its band listed it), so the move starts from there rather than
+snapping to where it already is. When only the older sample exists (a gap, or a body standing
+still), the entity holds its last position; no extrapolation. (Draining the buffer by
+time-scaling instead of stepping is a Phase 3 refinement.)
 
 ### 7.4 Lag compensation (melee)
 A `MeleeArc` activated by a frame is resolved against other entities' positions at the
