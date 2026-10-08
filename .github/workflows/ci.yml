@@ -163,7 +163,14 @@ jobs:
           cargo clippy -p gm-client --target wasm32-unknown-unknown --locked -- -D warnings
           cargo clippy -p gm-client --target wasm32-unknown-unknown --features webgl --locked -- -D warnings
       - name: Web gate (sizes, QUIC and WebTransport in one zone, headless Chromium on its software GPU)
-        run: CHROME=google-chrome scripts/check-web.sh --browser --software
+        run: CHROME=google-chrome KEEP="$RUNNER_TEMP/web" scripts/check-web.sh --browser --software
+      - name: The web gate's logs, when it failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-browser
+          path: ${{ runner.temp }}/web
+          if-no-files-found: ignore
       - name: Screens gate in the browser (the page's form by the browser's own input, the canvas screens by script)
         run: CHROME=google-chrome SKIP_TESTS=1 KEEP="$RUNNER_TEMP/screens" scripts/check-screens.sh --browser --software
       - name: The screens gate's logs, when it failed
