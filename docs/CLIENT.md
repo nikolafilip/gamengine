@@ -77,7 +77,9 @@ focus, the scroll positions, the carets and the widget the button went down on.
   it is face 0 of the bundle's atlases and the client's fallback; the screens' words and
   the HUD's are in the text face (Fira Sans Medium, a line of 12 dots) and the titles in
   the title face (MedievalSharp, 19) when the bundle has loaded, measured per glyph, else
-  in this one.
+  in this one. Those two faces hold a generic set of 308 characters (LOOK.md 2.3: ASCII,
+  the Latin-1 Supplement's letters and signs, Latin Extended-A, the typographic marks),
+  so a stack's `kit ×3 of 5` and a name in any Latin tongue read as written there.
 - **Scale.** One whole-number scale for HUD and screens: 1 below 600 pixels of height, 2
   below 1300, 3 below 1900, 4 from there (a line of text is then 2 to 3 hundredths of the
   frame's height; until the director played at 1080 lines it was 3 from 1000, and the

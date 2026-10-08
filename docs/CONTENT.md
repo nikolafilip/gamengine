@@ -416,7 +416,9 @@ Five findings on the servers and the pipeline (LOOK.md 11.2 has the client's sev
   mannequin); props 2,240 (hammer) to 15,830 (crossbow) bytes, 48 to 584 triangles.
   With an atlas per density (LOOK.md 11.4, the same evening): **713,302 bytes** in 11
   files, the atlases 49,641 / 123,997 / 200,633 / 282,595 bytes; the build takes about
-  three seconds.
+  three seconds. With the faces' generic character set (LOOK.md 13.12, 2026-10-08; 308
+  characters a face instead of 105): **1,153,054 bytes**, the atlases 82,847 / 207,092 /
+  332,624 / 470,976 bytes.
 - `gm-tools content build`: the sources to the bundle in about a second in release; the
   rebuild in CI compares hash for hash and found no difference between runs.
 - Props drawn: 48 avatars in the town, every one holding the sword, cost **0.006 ms a
