@@ -1513,10 +1513,11 @@ pub(crate) fn facing(
         if free || off.abs() <= FACING_BACKPEDAL_DEG {
             target = travel;
         }
-    } else if free && !anim::acts(anim) {
-        if let Some(drawn) = drawn {
-            return drawn;
-        }
+    } else if free
+        && !anim::acts(anim)
+        && let Some(drawn) = drawn
+    {
+        return drawn;
     }
     let Some(drawn) = drawn else {
         return target.rem_euclid(360.0);

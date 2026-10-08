@@ -718,13 +718,7 @@ fn guard_step(
 /// The reload of the firearm in hand (MODES.md 3.2): `R`, or an empty magazine with
 /// rounds carried, which reloads by itself; it ends by itself, a stagger drops it and the
 /// rounds are kept (and the empty magazine begins it again once the body can).
-fn reload_step(
-    sheet: &Sheet,
-    m: &mut Mover,
-    pressed: u16,
-    now: Tick,
-    staggered: bool,
-) {
+fn reload_step(sheet: &Sheet, m: &mut Mover, pressed: u16, now: Tick, staggered: bool) {
     let kit = &sheet.kit;
     if kit.mode != Mode::Gun || m.held > 1 {
         return;
@@ -802,6 +796,7 @@ pub fn command_exit_ticks(dt: f32) -> Tick {
 /// root's: the stance's base (`scoped` while the scope is up), the move's share past a
 /// walk, the air's, and the spray's growing with the square of the shots within `recover`
 /// of the last. `shot` is the index of the shot in its spray (0 for the first).
+#[allow(clippy::too_many_arguments)]
 pub fn cone_deg(
     f: &crate::vocab::Firearm,
     max_speed: f32,
