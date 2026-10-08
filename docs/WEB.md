@@ -249,7 +249,13 @@ treats what it did as it treats the mouse and the keys (MODES.md 5.6 has the con
   rounded, at least 2 and at most 4 (`ui::touch_scale`): an S23 at 2.625 asks for 3, and
   gets it in fullscreen (2340 by 1080 device pixels: the tallest panel, 360 units, is the
   whole height), 2 with the browser's bars (CLIENT.md 3's fit rule). A dot is then a
-  device pixel ratio, so a 40-dot cell is 4 to 7 mm under a finger.
+  device pixel ratio, so a 40-dot cell is 4 to 7 mm under a finger. **From the first
+  frame** (2026-10-08 night): the page says whether its pointer is coarse
+  (`gmOptions.touch`, `matchMedia("(pointer: coarse)")`, `Options::touch`,
+  `Fingers::expecting`), and the client counts that as a finger seen; before, the finger
+  was seen at the first tap, so the director's characters in fullscreen were tiny (the
+  window's scale, 2 at best) until he tapped, and the screen jumped to 3. The phone step
+  of `check-web.sh` reads the first report, before any finger: `touch=1`, `ui_scale=3`.
 
 **The canvas was drawn at a third of its pixels.** winit sets the canvas's CSS size and
 never its backing size (`width`/`height`), and the client configured its surface from
