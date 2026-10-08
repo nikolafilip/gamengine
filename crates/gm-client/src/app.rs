@@ -5275,13 +5275,16 @@ impl App {
         }
         let returns = self.returns_to_screens();
         // The pointer follows the screens: free while one is up, the game's again after.
+        // Not for a finger (WEB.md 3.5): a phone's browser gives the pointer lock to the
+        // tap that put the screen down and takes it back at the next touch, and losing
+        // it is Escape, so every tap in the game opened the menu.
         let up = self.screen_up();
         if up != self.was_up {
             self.was_up = up;
             if up {
                 self.release_keys();
                 self.set_grab(false);
-            } else if self.wants_pointer() && self.focused() {
+            } else if self.wants_pointer() && self.focused() && !self.fingers.seen {
                 self.set_grab(true);
             }
         }
