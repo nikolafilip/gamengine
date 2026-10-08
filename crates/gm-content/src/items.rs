@@ -280,6 +280,17 @@ impl ItemContent {
         Place::parse(&t.kind)
     }
 
+    /// The prop an item of this template puts in the hand (CONTENT.md 3): what a build's
+    /// abilities must hold for the item to be worn as a weapon (ITEMS.md 2). `None` for a
+    /// template without a model, or one this content does not know.
+    pub fn model(&self, template: &str) -> Option<&str> {
+        self.templates
+            .iter()
+            .find(|t| t.id == template)?
+            .model
+            .as_deref()
+    }
+
     /// A stack template (MODES.md 11.1): its cap and what one of it heals; `None` for
     /// anything else.
     pub fn stack(&self, template: &str) -> Option<(u32, Option<i32>)> {

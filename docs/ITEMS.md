@@ -49,8 +49,23 @@ character wears is MODELS.md's.
   and is no error; an item whose template the content no longer knows comes off like any
   other.
 - A worn item **stays in the inventory** and takes its slot there.
-- Gear is **unbound and un-classed** (PLAN.md 3.4): any character may wear any item. What an
-  item is good for is decided by what it is made of (3.2), not by who holds it.
+- Gear is **unbound and un-classed** (PLAN.md 3.4): any character may wear any armour, and
+  what an item is good for is decided by what it is made of (3.2), not by who holds it.
+  **A weapon is worn only by hands that hold one** (the director, 2026-10-08: "my musket
+  can equip a staff? make it say it can't and disable it"): an item of a weapon template
+  is worn only when an ability of the character's build has the template's `model` as
+  its `prop` (CONTENT.md 3; `gm_hub::hub::hands`, `economy::fits`). The musketeer's hands
+  are for the musket, the pistol and the dagger; the blade's for the sword; a caster's for
+  the staff. A weapon nobody in the build swings would sharpen a kind of blow the body
+  never deals and put the wrong prop in its hand (LOOK.md 6.1 prefers the worn weapon's
+  model), so the hub refuses it in words, "this build's hands are for the musket, the
+  pistol and the dagger: not a staff", and says the same of the item wherever it is shown
+  (`ItemSummary.fits` false, the words last in `does`: the inventory, the storage, a stall's
+  listing, a trade), so the bag offers no Wear for it and takes no drop of it on the weapon
+  slot. Armour, parts and stacks fit everyone. The rule is the build's, not the item's: the
+  item stays unbound, sells to whoever holds one, and the same sword fits a blade and a
+  captain. A respec that leaves a worn weapon behind keeps it on until it is taken off (an
+  open point; the trainer could take it off at the `Respawned`).
 - A companion (a hired avatar, a recruit) fights in **nothing** in v1 (9).
 
 Stored as `worn (character_id, slot, item_id)`, one row per filled place, the item unique
@@ -194,7 +209,9 @@ become, not what they do.
 
 `HUB_VERSION` is 7 and `PLAYER_VERSION` 2 (11 and 4 since 2026-10-07: `items.quantity`,
 `GearReading.stacks`, `ZoneEconOp::Consume`, `HubNotice::Gear`, `ItemSummary.quantity`
-and `cap`; `StallBuy` answers `Gear`). The requests of Phase 11:
+and `cap`; `StallBuy` answers `Gear`; `PLAYER_VERSION` 5 since 2026-10-08:
+`ItemSummary.fits`, section 2). The hub loads the content's looks beside the pack
+(`HubConfig.looks`) for the props the abilities hold. The requests of Phase 11:
 
 | Request | From | Answer | |
 |---|---|---|---|
@@ -203,7 +220,7 @@ and `cap`; `StallBuy` answers `Gear`). The requests of Phase 11:
 | `EconOp::StallList { item, price }` | a session | `Id` | into the caller's own stall, **which stands in the zone the character plays in** |
 | `EconOp::StallUnlist { listing }` | a session | `Done` | out of it again, under the same rule; the inventory must have room |
 | `ZoneEconOp::StallBuy { character, stall, listing, price }` | a zone | `Done` | 5 |
-| `ZoneEconOp::Wear { character, item }`, `TakeOff { character, item }` | a zone | `Gear(GearReading { seq, gear })` | 2, 3.3 |
+| `ZoneEconOp::Wear { character, item }`, `TakeOff { character, item }` | a zone | `Gear(GearReading { seq, gear })` | 2, 3.3; a weapon the build's hands do not hold is `Invalid` with the words of 2 |
 
 - **`EconOp::StallBuy` is gone**, as `EconOp::StallOpen` went in Phase 6: a session could
   buy from anywhere, and a program with no body at any stall could buy every underpriced

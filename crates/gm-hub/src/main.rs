@@ -392,6 +392,7 @@ async fn run() -> anyhow::Result<()> {
         party_sweep: gm_hub::party::SWEEP,
         party_away: std::time::Duration::from_secs(args.party_away),
         items: gm_content::items::load_items(&args.content)?,
+        looks: gm_content::looks::Looks::load_dir(&args.content)?,
         max_coin_grant: 500,
         models_dir: args.models_dir,
         // Uploads are parsed by this same binary in a child process.

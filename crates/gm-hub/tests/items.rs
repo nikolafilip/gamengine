@@ -101,7 +101,7 @@ async fn player(
         .request(&HubRequest::CreateCharacter {
             session,
             name: name.into(),
-            build: BuildChoice::Preset("ironclad".into()),
+            build: BuildChoice::Preset("blade".into()),
         })
         .await
         .unwrap()
@@ -201,6 +201,7 @@ fn config(
         party_sweep: std::time::Duration::from_millis(300),
         party_away: std::time::Duration::from_secs(2),
         items: items.clone(),
+        looks: gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks"),
         max_coin_grant: 500,
         models_dir: std::env::temp_dir().join(format!("gm-hub-items-{}", std::process::id())),
         ingest: gm_hub::IngestMode::InProcess,
@@ -491,6 +492,23 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
         wear(&town, other, sword).await,
         Err(HubError::Invalid(NOT_CARRIED.into()))
     );
+
+    // A weapon the build's hands do not hold (ITEMS.md 2): the blade swings a sword, so a
+    // staff is refused in words, and the inventory says so of it before anyone asks.
+    let staff = direct
+        .grant_item(smith, "staff", &iron, room("staff").as_deref())
+        .await
+        .unwrap();
+    let words = "this build's hands are for the sword: not a staff";
+    assert_eq!(
+        wear(&town, smith, staff).await,
+        Err(HubError::Invalid(words.into()))
+    );
+    let have = inventory(&smith_conn, smith_s, smith).await;
+    let shown = find(&have, staff);
+    assert!(!shown.fits && !shown.worn, "{shown:?}");
+    assert_eq!(shown.does.last().map(String::as_str), Some(words));
+    assert!(find(&have, plain).fits && find(&have, cuirass).fits);
 
     // One weapon: the plain sword takes the best one's place, and the best one is an
     // item like any other again.

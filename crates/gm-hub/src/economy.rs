@@ -28,6 +28,34 @@ pub const CHEST_SLOTS: i32 = 48;
 pub const CONTRACT_TIMEOUT_MINUTES: i32 = 120;
 /// What every mover says to a worn item (ITEMS.md 2).
 pub const WORN: &str = "it is worn: take it off first";
+/// Whether a build whose abilities hold `hands` (the props, `hub::hands`) may wear an
+/// item of `template` in `place` (ITEMS.md 2): a weapon only when its model is one of
+/// them; anything else, yes. `Err` carries the words for the player: "this build's hands
+/// are for the musket, the pistol and the dagger: not a staff".
+pub fn fits(
+    content: &ItemContent,
+    hands: &[String],
+    template: &str,
+    place: Option<Place>,
+) -> Result<(), String> {
+    if place != Some(Place::Weapon) {
+        return Ok(());
+    }
+    let model = content.model(template).unwrap_or(template);
+    if hands.iter().any(|h| h == model) {
+        return Ok(());
+    }
+    let held: Vec<String> = hands.iter().map(|h| format!("the {h}")).collect();
+    let held = match held.len() {
+        0 => "nothing".to_string(),
+        1 => held[0].clone(),
+        n => format!("{} and {}", held[..n - 1].join(", "), held[n - 1]),
+    };
+    Err(format!(
+        "this build's hands are for {held}: not a {template}"
+    ))
+}
+
 /// What is said of an item somebody would wear and does not carry.
 pub const NOT_CARRIED: &str = "that is not in the inventory";
 
@@ -1010,12 +1038,16 @@ impl Economy {
     /// The character's row is held against a change of where it is until this commits: a
     /// claim by another zone either sees what was put on, or comes first and this is
     /// refused.
+    ///
+    /// `hands` is what the character's build holds (`hub::hands`): a weapon whose model
+    /// none of its abilities holds is refused in words (ITEMS.md 2).
     pub async fn wear(
         &self,
         character: i64,
         zone: &str,
         item: i64,
         content: &ItemContent,
+        hands: &[String],
     ) -> Result<(u64, Gear, [String; 2], Vec<Stack>), EconError> {
         let mut tx = self.begin().await?;
         playing_in(&mut tx, character, zone).await?;
@@ -1049,6 +1081,7 @@ impl Economy {
         let place = content
             .place(&template)
             .ok_or_else(|| EconError::Invalid("that cannot be worn".into()))?;
+        fits(content, hands, &template, Some(place)).map_err(EconError::Invalid)?;
         sqlx::query("delete from worn where character_id = $1 and slot = $2")
             .bind(character)
             .bind(place.name())

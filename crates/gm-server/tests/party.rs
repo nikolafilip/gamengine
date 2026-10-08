@@ -621,6 +621,7 @@ async fn people_join_each_other_through_their_zones_and_a_fight_keeps_its_partie
             party_sweep: Duration::from_millis(300),
             party_away: std::time::Duration::from_secs(2),
             items: items.clone(),
+            looks: gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks"),
             max_coin_grant: 500,
             models_dir: std::env::temp_dir()
                 .join(format!("gm-party-models-{}", std::process::id())),

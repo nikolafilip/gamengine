@@ -1417,6 +1417,7 @@ mod tests {
             worn: false,
             quantity: 1,
             cap: 0,
+            fits: true,
             what: if whole {
                 "a weapon, 250 of 250".to_string()
             } else {

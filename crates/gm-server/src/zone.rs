@@ -259,7 +259,11 @@ fn consume_stack(
     };
     let character = slot.character;
     let mut left = quantity;
-    for stack in slot.stacks.iter_mut().filter(|s| s.quantity > 0 && which(s)) {
+    for stack in slot
+        .stacks
+        .iter_mut()
+        .filter(|s| s.quantity > 0 && which(s))
+    {
         if left == 0 {
             break;
         }
@@ -286,7 +290,10 @@ fn consume_stack(
         });
     }
     if left > 0 {
-        warn!(character, quantity, left, "consume: more spent than the stacks carried");
+        warn!(
+            character,
+            quantity, left, "consume: more spent than the stacks carried"
+        );
     }
 }
 
