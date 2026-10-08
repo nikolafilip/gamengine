@@ -180,7 +180,10 @@ firearm with a `cone` of its own, or a thrown knife), `3` the knife (a dagger as
 has a fist: `melee_arc` at full speed, silent). A gun slows the body by its `move_scale`
 while in hand, the knife not at all. The guard slot is empty in this mode (a `gun` build
 may not buy one: no parry with a musket). Actives stay (a dash, a vanish); `Shift` walks
-(half speed, no footsteps, SOUND.md), not guards.
+(half speed, no footsteps, SOUND.md), not guards. The weapons it wears are the ones these
+hands hold (ITEMS.md 2, 2026-10-08): a musket, a pistol, a dagger; a staff or a sword is
+refused in words and greyed in the bag. The mode stays the character's: no weapon worn
+turns a gunman into a bladesman mid-fight (1, 8).
 
 ### 3.8 On the wire and in the HUD
 
@@ -251,8 +254,9 @@ right of the crosshair (hits in the current chain, fading two seconds after the 
 
 The camera orbits and the body does not turn with it; WASD moves about the camera; a
 click on the ground sends the body there; a click on a body targets it and `Tab` cycles;
-an action with a target walks the body into range and then lands, every time; the primary
-repeats on the target until it falls; a guard is held.
+an action with a target walks the body into range and then lands, every time; a guard is
+held. (The root's repeating primary is not kept: nothing fires by itself, the pace of a
+fight is the player's, the director's call of 2026-10-08.)
 
 ### 5.2 Target
 
@@ -276,8 +280,8 @@ An action pressed with a target:
   then fires. One action waits; a new one replaces it; a movement key or a ground click
   cancels it. The walk is made of ordinary frames the client produces, so prediction and
   the ledger are untouched;
-- **the primary**: pressed once, it repeats every cooldown on the target until the target is
-  lost, the player moves, or presses it again. The root's double click.
+- **the primary** is an action like the others: one press, one shot. It repeated every
+  cooldown on the target until 2026-10-08; the director plays the spam himself.
 
 Range is the ability's: a melee arc's `reach`, a bolt's `range` (new, content: the musket
 600, the crossbow 900, a knife 300), an area's `origin: Aim` radius. Without a target an
@@ -311,7 +315,7 @@ command stance (COMPANIONS.md 5) keeps its key in every mode.
 |---|---|---|
 | 15a Action | `mode` in the build and the mode fixed on the client; the toggle gone; the magnet, chains, cancels, the dodge, knockdown and launch with diminishing returns; two chains in content (sword, dagger); the combo counter | the director chains a sword three times into a knockdown, rolls through a firebolt |
 | 15b Gun | the firearm block, magazine and reload, cycle, recoil and the cone, the head band, the three weapons, the ammo HUD; the musketeer preset; a pistol and a second long gun in content | a spray controlled against the pattern lands; a crouched tap at 1,500 u lands a headshot; the empty click |
-| 15c RPG | the target, the target frame, target-actions with the walk, the repeat, the ground click on the nav grid, the orbit camera; `range` in content; the aim statistics skipping RPG bodies | a frostweaver clicks a dummy, presses the shard, walks into range and lands it; `Tab` across three spar bots |
+| 15c RPG | the target, the target frame, target-actions with the walk, the ground click on the nav grid, the orbit camera; `range` in content; the aim statistics skipping RPG bodies | a frostweaver clicks a dummy, presses the shard, walks into range and lands it; `Tab` across three spar bots |
 
 Where CONTENT.md, LOOK.md and PROTOCOL.md say "Phase 15" they mean the editor (now 16) and
 by "Phase 16" the body's look (now 17); they are not rewritten.
@@ -509,9 +513,9 @@ Built as section 5 says, with these readings:
   1,500, a creature's as its own.
 - **Target-actions**: `1` the primary, `2` the secondary, `3`–`6` the actives; with a
   target they wait (`Rpg::act`) until the body is within the ability's `range` (95% of
-  it) and in sight, then press; the primary repeats on the target while it is ready and
-  stops when pressed again, the target is lost or a movement key is pressed. Out of
-  range the body walks toward the target on the nav grid (`gm_ai::nav`, built on the
+  it) and in sight, then press once; a new press is a new action (the primary repeated
+  until 2026-10-08, when the director played it: the spam is the player's). Out of range
+  the body walks toward the target on the nav grid (`gm_ai::nav`, built on the
   client from the map at the first click, seeded where the body stands); a click on the
   ground is the same walk. Without a target a key presses at once, as in the action
   mode, with the bolt flying level.
@@ -524,7 +528,11 @@ Built as section 5 says, with these readings:
 - **The camera** orbits the body's centre (`orbit_camera`: 240 u back and 90 up, the
   wheel from 120 to 400, pitched between 5° and 80° down), the pointer is free, the
   secondary button held turns it; the frames carry the camera's yaw and a level pitch,
-  the body faces where it goes (LOOK.md 13.9) or its target.
+  the body faces where it goes (LOOK.md 13.9) or its target. The own body is drawn
+  facing where the mover does while the zone's turn holds it (`lock_yaw`, predicted on
+  the client with the nearby bodies) and its target between actions; until 2026-10-08 it
+  was drawn at the camera's yaw, so the frostweaver cast its shard facing away from the
+  dummy while everyone else saw it turn.
 - **Marks**: a ring where the body is going, a red one under the target.
 - Not built: a body walking round other bodies (the grid knows the map only), a
   target kept five seconds out of sight (it is let go when it leaves the frame's
