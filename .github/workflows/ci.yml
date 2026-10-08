@@ -28,8 +28,9 @@ jobs:
       GM_TEST_DATABASE_URL: postgres://gm:gm@localhost:5432/gm_test
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.0 # rust-toolchain.toml
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: "System packages (ALSA's headers: the client links the sound device, SOUND.md 4)"
@@ -100,7 +101,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0 # rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
         with:
           key: release
@@ -142,8 +145,9 @@ jobs:
       GM_TEST_DATABASE_URL: postgres://gm:gm@localhost:5432/gm_test
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.0 # rust-toolchain.toml
           targets: wasm32-unknown-unknown
           components: clippy
       - uses: Swatinem/rust-cache@v2
