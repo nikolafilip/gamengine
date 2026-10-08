@@ -2,11 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>gamengine</title>
 <style>
-  html, body, #stage { margin: 0; height: 100%; background: #101014; color: #d8d8e0; font: 14px/1.4 monospace; overflow: hidden; }
-  #gm-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none; }
+  html, body, #stage { margin: 0; height: 100%; background: #101014; color: #d8d8e0; font: 14px/1.4 monospace; overflow: hidden; overscroll-behavior: none; }
+  /* A finger on the canvas is the game's (docs/WEB.md 3.5): no scrolling, no zooming, no
+     selection and no tap flash of the browser's. */
+  #gm-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none;
+               touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
   #panel { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 21em; padding: 1.2em 1.4em;
            background: #1a1a22; border: 1px solid #3a3a4a; z-index: 2; }
   #panel h1 { margin: 0 0 .6em; font-size: 16px; }
@@ -17,11 +20,21 @@
   #notice { margin: .8em 0 0; min-height: 1.4em; color: #ffb060; }
   button { padding: .4em .9em; background: #2c2c3c; color: #e8e8f0; border: 1px solid #50506a; font: inherit; cursor: pointer; }
   button:hover { background: #3a3a50; }
-  #status { position: fixed; left: 12px; bottom: 10px; z-index: 3; text-shadow: 0 0 3px #000; white-space: pre-wrap; max-width: 90vw; }
+  #status { position: fixed; left: 12px; bottom: 10px; z-index: 3; text-shadow: 0 0 3px #000; white-space: pre-wrap; max-width: 90vw; pointer-events: none; }
   #status.error { color: #ff8070; }
   #fullscreen { position: fixed; right: 10px; bottom: 8px; z-index: 3; opacity: .55; }
   #fullscreen:hover { opacity: 1; }
   [hidden] { display: none !important; }
+  /* A touch screen: the fullscreen control large enough for a finger, the form no wider
+     than the screen. */
+  @media (pointer: coarse) {
+    /* Top left, away from the game's own buttons (the menu top right, jump and the
+       secondary bottom right); gone once fullscreen is on. */
+    #fullscreen { opacity: .85; font-size: 16px; padding: .6em 1.2em; left: 10px; top: 10px; right: auto; bottom: auto; }
+    #stage:fullscreen #fullscreen { display: none; }
+    #panel { width: min(21em, 90vw); }
+    button { padding: .6em 1.1em; }
+  }
 </style>
 </head>
 <body>

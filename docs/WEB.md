@@ -212,6 +212,59 @@ differs slightly from native. Listed in 10. The page asks for the pointer itself
 (`web::ask_for_pointer`, since Phase 11; winit's own asking left a refusal in the console as
 an uncaught rejection): a browser that says no has answered, and the next click asks again.
 
+### 3.5 Fingers (2026-10-08)
+
+The director opened the LAN page on a phone (a Galaxy S23, Firefox) and it ran: the form,
+the hub, the town, the WebGL2 build. Nothing answered a tap, because the client listened to
+the mouse only and winit reports a finger apart (`WindowEvent::Touch`, a phase and a
+position per finger). Now `touch.rs` follows each finger from where it landed and the app
+treats what it did as it treats the mouse and the keys (MODES.md 5.6 has the controls):
+
+- **A screen up**: the finger is the pointer. Down is the press of a click, moving drags
+  (a list, a slider, the paperdoll), lifting is the release; two quick presses on one
+  spot are a double click. One finger at a time; a second one there is nothing.
+- **The RPG mode**: a tap on a body targets it, on the target it is the primary, on the
+  ground a walk there (5.5 as it is); a drag turns the orbit camera (the right button's
+  drag), a long press on the target is the secondary (the right tap), two fingers moving
+  apart or together are the wheel (120 to 400 u).
+- **The action and gun modes**: the left 45 % of the frame is a stick around where the
+  finger landed (56 dots to the rim, a dead zone of an eighth; the keys are taken first
+  when any is down); on the right a drag looks and a tap is the primary, held for 0.12 s
+  (a tick at least: one shot, one blow). A drag turns by 3 mouse counts a CSS pixel: a
+  swipe across a phone's width is half a turn at the default sensitivity.
+- **Buttons on the HUD**, drawn from the first finger seen: `menu` top right (Escape:
+  the menu, or the target let go first in the RPG mode), and bottom right `jump` with the
+  secondary (`2`) in the action and gun modes, the secondary alone in the RPG mode; every
+  cell of the hotbar is a button for its key (`1`–`8`, Shift, C, the mouse buttons), held
+  while the finger is. The look's pointer lock is never asked for by a finger.
+- **The scale**: with `ui_scale` 0 a touch screen is drawn at the device's pixel ratio
+  rounded, at least 2 and at most 4 (`ui::touch_scale`): an S23 at 2.625 asks for 3, and
+  gets it in fullscreen (2340 by 1080 device pixels: the tallest panel, 360 units, is the
+  whole height), 2 with the browser's bars (CLIENT.md 3's fit rule). A dot is then a
+  device pixel ratio, so a 40-dot cell is 4 to 7 mm under a finger.
+
+**The canvas was drawn at a third of its pixels.** winit sets the canvas's CSS size and
+never its backing size (`width`/`height`), and the client configured its surface from
+`inner_size`, which the browser reported in CSS pixels: on a phone of 2.625 device pixels
+a CSS pixel the arena was rendered at 892 by 412 and stretched, and a finger, which winit
+reports in device pixels, landed at 2.6 times its place, outside the frame (the gate's
+stick became a look). Now the surface is the canvas's client size times
+`devicePixelRatio` (`web::canvas_device_size`, `app::frame_size`), which configuring the
+surface writes on the canvas: 2342 by 1082 in the gate, crisp on any display scaled over
+100 % (a 4K desktop at 150 % had the same stretch).
+
+The page (5) keeps a finger on the canvas for the game: `touch-action: none`, no
+selection, no tap highlight, no overscroll, `viewport-fit=cover` and no pinch zoom of the
+page; with a coarse pointer the fullscreen control is finger-sized and the form no wider
+than the screen; and fullscreen locks the orientation to landscape where the browser
+allows it. The **phone step of `scripts/check-web.sh`** runs the WebGL2 build offline in
+headless Chromium as an S23 held sideways (`web-run.mjs --mobile`: 892 by 412 CSS pixels
+at 2.625, touch emulation on) and plays the fingers 6 s in (`--touch 6`: the stick
+pushed forward for 1.5 s, a swipe across the right, a tap), then reads the client's report:
+`touch=1`, `ui_scale=3`, and `yaw` and `pos` changed between the first report and the
+last (the report carries them since this change). The screenshot is `browser-phone.png`
+under `KEEP`. What a phone cannot do yet is listed in 10.
+
 ## 4. The model cache without a filesystem
 
 MODELS.md 8 holds, with the Cache API in place of the directory
@@ -393,10 +446,17 @@ at start, 2 KB and 50 KB, then the atlas of the UI's scale, 124 to 283 KB, once 
 scale; a prop of 2–16 KB when first seen), copied by `scripts/build-web.sh`. With the
 atlases per density (LOOK.md 2.2 and 11.4) the builds are **1,112,187 bytes (376,460
 packed)** and 3,103,848 (948,678); with the fight's effects and protocol v9 (LOOK.md 13)
-**1,136,246 (383,589 packed)** and 3,128,065 (956,743).
+**1,136,246 (383,589 packed)** and 3,128,065 (956,743); with the fingers and the
+canvas's device pixels (3.5, 2026-10-08) **1,249,355 (421,092 packed)**, +12,000 over the
+1,237,363 before it, and 3,240,891 (991,920).
 
 ## 10. Deliberately absent
 
+- On a phone (3.5): the chat line and the stall's prices (no keyboard without a field the
+  browser knows); the hotbar past eight cells; a second stick for the camera in the gun
+  mode (the right drag is the look there, and a tap the shot); the look's sensitivity for
+  fingers as a setting of its own (the gain is a number in `touch.rs`); iOS, where
+  Safari has no fullscreen on a phone and WebTransport only since 2025 (untried).
 - Rotation of pinned certificates without a restart (2.2); one UDP port for both transports.
 - Two tabs sharing one cap, and a last-use order that survives a reload (4).
 - Threads (`SharedArrayBuffer`, which needs cross-origin isolation headers on every host) and

@@ -65,10 +65,10 @@ round_trip_ms = 2000
 # symmetric: on WebGPU wgpu is a thin binding, for WebGL2 it links its GLES backend and the
 # shader translator. Sizes are of the .wasm after wasm-opt; "packed" is brotli -q 11 (what a
 # static host serves), gzip -9 where brotli is not installed.
-max_webgpu_wasm_bytes = 2097152         # raised from 1 MiB by the director on 2026-10-03 (WEB.md 9); measured 1,009,465 after Phase 13 (977,242 in Phase 12, 1,005,086 in Phase 11, 967,052 in Phase 10)
-max_webgpu_packed_bytes = 786432        # raised with it; measured 345,287 after Phase 13
-max_webgl_wasm_bytes = 3407872          # measured 3,003,328
-max_webgl_packed_bytes = 1048576        # measured 918,847
+max_webgpu_wasm_bytes = 2097152         # raised from 1 MiB by the director on 2026-10-03 (WEB.md 9); measured 1,249,355 with the fingers (2026-10-08), 1,009,465 after Phase 13 (977,242 in Phase 12, 1,005,086 in Phase 11, 967,052 in Phase 10)
+max_webgpu_packed_bytes = 786432        # raised with it; measured 421,092 with the fingers (2026-10-08), 345,287 after Phase 13
+max_webgl_wasm_bytes = 3407872          # measured 3,240,891 (2026-10-08), 3,003,328 after Phase 13
+max_webgl_packed_bytes = 1048576        # measured 991,920 (2026-10-08), 918,847 after Phase 13
 max_js_bytes = 180224                   # wasm-bindgen glue + loader + page, per build; measured 170,358 (webgl)
 max_wasm_memory_bytes = 67108864        # linear memory in the 8v8 arena; measured 3.3 MiB
 min_snapshots_per_s = 55                # of the zone's 64, as the browser client counts them

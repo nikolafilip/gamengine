@@ -162,6 +162,26 @@ pub fn ask_for_pointer() {
     }
 }
 
+/// The game's canvas in device pixels: its CSS size times `devicePixelRatio` (WEB.md
+/// 3.5), `None` without a canvas or while it has no size.
+pub fn canvas_device_size() -> Option<winit::dpi::PhysicalSize<u32>> {
+    let window = web_sys::window()?;
+    let canvas: web_sys::HtmlElement = window
+        .document()?
+        .get_element_by_id("gm-canvas")?
+        .dyn_into()
+        .ok()?;
+    let ratio = window.device_pixel_ratio().max(0.5);
+    let (w, h) = (canvas.client_width(), canvas.client_height());
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    Some(winit::dpi::PhysicalSize::new(
+        (w as f64 * ratio).round() as u32,
+        (h as f64 * ratio).round() as u32,
+    ))
+}
+
 /// Give the pointer back to the browser.
 pub fn give_pointer_back() {
     if let Some(d) = web_sys::window().and_then(|w| w.document()) {
