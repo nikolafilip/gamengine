@@ -306,7 +306,6 @@ mod tests {
         assert_eq!(role("mender"), Role::Heal);
         assert_eq!(role("frostweaver"), Role::Dps);
         assert_eq!(role("blade"), Role::Dps);
-        assert_eq!(role("captain"), Role::Dps);
         assert_eq!(role("shade"), Role::Scout);
         for r in [Role::Heal, Role::Tank, Role::Scout, Role::Dps] {
             assert_eq!(Role::from_index(r as u8), r);

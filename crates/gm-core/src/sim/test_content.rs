@@ -1821,7 +1821,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 primary: id(&pack, "sword"),
                 secondary: id(&pack, "kick"),
                 guard: Some(id(&pack, "parry")),
-                actives: vec![id(&pack, "dash"), id(&pack, "overhead")],
+                actives: vec![id(&pack, "charge"), id(&pack, "overhead")],
             },
         },
         NamedBuild {
@@ -1835,7 +1835,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 primary: id(&pack, "ice_shard"),
                 secondary: id(&pack, "kick"),
                 guard: Some(id(&pack, "brace")),
-                actives: vec![id(&pack, "frost_nova"), id(&pack, "blink")],
+                actives: vec![id(&pack, "frost_nova")],
             },
         },
         NamedBuild {
@@ -1874,35 +1874,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 ],
             },
         },
-        NamedBuild {
-            name: "captain".into(),
-            build: Build {
-                mode: Mode::Action,
-                frame: ArchetypeFrame::Striker,
-                attributes: Attributes::new(15, 10, 15, 5, 10),
-                armour: ArmourClass::Mail,
-                aspects: Aspects::one(Element::Water),
-                primary: id(&pack, "sword"),
-                secondary: id(&pack, "kick"),
-                guard: Some(id(&pack, "parry")),
-                actives: vec![id(&pack, "war_standard"), id(&pack, "dash")],
-            },
-        },
-        NamedBuild {
-            name: "marksman".into(),
-            build: Build {
-                mode: Mode::Rpg,
-                frame: ArchetypeFrame::Striker,
-                attributes: Attributes::new(10, 20, 10, 5, 10),
-                armour: ArmourClass::Leather,
-                aspects: Aspects::one(Element::Electric),
-                primary: id(&pack, "crossbow"),
-                secondary: id(&pack, "throwing_knife"),
-                guard: Some(id(&pack, "brace")),
-                actives: vec![id(&pack, "dash"), id(&pack, "leap"), id(&pack, "haste")],
-            },
-        },
-        // The gun (MODES.md 3): a musket, a pistol, the knife, a dodge and a vanish.
+        // The gun (MODES.md 3): a musket, a pistol, the knife, the legs; the neutral build.
         NamedBuild {
             name: "musketeer".into(),
             build: Build {
@@ -1910,11 +1882,11 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::new(10, 17, 13, 5, 10),
                 armour: ArmourClass::Leather,
-                aspects: Aspects::one(Element::Air),
+                aspects: Aspects::default(),
                 primary: id(&pack, "musket"),
                 secondary: id(&pack, "pistol"),
                 guard: None,
-                actives: vec![id(&pack, "dash"), id(&pack, "vanish")],
+                actives: vec![id(&pack, "dash"), id(&pack, "leap")],
             },
         },
     ];

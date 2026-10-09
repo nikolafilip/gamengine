@@ -481,7 +481,8 @@ one for the leader (MATRIX.md 10 bands):
 - `sanctuary` (active, 10): a circle of 140 u placed where the caster aims (within 500 u)
   for 6 s: Regen 12/s on every body in it.
 - `mender` preset: caster, cloth, Electric; staff, mend, brace; sanctuary, haste, thunderclap.
-- `captain` preset: striker, mail, Water; sword, crossbow, parry; war_standard, dash.
+- `captain` preset: striker, mail, Water; sword, crossbow, parry; war_standard, dash (cut
+  2026-10-09, MATRIX.md 15: the war standard is an active any build slots).
 
 Two vocabulary rules make them possible (VOCABULARY.md 4, MATRIX.md 7):
 

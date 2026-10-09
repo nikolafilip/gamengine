@@ -63,8 +63,8 @@ character wears is MODELS.md's.
   (`ItemSummary.fits` false, the words last in `does`: the inventory, the storage, a stall's
   listing, a trade), so the bag offers no Wear for it and takes no drop of it on the weapon
   slot. Armour, parts and stacks fit everyone. The rule is the build's, not the item's: the
-  item stays unbound, sells to whoever holds one, and the same sword fits a blade and a
-  captain. A respec that leaves a worn weapon behind keeps it on until it is taken off (an
+  item stays unbound, sells to whoever holds one, and the same sword fits every build whose
+  abilities hold a sword. A respec that leaves a worn weapon behind keeps it on until it is taken off (an
   open point; the trainer could take it off at the `Respawned`).
 - A companion (a hired avatar, a recruit) fights in **nothing** in v1 (9).
 

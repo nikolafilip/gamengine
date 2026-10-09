@@ -309,10 +309,10 @@ the five elemental bolts); a secondary is a short utility (kick, shield bash, a 
 is the whole of its damage at range. (v1 gave every build a bolt in the secondary slot:
 melee had free range and range had no edge; section 13.) A creature may hold a second
 primary in its secondary slot (the sentinel's crossbow, the Warden's stone). The content
-ships the abilities and seven presets (`ironclad`, `blade`, `frostweaver`, `shade`, `mender`,
-`captain`, `marksman`); `assets/content/README.md` has the table. Phase 7 adds `mend`
+ships the abilities and six presets (`ironclad`, `blade`, `frostweaver`, `shade`, `mender`,
+`musketeer`; section 15); `assets/content/README.md` has the table. Phase 7 adds `mend`
 (secondary, 4), `sanctuary` (active, 10) and `war_standard` (active, 10; two more squad
-slots), the presets `mender` and `captain`, and two more files: `creatures.toml` (creatures
+slots), the presets `mender` and `captain` (cut 2026-10-09, section 15), and two more files: `creatures.toml` (creatures
 are builds without a budget, with abilities marked `creature = true` that no player build may
 slot) and `trials.toml` (COMPANIONS.md 8, 11). An ability may carry `squad = N`: companions
 it adds to the squad of whoever has it in the build.
@@ -461,3 +461,51 @@ Open: nobody casts Fire among the presets (the firebolt and the fireball are slo
 nobody; that was so before) and nothing at all is Grass yet (the catalyst `umbra` is its
 only content); whether the blade's Water stays or the blade goes neutral is the director's
 to play. The arena gate: see section 11.
+
+---
+## 15. v4 (2026-10-09): six presets, each with its own face
+
+The director: "there seems to be too many of them, we need to simplify somehow and make them a
+bit more unique"; then "cut to six, distinct ones, but I'd leave gun (FPS) neutral". The
+eight presets had been measured first: every preset against every other, eight against eight,
+both sides, six seeds of 60 s (`round_robin` in `gm-bot/tests/arena.rs`, ignored by default:
+`ARENA_SEEDS=6 cargo test -p gm-bot --release --test arena round_robin -- --ignored
+--nocapture`). The blade and the captain were 49 : 51, the same build; four of eight were
+strikers, dash sat in four kits, Water and Air in three each, Fire and Grass in none.
+
+Done:
+- **captain** and **marksman** cut. The war standard stays an active any build may slot (a
+  party leader is a choice, not a class: `squad_capacity`); the crossbow stays a weapon a
+  build may hold under the weapon-fit rule (ITEMS.md 3). The sim tests that shot a crossbow
+  build one from the frostweaver's kit;
+- **blade**: `charge` for the dash, so its gap-closer is nobody else's. It keeps **Water**: a
+  neutral blade (measured: 9 : 33 against the frostweaver) breaks the cycle of section 11,
+  since nothing among the six but Water resists Water; the gun is the neutral build instead;
+- **frostweaver**: Water + Air still (the Air is what makes it the ironclad's counter, Ground
+  0.5x in, and the counter-pick's elemental score needs it: Water alone tied the blade and
+  nobody re-specced), but the blink is gone (the blink and the vanish are the shade's) and so
+  is the haste (the mender's): `frost_nova` alone. Measured against the blade on the gate's
+  three seeds: nova alone 22 : 16 (1.38); nova + haste 17 : 14 (1.21); nova + leap 8 : 13;
+- **musketeer**: **neutral** (`aspects = []`), `dash`, `leap`; the vanish is the shade's;
+- the duelist brain (gm-bot): melee or ranged is the primary weapon's verb, not the frame's
+  (a shade with a dagger closes in, a caster with a staff swings it); a charge is used from
+  the distance it covers; the offline arena issues every firearm its rounds through
+  `set_stacks` (the musketeer had one shot a life before: 3 kills in 48 fights).
+
+Measured (six seeds × 60 s, 8 v 8, both sides; the row's share of the kills):
+
+| | blade | frostweaver | ironclad | mender | musketeer | shade |
+|---|---|---|---|---|---|---|
+| blade | - | 58% | 27% | 100% | 52% | 61% |
+| frostweaver | 42% | - | 94% | 79% | 64% | 58% |
+| ironclad | 73% | 6% | - | 100% | 51% | 79% |
+| mender | 0% | 21% | 0% | - | 0% | 9% |
+| musketeer | 48% | 36% | 49% | 100% | - | 65% |
+| shade | 39% | 42% | 21% | 91% | 35% | - |
+
+The mender's row is the brain's, not the build's: a healer measured as a duelist heals
+nobody and swings a staff at mail. The gate of section 11 on its three seeds: ironclad : blade
+32 : 14 (2.3), frostweaver : ironclad 51 : 1, blade : frostweaver 22 : 16 (1.38; the bar is
+1.3, and the leg sits at noise level: a blade with the dash measured the same). Open: a Fire
+caster for the firebolt and the fireball nobody slots; Grass has no content; a mender
+measured in a mixed team rather than as a duelist.

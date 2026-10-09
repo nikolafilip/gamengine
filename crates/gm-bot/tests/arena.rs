@@ -43,8 +43,16 @@ fn spawns(bsp: &Bsp) -> Vec<Spawn> {
 
 /// Play `secs` seconds of team 1 (`build_a`) against team 2 (`build_b`), 8 v 8.
 fn play(bsp: &Arc<Bsp>, build_a: &str, build_b: &str, seed: u64, secs: u32) -> Outcome {
-    let pack = gm_content::load_dir(Path::new(CONTENT), RATE).expect("content");
+    let content = std::env::var("ARENA_CONTENT").unwrap_or_else(|_| CONTENT.to_string());
+    let pack = gm_content::load_dir(Path::new(&content), RATE).expect("content");
     let mut zone = Zone::new(RATE, seed, spawns(bsp), pack.clone());
+    let ammo: Vec<(String, u32, Option<i32>)> = pack
+        .abilities
+        .iter()
+        .filter_map(|a| a.ability.firearm.as_ref())
+        .filter(|f| !f.ammo.is_empty())
+        .map(|f| (f.ammo.clone(), 500, None))
+        .collect();
     let mut bots: Vec<(EntityId, Brain, u8)> = Vec::new();
     for i in 0..16 {
         let (team, name) = if i % 2 == 0 {
@@ -56,6 +64,9 @@ fn play(bsp: &Arc<Bsp>, build_a: &str, build_b: &str, seed: u64, secs: u32) -> O
         let id = zone
             .add_player(bsp.as_ref(), build, team)
             .expect("preset validates");
+        // A gun is issued with its magazine only; the rounds a body carries are stacks
+        // the hub tells the zone of (MODES.md 11). Here every bot carries plenty of each.
+        zone.set_stacks(id, &ammo);
         bots.push((
             id,
             Brain::new(seed * 100 + i as u64, Behaviour::Duelist),
@@ -234,4 +245,88 @@ fn mirror_match_is_even() {
         "the map or the brains are lopsided: {r:.2}"
     );
     let _ = Vec3::ZERO;
+}
+
+/// Every preset against every other, both sides, so the table is free of the team-1 edge
+/// (`ARENA_SEEDS` seeds × `ARENA_SECS` s each, default 2 × 60). Prints the kill table and
+/// the share of kills each build took against each other; run on demand:
+/// `ARENA_ROUND_ROBIN=1 cargo test -p gm-bot --release --test arena round_robin -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn round_robin() {
+    let bsp = Arc::new(Bsp::load(Path::new(MAP)).expect("arena built"));
+    let pack = gm_content::load_dir(Path::new(CONTENT), RATE).expect("content");
+    let mut names: Vec<String> = pack.builds.iter().map(|b| b.name.clone()).collect();
+    names.sort();
+    let seeds: u64 = std::env::var("ARENA_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    let secs: u32 = std::env::var("ARENA_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    let n = names.len();
+    // kills[a][b] = kills build a scored against build b, summed over both orientations.
+    let mut kills = vec![vec![0u32; n]; n];
+    for a in 0..n {
+        for b in a..n {
+            for seed in 1..=seeds {
+                let o = play(&bsp, &names[a], &names[b], seed, secs);
+                kills[a][b] += o.kills[1];
+                kills[b][a] += o.kills[2];
+                if a != b {
+                    let o = play(&bsp, &names[b], &names[a], seed, secs);
+                    kills[b][a] += o.kills[1];
+                    kills[a][b] += o.kills[2];
+                }
+            }
+            eprintln!(
+                "{} v {}: {} : {}",
+                names[a], names[b], kills[a][b], kills[b][a]
+            );
+        }
+    }
+    println!("\nkills (row scored on column), {seeds} seeds x {secs} s, both sides:");
+    print!("| build |");
+    for b in &names {
+        print!(" {b} |");
+    }
+    println!(" total |");
+    println!("|---|{}---|", "---|".repeat(n));
+    for a in 0..n {
+        print!("| {} |", names[a]);
+        let mut for_ = 0;
+        let mut against = 0;
+        for (b, row) in kills.iter().enumerate() {
+            print!(" {}:{} |", kills[a][b], row[a]);
+            if a != b {
+                for_ += kills[a][b];
+                against += row[a];
+            }
+        }
+        println!(" {for_}:{against} |");
+    }
+    println!("\nshare of kills (row's kills / all kills in the matchup):");
+    print!("| build |");
+    for b in &names {
+        print!(" {b} |");
+    }
+    println!(" mean |");
+    println!("|---|{}---|", "---|".repeat(n));
+    for a in 0..n {
+        print!("| {} |", names[a]);
+        let mut sum = 0.0;
+        for (b, row) in kills.iter().enumerate() {
+            let tot = (kills[a][b] + row[a]).max(1) as f64;
+            let share = kills[a][b] as f64 / tot;
+            if a == b {
+                print!(" - |");
+            } else {
+                print!(" {:.0}% |", share * 100.0);
+                sum += share;
+            }
+        }
+        println!(" {:.0}% |", sum / (n - 1) as f64 * 100.0);
+    }
 }

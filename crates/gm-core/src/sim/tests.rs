@@ -2964,9 +2964,18 @@ fn at(target: u32, input: Input) -> Input {
     Input { target, ..input }
 }
 
+/// A crossbow build (range 600 by content) for the aimed-bolt tests: the frostweaver's
+/// kit with the bow for the shard, since no preset ships a crossbow (MATRIX.md 15).
+fn crossbow_build(pack: &ContentPack) -> Build {
+    let mut b = pack.build("frostweaver").unwrap().clone();
+    b.primary = pack.find("crossbow").unwrap();
+    b.validate(pack).unwrap();
+    b
+}
+
 #[test]
 fn a_target_action_turns_the_body_and_leads_the_bolt_within_range_and_sight() {
-    // The marksman (crossbow, range 600 by content) faces away from a blade 400 u off
+    // The crossbow (range 600 by content) faces away from a blade 400 u off
     // that walks across its line; with the blade as the target the bolt is aimed by the
     // zone, led to where the blade will be, and lands.
     let pack = test_content::pack(RATE);
@@ -2975,12 +2984,7 @@ fn a_target_action_turns_the_body_and_leads_the_bolt_within_range_and_sight() {
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(400.0, -60.0, REST_Z), 90.0),
     ]);
-    let shooter = zone.add_player_at(
-        pack.build("marksman").unwrap().clone(),
-        1,
-        Vec3::new(0.0, 0.0, REST_Z),
-        180.0,
-    );
+    let shooter = zone.add_player_at(crossbow_build(&pack), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
     let runner = zone.add_player_at(
         pack.build("blade").unwrap().clone(),
         2,
@@ -3061,12 +3065,7 @@ fn a_target_out_of_range_or_out_of_sight_is_not_aimed_at() {
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(900.0, 0.0, REST_Z), 180.0),
     ]);
-    let shooter = zone.add_player_at(
-        pack.build("marksman").unwrap().clone(),
-        1,
-        Vec3::new(0.0, 0.0, REST_Z),
-        180.0,
-    );
+    let shooter = zone.add_player_at(crossbow_build(&pack), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
     let far = zone.add_player_at(
         pack.build("blade").unwrap().clone(),
         2,
@@ -3107,12 +3106,7 @@ fn a_target_out_of_range_or_out_of_sight_is_not_aimed_at() {
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(300.0, 0.0, REST_Z), 180.0),
     ]);
-    let shooter = zone.add_player_at(
-        pack.build("marksman").unwrap().clone(),
-        1,
-        Vec3::new(0.0, 0.0, REST_Z),
-        180.0,
-    );
+    let shooter = zone.add_player_at(crossbow_build(&pack), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
     let hidden = zone.add_player_at(
         pack.build("blade").unwrap().clone(),
         2,
