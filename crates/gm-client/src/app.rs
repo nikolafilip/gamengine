@@ -5950,6 +5950,9 @@ impl App {
             // What happened is used up; a button still held is still held.
             self.ui_input = UiInput {
                 down: self.ui_input.down,
+                // The pointer stays where it is: the paperdoll turns by how far it moved
+                // since last frame, not by where it is.
+                cursor: self.ui_input.cursor,
                 ..Default::default()
             };
         }
