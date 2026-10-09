@@ -11,7 +11,7 @@ when the two drift.
 | Key | Slot | Cost | Aspect | What it does |
 |---|---|---|---|---|
 | sword | primary | 2 | — | 60 slash, 90° arc, 150/60/300 ms, 600 ms |
-| hammer | primary | 2 | — | 90 blunt, ignores magic shields, heavy stagger, 1 s (no preset's since 2026-10-09) |
+| hammer | primary | 2 | — | 90 blunt, ignores magic shields, heavy stagger, 1 s: the shaman's (MATRIX.md 17) |
 | greatsword | primary | 2 | — | 95 slash, 120° arc of 96 u, 320/90/520 ms, 1.1 s: the colossus's (MATRIX.md 16) |
 | staff | primary | 0 | — | 40 blunt, 600 ms |
 | dagger | primary | 0 | — | 35 slash, 400 ms |
@@ -47,13 +47,17 @@ when the two drift.
 | war_standard | active | 10 | — | two more squad slots (five companions); used: Fortify 15% for 8 s on every body within 256 u, enemies included |
 | maul | primary | creature | — | 55 blunt through magic shields, 120° arc, 96 u reach, 550 ms windup, heavy knockback, one every 2 s |
 | quake | active | creature | ground | a circle of 150 u under whatever is aimed at within 700 u; breaks 1.3 s later for 70 ground |
+| slam | secondary | 4 | — | the hammer on the ground: 96 u circle at the feet, 30 blunt, knockback 300, stagger 40, 4 s |
+| briar | active | 10 | grass | a patch of 140 u where the shaman aims (within 500 u) for 6 s: 8 grass a second on everyone in it, Regen 30/s on the shaman's own side in it; 35 focus, 14 s |
+| entangle | active | 10 | grass | a circle of 112 u where the shaman aims (within 500 u): 15 grass + Root 1.5 s; 25 focus, 14 s |
 
 The range is the weapon's (MATRIX.md 10, 2026-10-06): a primary is a blade or the bow; a
 secondary is a short utility. Presets (thirty attribute points each, a kit of at most 40):
 **ironclad** (colossus, plate, ground; greatsword, shield bash, a shield in the off hand; stomp, bellow), **blade** (striker, mail, water;
 sword, kick; charge), **frostweaver** (caster, cloth, water + air; ice shard, kick), **shade**
 (infiltrator, leather, air; dagger, knife), **mender** (caster, cloth, electric: the healer;
-staff, mend) and **musketeer** (striker, leather, neutral; musket, pistol: the gun). MATRIX.md
+staff, mend), **musketeer** (striker, leather, neutral; musket, pistol: the gun) and **shaman**
+(caster, leather, grass; hammer, slam; briar, entangle: MATRIX.md 17). MATRIX.md
 11 records how the first four fare against each other; a bot that counter-picks takes the
 first preset listed among those that score the same.
 

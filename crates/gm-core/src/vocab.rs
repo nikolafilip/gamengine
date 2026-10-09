@@ -438,12 +438,16 @@ pub enum StatusTarget {
     Actor,
     Hit,
     Area,
+    /// `Area`, but only those on the caster's side (the caster among them): a boon an area
+    /// gives its own side while its packets hurt everyone (MATRIX.md 17's briar). Damage
+    /// never checks sides (VOCABULARY.md 8); a status may.
+    Allies,
 }
 
 /// Verb 4: put a status on someone. `target` `Hit` means every entity the previous step of
 /// the same ability hit (or the entity a projectile hit when nested in `on_hit`); `Area`
-/// means every entity an enclosing `AreaEffect` pulse touched; `Actor` is the caster
-/// (VOCABULARY.md 5.4).
+/// means every entity an enclosing `AreaEffect` pulse touched, `Allies` those of them on
+/// the caster's side; `Actor` is the caster (VOCABULARY.md 5.4).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct ApplyStatus {

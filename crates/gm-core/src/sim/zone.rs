@@ -1487,7 +1487,7 @@ impl Zone {
             match t {
                 Trigger::Status(s) => match s.target {
                     StatusTarget::Actor => self.apply_status(owner, owner, s),
-                    StatusTarget::Hit | StatusTarget::Area => {
+                    StatusTarget::Hit | StatusTarget::Area | StatusTarget::Allies => {
                         if let Some(h) = hit {
                             self.apply_status(h, owner, s);
                         }
@@ -1751,7 +1751,9 @@ impl Zone {
             for s in &area.def.effects {
                 match s.target {
                     StatusTarget::Actor => self.apply_status(area.owner, area.owner, s),
-                    StatusTarget::Hit | StatusTarget::Area => self.apply_status(id, area.owner, s),
+                    StatusTarget::Hit | StatusTarget::Area | StatusTarget::Allies => {
+                        self.apply_status(id, area.owner, s)
+                    }
                 }
             }
         }
@@ -1831,14 +1833,16 @@ impl Zone {
 
     /// Put a status on `target` (MATRIX.md 8), scaling the duration by the target's factor.
     pub fn apply_status(&mut self, target: EntityId, source: EntityId, s: &ApplyStatus) {
-        // A taunt is for enemies (MATRIX.md 8): an ally in the roar is not turned by it.
-        if s.status == Status::Taunt {
+        // A taunt is for enemies (MATRIX.md 8): an ally in the roar is not turned by it. A
+        // status for `Allies` (VOCABULARY.md 5.4) is for the source's own side, the source
+        // among them.
+        if s.status == Status::Taunt || s.target == StatusTarget::Allies {
             let (Some(src), Some(t)) = (self.players.get(&source), self.players.get(&target))
             else {
                 return;
             };
             let enemy = src.team() != t.team() || (t.team() == TEAM_WILD && src.party != t.party);
-            if !enemy {
+            if enemy == (s.target == StatusTarget::Allies) {
                 return;
             }
         }

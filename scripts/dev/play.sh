@@ -135,8 +135,9 @@ people() {
   bot owners --bots 3 --user 'owner-{i}@bots.test' --register --character 'Avatar{i}' \
     --builds ironclad,mender,frostweaver --zone town --list-for-hire 150 --secs 0
   # A stall keeper: walks to the first market tile, opens its stall, and lists whatever an
-  # operator hands it at 1 s 20 c: every weapon of items.toml, one plain and one fine of
-  # each, twelve for the stall's twelve slots. Handed once: a keeper that still carries
+  # operator hands it at 1 s 20 c: the six weapons the presets hold (the crossbow is
+  # nobody's since MATRIX.md 15; the hammer is the shaman's again, MATRIX.md 17), one plain
+  # and one fine of each, twelve for the stall's twelve slots. Handed once: a keeper that still carries
   # anything (its stall is open, or the stall closed and its stock came back) is not handed
   # more (--fresh forgets everything).
   spawn keeper --bots 1 --user keeper@bots.test --register --character Keeper --builds ironclad --zone town \
@@ -148,7 +149,7 @@ people() {
                 "dagger core/iron,frame/oak" "dagger core/dragonbone,frame/ash,catalyst/umbra,gem/opal" \
                 "greatsword core/iron,frame/oak" "greatsword core/dragonbone,frame/whalebone,catalyst/basalt,gem/opal" \
                 "staff core/iron,frame/ash" "staff core/dragonbone,frame/whalebone,catalyst/rime,gem/opal" \
-                "crossbow core/iron,frame/oak" "crossbow core/dragonbone,frame/whalebone,gem/opal" \
+                "hammer core/iron,frame/oak" "hammer core/dragonbone,frame/whalebone,catalyst/umbra,gem/opal" \
                 "musket core/iron,frame/oak" "musket core/dragonbone,frame/whalebone,gem/opal"; do
       # shellcheck disable=SC2086
       hubctl --grant-item Keeper $item >>"$D/log/grants.log" 2>&1

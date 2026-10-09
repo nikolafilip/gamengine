@@ -3387,6 +3387,64 @@ fn a_frostweavers_shard_lands_on_a_walking_target_seen_a_round_trip_ago() {
 /// is turned to the roarer and held there whatever its frames say, until the taunt is
 /// out; the second within ten seconds lasts half (MODES.md 4.5).
 #[test]
+fn a_briar_hurts_everyone_in_it_and_feeds_only_its_own_side() {
+    // MATRIX.md 17, VOCABULARY.md 5.4: the briar's packets are friendly fire like every
+    // packet; its Regen is `target = "allies"`, the shaman's side alone, the shaman too.
+    let world = BoxWorld::floor();
+    let spawns = vec![
+        Spawn {
+            origin: Vec3::new(0.0, 0.0, REST_Z),
+            yaw: 0.0,
+            team: 1,
+        },
+        Spawn {
+            origin: Vec3::new(0.0, 0.0, REST_Z),
+            yaw: 0.0,
+            team: 2,
+        },
+    ];
+    let mut zone = Zone::new(RATE, 1, spawns, test_content::pack(RATE));
+    let shaman = zone.content.build("shaman").unwrap().clone();
+    let blade = zone.content.build("blade").unwrap().clone();
+    let caster = zone.add_player_at(shaman, 1, Vec3::new(0.0, 0.0, REST_Z), 0.0);
+    // The patch lands where the caster looks: pitch 30 down puts it 80 u ahead (the
+    // sanctuary's test above); a circle of 140 u holds all three.
+    let ally = zone.add_player_at(blade.clone(), 1, Vec3::new(80.0, 60.0, REST_Z), 0.0);
+    let enemy = zone.add_player_at(blade, 2, Vec3::new(80.0, -60.0, REST_Z), 0.0);
+    let still = input(0.0, 0.0, 0);
+    // The patch is placed when the cast's step fires (300 ms in), where the caster looks
+    // then: the caster keeps looking down.
+    let down = Input {
+        pitch: 30.0,
+        ..still
+    };
+    let cast = Input { ability: 1, ..down };
+    tick(
+        &mut zone,
+        &world,
+        &[(caster, cast), (ally, still), (enemy, still)],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(caster, down), (ally, still), (enemy, still)],
+        40,
+    );
+    assert_eq!(zone.areas().len(), 1, "the briar stands");
+    assert!(
+        hits(&zone, HitKind::Area) >= 3,
+        "the thorns hurt all three: {} area hits, the patch at {:?}",
+        hits(&zone, HitKind::Area),
+        zone.areas()[0].origin
+    );
+    let has = |id: EntityId| zone.player(id).unwrap().mover.statuses.has(Status::Regen);
+    assert!(has(ally), "the ally in the patch has Regen");
+    assert!(has(caster), "the shaman in its own patch too");
+    assert!(!has(enemy), "the enemy in it has none");
+}
+
+#[test]
 fn a_bellow_turns_enemies_to_the_roarer_and_not_allies() {
     let world = BoxWorld::floor();
     let spawns = vec![
