@@ -263,6 +263,11 @@ the well); the viewport and the scissor are **set back to the whole frame** befo
 HUD's layers 1–4 close the frame. The pass exists only in frames that have a paperdoll,
 so the game's frame cost does not move. The doll's draws ride in the same block buffer as
 the world's (`Characters::prepare_with_dolls`), after them.
+The selector of CLIENT.md 4.2 draws the same body **in the open** (`Ui::paperdoll_open`,
+`Paperdoll.open`): no well, the map turning behind the screens showing through, and the
+camera further back (`DOLL_OPEN_DISTANCE` = 46 u before the body's origin, at 34 u up, a
+degree down) so the whole body stands in the rectangle; its props are the hub's pack's
+abilities looked up in the manifest (`ability_prop`), since no zone has sent a prop list.
 
 ## 6. Props in hands
 

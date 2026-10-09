@@ -5,16 +5,19 @@
 //! clicks through.
 
 use gm_core::build::{Build, ContentPack};
+use gm_core::tick::TickRate;
 use gm_core::vocab::ArchetypeFrame;
 use gm_hub_proto::player::{PlayerRequest, PlayerResponse};
 use gm_hub_proto::protocol::{
     BuildChoice, CharacterId, CharacterSummary, HubError, LocationSummary,
     MAX_CHARACTERS_PER_ACCOUNT, SessionId, ZoneTicket,
 };
+use gm_model::ModelId;
 use web_time::{Duration, Instant};
 
 use crate::hub::{Account, Answer, HubApi, Pending, RpcError};
-use crate::ui::{self, Canvas, Column, Field, Key, ListEvent, Rect, Ui};
+use crate::showcase::{self, Shown};
+use crate::ui::{self, Canvas, Column, Field, Key, Rect, Ui};
 
 /// A zone takes a moment to put a character away after it left (its last save): an entry
 /// the hub refuses as `Busy`, and a list that still shows the character in its zone, are
@@ -121,6 +124,8 @@ pub struct Front {
     // The new character's form.
     name: String,
     archetype: usize,
+    /// The kit's row picked in the selector, whose words are read (CLIENT.md 4.2).
+    ability_at: usize,
     /// The zone being entered, for the screen that says so.
     entering: String,
 }
@@ -189,6 +194,15 @@ pub fn build_name(pack: Option<&ContentPack>, build: &Build) -> String {
         .map_or_else(|| "custom".to_string(), |b| b.name.clone())
 }
 
+/// Which of the characters and the archetypes a step of the arrows lands on: round
+/// the ends.
+fn stepped(at: usize, step: i32, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (at as i64 + step as i64).rem_euclid(count as i64) as usize
+}
+
 fn played(seconds: u32) -> String {
     match seconds {
         0 => "new".into(),
@@ -196,19 +210,6 @@ fn played(seconds: u32) -> String {
         s if s < 360_000 => format!("{} h {} m", s / 3600, s % 3600 / 60),
         s => format!("{} h", s / 3600),
     }
-}
-
-/// The abilities of a build by their content keys, as words.
-fn abilities(pack: &ContentPack, b: &Build) -> String {
-    let name = |i: u16| {
-        pack.abilities
-            .get(i as usize)
-            .map_or_else(|| "?".to_string(), |a| a.key.replace('_', " "))
-    };
-    let mut all = vec![name(b.primary), name(b.secondary)];
-    all.extend(b.guard.map(name));
-    all.extend(b.actives.iter().map(|a| name(*a)));
-    all.join(", ")
 }
 
 impl Front {
@@ -237,6 +238,7 @@ impl Front {
             content_asked: None,
             name: String::new(),
             archetype: 0,
+            ability_at: 0,
             entering: String::new(),
         };
         if let Some(auto) = auto {
@@ -586,6 +588,23 @@ impl Front {
         [answered, clicked]
     }
 
+    /// The build the selector shows this frame (CLIENT.md 4.2), for the body the app
+    /// draws into it: a character's, with the model it wears, or an archetype's.
+    pub fn shown(&self) -> Option<(Option<&ContentPack>, &Build, Option<ModelId>)> {
+        let pack = self.content.as_ref();
+        match self.screen {
+            Screen::Characters => self
+                .characters
+                .get(self.picked)
+                .map(|c| (pack, &c.build, c.model)),
+            Screen::NewCharacter => pack?
+                .builds
+                .get(self.archetype)
+                .map(|b| (pack, &b.build, None)),
+            _ => None,
+        }
+    }
+
     /// A person is waiting for an answer: the buttons that would ask another are off.
     /// The list being asked for again behind the screen is nothing a person waits for: a
     /// button that went grey for the length of it would swallow the click that met it.
@@ -737,33 +756,43 @@ impl Front {
     fn characters<C: Canvas>(&mut self, ui: &mut Ui<'_, C>) -> Action {
         let s = ui.scale;
         let gap = 6.0 * s;
-        let list = ui.list_height(6);
-        let inner = list + gap + 2.0 * ui.line() + gap + ui.button_height();
-        let panel = Rect::centred(ui.size(), PANEL_UNITS * s, ui.panel_height(inner, true));
-        let title = format!("characters of {}", self.email.trim());
-        let inner = ui.panel(panel, &title);
-        let mut col = Column::new(inner, gap);
-        let rows: Vec<Vec<String>> = self
-            .characters
-            .iter()
-            .map(|c| {
-                vec![
-                    c.name.clone(),
-                    build_name(self.content.as_ref(), &c.build),
-                    c.last_zone.clone().unwrap_or_else(|| "new".into()),
-                    played(c.play_seconds),
-                ]
-            })
-            .collect();
-        ui.focus_default("list", "characters");
-        let event = ui.list(
-            col.take(list),
-            "characters",
-            &[0.0, 0.42, 0.63, 0.82],
-            &rows,
-            &mut self.picked,
+        // The strip at the bottom: the buttons, and a line under them for the notice.
+        let strip_inner = ui.button_height() + gap + ui.line();
+        let pack = self.content.as_ref();
+        let c = self.characters.get(self.picked);
+        let words = c.map(|c| {
+            let kind = build_name(pack, &c.build);
+            match &c.last_zone {
+                Some(zone) => format!("{kind}  |  in {zone}  |  played {}", played(c.play_seconds)),
+                None => format!("{kind}  |  not yet in the world"),
+            }
+        });
+        let shown = match (c, &words) {
+            (Some(c), Some(words)) => Some(Shown {
+                name: &c.name,
+                build: &c.build,
+                pack,
+                rate: TickRate::COMBAT,
+                words,
+                index: self.picked,
+                count: self.characters.len(),
+            }),
+            _ => None,
+        };
+        let waiting = if self.characters.is_empty() {
+            "no characters yet"
+        } else {
+            "asking the hub for the content"
+        };
+        let picked = showcase::selector(
+            ui,
+            shown.as_ref(),
+            waiting,
+            None,
+            &mut self.ability_at,
+            strip_inner,
         );
-        let notice = col.take(2.0 * ui.line());
+        let mut col = Column::new(picked.strip, gap);
         // A browser's tab is closed by the browser.
         let web = cfg!(target_arch = "wasm32");
         let labels: &[&str] = if web {
@@ -771,15 +800,15 @@ impl Front {
         } else {
             &["Play", "New character", "Log out", "Quit"]
         };
-        let row = ui.buttons(col.take(ui.button_height()), labels);
+        let row = showcase::lead_buttons(ui, col.take(ui.button_height()), labels);
         let free = !self.waiting();
         let any = !self.characters.is_empty();
         let mut play = ui.button_if(row[0], "Play", free && any);
-        play |= free && any && event == ListEvent::Activated;
         // An account has room for so many, and none can be deleted yet.
         let room = (self.characters.len() as i64) < MAX_CHARACTERS_PER_ACCOUNT;
         if ui.button_if(row[1], "New character", free && room) {
             self.screen = Screen::NewCharacter;
+            self.ability_at = 0;
             self.notice.clear();
         }
         if ui.button_if(row[2], "Log out", free) {
@@ -788,8 +817,21 @@ impl Front {
         if !web && ui.button(row[3], "Quit") {
             return Action::Quit;
         }
-        // Enter that no button took is the screen's own: Play.
+        let notice = col.take(ui.line());
+        // Enter that no button took is the screen's own: Play. The arrows and the keys
+        // go to the next or the previous character.
         play |= free && any && ui.key(Key::Enter);
+        let mut step = picked.step;
+        if ui.key(Key::Left) || ui.key(Key::Up) {
+            step -= 1;
+        }
+        if ui.key(Key::Right) || ui.key(Key::Down) {
+            step += 1;
+        }
+        if step != 0 && any {
+            self.picked = stepped(self.picked, step, self.characters.len());
+            self.ability_at = 0;
+        }
         self.ask_content();
         if play && let Some(c) = self.characters.get(self.picked) {
             let id = c.id;
@@ -817,74 +859,50 @@ impl Front {
 
     fn new_character<C: Canvas>(&mut self, ui: &mut Ui<'_, C>) -> Action {
         let s = ui.scale;
-        let gap = 5.0 * s;
+        let gap = 6.0 * s;
         let line = ui.line();
-        let list = ui.list_height(6);
-        // The name, the archetypes, six lines about the one picked, two of notice, the
-        // buttons.
-        let inner = (ui.field_height() + gap)
-            + (line + gap)
-            + (list + gap)
-            + (6.0 * line + gap)
-            + (2.0 * line + gap)
-            + ui.button_height();
-        let panel = Rect::centred(ui.size(), PANEL_UNITS * s, ui.panel_height(inner, true));
-        let inner = ui.panel(panel, "a new character");
-        let mut col = Column::new(inner, gap);
+        // The strip at the bottom: the name's field with the buttons beside it, and a
+        // line under them for the notice.
+        let strip_inner = ui.field_height() + gap + line;
+        let presets = self.content.as_ref().map_or(&[][..], |p| &p.builds[..]);
+        let names: Vec<String> = presets.iter().map(|b| b.name.clone()).collect();
+        let blurb = self.blurbs.get(self.archetype).map_or("", String::as_str);
+        let shown = match (self.content.as_ref(), presets.get(self.archetype)) {
+            (Some(pack), Some(b)) => Some(Shown {
+                name: &b.name,
+                build: &b.build,
+                pack: Some(pack),
+                rate: TickRate::COMBAT,
+                words: blurb,
+                index: self.archetype,
+                count: presets.len(),
+            }),
+            _ => None,
+        };
+        let picked = showcase::selector(
+            ui,
+            shown.as_ref(),
+            "asking the hub for the archetypes",
+            Some(&names),
+            &mut self.ability_at,
+            strip_inner,
+        );
+        let mut col = Column::new(picked.strip, gap);
+        let row = col.take(ui.field_height());
         ui.focus_default("field", "name");
-        // The hub counts a name in bytes (24 of them).
+        // The hub counts a name in bytes (24 of them). The field takes the left part of
+        // the row, the buttons the rest, level with its box.
         let name = Field {
             max_bytes: 24,
             ..Field::text(24)
         };
-        ui.text_field(col.take(ui.field_height()), "name", &mut self.name, name);
-        let head = col.take(line);
-        ui.label(head.x, head.y, 0.0, ui::FAINT, "archetype");
-        let presets = self.content.as_ref().map_or(&[][..], |p| &p.builds[..]);
-        let rows: Vec<Vec<String>> = presets
-            .iter()
-            .map(|b| {
-                vec![
-                    b.name.clone(),
-                    frame_name(b.build.frame).to_string(),
-                    b.build.armour.name().to_string(),
-                ]
-            })
-            .collect();
-        ui.list(
-            col.take(list),
-            "archetypes",
-            &[0.0, 0.42, 0.74],
-            &rows,
-            &mut self.archetype,
+        let field_w = (row.w * 0.38).max((160.0 * s).min(row.w * 0.5));
+        ui.text_field(
+            Rect::new(row.x, row.y, field_w, row.h),
+            "name",
+            &mut self.name,
+            name,
         );
-        // What the picked archetype is, in the content's words, and its facts.
-        let about = col.take(6.0 * line);
-        match (self.content.as_ref(), presets.get(self.archetype)) {
-            (Some(pack), Some(b)) => {
-                let blurb = self.blurbs.get(self.archetype).map_or("", String::as_str);
-                let used = ui.paragraph(
-                    Rect::new(about.x, about.y, about.w, 4.0 * line),
-                    ui::TEXT,
-                    blurb,
-                );
-                let aspects: Vec<&str> = b.build.aspects.iter().map(|e| e.name()).collect();
-                let facts = format!("{}: {}", aspects.join(" and "), abilities(pack, &b.build));
-                ui.paragraph(
-                    Rect::new(about.x, about.y + used, about.w, about.h - used),
-                    ui::FAINT,
-                    &facts,
-                );
-            }
-            _ => ui.label(
-                about.x,
-                about.y,
-                about.w,
-                ui::FAINT,
-                "asking the hub for the archetypes",
-            ),
-        }
-        let notice = col.take(2.0 * line);
         let web = cfg!(target_arch = "wasm32");
         // An account with no character has nowhere to go back to but out.
         let empty = self.characters.is_empty();
@@ -894,22 +912,48 @@ impl Front {
         } else {
             &["Create", back, "Quit"]
         };
-        let row = ui.buttons(col.take(ui.button_height()), labels);
+        let bh = ui.button_height();
+        let buttons = Rect::new(
+            row.x + field_w + 2.0 * gap,
+            row.y + row.h - bh,
+            (row.w - field_w - 2.0 * gap).max(0.0),
+            bh,
+        );
+        let brow = showcase::lead_buttons(ui, buttons, labels);
         let free = !self.waiting();
         let ready = free && presets.get(self.archetype).is_some();
-        let mut create = ui.button_if(row[0], "Create", ready);
-        if ui.button_if(row[1], back, free) || (!empty && ui.key(Key::Escape)) {
+        let mut create = ui.button_if(brow[0], "Create", ready);
+        if ui.button_if(brow[1], back, free) || (!empty && ui.key(Key::Escape)) {
             if empty {
                 return self.log_out();
             }
             self.screen = Screen::Characters;
+            self.ability_at = 0;
             self.notice.clear();
         }
-        if !web && ui.button(row[2], "Quit") {
+        if !web && ui.button(brow[2], "Quit") {
             return Action::Quit;
         }
-        // Enter that no button took is the screen's own: Create.
+        let notice = col.take(line);
+        // Enter that no button took is the screen's own: Create. The arrows and the keys
+        // the name's field left (it has them while it is typed in) cycle the archetypes.
         create |= ready && ui.key(Key::Enter);
+        let mut step = picked.step;
+        if ui.key(Key::Left) || ui.key(Key::Up) {
+            step -= 1;
+        }
+        if ui.key(Key::Right) || ui.key(Key::Down) {
+            step += 1;
+        }
+        let was = self.archetype;
+        if let Some(i) = picked.tab {
+            self.archetype = i;
+        } else if step != 0 {
+            self.archetype = stepped(self.archetype, step, presets.len());
+        }
+        if self.archetype != was {
+            self.ability_at = 0;
+        }
         let preset = presets.get(self.archetype).map(|p| p.name.clone());
         self.ask_content();
         if create && let Some(preset) = preset {
@@ -1086,7 +1130,9 @@ mod tests {
             if self.front.wait.is_none() {
                 self.frame(&UiInput::default());
             }
-            crate::ui::tests::tidy(&self.drawn, &self.state, PANEL_UNITS);
+            // The selector lies across the whole frame (CLIENT.md 4.2).
+            let whole = matches!(self.front.screen, Screen::Characters | Screen::NewCharacter);
+            crate::ui::tests::tidy_in(&self.drawn, &self.state, PANEL_UNITS, whole);
         }
 
         /// Frames until the machine has nothing more to pick up; the actions on the way.
@@ -1196,15 +1242,28 @@ mod tests {
         );
         assert_eq!(run.front.screen, Screen::Characters);
         assert!(run.front.password.is_empty(), "the password is not kept");
-        // The list says who they are, what they are, where and for how long.
-        assert!(
-            run.says("Aldric  blade  arena  1 h 6 m"),
-            "{:?}",
-            run.said()
-        );
-        assert!(run.says("Brena  blade  new  1 h 6 m"));
-        // The second one, by a click; Play asks for no zone: the hub knows where it was.
-        run.click("Brena");
+        // The selector says who the one shown is, what, where and for how long; the
+        // arrows go to the next.
+        assert!(run.says("Aldric"), "{:?}", run.said());
+        assert!(run.says("blade  |  in arena  |  played 1 h 6 m"));
+        assert!(run.says("1 of 2"));
+        // (What an arrow changed is on the screen a frame later.)
+        run.click(">");
+        run.frame(&UiInput::default());
+        assert!(run.says("Brena"), "{:?}", run.said());
+        assert!(run.says("blade  |  not yet in the world"));
+        assert!(run.says("2 of 2"));
+        // Round the end and back, by the keys too.
+        run.click(">");
+        run.frame(&UiInput::default());
+        assert!(run.says("Aldric"));
+        run.frame(&UiInput {
+            keys: vec![Key::Left],
+            ..Default::default()
+        });
+        run.frame(&UiInput::default());
+        assert!(run.says("Brena"), "{:?}", run.said());
+        // The second one; Play asks for no zone: the hub knows where it was.
         assert_eq!(run.click("Play"), Action::None);
         let actions = run.settle();
         assert!(
@@ -1313,9 +1372,12 @@ mod tests {
         run.settle();
         assert_eq!(run.front.screen, Screen::NewCharacter);
         // The archetypes with the content's words, and no way back to an empty list.
-        assert!(run.says("ironclad  colossus  plate"), "{:?}", run.said());
+        assert!(run.says("ironclad"), "{:?}", run.said());
+        assert!(run.says("colossus in plate  |  ground  |  action mode"));
         assert!(run.says("A wall of plate behind a shield."));
-        assert!(run.says("ground: greatsword, shield bash, shield wall, stomp, bellow"));
+        assert!(run.says("Greatsword  weapon"));
+        assert!(run.says("Bellow  active"));
+        assert!(run.says("ironclad"));
         assert!(
             run.state
                 .find("Back")
@@ -1419,7 +1481,7 @@ mod tests {
         assert_eq!(run.front.screen, Screen::Characters);
         assert!(run.says("kicked: zone stopped"));
         assert!(
-            run.says("Aldric  blade  town"),
+            run.says("blade  |  in town"),
             "the list was asked for again"
         );
     }
@@ -1504,10 +1566,10 @@ mod tests {
         run.settle();
         run.front.back_to_characters("");
         run.settle();
-        assert!(run.says("Aldric  blade  town"));
+        assert!(run.says("blade  |  in town"));
         std::thread::sleep(std::time::Duration::from_millis(20));
         run.settle();
-        assert!(run.says("Aldric  blade  arena"), "{:?}", run.said());
+        assert!(run.says("blade  |  in arena"), "{:?}", run.said());
     }
 
     #[test]
@@ -1529,7 +1591,9 @@ mod tests {
         run.field("password", "a long password");
         run.click("Log in");
         run.settle();
-        run.click("Brena");
+        run.click(">");
+        run.frame(&UiInput::default());
+        assert!(run.says("Brena"), "{:?}", run.said());
         // Back from a zone, on a slow line: the list is on its way again.
         run.hub.slow.set(true);
         run.front.back_to_characters("");
@@ -1681,7 +1745,11 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert!(run.says("ironclad  colossus  plate"), "{:?}", run.said());
+        assert!(
+            run.says("colossus in plate  |  ground  |  action mode"),
+            "{:?}",
+            run.said()
+        );
         // Nothing of ours is cut short on this screen, the longest refusal of a name
         // that the field lets through included.
         run.field("name", "Aldric!");
