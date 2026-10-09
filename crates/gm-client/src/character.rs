@@ -1,12 +1,12 @@
-//! The character's page (MATRIX.md 9.1, CLIENT.md 4.6): the thirty attribute points and the
+//! The character's page (MATRIX.md 9.1, CLIENT.md 4.5): the thirty attribute points and the
 //! kit, edited here and worn at the trainer in the town. The editor itself is shared with
 //! the game master's page (GM.md 4), which wears any build at once, anywhere. Nothing is
-//! decided here: the zone validates and answers (`FromZone::RespecResult`).
+//! decided here: the zone validates, saves and answers (`FromZone::RespecResult`).
 
-use gm_core::build::{AbilityDef, BUDGET, Build, ContentPack, MAX_ACTIVES, Slot};
+use gm_core::build::{AbilityDef, BUDGET, Build, BuildError, ContentPack, MAX_ACTIVES, Slot};
 use gm_core::matrix::{ArmourClass, Aspects, Attributes, Element};
 use gm_core::tick::TickRate;
-use gm_core::vocab::{ArchetypeFrame, Guard, MoveKind, Origin, Shape, Trigger, Verb};
+use gm_core::vocab::{ArchetypeFrame, Guard, Mode, MoveKind, Origin, Shape, Trigger, Verb};
 
 use crate::ui::{self, Canvas, Column, Key, ListEvent, Rect, RowMark, Ui};
 
@@ -114,15 +114,13 @@ pub fn build_editor<C: Canvas>(
         row
     };
     for (i, r) in ui.buttons(buttons, &options).into_iter().enumerate() {
-        let text = if i == preset {
-            format!("[{}]", options[i])
-        } else {
-            options[i].to_string()
-        };
-        if ui.button(r, &text)
+        if ui.button(r, options[i])
             && let Some(nb) = pack.builds.get(i)
         {
             *b = nb.build.clone();
+        }
+        if i == preset {
+            ui.mark(r);
         }
     }
     // The two columns, and under them what room is left (a line or two) to read an
@@ -150,12 +148,22 @@ pub fn build_editor<C: Canvas>(
         both.h,
     );
     body_column(ui, body, b);
-    let over = kit_columns(ui, kit, pack, b);
+    let (over, why) = kit_columns(ui, kit, pack, b);
     // What the ability under the cursor does, in the lines there are (the last cut if
-    // it must be); else what the lines are for.
+    // it must be), after why it cannot be taken where it cannot; else what the lines
+    // are for.
     match over.and_then(|i| pack.abilities.get(i as usize)) {
         Some(def) => {
-            let text = words_of(def, rate);
+            let words = words_of(def, rate);
+            let text = match &why {
+                // `words_of` opens with the name: the reason goes between.
+                Some(why) => {
+                    let head = format!("{}: ", def.ability.name);
+                    let rest = words.strip_prefix(&head).unwrap_or(&words);
+                    format!("{head}{why}. {rest}")
+                }
+                None => words,
+            };
             let lines = ui::wrap_measured(&text, read.w, |t| ui.text_width(t));
             for (n, l) in lines.iter().take(read_lines).enumerate() {
                 let shown = if n + 1 == read_lines && lines.len() > read_lines {
@@ -163,7 +171,8 @@ pub fn build_editor<C: Canvas>(
                 } else {
                     l.clone()
                 };
-                ui.label(read.x, read.y + line * n as f32, 0.0, ui::TEXT, &shown);
+                let ink = if why.is_some() { ui::WARN } else { ui::TEXT };
+                ui.label(read.x, read.y + line * n as f32, 0.0, ink, &shown);
             }
         }
         None => ui.label(
@@ -207,24 +216,24 @@ fn body_column<C: Canvas>(ui: &mut Ui<'_, C>, area: Rect, b: &mut Build) {
     ) {
         b.armour = ArmourClass::from_index(armour as u8).unwrap_or_default();
     }
-    // Aspects: one or two of five (the second costs 10).
+    // Aspects: one or two of six (the second costs 10).
     let row = col.take(fh);
     ui.label(
         row.x,
         row.y,
         row.w,
         ui::FAINT,
-        "aspects  (one; a second costs 10 kit points)",
+        "aspects  (none is neutral; the second costs 10)",
     );
     // Each box as wide as its word needs, the spare shared between them.
     let boxes = Rect::new(row.x, row.y + line, row.w, row.h - line);
-    let names = ["flame", "shadow", "storm", "frost", "stone"];
+    let names: Vec<&str> = Element::ALL.iter().map(|e| e.name()).collect();
     let side = ui.ascent() + 4.0 * s;
     let needs: Vec<f32> = names
         .iter()
         .map(|n| side + 6.0 * s + ui.text_width(n))
         .collect();
-    let spare = ((boxes.w - needs.iter().sum::<f32>()) / 4.0).max(0.0);
+    let spare = ((boxes.w - needs.iter().sum::<f32>()) / (names.len() - 1) as f32).max(0.0);
     let mut x = boxes.x;
     let cells: Vec<Rect> = needs
         .iter()
@@ -328,15 +337,140 @@ fn body_column<C: Canvas>(ui: &mut Ui<'_, C>, area: Rect, b: &mut Build) {
     };
 }
 
+/// The name of an ability, for what is said about a draft.
+fn name_of(pack: &ContentPack, i: u16) -> String {
+    pack.abilities
+        .get(i as usize)
+        .map_or_else(|| format!("ability {i}"), |a| a.ability.name.clone())
+}
+
+/// Why ability `i` cannot go into `slot` of the draft `b` as it stands (CLIENT.md 4.6):
+/// the mode's rule on firearms and guards, the aspect it needs, an ability already in
+/// the kit that it would double or share a cooldown with, the actives' count, the
+/// budget. `None` where it can, or already is there. The rules are `Build::validate`'s
+/// (MATRIX.md 9), asked one ability at a time.
+pub fn why_not(pack: &ContentPack, b: &Build, slot: Slot, i: u16) -> Option<String> {
+    let def = pack.abilities.get(i as usize)?;
+    let there = match slot {
+        Slot::Primary => b.primary == i,
+        Slot::Secondary => b.secondary == i,
+        Slot::Guard => b.guard == Some(i),
+        Slot::Active => b.actives.contains(&i),
+        Slot::Extra => false,
+    };
+    if there {
+        return None;
+    }
+    let firearm = def.ability.firearm.is_some();
+    match (b.mode, slot) {
+        (Mode::Gun, Slot::Primary) if !firearm => {
+            return Some("a gun build's weapon is a firearm".into());
+        }
+        (Mode::Gun, Slot::Guard) => return Some("a gun build has no guard".into()),
+        (Mode::Action | Mode::Rpg, _) if firearm => {
+            return Some("a firearm: only a gun build holds one".into());
+        }
+        _ => {}
+    }
+    if let Some(needs) = def.aspect
+        && !b.aspects.contains(needs)
+    {
+        return Some(format!("needs the {} aspect", needs.name()));
+    }
+    // The rest of the kit: everything slotted but what this one would replace.
+    let others: Vec<u16> = b
+        .slots()
+        .into_iter()
+        .filter(|(_, in_slot)| slot == Slot::Active || *in_slot != slot)
+        .map(|(j, _)| j)
+        .collect();
+    if others.contains(&i) {
+        return Some("already in the kit".into());
+    }
+    if let Some(g) = def.ability.cooldown.group
+        && let Some(other) = others.iter().find(|j| {
+            pack.abilities
+                .get(**j as usize)
+                .and_then(|a| a.ability.cooldown.group)
+                == Some(g)
+        })
+    {
+        return Some(format!("shares a cooldown with {}", name_of(pack, *other)));
+    }
+    if slot == Slot::Active && b.actives.len() >= MAX_ACTIVES {
+        return Some(format!("{MAX_ACTIVES} actives already: take one out"));
+    }
+    let mut draft = b.clone();
+    match slot {
+        Slot::Primary => draft.primary = i,
+        Slot::Secondary => draft.secondary = i,
+        Slot::Guard => draft.guard = Some(i),
+        Slot::Active => draft.actives.push(i),
+        Slot::Extra => {}
+    }
+    let cost = draft.cost(pack);
+    if cost > BUDGET {
+        return Some(format!("would take the kit to {cost} of {BUDGET} points"));
+    }
+    None
+}
+
+/// The pack's refusal of a draft, with the abilities by name.
+fn said(pack: &ContentPack, e: &BuildError) -> String {
+    match e {
+        BuildError::UnknownAbility(i) => format!("the pack has no ability {i}"),
+        BuildError::WrongSlot { index, expected } => {
+            let slot = match expected {
+                Slot::Primary => "weapon",
+                Slot::Secondary => "secondary",
+                Slot::Guard => "guard",
+                Slot::Active => "active",
+                Slot::Extra => "extra",
+            };
+            format!("{} does not fit the {slot} slot", name_of(pack, *index))
+        }
+        BuildError::DuplicateAbility(i) => format!("{} is in the kit twice", name_of(pack, *i)),
+        BuildError::MissingAspect { index, needs } => {
+            format!(
+                "{} needs the {} aspect",
+                name_of(pack, *index),
+                needs.name()
+            )
+        }
+        BuildError::CreatureOnly(i) => format!("{} is a creature's", name_of(pack, *i)),
+        BuildError::NotSlottable(i) => {
+            format!("{} comes with another ability", name_of(pack, *i))
+        }
+        BuildError::FirearmNeedsGun(i) => {
+            format!(
+                "{} is a firearm: only a gun build holds one",
+                name_of(pack, *i)
+            )
+        }
+        BuildError::SharedCooldownGroup(g) => {
+            // The two that share it, by name.
+            let shared: Vec<String> = pack
+                .abilities
+                .iter()
+                .filter(|a| a.ability.cooldown.group == Some(*g))
+                .map(|a| a.ability.name.clone())
+                .collect();
+            format!("one cooldown shared: {}", shared.join(", "))
+        }
+        other => other.to_string(),
+    }
+}
+
 /// The kit's lists side by side under its budget: the weapons; the secondaries over
 /// the guards (or none); the actives, in two lists where there is room. A click puts
-/// a row in or takes it out. Returns the ability under the cursor.
+/// a row in or takes it out; a row that cannot go in as the draft stands is off
+/// (`why_not`). Returns the ability under the cursor and, if it is off, why.
 fn kit_columns<C: Canvas>(
     ui: &mut Ui<'_, C>,
     area: Rect,
     pack: &ContentPack,
     b: &mut Build,
-) -> Option<u16> {
+) -> (Option<u16>, Option<String>) {
     let s = ui.scale;
     let gap = 5.0 * s;
     let line = ui.line();
@@ -392,22 +526,42 @@ fn kit_columns<C: Canvas>(
         rows
     };
     let mut over: Option<u16> = None;
+    let mut why: Option<String> = None;
+    // A list of one slot: the rows that cannot be taken are off, and the cursor over
+    // one reads why.
     let mut pick = |ui: &mut Ui<'_, C>,
                     r: Rect,
                     name: &str,
+                    slot: Slot,
                     list: &[(u16, String, String)],
                     current: Option<u16>,
-                    none: bool|
+                    none: bool,
+                    b: &Build|
      -> Option<Option<u16>> {
         let rows = rows_of(list, none);
+        let reasons: Vec<Option<String>> = list
+            .iter()
+            .map(|(i, ..)| why_not(pack, b, slot, *i))
+            .collect();
+        let marks: Vec<RowMark> = reasons
+            .iter()
+            .map(|r| {
+                if r.is_some() {
+                    RowMark::Off
+                } else {
+                    RowMark::Plain
+                }
+            })
+            .collect();
         let mut at = match current {
             Some(c) => list.iter().position(|(i, ..)| *i == c).unwrap_or(ui::NONE),
             None if none => rows.len() - 1,
             None => ui::NONE,
         };
-        let event = ui.list(r, name, &COLS, &rows, &mut at);
+        let event = ui.list_marked(r, name, &COLS, &rows, &marks, &mut at);
         if let Some(i) = ui.row_over(name) {
             over = list.get(i).map(|(i, ..)| *i);
+            why = reasons.get(i).cloned().flatten();
         }
         match event {
             ListEvent::Picked | ListEvent::Activated => Some(list.get(at).map(|(i, ..)| *i)),
@@ -418,15 +572,26 @@ fn kit_columns<C: Canvas>(
         ui,
         list_rect(cols[0], primaries.len()),
         "primary",
+        Slot::Primary,
         &primaries,
         Some(b.primary),
         false,
+        b,
     ) {
         b.primary = i;
     }
     // The middle column: the secondaries, then the guards under their own label.
     let sec = list_rect(cols[1], secondaries.len());
-    if let Some(Some(i)) = pick(ui, sec, "secondary", &secondaries, Some(b.secondary), false) {
+    if let Some(Some(i)) = pick(
+        ui,
+        sec,
+        "secondary",
+        Slot::Secondary,
+        &secondaries,
+        Some(b.secondary),
+        false,
+        b,
+    ) {
         b.secondary = i;
     }
     let guard_label_y = sec.y + sec.h + gap;
@@ -440,7 +605,7 @@ fn kit_columns<C: Canvas>(
         cols[1].w,
         row_height(guard_rows.min(guard_fits)),
     );
-    if let Some(g) = pick(ui, guard, "guard", &guards, b.guard, true) {
+    if let Some(g) = pick(ui, guard, "guard", Slot::Guard, &guards, b.guard, true, b) {
         b.guard = g;
     }
     // Actives: the ones in the build are lit; a click toggles the row and the list goes
@@ -456,11 +621,18 @@ fn kit_columns<C: Canvas>(
             .iter()
             .map(|(_, name, cost)| vec![name.clone(), cost.clone()])
             .collect();
+        let reasons: Vec<Option<String>> = part
+            .iter()
+            .map(|(i, ..)| why_not(pack, b, Slot::Active, *i))
+            .collect();
         let marks: Vec<RowMark> = part
             .iter()
-            .map(|(i, ..)| {
+            .zip(&reasons)
+            .map(|((i, ..), why)| {
                 if b.actives.contains(i) {
                     RowMark::Picked
+                } else if why.is_some() {
+                    RowMark::Off
                 } else {
                     RowMark::Plain
                 }
@@ -480,9 +652,10 @@ fn kit_columns<C: Canvas>(
         }
         if let Some(i) = ui.row_over(name) {
             over = part.get(i).map(|(i, ..)| *i);
+            why = reasons.get(i).cloned().flatten();
         }
     }
-    over
+    (over, why)
 }
 
 /// Seconds from ticks, short: `14 s`, `0.6 s`.
@@ -635,7 +808,7 @@ pub fn verdict(pack: &ContentPack, b: &Build) -> (bool, String) {
                 Attributes::FREE_POINTS
             ),
         ),
-        Err(e) => (false, format!("{e}")),
+        Err(e) => (false, said(pack, &e)),
     }
 }
 
@@ -661,6 +834,10 @@ pub struct CharacterView<'a> {
     /// The zone's last word on what was asked.
     pub note: &'a str,
 }
+
+/// Why "Wear it" is off away from the trainer: the page's note, and the button's own
+/// word when it is pointed at or pressed.
+pub const AWAY: &str = "to wear it, stand by the trainer at the town board";
 
 #[derive(Default)]
 pub struct CharacterPage {
@@ -721,7 +898,17 @@ impl CharacterPage {
         } else if v.at_trainer {
             ""
         } else {
-            "to wear it, stand by the trainer at the town board"
+            AWAY
+        };
+        // Why the build cannot be worn, when it cannot: the grey button says so itself.
+        let off = if !valid {
+            Some(words.as_str())
+        } else if *b == *v.own {
+            Some("this is what you wear")
+        } else if !v.at_trainer {
+            Some(AWAY)
+        } else {
+            None
         };
         ui.label(
             row.x + row.w * 0.42,
@@ -734,7 +921,7 @@ impl CharacterPage {
             Rect::new(row.x, row.y, row.w * 0.4, row.h),
             &["Wear it", "Back to worn", "Close"],
         );
-        if ui.button_if(buttons[0], "Wear it", valid && b != v.own && v.at_trainer) {
+        if ui.button_or(buttons[0], "Wear it", off) {
             return CharacterAction::Wear(b.clone());
         }
         if ui.button_if(buttons[1], "Back to worn", b != v.own) {
@@ -904,5 +1091,170 @@ mod tests {
         frame(&mut page, &mut st, &UiInput::default(), &here);
         assert!(st.shows("kit costs 52 of 40 points"), "{:?}", st.seen);
         assert!(st.find("Wear it").is_none());
+    }
+
+    /// A grey "Wear it" says why it is grey, on the button itself: pointed at for a
+    /// moment, or pressed (a tap on a phone), the reason comes up beside the pointer; a
+    /// script never finds the button. The zone's refusal is the page's note.
+    #[test]
+    fn the_grey_button_explains_itself() {
+        let pack = test_content::pack(TickRate::TOWN);
+        let own = pack.builds[1].build.clone();
+        let away = CharacterView {
+            pack: &pack,
+            own: &own,
+            rate: TickRate::TOWN,
+            at_trainer: false,
+            note: "",
+        };
+        let (mut page, mut st) = (CharacterPage::default(), UiState::default());
+        // A changed draft, away from the trainer: the button is off and says where to go.
+        click_attr(&mut page, &mut st, "STR", "-", &away);
+        frame(&mut page, &mut st, &UiInput::default(), &away);
+        assert!(st.find("Wear it").is_none(), "{:?}", st.seen);
+        assert!(st.shows(&format!("Wear it (off: {AWAY})")), "{:?}", st.seen);
+        assert!(!st.shows("tooltip:"), "{:?}", st.seen);
+        let at = st
+            .seen
+            .iter()
+            .find(|s| s.text.starts_with("Wear it (off"))
+            .unwrap()
+            .rect
+            .centre();
+        // The pointer rests on it: after the tooltip's 150 ms the reason is beside it.
+        for time in [1.0, 1.1] {
+            let rest = UiInput {
+                cursor: at,
+                time,
+                ..Default::default()
+            };
+            frame(&mut page, &mut st, &rest, &away);
+        }
+        assert!(!st.shows("tooltip:"), "{:?}", st.seen);
+        let rest = UiInput {
+            cursor: at,
+            time: 1.2,
+            ..Default::default()
+        };
+        frame(&mut page, &mut st, &rest, &away);
+        assert!(st.shows(&format!("tooltip: {AWAY}")), "{:?}", st.seen);
+        // A press on it (a tap): the reason stays up two seconds after the finger left.
+        let (mut page, mut st) = (CharacterPage::default(), UiState::default());
+        click_attr(&mut page, &mut st, "STR", "-", &away);
+        assert_eq!(
+            click_at(&mut page, &mut st, at, &away),
+            CharacterAction::None
+        );
+        assert!(st.shows(&format!("tooltip: {AWAY}")), "{:?}", st.seen);
+        let later = UiInput {
+            cursor: (0.0, 0.0),
+            time: 1.5,
+            ..Default::default()
+        };
+        frame(&mut page, &mut st, &later, &away);
+        assert!(st.shows(&format!("tooltip: {AWAY}")), "{:?}", st.seen);
+        let gone = UiInput {
+            cursor: (0.0, 0.0),
+            time: 2.5,
+            ..Default::default()
+        };
+        frame(&mut page, &mut st, &gone, &away);
+        assert!(!st.shows("tooltip:"), "{:?}", st.seen);
+        // By the trainer with nothing changed: off too, and says so.
+        let (mut page, mut st) = (CharacterPage::default(), UiState::default());
+        let here = CharacterView {
+            at_trainer: true,
+            ..away
+        };
+        frame(&mut page, &mut st, &UiInput::default(), &here);
+        assert!(
+            st.shows("Wear it (off: this is what you wear)"),
+            "{:?}",
+            st.seen
+        );
+        // The zone's word is the page's note, as it came.
+        let refused = CharacterView {
+            note: "not in a fight: wait a moment",
+            ..here
+        };
+        frame(&mut page, &mut st, &UiInput::default(), &refused);
+        assert!(st.shows("not in a fight: wait a moment"), "{:?}", st.seen);
+    }
+
+    #[test]
+    fn what_cannot_be_taken_is_off_and_says_why() {
+        let pack = test_content::pack(TickRate::TOWN);
+        let by = |key: &str| pack.find(key).unwrap_or_else(|| panic!("no {key}"));
+        let ironclad = pack.build("ironclad").expect("ironclad").clone();
+        let blade = pack.build("blade").expect("blade").clone();
+        let musketeer = pack.build("musketeer").expect("musketeer").clone();
+        // A firearm in an action build; a sword and a guard in a gun build.
+        assert_eq!(
+            why_not(&pack, &blade, Slot::Primary, by("musket")).as_deref(),
+            Some("a firearm: only a gun build holds one")
+        );
+        assert_eq!(
+            why_not(&pack, &musketeer, Slot::Primary, by("sword")).as_deref(),
+            Some("a gun build's weapon is a firearm")
+        );
+        assert_eq!(
+            why_not(&pack, &musketeer, Slot::Guard, by("parry")).as_deref(),
+            Some("a gun build has no guard")
+        );
+        // An aspect the build lacks; what is in the kit already is fine.
+        assert_eq!(
+            why_not(&pack, &ironclad, Slot::Active, by("frost_nova")).as_deref(),
+            Some("needs the water aspect")
+        );
+        assert_eq!(why_not(&pack, &ironclad, Slot::Active, by("stomp")), None);
+        assert_eq!(
+            why_not(&pack, &ironclad, Slot::Primary, ironclad.primary),
+            None
+        );
+        // The budget: the ironclad spends all forty, so any active without an aspect
+        // would take it over.
+        let plain = pack
+            .abilities
+            .iter()
+            .position(|a| a.slot == Slot::Active && a.aspect.is_none() && !a.creature && a.cost > 0)
+            .expect("an active with no aspect") as u16;
+        let why = why_not(&pack, &ironclad, Slot::Active, plain).expect("over the budget");
+        assert!(why.starts_with("would take the kit to"), "{why}");
+        // On the page: the row is off, the cursor over it reads why, and a click on it
+        // changes nothing.
+        let view = CharacterView {
+            pack: &pack,
+            own: &blade,
+            rate: TickRate::TOWN,
+            at_trainer: true,
+            note: "",
+        };
+        let (mut page, mut st) = (CharacterPage::default(), UiState::default());
+        frame(&mut page, &mut st, &UiInput::default(), &view);
+        let row = st
+            .seen
+            .iter()
+            .find(|s| s.kind == ui::SeenKind::Row && s.text.starts_with("Musket"))
+            .expect("the musket's row")
+            .rect
+            .centre();
+        frame(
+            &mut page,
+            &mut st,
+            &UiInput {
+                cursor: row,
+                ..Default::default()
+            },
+            &view,
+        );
+        assert!(st.shows("only a gun build holds one"), "{:?}", st.seen);
+        click_at(&mut page, &mut st, row, &view);
+        frame(&mut page, &mut st, &UiInput::default(), &view);
+        assert_eq!(page.draft.as_ref().map(|d| d.primary), Some(blade.primary));
+        assert!(
+            st.find("Wear it").is_none(),
+            "nothing changed: {:?}",
+            st.seen
+        );
     }
 }

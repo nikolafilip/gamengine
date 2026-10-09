@@ -31,7 +31,7 @@ pub struct Body {
     /// Crouched (MODES.md 3.5): the body and its hitbox are `CROUCH_DROP` lower.
     pub crouched: bool,
     /// Status mask, a bit per `Status` index (the aura).
-    pub status: u16,
+    pub status: u32,
     /// Health in per mille of its maximum, for bodies whose health the wire shows (the own
     /// party and creatures).
     pub health: Option<u16>,
@@ -171,6 +171,15 @@ impl Senses<'_> {
 
     pub fn health_frac(&self) -> f32 {
         self.health as f32 / self.sheet.derived.health.max(1) as f32
+    }
+
+    /// Who taunted this mind's body (MATRIX.md 8), while it lasts and the taunter is
+    /// alive and known: the body it must fight.
+    pub fn taunted_by(&self) -> Option<EntityId> {
+        self.me
+            .statuses
+            .taunted_by()
+            .filter(|&id| self.body(id).is_some_and(|b| b.alive))
     }
 
     /// The ability in kit slot `slot` is off cooldown and affordable.

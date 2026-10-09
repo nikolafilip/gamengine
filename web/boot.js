@@ -101,6 +101,9 @@ field("offline").addEventListener("click", () => {
 async function start(options, build) {
   panel.hidden = true;
   say("loading the client");
+  // A coarse pointer (a phone, a tablet): the client draws for a finger from its first
+  // frame, not from the first tap (docs/WEB.md 3.5).
+  options.touch = matchMedia("(pointer: coarse)").matches;
   globalThis.gmOptions = options;
   globalThis.gmStatus = (kind, text) => {
     if (kind === "stats") {

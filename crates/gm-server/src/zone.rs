@@ -315,6 +315,7 @@ fn look_of(
         return Look {
             held: looks.held(None, in_hand),
             worn: Look::NONE,
+            off: Look::NONE,
         };
     }
     let worn = hub_slots
@@ -322,9 +323,12 @@ fn look_of(
         .map(|s| s.worn[0].as_str())
         .filter(|t| !t.is_empty());
     let primary = player.map(|p| p.sheet.build.primary as usize);
+    // The off hand (LOOK.md 6.5): the guard's prop, a shield for a shield wall.
+    let guard = player.and_then(|p| p.sheet.build.guard.map(|g| g as usize));
     Look {
         held: looks.held(worn, primary),
         worn: Look::NONE,
+        off: looks.off(guard),
     }
 }
 
@@ -503,8 +507,14 @@ fn character_state(
     slot: &HubSlot,
 ) -> Option<CharacterState> {
     let p = zone.player(id)?;
+    // The build the character chose (MATRIX.md 9.1): in a team zone one it asked for is
+    // worn at the next respawn, and is what it wears when it next enters anywhere.
+    let build = p
+        .pending_build
+        .clone()
+        .unwrap_or_else(|| p.sheet.build.clone());
     Some(CharacterState {
-        build: p.sheet.build.clone(),
+        build,
         zone: Some(link.zone.clone()),
         position: p.mover.mv.origin.into(),
         yaw: p.mover.yaw,
@@ -1151,8 +1161,48 @@ pub async fn run_with_web(
                         }
                         zone.respec_now(id, b).map_err(|e| e.to_string())
                     });
-                    if let Some(s) = sessions.get(&id) {
+                    // Under a hub the build it chose is saved at once, and the answer is
+                    // the save's: a build worn here that the hub does not hold would be
+                    // the old one again at the next claim. (The periodic save carries it
+                    // too, as it carries a pending one.)
+                    let saving = result.is_ok()
+                        && cfg
+                            .hub
+                            .as_ref()
+                            .zip(hub_slots.get_mut(&id))
+                            .and_then(|(link, slot)| {
+                                let state = character_state(&zone, link, id, slot)?;
+                                slot.last_save = Instant::now();
+                                let (link, tx, character) =
+                                    (link.clone(), event_tx.clone(), slot.character);
+                                tokio::spawn(async move {
+                                    let saved = link.save_told(character, state).await;
+                                    let result = match saved {
+                                        Ok(seq) => {
+                                            let _ = tx
+                                                .send(ClientEvent::PartySeq { character, seq })
+                                                .await;
+                                            Ok(())
+                                        }
+                                        Err(why) => Err(why),
+                                    };
+                                    let _ = tx.send(ClientEvent::RespecSaved { id, result }).await;
+                                });
+                                Some(())
+                            })
+                            .is_some();
+                    if !saving && let Some(s) = sessions.get(&id) {
                         s.send_control(FromZone::RespecResult(result));
+                    }
+                }
+                ClientEvent::RespecSaved { id, result } => {
+                    if let Err(why) = &result {
+                        warn!(entity = id, "a respec was worn but not saved: {why}");
+                    }
+                    if let Some(s) = sessions.get(&id) {
+                        s.send_control(FromZone::RespecResult(
+                            result.map_err(|why| format!("worn here, but not saved: {why}")),
+                        ));
                     }
                 }
                 ClientEvent::Gm { id, op } => {
@@ -1450,6 +1500,12 @@ pub async fn run_with_web(
                             .iter()
                             .find_map(|g| g.tile_at(p.mover.mv.origin))
                             .ok_or("stand on a market tile to open a stall")?;
+                        // One stall per character (ECONOMY.md 7): a keeper back after a
+                        // restart finds its stall standing, and is told so here rather
+                        // than by the hub's constraint on every ask.
+                        if stalls.values().any(|s| s.owner == slot.character) {
+                            return Err("you already have a stall");
+                        }
                         if stalls.values().any(|s| (s.tile_x, s.tile_y) == (x, y)) {
                             return Err("that tile is taken");
                         }

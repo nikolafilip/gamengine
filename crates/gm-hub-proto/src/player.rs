@@ -21,7 +21,7 @@ use crate::protocol::{
 
 /// The version of the players' messages; any change to them, or to a type they carry, is
 /// a new one.
-pub const PLAYER_VERSION: u8 = 5;
+pub const PLAYER_VERSION: u8 = 6;
 
 /// What a stream that speaks the players' messages begins with: the empty frame, then
 /// the version in a frame of its own.

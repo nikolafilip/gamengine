@@ -65,11 +65,14 @@ pub enum ContentCmd {
         dir: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        /// In the left hand (LOOK.md 6.5: a shield), with the right one empty.
+        #[arg(long)]
+        left: bool,
     },
     /// Write one of the tool's own flat-coloured props as a .glb (CONTENT.md 7: the
-    /// procedural source): sword, hammer, musket.
+    /// procedural source): sword, greatsword, shield, hammer, musket, pistol.
     Synth {
-        /// `sword`, `hammer` or `musket`.
+        /// `sword`, `greatsword`, `shield`, `hammer`, `musket` or `pistol`.
         what: String,
         #[arg(long)]
         out: PathBuf,
@@ -130,7 +133,12 @@ pub fn run(cmd: ContentCmd) -> Result<()> {
             println!("content: atlas {} x {} -> {}", a.w, a.h, out.display());
             Ok(())
         }
-        ContentCmd::Look { key, dir, out } => {
+        ContentCmd::Look {
+            key,
+            dir,
+            out,
+            left,
+        } => {
             let bundle = build(&dir)?;
             let Some(model) = bundle.props.get(&key) else {
                 bail!(
@@ -138,7 +146,7 @@ pub fn run(cmd: ContentCmd) -> Result<()> {
                     bundle.props.keys().cloned().collect::<Vec<_>>().join(", ")
                 );
             };
-            let (w, h, rgba) = fitting_room(model);
+            let (w, h, rgba) = fitting_room(model, left);
             std::fs::write(&out, gm_ingest::write::png(w, h, &rgba))
                 .with_context(|| format!("writing {}", out.display()))?;
             println!("content: {key} in the hand, {w} x {h} -> {}", out.display());
@@ -147,11 +155,15 @@ pub fn run(cmd: ContentCmd) -> Result<()> {
         ContentCmd::Synth { what, out } => {
             let glb = match what.as_str() {
                 "sword" => gm_ingest::synth::sword_prop(0.85),
+                "greatsword" => gm_ingest::synth::greatsword_prop(),
+                "shield" => gm_ingest::synth::shield_prop(),
                 "hammer" => gm_ingest::synth::hammer_prop(),
                 "musket" => gm_ingest::synth::musket_prop(),
                 "pistol" => gm_ingest::synth::pistol_prop(),
                 other => {
-                    bail!("`{other}` is not a prop the tool makes: sword, hammer, musket, pistol")
+                    bail!(
+                        "`{other}` is not a prop the tool makes: sword, greatsword, shield, hammer, musket, pistol"
+                    )
                 }
             }
             .build();
@@ -390,12 +402,20 @@ pub const PIECES: &[&str] = &[
 /// The faces (LOOK.md 2.3): their ids in the atlas.
 pub const FACES: &[(&str, u8)] = &[("text", 1), ("title", 2)];
 
-/// The characters a face is rasterised for: printable ASCII and the ten letters of
-/// CLIENT.md 3.
+/// The characters a face is rasterised for (LOOK.md 2.3): printable ASCII; of the Latin-1
+/// Supplement the signs `¡ § « ° ± · » ¿` and everything from `À` to `ÿ` (the accented
+/// letters of the western tongues, `×` and `÷` among them); Latin Extended-A whole, `Ā`
+/// to `ž` (Gaj's letters, and the Polish, Czech, Slovak, Hungarian, Romanian, Turkish and
+/// the rest); and the typographic marks the game and its players write (`– — ‘ ’ “ ” … ‹
+/// › • − → €`). A character the font has no glyph for is left out of that face rather
+/// than baked as its `.notdef` box (`rasterise`), and the client draws it as `?`.
 fn charset() -> Vec<char> {
     (0x20u8..=0x7e)
         .map(char::from)
-        .chain("čćđšžČĆĐŠŽ".chars())
+        .chain("¡§«°±·»¿".chars())
+        .chain('\u{c0}'..='\u{ff}')
+        .chain('\u{100}'..='\u{17f}')
+        .chain("–—‘’“”…‹›•−→€".chars())
         .collect()
 }
 
@@ -897,7 +917,7 @@ const STANCES: [(u8, f32, f32, bool); 11] = [
 
 /// The striker's mannequin holding `prop` in every stance, seen from the front (top row)
 /// and from its right (bottom row): RGBA, its width and height.
-fn fitting_room(prop: &Model) -> (u32, u32, Vec<u8>) {
+fn fitting_room(prop: &Model, left: bool) -> (u32, u32, Vec<u8>) {
     use gm_ingest::raster::{self, Dir, ModelSoup, Soup, Window};
     let frame = gm_core::vocab::ArchetypeFrame::Striker;
     let mesh = mannequin::build(frame, &mannequin::Shape::MANNEQUIN);
@@ -942,7 +962,11 @@ fn fitting_room(prop: &Model) -> (u32, u32, Vec<u8>) {
         let body_normals: Vec<glam::Vec3> = (0..mesh.normals.len())
             .map(|i| skin[mesh.joints[i][0] as usize].transform_vector3(mesh.normals[i]))
             .collect();
-        let attach = gm_model::pose::prop_attach(&mesh.pivots, &skin);
+        let attach = if left {
+            gm_model::pose::prop_attach_left(&mesh.pivots, &skin)
+        } else {
+            gm_model::pose::prop_attach(&mesh.pivots, &skin)
+        };
         let prop_at: Vec<glam::Vec3> = held
             .positions
             .iter()
@@ -1051,8 +1075,8 @@ fn mannequin_model(frame: gm_core::vocab::ArchetypeFrame, tint: [f32; 3]) -> Mod
 }
 
 /// Rasterise a face at `size` dots per em for an atlas of `density` texels a dot: the line
-/// height and the ascent in dots, and every glyph of the charset as a picture with its
-/// bearing in texels and its advance in quarter dots (LOOK.md 2.3).
+/// height and the ascent in dots, and every glyph of the charset the font has as a picture
+/// with its bearing in texels and its advance in quarter dots (LOOK.md 2.3).
 ///
 /// The metrics are the same at every density, so a layout is: the ascent is the height of
 /// the face's capitals (the baseline lies that far under the line's top; an accent stands
@@ -1077,6 +1101,11 @@ fn rasterise(bytes: &[u8], size: f32, density: u8) -> Result<(u8, u8, Vec<Raster
     let mut glyphs = Vec::new();
     for c in charset() {
         let id = font.glyph_id(c);
+        if id.0 == 0 {
+            // The font maps it to nothing: left out of the face, not baked as the
+            // `.notdef` box; the client draws what is not in a face as `?`.
+            continue;
+        }
         let advance = (dots.h_advance(id) * atlas::ADVANCE_PARTS)
             .round()
             .clamp(0.0, 255.0) as u8;
@@ -1564,6 +1593,52 @@ mod tests {
                 .expect("an atlas for every scale");
             assert_eq!(e.density, scale.min(4));
             assert_eq!(e.sha256, sha(&bundle.files[&e.file]));
+        }
+    }
+
+    /// LOOK.md 2.3: both faces hold what the game writes beyond ASCII (the `×` of a stack,
+    /// "kit ×3 of 5"; the dashes, quotes and ellipsis; the accented letters of other
+    /// tongues than Gaj's), each a picture and not a blank; and a character the font has
+    /// no glyph for is not in the face at all, so nothing is drawn as the `.notdef` box.
+    #[test]
+    fn the_faces_hold_the_signs_the_game_writes_and_nothing_the_font_lacks() {
+        let bundle = build(&sources()).expect("the content builds");
+        let skin: SkinToml = toml::from_str(
+            &std::fs::read_to_string(sources().join("ui/skin.toml")).expect("skin.toml"),
+        )
+        .expect("skin.toml parses");
+        let wanted: Vec<char> = charset();
+        for (name, id) in FACES {
+            let bytes = std::fs::read(sources().join("ui").join(&skin.font[*name].file))
+                .expect("the font file");
+            let font = ab_glyph::FontRef::try_from_slice(&bytes).expect("a font");
+            for a in &bundle.atlases {
+                let face = &a.faces[id];
+                for c in "×÷°±–—…‘’“”«»éñüßčđłşő".chars() {
+                    let g = face.glyphs.get(&c).unwrap_or_else(|| {
+                        panic!("face {name}: no {c:?} at density {}", a.density)
+                    });
+                    assert!(
+                        g.cell.w > 0 && g.cell.h > 0 && g.advance > 0,
+                        "face {name}: {c:?} is blank at density {}",
+                        a.density
+                    );
+                }
+                for c in face.glyphs.keys() {
+                    assert!(
+                        wanted.contains(c),
+                        "face {name}: {c:?} is not in the charset"
+                    );
+                    assert_ne!(font.glyph_id(*c).0, 0, "face {name}: the font has no {c:?}");
+                }
+                for c in &wanted {
+                    assert_eq!(
+                        face.glyphs.contains_key(c),
+                        font.glyph_id(*c).0 != 0,
+                        "face {name}: {c:?} is in the face iff the font has it"
+                    );
+                }
+            }
         }
     }
 
