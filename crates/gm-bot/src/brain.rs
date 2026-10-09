@@ -72,6 +72,8 @@ enum ActiveUse {
     Shot,
     Swing(f32),
     Closer,
+    /// A charge at this speed (u/s) for this many ticks.
+    Charge(f32, u32),
     Blink,
 }
 
@@ -96,6 +98,11 @@ fn classify(kit: &Kit, slot: u8) -> Option<ActiveUse> {
         Verb::MeleeArc(m) => ActiveUse::Swing(m.reach),
         Verb::MoveSelf(m) => match m.kind {
             MoveKind::Blink { .. } => ActiveUse::Blink,
+            // A charge covers speed x duration and stops on the hit: used from where it
+            // lands on the target, not from the dash's window.
+            MoveKind::Charge {
+                speed, duration, ..
+            } => ActiveUse::Charge(speed, duration),
             _ => ActiveUse::Closer,
         },
         Verb::Guard(_) => return None,
@@ -236,7 +243,16 @@ impl Brain {
             }
             return self.input(buttons, forward, side, ability);
         }
-        let nearest = self.nearest(me, v.team, v.others);
+        // Taunted (MATRIX.md 8): the taunter is the one to fight while it lasts.
+        let nearest = match v.me.statuses.taunted_by() {
+            Some(by) => v
+                .others
+                .iter()
+                .find(|e| e.id == by && e.kind == EntityKind::Player && e.alive())
+                .map(|e| (e, (e.pos - me).length()))
+                .or_else(|| self.nearest(me, v.team, v.others)),
+            None => self.nearest(me, v.team, v.others),
+        };
         let (reach, swing) =
             swing_of(v.kit).map_or((70.0, buttons::PRIMARY), |(m, b)| (m.reach, b));
         let shot = shot_of(v.kit);
@@ -327,10 +343,14 @@ impl Brain {
             }
             Behaviour::Duelist | Behaviour::Spar => {
                 let spar = self.behaviour == Behaviour::Spar;
-                let ranged = matches!(
-                    v.frame,
-                    ArchetypeFrame::Caster | ArchetypeFrame::Infiltrator
-                );
+                // Ranged is the weapon's, not the frame's (MATRIX.md 10): a caster with a
+                // staff closes in, a striker with a crossbow or a musket keeps away.
+                let ranged = v.kit.primary.is_some_and(|i| {
+                    matches!(
+                        v.kit.abilities[i as usize].steps.first().map(|s| &s.verb),
+                        Some(Verb::Projectile(_))
+                    )
+                });
                 let home = if spar && v.alive {
                     Some(*self.home.get_or_insert(me))
                 } else {
@@ -441,6 +461,10 @@ impl Brain {
                                 } else {
                                     (200.0..600.0).contains(&d)
                                 }
+                            }
+                            Some(ActiveUse::Charge(speed, ticks)) => {
+                                let cover = speed * ticks as f32 / self.hz.max(1) as f32;
+                                !ranged && d > reach && d < cover + reach * 0.5
                             }
                             Some(ActiveUse::Blink) => {
                                 if ranged {
@@ -566,29 +590,43 @@ mod tests {
     #[test]
     fn counter_pick_follows_the_matrix() {
         let pack = test_content::pack(TickRate::COMBAT);
-        // Against ironclads (Stone): frostweaver (Frost beats Stone; Stone into Frost+Shadow is 0.25x).
+        // Against ironclads (Ground): frostweaver (Water beats Ground; Ground into
+        // Water + Air is 0.5x), from a blade (Water alone: 2x in, 1x taken) as well.
         assert_eq!(
-            counter_pick(&pack, "blade", Aspects::one(Element::Stone)).as_deref(),
+            counter_pick(&pack, "blade", Aspects::one(Element::Ground)).as_deref(),
             Some("frostweaver")
         );
-        // Against frostweavers (Frost + Shadow): blade (Flame is 4x into both).
+        // Against a Water + Air team: mender (Electric is 4x into both).
         assert_eq!(
             counter_pick(
                 &pack,
                 "ironclad",
-                Aspects::two(Element::Frost, Element::Shadow)
+                Aspects::two(Element::Water, Element::Air)
             )
             .as_deref(),
-            Some("blade")
+            Some("mender")
         );
-        // Against blades (Flame): ironclad (Stone beats Flame, Flame into Stone is 0.5).
+        // Against blades (Water): the shaman (Grass 2x in, Water 0.5x back; MATRIX.md 17),
+        // over the frostweaver (its Air is 1x in, Water is 0.5x back) and the mender
+        // (Electric 2x in, 1x back), and a frostweaver re-specs to it.
         assert_eq!(
-            counter_pick(&pack, "frostweaver", Aspects::one(Element::Flame)).as_deref(),
-            Some("ironclad")
+            counter_pick(&pack, "ironclad", Aspects::one(Element::Water)).as_deref(),
+            Some("shaman")
+        );
+        assert_eq!(
+            counter_pick(&pack, "frostweaver", Aspects::one(Element::Water)).as_deref(),
+            Some("shaman")
+        );
+        // Against a Grass team: nothing in the roster is its predator but the shade's Air
+        // (Fire has no build); the shade scores 2x in, 0.5x back, and a frostweaver (its
+        // Water 0.5x in, Air 1x back) goes to it.
+        assert_eq!(
+            counter_pick(&pack, "frostweaver", Aspects::one(Element::Grass)).as_deref(),
+            Some("shade")
         );
         // Already the counter: nothing to change.
         assert_eq!(
-            counter_pick(&pack, "frostweaver", Aspects::one(Element::Stone)),
+            counter_pick(&pack, "frostweaver", Aspects::one(Element::Ground)),
             None
         );
         assert_eq!(counter_pick(&pack, "blade", Aspects::NONE), None);

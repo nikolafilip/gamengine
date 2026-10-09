@@ -1,6 +1,6 @@
 # Wire Protocol
 
-Status: v14 (the crouch seen, section 26; v13 and before as the sections say; v9 after Phase 14: the ability a stance belongs to, section 21; v8 of Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+Status: v17 (the off hand and the Taunt's source, section 29; v16 the six elements, section 28; v15 the RPG body's facing, section 27; v14 the crouch seen, section 26; v13 and before as the sections say; v9 after Phase 14: the ability a stance belongs to, section 21; v8 of Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
 and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
@@ -115,7 +115,7 @@ a few hours at 64 Hz) cost one tick of movement, anything less costs nothing (PL
 | view_tick | 32 | server tick the client is displaying for other entities (its interpolation time); 0 = none. Used for melee lag compensation (section 7.4) |
 | frame_count − 1 | 2 | 1..=4 frames |
 | first_tick | 32 | client tick of the oldest frame; frame `i` is tick `first_tick + i` |
-| frames | 100 each | oldest first (97 before v16) |
+| frames | 100 each | oldest first (97 before v18) |
 
 Frame:
 
@@ -129,7 +129,7 @@ Frame:
 | ability | 8 | slot activated this tick (1-based), 0 = none |
 | held | 2 | the weapon in hand of a gun build (MODES.md 3.7): 0 the primary, 1 the secondary, 2 the knife; 3 is malformed |
 | target | 32 | the body an activation this tick is aimed at (MODES.md 5.3); 0 = none |
-| use_slot | 3 | v16: the item cell a `use` this tick is of (LOOK.md 3.2), 1–4; 0 = none named, which is the first cell's; 5–7 are malformed |
+| use_slot | 3 | v18: the item cell a `use` this tick is of (LOOK.md 3.2), 1–4; 0 = none named, which is the first cell's; 5–7 are malformed |
 
 Movement direction lives in `forward`/`side` only; there are no forward/back/left/right buttons
 (the Phase 0 skeleton listed both, which was redundant).
@@ -190,12 +190,13 @@ Own block (never delta-encoded: it is small and the client must adopt it exactly
 | stamina | uvar | whole points |
 | focus | uvar | whole points |
 | status_count | 4 | 0..=8 |
-| per status: status | 4 | `Status` index (MATRIX.md 8) |
+| per status: status | 5 | `Status` index (MATRIX.md 8; 4 bits until v17) |
 | per status: remaining | uvar | frame ticks left, relative to `last_input_tick` |
 | per status: magnitude | svar | `round(magnitude × 16)` |
 | per status: stacks | 3 | |
+| per status: source | uvar | v17: the entity that applied it (0: nobody). A Taunt's is who the body is turned to (MATRIX.md 8) |
 | guns | 1 | v11: 1 for a gun build (MODES.md 3.8), then for the primary and the secondary each `magazine` (uvar) and `reserve` (uvar), and 1 bit: the one in hand is being reloaded |
-| bar | 4 × uvar | v16: the item bar (LOOK.md 3.2): how many of each cell's stack the body carries, then 3 bits: the cell in use, 1–4, 0 for none (v12–v15: one uvar, the kits, and one bit) |
+| bar | 4 × uvar | v18: the item bar (LOOK.md 3.2): how many of each cell's stack the body carries, then 3 bits: the cell in use, 1–4, 0 for none (v12–v17: one uvar, the kits, and one bit) |
 
 Entity record:
 
@@ -211,11 +212,11 @@ Entity record:
 | vel | 3 × svar | VEL. Absolute when SPAWN (or the baseline record has no velocity), delta otherwise |
 | anim | 8 (+ uvar) | ANIM. When the stance is a script's (windup 3, swing 4, recovery 5, cast 10), the **acting ability** follows as a uvar: the `AbilityId` of the script (the pack's index and one). ANIM is set when either changes (v9, section 21) |
 | health | uvar | HEALTH |
-| flags | 10 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only), 8 crouched (MODES.md 3.5; v14, every body), 9 in the RPG mode (MODES.md 5.1; v15, every body) |
-| status | 16 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras) |
+| flags | 10 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only), 8 crouched (MODES.md 3.5; v14, every body), 9 retired (was `RPG`, v15 to v17; never set since 2026-10-09, section 27) |
+| status | 24 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras); 16 bits until v17 (`STATUS_BITS`) |
 
 Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infiltrator), `team`
-2 bits (0 none), `aspects` 5 bits (a bit per element, MATRIX.md 5), `armour` 2 bits (cloth,
+2 bits (0 none), `aspects` 6 bits (a bit per element, MATRIX.md 5; v16, none is neutral), `armour` 2 bits (cloth,
 leather, mail, plate): everything that makes a build readable at a glance. Projectile → `owner`
 uvar, `def` uvar (ability index in the owner's kit), `input_tick` uvar (the owner's client tick
 that fired it, for matching the owner's predicted copy). Area → `owner` uvar, `def` uvar (0 when
@@ -859,9 +860,37 @@ in the simulation's snapshots:
   (`app::facing`). Nothing else reads the bit; the zone's aim, hitboxes and ledger are as
   before.
 
-## 28. Changes in v16 (the item bar, 2026-10-08)
+Retired on 2026-10-09 (MODES.md 10.3): an RPG body's frames carry its own facing now,
+the way it walks or was left, so the bit says nothing a client needs and is never set.
+It stays on the wire as bit 9 (`flags::RETIRED_RPG`) so the record's width and the
+version hold.
 
-`PROTOCOL_VERSION` 16 (LOOK.md 3.2, MODES.md 11.3). Three bits in the input frame and the
+## 28. Changes in v16 (six elements, 2026-10-09)
+
+`PROTOCOL_VERSION` 16 (MATRIX.md 5, 14). One bit in the snapshot's player spawn info:
+
+- `aspects` is **six** bits, not five: a bit per element in MATRIX.md 5's order (Fire,
+  Water, Grass, Electric, Ground, Air). All six clear is a neutral body. Nothing else on the
+  wire changes; the elements' indices moved, so a v15 client would read the wrong colours
+  and the wrong bit widths, and the version byte keeps it out.
+
+## 29. Changes in v17 (the colossus's arms, 2026-10-09)
+
+`PROTOCOL_VERSION` 17 (MATRIX.md 16, LOOK.md 6.5):
+
+- `Look` gains **`off: u16`**: the prop in the off hand, an index into the pack's `props`
+  like `held` (`NONE` for nothing). The zone chooses it: the prop of the build's **guard**
+  ability (a shield for a shield wall), else nothing; a gun build's is `NONE`.
+- The own block's `status` index is **five** bits (seventeen statuses: `Taunt` is 16) and
+  every status carries its **`source`** (uvar): the entity that applied it, which the
+  mover reads on both sides to turn a taunted body to its taunter. An entity record's
+  `status` mask is **24** bits (`gm_net::snapshot::STATUS_BITS`).
+- Nothing else changes; a v16 client would read the own block's statuses one bit short, and
+  the version byte keeps it out.
+
+## 30. Changes in v18 (the item bar, 2026-10-09)
+
+`PROTOCOL_VERSION` 18 (LOOK.md 3.2, MODES.md 11.3). Three bits in the input frame and the
 own block reshaped:
 
 - The frame carries `use_slot` (3 bits) after `target`: the item cell a `use` (button
@@ -870,5 +899,5 @@ own block reshaped:
 - The own block carries the bar, four uvars (how many of each cell's stack the body
   carries), then the cell in use in 3 bits (0 none), where v12 carried one count and one
   bit. The client adopts them as it adopts the rounds, and drops a use the zone cleared.
-- Nothing new in the control stream. Hub protocol 12 and the players' protocol 6 carry
+- Nothing new in the control stream. Hub protocol 12 and the players' protocol 7 carry
   the bar's arrangement (ITEMS.md 4).

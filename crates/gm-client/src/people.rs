@@ -1413,7 +1413,7 @@ mod tests {
             template: if whole { template } else { "component" }.to_string(),
             components: vec![("core".into(), "core/iron".into())],
             place: if whole { PLACE_WEAPON } else { PLACE_NONE },
-            edge: [0; 8],
+            edge: [0; 9],
             worn: false,
             quantity: 1,
             cap: 0,

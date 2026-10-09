@@ -1357,7 +1357,7 @@ mod tests {
                 .map(|m| (m.split('/').next().unwrap().to_string(), m.to_string()))
                 .collect(),
             place: if whole { PLACE_WEAPON } else { PLACE_NONE },
-            edge: [0; 8],
+            edge: [0; 9],
             worn: false,
             quantity: 1,
             cap: 0,
@@ -1486,7 +1486,7 @@ mod tests {
         Hub(RefCell::new(Shop {
             coin: 215,
             items: vec![
-                item(1, "sword", &["slash +11.0%", "storm +9.5%"], &BEST),
+                item(1, "sword", &["slash +11.0%", "electric +9.5%"], &BEST),
                 worn,
                 item(3, "", &[], &["catalyst/ember"]),
             ],
@@ -1701,7 +1701,7 @@ mod tests {
         // yet), what it is made of. All of it the hub's words.
         assert!(run.shows("2 g 15 s"));
         assert!(run.shows("sword  slash +11.0%") && run.shows("ember  a catalyst, for crafting"));
-        assert!(run.shows("a weapon, 250 of 250") && run.shows("slash +11.0%  storm +9.5%"));
+        assert!(run.shows("a weapon, 250 of 250") && run.shows("slash +11.0%  electric +9.5%"));
         assert!(run.shows("you wear nothing in its place"));
         assert!(run.shows("of boss scale, dragonbone, thunderstone, whalebone, opal, opal"));
         assert!(run.st.clipped.is_empty(), "{:?}", run.st.clipped);
@@ -1761,7 +1761,7 @@ mod tests {
         // The other sword is judged against the one worn; a part is worn nowhere.
         run.click(&mut bag, "sword  slash +2.0%", &hub);
         run.look(&mut bag, &hub);
-        assert!(run.shows("you wear: slash +11.0%  storm +9.5%"));
+        assert!(run.shows("you wear: slash +11.0%  electric +9.5%"));
         run.click(&mut bag, "ember", &hub);
         run.look(&mut bag, &hub);
         assert!(!run.offers("Wear"));
@@ -1916,7 +1916,7 @@ mod tests {
                 },
                 ListingSummary {
                     id: 72,
-                    item: item(12, "sword", &["slash +11.0%", "storm +9.5%"], &BEST),
+                    item: item(12, "sword", &["slash +11.0%", "electric +9.5%"], &BEST),
                     price: 120,
                 },
                 ListingSummary {
@@ -2116,13 +2116,13 @@ mod tests {
                 let mut robe = item(
                     4,
                     "crossbow",
-                    &["storm -11.1%", "other elements -9.9%"],
+                    &["electric -11.1%", "other elements -9.9%"],
                     &BEST,
                 );
                 robe.what = "an armour, 250 of 250".into();
                 shop.items.push(robe.clone());
                 shop.items[1].worn = true;
-                shop.items[1].does = vec!["slash +11.0%".into(), "shadow +9.5%".into()];
+                shop.items[1].does = vec!["slash +11.0%".into(), "air +9.5%".into()];
                 // A part of the layer and the material with the longest names.
                 shop.items[2] = item(3, "", &[], &["catalyst/thunderstone"]);
                 shop.stored = shop.items.clone();

@@ -56,7 +56,7 @@ from it; the zone reads it from the same build for the rules of sections 3 and 5
 | Movement | WASD, crouch, jump; walk is quiet | WASD, dodge | WASD about the camera, or a click on the ground |
 | Attack | hold or tap the mouse; reload | combos and cancels on the hotbar | a target, then actions that wait for range |
 | HUD | crosshair that opens, ammo, health | hotbar with cooldowns, combo counter | target frame, hotbar, the ground marker |
-| Presets | musketeer (new) | blade, ironclad, shade, captain | frostweaver, mender |
+| Presets | musketeer (new) | blade, ironclad, shade | frostweaver, mender |
 
 The presets' modes are a proposal; an archetype in `action` could as well be `rpg`. The
 tavern's list and the people page say the mode with the frame (`blade: striker in mail,
@@ -236,7 +236,8 @@ the gun: a roll through the shot.
 
 Two statuses (MATRIX.md 8, VOCABULARY.md 5.4): `Knockdown(ms)` (the body is on the ground,
 cannot act or guard, takes hits in full, rises when the time is out) and `Launched(ms)`
-(in the air, same, and falls into a `Knockdown` of half the time). **Diminishing
+(in the air, same, and falls into a `Knockdown` of half the time); since MATRIX.md 16 a
+third, `Taunt(ms)` (the body and its view turned to the taunter and held). **Diminishing
 returns**: the second control of the same kind on one body within 10 s lasts half, the
 third does nothing and the body is immune to that kind for 10 s. The party frame shows the
 mark on the target so a gank is timed, not spammed.
@@ -252,7 +253,8 @@ right of the crosshair (hits in the current chain, fading two seconds after the 
 
 ### 5.1 What is kept from the root
 
-The camera orbits and the body does not turn with it; WASD moves about the camera; a
+The camera orbits and the body does not turn with it; WASD moves about the camera and
+the body faces the way it goes (`S` turns it round, toward the camera: no backpedal); a
 click on the ground sends the body there; a click on a body targets it and `Tab` cycles;
 an action with a target walks the body into range and then lands, every time; a guard is
 held. (The root's repeating primary is not kept: nothing fires by itself, the pace of a
@@ -286,7 +288,8 @@ An action pressed with a target:
 
 Range is the ability's: a melee arc's `reach`, a bolt's `range` (new, content: the musket
 600, the crossbow 900, a knife 300), an area's `origin: Aim` radius. Without a target an
-action fires where the body faces, as in the action mode without the magnet.
+action fires where the body faces, as in the action mode without the magnet: the way it
+last walked or was turned, never the camera's (10.3, 2026-10-09).
 
 ### 5.4 On the wire
 
@@ -590,6 +593,26 @@ Built as section 5 says, with these readings:
 - Not built: a body walking round other bodies (the grid knows the map only), a
   target kept five seconds out of sight (it is let go when it leaves the frame's
   knowledge), the people page's and the tavern's word of the mode.
+- **The frame's yaw is the body's facing (2026-10-09).** The director, on the PC and
+  the phone: "action (skill) most of the time hits in front of camera (camera
+  direction) instead of char direction, also mobile movements make it face camera
+  direction when stopped as well, and also doesnt orient backwards, always forwards but
+  moves backwards ... camera pan is only view, controls should orient chars and attack
+  in that orientation". Until then the frames carried the camera's yaw and the body's
+  facing was the drawing's alone (`app::facing` with a freedom from the look, the `RPG`
+  snapshot flag): the zone fired an action without a target the camera's way, the
+  mover's yaw the guard and the magnet read was the camera's, everyone else saw the
+  body at the camera's yaw whenever the drawing's rule fell back to it, and `S` moved
+  the body backwards along the camera with its facing only drawn round. Now the RPG
+  frame (`rpg::RpgFrame`) carries the body's own yaw: **walking**, the way it goes (the
+  axes about the camera, or the nav grid's step, turned into a world direction: `yaw`
+  there, `forward` the stick's push, nothing to the side), so `S` turns the body round
+  and walks it toward the camera; **standing**, the mover's current yaw, which keeps the
+  last walk's facing and the turn a target-action or the magnet made, whatever the
+  camera does. The zone, the guard's facing test, the magnet, the tracer and every
+  other client read the same yaw; `app::facing` has no RPG exception any more and the
+  snapshot's bit 9 is retired (PROTOCOL.md 27). The camera is only the view: its yaw
+  goes nowhere but the orbit and the axes.
 
 ## 11. Rounds, kits and the quartermaster (2026-10-07, built as 15d: 11.7)
 
@@ -655,7 +678,7 @@ nothing but what the reserve means. The stranger sees the stance only, as now.
 gun; it is a `buttons::USE` bit, protocol v12, in bit 14 of the two reserved). Since
 2026-10-08 the kit is one of the **item cells** of the hotbar (LOOK.md 3.2): four cells on
 `F`, `8`, `9`, `0`, each holding a stack the character carries, the kit on `F` unless
-moved; `USE` names the cell (`use_slot`, protocol v16) and the zone uses one of that
+moved; `USE` names the cell (`use_slot`, protocol v18) and the zone uses one of that
 cell's stack, whatever its template does (a kit heals). What follows holds for every
 cell. It is a script of **1,500 ms** whatever the zone's tick rate (a town's 20 Hz as a fight's 64): the
 hand lowers the weapon (the view model as the reload), the body walks at half speed, a
@@ -741,7 +764,7 @@ Built as 11.1–11.5 say, with these readings:
   that joins a zone has its guns issued full once.
 - **The kit, an item cell** (LOOK.md 3.2): `buttons::USE` (bit 14; bit 15 stays
   reserved) with the cell in `Input.use_slot` (1-based; 0 is the first cell's: protocol
-  v16), `F`, `8`, `9`, `0` on the client, in every mode: the client reads them before the
+  v18), `F`, `8`, `9`, `0` on the client, in every mode: the client reads them before the
   mode's own keys (2026-10-08: the RPG mode built its frame another way and never read
   `F`, so it did nothing there, in the browser and the native client alike;
   `Input::sim_input` reads them first now, and a client test presses each in the three
@@ -761,7 +784,7 @@ Built as 11.1–11.5 say, with these readings:
   spend a kit for nothing), and the client drops it on the next snapshot (`using` 0).
   The body walks at half speed meanwhile and fires nothing; the stance `anim::USE` (15);
   the view model is lowered and worked as for a reload (`kit_progress`). The own block
-  carries `bar` (four counts) and `using` (the cell, 3 bits; protocol v16), and the
+  carries `bar` (four counts) and `using` (the cell, 3 bits; protocol v18), and the
   client adopts them, and the guns' rounds, from a snapshot that differs in them (a stack
   bought at a stall, a grant while in the zone): before, it took them only with a
   correction of position or status, so the HUD counted the kits of the claim until the

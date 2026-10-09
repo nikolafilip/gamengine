@@ -13,6 +13,8 @@ official content as a whole is CC-BY-SA 4.0 (LICENSE.md at the root).
 | `props/staff.glb` | the same pack (`staff.gltf` + `mage_texture.png`) | CC0 1.0 |
 | `props/crossbow.glb` | the same pack (`crossbow_1handed.gltf` + `rogue_texture.png`) | CC0 1.0 |
 | `props/hammer.glb` | ours: `gm-tools content synth hammer` | CC-BY-SA 4.0 |
+| `props/greatsword.glb` | ours: `gm-tools content synth greatsword` | CC-BY-SA 4.0 |
+| `props/shield.glb` | ours: `gm-tools content synth shield` | CC-BY-SA 4.0 |
 | `props/musket.glb` | ours: `gm-tools content synth musket` | CC-BY-SA 4.0 |
 | `props/pistol.glb` | ours: `gm-tools content synth pistol` | CC-BY-SA 4.0 |
 

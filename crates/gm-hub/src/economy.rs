@@ -2477,6 +2477,18 @@ impl Economy {
         if !has_room(&mut tx, sto, 0).await? {
             return Err(EconError::Full);
         }
+        // One stall per character: asked first, so an owner asking again (a keeper after a
+        // restart, a stall left in another zone) is refused without the database logging
+        // a constraint violation for each ask.
+        if sqlx::query("select 1 from stalls where owner_character = $1")
+            .bind(character)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal)?
+            .is_some()
+        {
+            return Err(EconError::State("you already have a stall".into()));
+        }
         let holder = new_holder(&mut tx, "stall", STALL_SLOTS).await?;
         let id: i64 = sqlx::query(
             "insert into stalls (owner_character, zone, tile_x, tile_y, expires, holder_id) \

@@ -12,7 +12,7 @@ key = "sentinel"
 name = "Sentinel"
 frame = "striker"
 armour = "mail"
-aspects = ["flame"]
+aspects = ["water"]
 attributes = { str = 16, agi = 14, con = 16, int = 8, spr = 10 }
 health = 1200
 might = 1.0
@@ -29,7 +29,7 @@ key = "warden"
 name = "The Warden"
 frame = "colossus"
 armour = "plate"
-aspects = ["stone"]
+aspects = ["ground"]
 attributes = { str = 20, agi = 8, con = 20, int = 14, spr = 14 }
 health = 15000
 might = 2.0
@@ -54,7 +54,7 @@ key = "dummy"
 name = "Training dummy"
 frame = "colossus"
 armour = "leather"
-aspects = ["stone"]
+aspects = ["ground"]
 attributes = { str = 5, agi = 5, con = 5, int = 5, spr = 5 }
 health = 5000
 stagger_threshold = 60000
@@ -70,7 +70,7 @@ key = "trainer"
 name = "Trainer"
 frame = "striker"
 armour = "cloth"
-aspects = ["flame"]
+aspects = ["fire"]
 attributes = { str = 5, agi = 5, con = 5, int = 5, spr = 5 }
 health = 1000
 primary = "staff"

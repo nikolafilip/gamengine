@@ -482,6 +482,17 @@ pub fn step_mover<W: CollisionWorld + ?Sized>(
         None => {}
     }
     m.statuses.expire(now);
+    // Taunted (MATRIX.md 8): the body is turned to whoever taunted it and held there,
+    // tick by tick, while the taunt lasts and the taunter is in sight of the wire; the
+    // client's view follows the mover's yaw while the hold stands (CLIENT.md).
+    if let Some(by) = m.statuses.taunted_by()
+        && let Some(b) = company.find(by)
+        && let Some(until) = m.statuses.get(crate::vocab::Status::Taunt).map(|s| s.until)
+    {
+        let yaw = yaw_toward(m.mv.origin, b.centre);
+        m.lock_yaw = Some((yaw, until));
+        m.yaw = yaw;
+    }
     // Stagger interrupts everything (MATRIX.md 8); the server already cleared the script
     // when it applied the status, the client follows at reconciliation. A body on the
     // ground (MODES.md 4.5) is as helpless.
@@ -885,6 +896,7 @@ pub fn command_exit_ticks(dt: f32) -> Tick {
 /// root's: the stance's base (`scoped` while the scope is up), the move's share past a
 /// walk, the air's, and the spray's growing with the square of the shots within `recover`
 /// of the last. `shot` is the index of the shot in its spray (0 for the first).
+#[allow(clippy::too_many_arguments)]
 pub fn cone_deg(
     f: &crate::vocab::Firearm,
     max_speed: f32,

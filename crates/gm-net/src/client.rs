@@ -96,7 +96,7 @@ pub struct RenderEntity {
     pub acting: u16,
     pub flags: u16,
     /// Active statuses, a bit per `Status` index.
-    pub status: u16,
+    pub status: u32,
     /// Health, for the bodies whose health the zone sends: the own party and creatures.
     pub health: Option<u16>,
     /// Velocity as the two snapshots around the render time show it.
@@ -430,7 +430,7 @@ impl ClientState {
                     until: last_input_tick.wrapping_add(w.remaining),
                     magnitude: w.magnitude,
                     stacks: w.stacks,
-                    source: 0,
+                    source: w.source,
                 };
             }
             st

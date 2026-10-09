@@ -116,8 +116,16 @@ four times oversampled).
 
 Two faces rasterised by the tool from font files in `assets/content/ui/` (OFL or CC0 only,
 named in LICENSES.md), **once per density from the outlines**, with the coverage the
-rasteriser gives as alpha: `Text` (**Fira Sans Medium**; ASCII, Gaj's letters, the few
-marks the chat uses) and `Title` (MedievalSharp). `skin.toml` gives each its height in dots
+rasteriser gives as alpha: `Text` (**Fira Sans Medium**) and `Title` (MedievalSharp), each
+for the **same generic set of characters** (13.12, since 2026-10-08; before it ASCII and
+Gaj's ten letters, and a stack read `kit ?3 of 5`): printable ASCII; of the Latin-1
+Supplement the signs `¡ § « ° ± · » ¿` and everything from `À` to `ÿ` (the accented
+letters of the western tongues, `×` and `÷` among them); Latin Extended-A whole, `Ā` to `ž`
+(Gaj's letters, and the Polish, Czech, Slovak, Hungarian, Romanian, Turkish and the rest);
+and the typographic marks the game and its players write, `– — ‘ ’ “ ” … ‹ › • − → €`: 308
+characters (`gm_tools::content::charset`). A character the font has no glyph for is left
+out of that face rather than baked as the font's box (MedievalSharp lacks `→`), and the
+client draws what a face lacks as `?`, as before. `skin.toml` gives each its height in dots
 from the top of its ascenders to the bottom of its descenders (15.5 and 20). The metrics
 are made for layouts and are the same at every density: the **ascent** is the height of
 the face's capitals to the nearest dot (9 and 14: the baseline lies that far under the
@@ -293,6 +301,11 @@ the well); the viewport and the scissor are **set back to the whole frame** befo
 HUD's layers 1–4 close the frame. The pass exists only in frames that have a paperdoll,
 so the game's frame cost does not move. The doll's draws ride in the same block buffer as
 the world's (`Characters::prepare_with_dolls`), after them.
+The selector of CLIENT.md 4.2 draws the same body **in the open** (`Ui::paperdoll_open`,
+`Paperdoll.open`): no well, the map turning behind the screens showing through, and the
+camera further back (`DOLL_OPEN_DISTANCE` = 46 u before the body's origin, at 34 u up, a
+degree down) so the whole body stands in the rectangle; its props are the hub's pack's
+abilities looked up in the manifest (`ability_prop`), since no zone has sent a prop list.
 
 ## 6. Props in hands
 
@@ -395,6 +408,22 @@ last 22% of it. The stranger sees the `RELOAD` stance (13.3). Offline, `--prop K
 the first person is the fitting room of the view model: the prop in the view with the
 stride's bob; `R` held works a reload over and over.
 
+### 6.5 The off hand (2026-10-09)
+
+The director: the colossus wants "an oversized sword ... and also shield, so it looks a bit
+more appropriate" (MATRIX.md 16). A body holds a second prop in its **left hand**: the
+`prop` of its build's **guard** ability (CONTENT.md 3.1; `shield_wall` holds `shield`), else
+nothing; a worn item does not reach the off hand yet (a shield item is a template with
+`held = "left"` for a later phase). On the wire it is **`Look.off`** (protocol v17, section
+29 there), chosen by the zone with `held` and sent in the same `Look`; a gun build's is
+`NONE`. It is drawn as `held` is (6.3), by the wearer's skinning matrix of **`prop_l`** at
+that bone's pivot times **the left grip** (`gm_model::pose::grip_left`, `prop_attach_left`):
+the right grip mirrored through the body's plane, which is not a rotation, so it is the
+right grip turned half round about the business end instead; a shield's face (+Z of its
+model, the back of the fist's side) then stands out of the back of the hand, and the
+guard stance, which already raises the left forearm across the chest, raises the shield in
+front. The fitting room draws it: `gm-tools content look shield --left`.
+
 ## 7. The purse: silver and gold
 
 The director dropped copper (2026-10-03). The ledger's integer is **silver**; **100 silver =
@@ -418,7 +447,7 @@ two gem sockets: no casino, PLAN.md 0.) The screens show two coins (`coin_gold`,
 | Number | Proposed | Why |
 |---|---|---|
 | `max_bundle_bytes` | 2 MiB | the whole of `assets/built/content/`: what a browser may have to fetch over a session |
-| `max_atlas_bytes` | 393,216 | one atlas: a client fetches `ui.gma` before the first screen and the one of its scale after (measured 49,641 / 123,997 / 200,633 / 282,595 at one to four texels a dot; 262,144 while there was one atlas) |
+| `max_atlas_bytes` | 524,288 | one atlas: a client fetches `ui.gma` before the first screen and the one of its scale after (measured 82,847 / 207,092 / 332,624 / 470,976 at one to four texels a dot with the generic character set of 2.3; 393,216 for 49,641 / 123,997 / 200,633 / 282,595 with ASCII and Gaj's letters; 262,144 while there was one atlas) |
 | `max_prop_gmm_bytes` | 131,072 | CONTENT.md 4 |
 | `max_webgpu_wasm_bytes` (WEB.md 9) | 2,097,152 | raised from 1 MiB by the director (9); the phase reports what it added |
 | `max_native_added_bytes` | 262,144 | the native client |
@@ -796,11 +825,13 @@ Seen on the software GPU at 1920 × 1080 (`strafe.sh` in the session's scratchpa
 held with `xdotool`): A in profile to the left, D to the right, W away, S a backpedal,
 idle on the look.
 
-The RPG mode is the exception (MODES.md 5.1, 10.3; 2026-10-08): its camera orbits a body
-that does not turn with it, so an RPG body (snapshot flag `RPG`, v15) is drawn standing as
-it was left, facing its last travel or the target it last turned to, and runs facing its
-travel whichever way, S included; it turns to its look only for an action, where the zone
-fires.
+The RPG mode was the exception (MODES.md 5.1, 10.3; 2026-10-08): its camera orbits a
+body that does not turn with it, so an RPG body (snapshot flag `RPG`, v15) was drawn
+standing as it was left, facing its last travel or the target it last turned to, and ran
+facing its travel whichever way, S included. Since 2026-10-09 it needs none: the RPG
+frames carry the body's own facing instead of the camera's (MODES.md 10.3), so its `yaw`
+is where it walks or was left, the zone fires there, and the one rule above draws every
+body. The flag is retired.
 
 ### 13.10 The gun in the hand (2026-10-07, the director played the gun mode)
 
@@ -849,3 +880,17 @@ leaves a dark disc of 3.5 units on the surface, 0.6 off it, for twenty seconds, 
 four fading; 160 at most. Nothing marks a body yet: blood is the body's look (Phase 17).
 The effects table of 13 gains two rows by this.
 
+
+### 13.12 The font's character set (2026-10-08, the co-owner played in the browser)
+
+The inventory read `kit ?3` and `kit ?3 of 5`. The game writes `kit ×3 of 5` (the item
+rows of `gm-content`, the bag), but the faces were rasterised for printable ASCII and
+Gaj's ten letters only, so the `×` was not in the atlas and the HUD drew its `?`. The
+decision: the set is generic, not Croatian (2.3): ASCII, the Latin-1 Supplement's letters
+and signs, Latin Extended-A whole, and the typographic marks, 308 characters in each face;
+a character the font lacks is left out rather than baked as its box; and a test of the
+tool holds both faces to that and to the `×`, the dashes, the quotes and an accented
+letter of another tongue (`the_faces_hold_the_signs_the_game_writes_and_nothing_the_font_lacks`).
+The atlases grew with the glyphs, 82,847 / 207,092 / 332,624 / 470,976 bytes at one to
+four texels a dot, and `max_atlas_bytes` is 512 KiB (8). The five-by-seven face
+(CLIENT.md 3) is unchanged: it is what is drawn before the bundle loads, and keeps its `?`.

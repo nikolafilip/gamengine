@@ -25,7 +25,7 @@ pub struct InputFrame {
     /// The body the frame's activation is aimed at (MODES.md 5.3); 0 = none.
     pub target: u32,
     /// The item cell a `USE` this tick is of (LOOK.md 3.2), 1-based; 0 = none named (the
-    /// first cell's). v16.
+    /// first cell's). v18.
     pub use_slot: u8,
 }
 
@@ -212,7 +212,7 @@ mod tests {
         }
         let bytes = d.encode();
         // header 16 + ack 32 + view 32 + count 2 + first 32 + 4 * 100 = 514 bits = 65 bytes
-        // (v16: the item cell's 3 bits a frame).
+        // (v18: the item cell's 3 bits a frame).
         assert_eq!(bytes.len(), 65);
         let back = InputDatagram::decode(&bytes).unwrap();
         assert_eq!(back, d);

@@ -21,7 +21,7 @@ use crate::protocol::{
 
 /// The version of the players' messages; any change to them, or to a type they carry, is
 /// a new one.
-pub const PLAYER_VERSION: u8 = 6;
+pub const PLAYER_VERSION: u8 = 7;
 
 /// What a stream that speaks the players' messages begins with: the empty frame, then
 /// the version in a frame of its own.
@@ -90,9 +90,9 @@ pub enum PlayerRequest {
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 pub enum PlayerEcon {
     Inventory,
-    /// The item bar (LOOK.md 3.2): the four cells' templates. v6.
+    /// The item bar (LOOK.md 3.2): the four cells' templates. v7.
     Bar,
-    /// Arrange the item bar: four cells, a stack template or nothing each. v6.
+    /// Arrange the item bar: four cells, a stack template or nothing each. v7.
     SetBar {
         cells: Vec<Option<String>>,
     },
@@ -185,7 +185,7 @@ pub struct HireRow {
 pub enum PlayerEconReply {
     Done,
     Id(i64),
-    /// The item bar's four cells. v6.
+    /// The item bar's four cells. v7.
     Bar(Vec<Option<String>>),
     Holder {
         coin: i64,

@@ -55,8 +55,8 @@ wins and the code is wrong. Changes to either require changing both in the same 
 - **Cost** `{ stamina, focus }`.
 - **Cooldown** `{ ticks, group }`; abilities in the same group share one cooldown.
 - **DamagePacket** `{ amount, type, bypass, knockback, stagger }`. `type` is one of the three
-  physical kinds (Slash, Pierce, Blunt) or the five elements (Flame, Shadow, Storm, Frost,
-  Stone) of MATRIX.md; `bypass` is a set of `ARMOR`, `MAGIC_SHIELD`, `EVASION`: the RPS "true
+  physical kinds (Slash, Pierce, Blunt) or the six elements (Fire, Water, Grass, Electric,
+  Ground, Air) of MATRIX.md 5; `bypass` is a set of `ARMOR`, `MAGIC_SHIELD`, `EVASION`: the RPS "true
   bypasses" of PLAN.md 3.2.
 - **Shape**: `Sphere{radius}`, `Cylinder{radius, height}`, `Cone{length, half_angle}`,
   `Box{half_extents}`.
@@ -112,7 +112,9 @@ Resolution: first pulse at `delay`, then every `interval` until `duration`. Targ
 capsules overlapping the shape, nearest first up to `max_targets`; with `requires_los`, a trace
 from the origin to the capsule centre must also be clear. Damage is scaled by `falloff` from the
 centre (`Linear` = 1 − d/r, `InverseSquare` = (1 − d/r)²). `effects` with `target: Area` land on
-every target after its damage; `target: Actor` lands on the caster once per pulse. The caster is
+every target after its damage, with `target: Allies` on those of them on the caster's side
+(the caster among them; MATRIX.md 17's briar hurts everyone and feeds its own side);
+`target: Actor` lands on the caster once per pulse. The caster is
 a target like anyone else (a fireball at your feet burns you) unless `exclude_actor` is set,
 which content uses for shockwaves that originate at the caster's own feet. Areas ignore guards.
 The area is sent to clients as an entity (its origin and largest extent) for drawing only.
@@ -120,11 +122,14 @@ The area is sent to clients as an entity (its origin and largest extent) for dra
 ### 5.4 ApplyStatus
 
 Parameters: `status`, `duration`, `magnitude`, `max_stacks`, `stacking` (`Refresh` |
-`Extend` | `Independent`), `target` (`Actor` | `Hit` | `Area`), `dispellable`.
+`Extend` | `Independent`), `target` (`Actor` | `Hit` | `Area` | `Allies`), `dispellable`.
+`Allies` is `Area` kept to the caster's side (team, or party among the wild): damage never
+checks sides (section 8), a status may, as `Taunt` lands on enemies only (MATRIX.md 8).
 
 Initial status set: `Slow`, `Haste`, `Root`, `Bleed`, `Burn`, `Chill` (stacks to `Freeze`),
 `Shock` (interrupts), `Silence`, `Stagger`, `Fortify`, `Weaken`, `Expose` (grants `ARMOR`
-bypass to attackers), `Regen`, `Stealth`. Exact semantics, stacking and immunity windows are
+bypass to attackers), `Regen`, `Stealth`; Phase 15d added `Knockdown` and `Launched` (MODES.md 4.5), v5 of
+MATRIX.md `Taunt` (a body turned to the status's source and held there; MATRIX.md 16). Exact semantics, stacking and immunity windows are
 MATRIX.md 8. Statuses act through multipliers on `MoveVars`, resources and damage packets.
 `Stealth` reduces the distance at which the entity is included in snapshots; **nothing ever
 bypasses PVS culling** (PLAN.md 8).

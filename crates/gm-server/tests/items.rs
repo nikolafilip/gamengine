@@ -3,7 +3,9 @@
 //! through the zone, at once, and not in a fight; and the zone's hits show the edge, before
 //! and after, to the point. Needs `GM_TEST_DATABASE_URL` (a Postgres the test may wipe);
 //! without it the test is skipped. The gun mode's hand (MODES.md 3.7) is pinned here too:
-//! the weapon switched to is what everyone is told the body holds.
+//! the weapon switched to is what everyone is told the body holds; and so is the build
+//! worn at the trainer (MATRIX.md 9.1): the hub holds it before the zone says so, and it
+//! is what the character wears when it enters again.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -12,7 +14,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use glam::Vec3;
 use gm_bsp::Bsp;
-use gm_core::build::Sheet;
+use gm_core::build::{Build, Sheet};
 use gm_core::sim::{Input, buttons};
 use gm_core::tick::TickRate;
 use gm_core::trace::{CollisionWorld, Hull};
@@ -24,7 +26,7 @@ use gm_hub::protocol::{
 use gm_hub::{Db, HubClient, HubConfig, HubKey, IngestMode};
 use gm_net::PROTOCOL_VERSION;
 use gm_net::client::ClientState;
-use gm_net::control::{self, FromClient, FromZone, StallEntry};
+use gm_net::control::{self, FromClient, FromZone, StallEntry, TRAINER_REACH};
 use gm_net::transport::{Identity, SERVER_NAME, client_config, hub_server_config, server_config};
 use gm_server::{HubLink, HubLinkConfig, ZoneConfig, ZoneWorld};
 use quinn::rustls::pki_types::CertificateDer;
@@ -32,6 +34,10 @@ use quinn::rustls::pki_types::CertificateDer;
 const TOWN: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/maps/built/town.bsp"
+);
+const ARENA: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/maps/built/arena.bsp"
 );
 const CONTENT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/content");
 const SECRET: &str = "items-zone-secret";
@@ -45,8 +51,9 @@ const GATE: &str = "one thing at a time: try again in a moment";
 /// What the test tells a client to do, and what the client has seen.
 #[derive(Default)]
 struct Shared {
-    /// The body's own id in the zone.
+    /// The body's own id in the zone, and the build the zone gave it on arrival.
     id: u32,
+    own: Option<Build>,
     yaw: f32,
     buttons: u16,
     /// The gun mode's hand (MODES.md 3.7): 0 the gun, 1 the pistol, 2 the knife.
@@ -107,9 +114,10 @@ impl Hand {
             other => panic!("{name}: no content: {other:?}"),
         };
         let rate = TickRate::new(hz as u32);
-        let mut client = ClientState::new(entity, rate, Sheet::new(own, &pack, team));
+        let mut client = ClientState::new(entity, rate, Sheet::new(own.clone(), &pack, team));
         let shared = Arc::new(Mutex::new(Shared {
             id: entity,
+            own: Some(own),
             yaw,
             ..Shared::default()
         }));
@@ -221,7 +229,8 @@ impl Hand {
                 .filter_map(|m| match m {
                     FromZone::BuyResult { result, .. }
                     | FromZone::WearResult { result, .. }
-                    | FromZone::StallResult(result) => Some(result.clone()),
+                    | FromZone::StallResult(result)
+                    | FromZone::RespecResult(result) => Some(result.clone()),
                     _ => None,
                 })
                 .collect();
@@ -338,6 +347,10 @@ impl Someone {
     }
 
     async fn ticket(&self) -> ZoneTicket {
+        self.ticket_for("town").await
+    }
+
+    async fn ticket_for(&self, zone: &str) -> ZoneTicket {
         // A character that just left is put away by its zone in a moment: asked again.
         for _ in 0..50 {
             match self
@@ -345,7 +358,7 @@ impl Someone {
                 .request(&HubRequest::Enter {
                     session: self.session,
                     character: self.character,
-                    zone: "town".into(),
+                    zone: zone.into(),
                 })
                 .await
             {
@@ -379,6 +392,15 @@ impl Someone {
             other => panic!("{other:?}"),
         }
     }
+
+    /// The build the hub holds for the character.
+    async fn stored_build(&self, db: &Db) -> Build {
+        db.character(self.character)
+            .await
+            .unwrap()
+            .expect("the character is in the database")
+            .build
+    }
 }
 
 fn strings(parts: &[&str]) -> Vec<String> {
@@ -399,7 +421,54 @@ struct Town {
     grid: gm_bsp::StallGrid,
 }
 
-async fn stand_up(url: &str) -> Town {
+/// Another zone under the same hub, with the map at `path`; wild or a team zone.
+async fn add_zone(town: &Town, zone: &str, path: &str, wild: bool) -> Arc<ZoneWorld> {
+    let content = gm_content::load_dir(Path::new(CONTENT), TickRate::COMBAT).expect("content");
+    let identity = Identity::generate(&["localhost"]).unwrap();
+    let world = Arc::new(ZoneWorld::load(Path::new(path)).expect("the map is built"));
+    let endpoint = quinn::Endpoint::server(
+        server_config(&identity).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let link = HubLink::connect(HubLinkConfig {
+        addr: town.hub_addr,
+        cert_der: town.hub_cert.clone(),
+        zone: zone.into(),
+        secret: SECRET.into(),
+        map: world.name.clone(),
+        map_hash: world.hash,
+        public_addr: endpoint.local_addr().unwrap(),
+        zone_cert_der: identity.cert_der().to_vec(),
+        web: None,
+        min_trust: 0,
+        requires: Vec::new(),
+        max_players: 64,
+    })
+    .await
+    .expect("the zone registers");
+    let _zone = tokio::spawn(gm_server::run(
+        ZoneConfig {
+            max_ticks: Some(64 * 120),
+            content,
+            looks: gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks"),
+            hub: Some(link),
+            gear_after_fight: LOCK,
+            gm_names: Vec::new(),
+            tuning_file: None,
+            wild,
+            ..ZoneConfig::default()
+        },
+        world.clone(),
+        endpoint,
+        std::future::pending(),
+    ));
+    world
+}
+
+/// `wild`: the town's creatures (the trainer, the dummies) stand on their posts and every
+/// human is team 1 (COMPANIONS.md 3.1); else a team zone on the town's map.
+async fn stand_up(url: &str, wild: bool) -> Town {
     let db = Db::connect(url).await.expect("database");
     db.migrate().await.expect("migrations");
     db.wipe().await.expect("wipe");
@@ -475,6 +544,7 @@ async fn stand_up(url: &str) -> Town {
             gear_after_fight: LOCK,
             gm_names: Vec::new(),
             tuning_file: None,
+            wild,
             ..ZoneConfig::default()
         },
         world.clone(),
@@ -512,7 +582,7 @@ async fn a_weapon_is_bought_at_a_stall_worn_and_felt_in_the_zone_s_hits() {
         world,
         map,
         grid,
-    } = stand_up(&url).await;
+    } = stand_up(&url, false).await;
     // A keeper on a market tile, a buyer in front of the counter and facing it, and
     // somebody across the square. (An operator puts them there: `gm-hub --place`.)
     // (A wall of plate: each blow moves it a hair, and five of them leave it standing.)
@@ -826,7 +896,7 @@ async fn the_weapon_switched_to_is_what_everyone_sees_in_the_hand() {
         return;
     };
     let _one_at_a_time = DATABASE.lock().await;
-    let town = stand_up(&url).await;
+    let town = stand_up(&url, false).await;
     let looks = gm_content::looks::Looks::load_dir(Path::new(CONTENT)).expect("looks");
     let (musket, pistol, dagger) = (
         looks.prop_index("musket"),
@@ -880,6 +950,134 @@ async fn the_weapon_switched_to_is_what_everyone_sees_in_the_hand() {
     assert_eq!(said, 1, "one look for the switch back");
 }
 
+/// A build worn at the trainer is the character's (MATRIX.md 9.1): the hub holds it
+/// before the zone says "worn", it is what the character wears when it enters again,
+/// and the same for one chosen in a team zone and worn at the next respawn. Away from
+/// the trainer the zone says where to stand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_build_worn_at_the_trainer_is_the_character_s_when_it_enters_again() {
+    let Ok(url) = std::env::var("GM_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: set GM_TEST_DATABASE_URL to a Postgres this test may wipe");
+        return;
+    };
+    let _one_at_a_time = DATABASE.lock().await;
+    if let Ok(filter) = std::env::var("GM_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    }
+    let town = stand_up(&url, true).await;
+    let _arena = add_zone(&town, "arena", ARENA, false).await;
+    let content = gm_content::load_dir(Path::new(CONTENT), TickRate::COMBAT).expect("content");
+    let blade = content.build("blade").unwrap().clone();
+    // What the director did: a point off STR and onto CON, by the trainer at the board.
+    let mut chosen = blade.clone();
+    chosen.attributes.str_ -= 1;
+    chosen.attributes.con += 1;
+    assert!(chosen.validate(&content).is_ok());
+    let trainer = town
+        .world
+        .creature_posts
+        .iter()
+        .find(|p| p.creature == "trainer")
+        .expect("the town posts a trainer")
+        .origin;
+    let up = Vec3::Z * (1.0 - Hull::Player.mins().z);
+    // A spawn of the town's within reach of the trainer, and one well out of it.
+    let near = town
+        .world
+        .spawns
+        .iter()
+        .map(|s| s.origin)
+        .find(|o| (*o - trainer).length() <= TRAINER_REACH * 0.5)
+        .expect("a spawn by the trainer");
+    let far_off = town
+        .world
+        .spawns
+        .iter()
+        .map(|s| s.origin)
+        .find(|o| (*o - trainer).length() > TRAINER_REACH * 3.0)
+        .expect("a spawn away from the trainer");
+
+    let student = Someone::new(town.hub_addr, &town.hub_cert, "Student", "blade").await;
+    let far = Someone::new(town.hub_addr, &town.hub_cert, "Far", "blade").await;
+    assert!(
+        town.db
+            .place(student.character, "town", (near + up).into(), 0.0)
+            .await
+            .unwrap()
+    );
+    assert!(
+        town.db
+            .place(far.character, "town", (far_off + up).into(), 0.0)
+            .await
+            .unwrap()
+    );
+    let hand = Hand::join(&student.ticket().await, "Student", 0.0, town.map.clone()).await;
+    let far_hand = Hand::join(&far.ticket().await, "Far", 0.0, town.map.clone()).await;
+    assert_eq!(hand.shared.lock().unwrap().own.as_ref(), Some(&blade));
+
+    // Away from the trainer: refused, in words, and nothing is saved.
+    assert_eq!(
+        far_hand
+            .ask(FromClient::Respec(BuildChoice::Custom(chosen.clone())))
+            .await,
+        Err("stand by the trainer in the town".into())
+    );
+    assert_eq!(far.stored_build(&town.db).await, blade);
+
+    // By the trainer: worn, and the hub holds it by the time the zone says so.
+    assert_eq!(
+        hand.ask_when_calm(FromClient::Respec(BuildChoice::Custom(chosen.clone())))
+            .await,
+        Ok(())
+    );
+    assert_eq!(student.stored_build(&town.db).await, chosen);
+    hand.until("the build applied", |s| {
+        s.heard
+            .iter()
+            .any(|m| matches!(m, FromZone::BuildApplied(b) if *b == chosen))
+    })
+    .await;
+
+    // Logged out and in again: the new build is what the zone gives the body.
+    hand.leave().await;
+    let hand = Hand::join(&student.ticket().await, "Student", 0.0, town.map.clone()).await;
+    assert_eq!(hand.shared.lock().unwrap().own.as_ref(), Some(&chosen));
+    hand.leave().await;
+
+    // In a team zone the build is worn at the next respawn: chosen, saved, and worn on
+    // entering the town again without ever having died in the arena.
+    let mut again = chosen.clone();
+    again.attributes.agi -= 1;
+    again.attributes.spr += 1;
+    assert!(again.validate(&content).is_ok());
+    let world = ZoneWorld::load(Path::new(ARENA)).expect("arena.bsp is built");
+    let arena_map = Arc::new(world.bsp.clone());
+    let hand = Hand::join(
+        &student.ticket_for("arena").await,
+        "Student",
+        0.0,
+        arena_map,
+    )
+    .await;
+    assert_eq!(hand.shared.lock().unwrap().own.as_ref(), Some(&chosen));
+    assert_eq!(
+        hand.ask(FromClient::Respec(BuildChoice::Custom(again.clone())))
+            .await,
+        Ok(())
+    );
+    assert_eq!(student.stored_build(&town.db).await, again);
+    assert!(hand.shared.lock().unwrap().alive, "never died in the arena");
+    hand.leave().await;
+    let hand = Hand::join(&student.ticket().await, "Student", 0.0, town.map.clone()).await;
+    assert_eq!(hand.shared.lock().unwrap().own.as_ref(), Some(&again));
+    println!(
+        "respec: worn at the trainer and saved; chosen in the arena and saved; both worn again on entering"
+    );
+}
+
 /// The kit (MODES.md 11.3) over the real protocol: bought at a stall (the zone learns the
 /// stack from the reading after the buy), used with a press of `USE` when hurt (a use of a
 /// second and a half, the heal at its end, one kit fewer at the hub), and begun for nothing
@@ -904,7 +1102,7 @@ async fn a_kit_bought_at_a_stall_heals_on_a_press_and_is_kept_at_full_health() {
         world: _,
         map,
         grid,
-    } = stand_up(&url).await;
+    } = stand_up(&url, false).await;
     let smith = Someone::new(hub_addr, &hub_cert, "Smith", "ironclad").await;
     let buyer = Someone::new(hub_addr, &hub_cert, "Buyer", "blade").await;
     let tile = grid.centre(grid.base_x, grid.base_y).expect("a tile");
