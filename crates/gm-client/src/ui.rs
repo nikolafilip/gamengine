@@ -79,6 +79,8 @@ pub type TipLines = Vec<(String, [f32; 4])>;
 
 pub const PLATE: [f32; 4] = [0.06, 0.06, 0.08, 0.88];
 pub const EDGE: [f32; 4] = [0.36, 0.36, 0.46, 1.0];
+/// A drag of this many units across the paperdoll turns the body once around.
+pub const TURN_DOTS: f32 = 240.0;
 pub const WELL: [f32; 4] = [0.02, 0.02, 0.03, 0.90];
 pub const BUTTON: [f32; 4] = [0.17, 0.17, 0.24, 1.0];
 pub const BUTTON_HOT: [f32; 4] = [0.26, 0.26, 0.37, 1.0];
@@ -2066,9 +2068,12 @@ impl<'a, C: Canvas> Ui<'a, C> {
         let s = self.scale;
         let id = "paperdoll";
         let (_, held, _) = self.clicked(id, r);
-        if held && self.input.down {
+        // A drag across the body turns it: one full turn per `TURN_DOTS` units dragged.
+        // Not on the frame of the press itself, whose last cursor is wherever the
+        // pointer (or the last finger) was before.
+        if held && self.input.down && !self.input.pressed {
             self.state.paperdoll_turn +=
-                (self.input.cursor.0 - self.input.last_cursor.0) / (120.0 * s);
+                (self.input.cursor.0 - self.input.last_cursor.0) / (TURN_DOTS * s);
         }
         if well {
             self.canvas.layer(LAYER_PLATES);
@@ -2505,6 +2510,49 @@ pub mod tests {
             keys: keys.to_vec(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_drag_across_the_paperdoll_turns_it_by_how_far_it_moved() {
+        let mut canvas = Recorder::new(1920.0, 1080.0);
+        let mut st = UiState::default();
+        let r = Rect::new(600.0, 100.0, 700.0, 800.0);
+        let mut input = UiInput {
+            cursor: (900.0, 500.0),
+            last_cursor: (0.0, 0.0),
+            pressed: true,
+            down: true,
+            ..Default::default()
+        };
+        let s = scale_for(canvas.size(), 100.0, 0);
+        let show = |canvas: &mut Recorder, st: &mut UiState, input: &UiInput| {
+            let mut ui = Ui::begin(canvas, st, input, "equip", 100.0);
+            ui.paperdoll(r);
+            ui.end();
+        };
+        show(&mut canvas, &mut st, &input);
+        assert_eq!(st.paperdoll_turn, 0.0, "the press itself turns nothing");
+        input.pressed = false;
+        input.last_cursor = input.cursor;
+        input.cursor = (900.0 + TURN_DOTS * s * 0.5, 500.0);
+        show(&mut canvas, &mut st, &input);
+        assert!(
+            (st.paperdoll_turn - 0.5).abs() < 1e-5,
+            "half a turn: {}",
+            st.paperdoll_turn
+        );
+        // The frame after, with the pointer still: no more turning.
+        input.last_cursor = input.cursor;
+        show(&mut canvas, &mut st, &input);
+        assert!((st.paperdoll_turn - 0.5).abs() < 1e-5);
+        input.down = false;
+        input.released = true;
+        input.cursor = (100.0, 100.0);
+        show(&mut canvas, &mut st, &input);
+        assert!(
+            (st.paperdoll_turn - 0.5).abs() < 1e-5,
+            "let go: the body stays"
+        );
     }
 
     #[test]
