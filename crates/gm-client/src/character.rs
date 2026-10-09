@@ -207,24 +207,24 @@ fn body_column<C: Canvas>(ui: &mut Ui<'_, C>, area: Rect, b: &mut Build) {
     ) {
         b.armour = ArmourClass::from_index(armour as u8).unwrap_or_default();
     }
-    // Aspects: one or two of five (the second costs 10).
+    // Aspects: one or two of six (the second costs 10).
     let row = col.take(fh);
     ui.label(
         row.x,
         row.y,
         row.w,
         ui::FAINT,
-        "aspects  (one; a second costs 10 kit points)",
+        "aspects  (none is neutral; the second costs 10)",
     );
     // Each box as wide as its word needs, the spare shared between them.
     let boxes = Rect::new(row.x, row.y + line, row.w, row.h - line);
-    let names = ["flame", "shadow", "storm", "frost", "stone"];
+    let names: Vec<&str> = Element::ALL.iter().map(|e| e.name()).collect();
     let side = ui.ascent() + 4.0 * s;
     let needs: Vec<f32> = names
         .iter()
         .map(|n| side + 6.0 * s + ui.text_width(n))
         .collect();
-    let spare = ((boxes.w - needs.iter().sum::<f32>()) / 4.0).max(0.0);
+    let spare = ((boxes.w - needs.iter().sum::<f32>()) / (names.len() - 1) as f32).max(0.0);
     let mut x = boxes.x;
     let cells: Vec<Rect> = needs
         .iter()

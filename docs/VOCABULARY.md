@@ -55,8 +55,8 @@ wins and the code is wrong. Changes to either require changing both in the same 
 - **Cost** `{ stamina, focus }`.
 - **Cooldown** `{ ticks, group }`; abilities in the same group share one cooldown.
 - **DamagePacket** `{ amount, type, bypass, knockback, stagger }`. `type` is one of the three
-  physical kinds (Slash, Pierce, Blunt) or the five elements (Flame, Shadow, Storm, Frost,
-  Stone) of MATRIX.md; `bypass` is a set of `ARMOR`, `MAGIC_SHIELD`, `EVASION`: the RPS "true
+  physical kinds (Slash, Pierce, Blunt) or the six elements (Fire, Water, Grass, Electric,
+  Ground, Air) of MATRIX.md 5; `bypass` is a set of `ARMOR`, `MAGIC_SHIELD`, `EVASION`: the RPS "true
   bypasses" of PLAN.md 3.2.
 - **Shape**: `Sphere{radius}`, `Cylinder{radius, height}`, `Cone{length, half_angle}`,
   `Box{half_extents}`.

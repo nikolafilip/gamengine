@@ -1785,7 +1785,7 @@ impl Zone {
                         let dtype = if slot.status == Some(Status::Bleed) {
                             DamageType::Pierce
                         } else {
-                            DamageType::Flame
+                            DamageType::Fire
                         };
                         let packet = DamagePacket {
                             amount: amount as u16,
@@ -2024,7 +2024,7 @@ impl Zone {
             stats
         } else {
             AttackerStats {
-                gear: [0; 8],
+                gear: [0; 9],
                 ..stats
             }
         };
@@ -2040,7 +2040,7 @@ impl Zone {
             evading: t.mover.evading(frame_now),
             exposed: t.mover.statuses.has(Status::Expose),
             block,
-            gear: if geared { t.gear.taken } else { [0; 8] },
+            gear: if geared { t.gear.taken } else { [0; 9] },
         };
         let amount = resolve_damage(packet, &stats, &defender);
         let absorbed = if block.is_some() {

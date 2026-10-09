@@ -354,25 +354,25 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
     // What an item is and does is the hub's to say (ITEMS.md 3.2), numbers and words: no
     // client works either out.
     let at = |t: DamageType| t as usize;
-    let mut sword_edge = [0u16; 8];
+    let mut sword_edge = [0u16; 9];
     sword_edge[at(DamageType::Slash)] = 220;
-    sword_edge[at(DamageType::Flame)] = 190;
-    let cuirass_edge = [220u16, 220, 220, 0, 0, 0, 0, 0];
-    let plain_edge = [40u16, 0, 0, 0, 0, 0, 0, 0];
+    sword_edge[at(DamageType::Fire)] = 190;
+    let cuirass_edge = [220u16, 220, 220, 0, 0, 0, 0, 0, 0];
+    let plain_edge = [40u16, 0, 0, 0, 0, 0, 0, 0, 0];
     let have = inventory(&smith_conn, smith_s, smith).await;
     let find = |list: &[ItemSummary], id: i64| list.iter().find(|i| i.id == id).unwrap().clone();
     assert_eq!(have.len(), 6);
     let shown = find(&have, sword);
     assert_eq!((shown.place, shown.edge), (PLACE_WEAPON, sword_edge));
     assert_eq!(shown.what, "a weapon, 250 of 250");
-    assert_eq!(shown.does, ["slash +11.0%", "flame +9.5%"]);
+    assert_eq!(shown.does, ["slash +11.0%", "fire +9.5%"]);
     let shown = find(&have, cuirass);
     assert_eq!((shown.place, shown.edge), (PLACE_ARMOUR, cuirass_edge));
     assert_eq!(shown.what, "an armour, 220 of 250");
     assert_eq!(shown.does, ["physical -9.9%"]);
     assert_eq!(find(&have, plain).edge, plain_edge);
     let shown = find(&have, ember);
-    assert_eq!((shown.place, shown.edge), (PLACE_NONE, [0; 8]));
+    assert_eq!((shown.place, shown.edge), (PLACE_NONE, [0; 9]));
     assert_eq!(shown.what, "a catalyst, for crafting");
     assert!(shown.does.is_empty());
     assert!(have.iter().all(|i| !i.worn));
@@ -380,7 +380,7 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
     // Wearing is asked for by the zone the character plays in (ITEMS.md 2), and answered
     // with what its gear does from then on.
     let gear = wear(&town, smith, sword).await.unwrap();
-    assert_eq!((gear.dealt, gear.taken), (sword_edge, [0; 8]));
+    assert_eq!((gear.dealt, gear.taken), (sword_edge, [0; 9]));
     let gear = wear(&town, smith, cuirass).await.unwrap();
     assert_eq!((gear.dealt, gear.taken), (sword_edge, cuirass_edge));
     // Twice is once.
@@ -563,7 +563,7 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
 
     // Taking off: by the item, and taking off what is not worn changes nothing.
     let gear = take_off(&town, smith, sword).await.unwrap();
-    assert_eq!((gear.dealt, gear.taken), ([0; 8], cuirass_edge));
+    assert_eq!((gear.dealt, gear.taken), ([0; 9], cuirass_edge));
     assert_eq!(take_off(&town, smith, sword).await, Ok(gear));
     assert_eq!(take_off(&town, smith, ember).await, Ok(gear));
     assert_eq!(take_off(&town, smith, theirs).await, Ok(gear));
@@ -698,7 +698,7 @@ async fn what_is_worn_is_the_hub_s_and_changes_through_the_zone() {
         Err(HubError::Unauthorized)
     );
     let gear = take_off(&arena, smith, cuirass).await.unwrap();
-    assert_eq!((gear.dealt, gear.taken), (sword_edge, [0; 8]));
+    assert_eq!((gear.dealt, gear.taken), (sword_edge, [0; 9]));
     // Its stall stands in the town: from the arena it neither lists nor unlists there.
     assert_eq!(
         players(PlayerEcon::StallList {

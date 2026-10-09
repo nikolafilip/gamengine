@@ -670,9 +670,9 @@ fn stomp_pulses_once_damages_and_slows_everyone_in_range() {
         20,
     );
     let pb = zone.player(b).unwrap();
-    // 35 stone x 0.8 (INT 5), Stone into Flame is 2x, ward 0.02 * 5 = 0.10:
-    // 35 * 0.8 * 2 * 0.9 = 50.4 -> 50.
-    assert_eq!(pb.max_health() - pb.health, 50);
+    // 35 ground x 0.8 (INT 5), Ground into Water is 1x, ward 0.02 * 5 = 0.10:
+    // 35 * 0.8 * 1 * 0.9 = 25.2 -> 25.
+    assert_eq!(pb.max_health() - pb.health, 25);
     assert!(pb.mover.statuses.has(Status::Slow));
     assert!(
         (pb.mover.statuses.speed_scale() - 0.7).abs() < 1e-6,
@@ -719,7 +719,7 @@ fn frost_nova_chills_twice_and_a_shard_freezes() {
     let pb = zone.player(b).unwrap();
     assert_eq!(pb.mover.statuses.stacks(Status::Chill), 2);
     assert!((pb.mover.statuses.speed_scale() - 0.7).abs() < 1e-6);
-    // Frost into Stone is 2x and ignores plate: 30 * 1.4 (INT 20) * 2 * (1 - 0.2 ward) = 67.2 -> 67.
+    // Water into Ground is 2x and ignores plate: 30 * 1.4 (INT 20) * 2 * (1 - 0.2 ward) = 67.2 -> 67.
     assert_eq!(pb.max_health() - pb.health, 67);
     // The ice shard (the frostweaver's primary) adds the third stack: frozen (rooted),
     // chill cleared, immune after.
@@ -916,7 +916,7 @@ fn fortify_cuts_frost_but_not_the_hammer() {
         40,
     );
     let pb = zone.player(b).unwrap();
-    // Ice shard 50 x 1.4 (INT 20) x 2 (frost into stone) x 0.8 (ward 0.20) x 0.6 (fortify)
+    // Ice shard 50 x 1.4 (INT 20) x 2 (water into ground) x 0.8 (ward 0.20) x 0.6 (fortify)
     // = 67.2 -> 67.
     assert_eq!(
         before - pb.health,
@@ -968,12 +968,12 @@ fn respec_applies_at_the_next_respawn() {
     assert!(pb.alive);
     assert_eq!(pb.sheet.build.frame, ArchetypeFrame::Caster);
     assert_eq!(pb.sheet.build.armour, ArmourClass::Cloth);
-    assert!(pb.sheet.build.aspects.contains(Element::Frost));
+    assert!(pb.sheet.build.aspects.contains(Element::Water));
     assert_eq!(pb.health, pb.sheet.derived.health);
     assert_eq!(pb.health, 500 + 40 * 5);
     assert_eq!(
         pb.sheet.build.aspects,
-        Aspects::two(Element::Frost, Element::Shadow)
+        Aspects::two(Element::Water, Element::Air)
     );
 }
 
@@ -1255,9 +1255,9 @@ fn a_quake_is_a_telegraph_you_can_walk_out_of() {
         }
         let p = zone.player(victim).unwrap();
         if stays {
-            // 70 stone x 1.16 (INT 14) x 2 (the Warden's might) x 2 (Stone into Flame)
-            // x 0.9 (ward 0.10) = 292.3.
-            assert_eq!(p.max_health() - p.health, 292);
+            // 70 ground x 1.16 (INT 14) x 2 (the Warden's might) x 1 (Ground into Water)
+            // x 0.9 (ward 0.10) = 146.2.
+            assert_eq!(p.max_health() - p.health, 146);
         } else {
             assert_eq!(p.health, p.max_health(), "at {:?}", p.mover.mv.origin);
         }
@@ -1378,8 +1378,8 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
     assert_eq!(swing(sword, cuirass), 60, "a wash");
     // An edge on another type is no edge on this one.
     let mut frost = Gear::NONE;
-    frost.dealt[DamageType::Frost as usize] = 250;
-    frost.taken[DamageType::Frost as usize] = 250;
+    frost.dealt[DamageType::Water as usize] = 250;
+    frost.taken[DamageType::Water as usize] = 250;
     assert_eq!(swing(frost, frost), 60);
     // What a zone is told is kept within the cap.
     let mut wild = Gear::NONE;
@@ -1471,9 +1471,9 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
         (sum(HitKind::Projectile), sum(HitKind::Dot))
     };
     let mut flame = Gear::NONE;
-    flame.dealt[DamageType::Flame as usize] = 250;
+    flame.dealt[DamageType::Fire as usize] = 250;
     let mut ward = Gear::NONE;
-    ward.taken[DamageType::Flame as usize] = 250;
+    ward.taken[DamageType::Fire as usize] = 250;
     let (bolt_plain, burn_plain) = burn(Gear::NONE, Gear::NONE);
     let (bolt_armed, burn_armed) = burn(flame, Gear::NONE);
     let (bolt_warded, burn_warded) = burn(Gear::NONE, ward);
@@ -1568,17 +1568,17 @@ fn gear_is_taken_when_a_blow_is_made_and_a_fight_is_damage() {
         let pb = zone.player(b).unwrap();
         pb.max_health() - pb.health
     };
-    let stone = DamageType::Stone as usize;
+    let stone = DamageType::Ground as usize;
     let (mut hammer, mut robe) = (Gear::NONE, Gear::NONE);
     hammer.dealt[stone] = 250;
     robe.taken[stone] = 250;
-    // 50.4 unrounded (the stomp test above).
-    assert_eq!(stomp(Gear::NONE, Gear::NONE), 50);
-    assert_eq!(stomp(hammer, Gear::NONE), 57, "50.4 x 1.125");
-    assert_eq!(stomp(Gear::NONE, robe), 45, "50.4 / 1.125");
+    // 25.2 unrounded (the stomp test above).
+    assert_eq!(stomp(Gear::NONE, Gear::NONE), 25);
+    assert_eq!(stomp(hammer, Gear::NONE), 28, "25.2 x 1.125");
+    assert_eq!(stomp(Gear::NONE, robe), 22, "25.2 / 1.125");
     assert_eq!(
         stomp(sword, Gear::NONE),
-        50,
+        25,
         "a sword's edge is not a stomp's"
     );
 
@@ -1677,7 +1677,7 @@ fn gear_is_taken_when_a_blow_is_made_and_a_fight_is_damage() {
             })
             .expect("a pulse")
     };
-    let flame = DamageType::Flame as usize;
+    let flame = DamageType::Fire as usize;
     let (mut staff, mut ward) = (Gear::NONE, Gear::NONE);
     staff.dealt[flame] = 250;
     ward.taken[flame] = 250;

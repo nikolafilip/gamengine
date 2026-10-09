@@ -3,7 +3,7 @@
 # Price bands (MATRIX.md 10, v2): primaries 0-2 (a melee weapon or the ranged one: the range is
 # the weapon's, 2026-10-06), secondaries 2-4 (short utilities: a kick, a bash, a knife of 300 u,
 # a mend), guards 4-6, actives 6-12. The kit's budget is 40; attributes are not in it.
-# Damage types: slash pierce blunt (physical) | flame shadow storm frost stone (elements).
+# Damage types: slash pierce blunt (physical) | fire water grass electric ground air (elements).
 # An ability with an `aspect` needs that aspect in the build; its elemental packets are that element.
 
 # ---------- primaries ----------
@@ -85,7 +85,7 @@ name = "Firebolt"
 slot = "primary"
 cost = 2
 prop = "staff"
-aspect = "flame"
+aspect = "fire"
 cooldown_ms = 1200
 focus = 10
 move_scale = 0.7
@@ -97,7 +97,7 @@ speed = 1400
 gravity = 0.1
 radius = 4
 lifetime_ms = 3000
-damage = { amount = 55, type = "flame", knockback = 60, stagger = 10 }
+damage = { amount = 55, type = "fire", knockback = 60, stagger = 10 }
 spawn = { weapon = [16, 4, -2] }
 spread = 0.3
 on_hit = [ { status = { status = "burn", duration_ms = 3000, magnitude = 12, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
@@ -108,7 +108,7 @@ name = "Ice shard"
 slot = "primary"
 cost = 2
 prop = "staff"
-aspect = "frost"
+aspect = "water"
 cooldown_ms = 1000
 focus = 8
 move_scale = 0.7
@@ -120,7 +120,7 @@ speed = 1500
 gravity = 0.15
 radius = 4
 lifetime_ms = 3000
-damage = { amount = 50, type = "frost", knockback = 60, stagger = 10 }
+damage = { amount = 50, type = "water", knockback = 60, stagger = 10 }
 spawn = { weapon = [16, 4, -2] }
 spread = 0.3
 on_hit = [ { status = { status = "chill", duration_ms = 3000, magnitude = 0, max_stacks = 3, stacking = "extend", target = "hit" } } ]
@@ -131,14 +131,14 @@ name = "Stone throw"
 slot = "primary"
 cost = 2
 prop = "staff"
-aspect = "stone"
+aspect = "ground"
 cooldown_ms = 1800
 focus = 8
 move_scale = 0.6
 interrupt = "on_damage"
 [[ability.step]]
 at_ms = 250
-projectile = { speed = 1100, gravity = 0.6, radius = 6, lifetime_ms = 3000, damage = { amount = 75, type = "stone", knockback = 250, stagger = 30 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
+projectile = { speed = 1100, gravity = 0.6, radius = 6, lifetime_ms = 3000, damage = { amount = 75, type = "ground", knockback = 250, stagger = 30 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
 
 [[ability]]
 key = "shadow_dart"
@@ -146,14 +146,14 @@ name = "Shadow dart"
 slot = "primary"
 cost = 2
 prop = "staff"
-aspect = "shadow"
+aspect = "air"
 cooldown_ms = 800
 focus = 6
 move_scale = 0.8
 interrupt = "never"
 [[ability.step]]
 at_ms = 100
-projectile = { speed = 2000, gravity = 0.05, radius = 2, lifetime_ms = 3000, damage = { amount = 40, type = "shadow", bypass = ["evasion"], knockback = 40, stagger = 5 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
+projectile = { speed = 2000, gravity = 0.05, radius = 2, lifetime_ms = 3000, damage = { amount = 40, type = "air", bypass = ["evasion"], knockback = 40, stagger = 5 }, spawn = { weapon = [16, 4, -2] }, spread = 0.3 }
 
 [[ability]]
 key = "spark"
@@ -161,7 +161,7 @@ name = "Spark"
 slot = "primary"
 cost = 2
 prop = "staff"
-aspect = "storm"
+aspect = "electric"
 cooldown_ms = 1200
 focus = 10
 move_scale = 0.7
@@ -173,7 +173,7 @@ speed = 2400
 gravity = 0
 radius = 3
 lifetime_ms = 3000
-damage = { amount = 50, type = "storm", knockback = 40, stagger = 10 }
+damage = { amount = 50, type = "electric", knockback = 40, stagger = 10 }
 spawn = { weapon = [16, 4, -2] }
 spread = 0.3
 on_hit = [ { status = { status = "shock", duration_ms = 16, magnitude = 1, max_stacks = 1, stacking = "refresh", target = "hit" } } ]
@@ -251,7 +251,7 @@ key = "blink"
 name = "Blink"
 slot = "active"
 cost = 10
-aspect = "shadow"
+aspect = "air"
 cooldown_ms = 6000
 focus = 30
 [[ability.step]]
@@ -274,7 +274,7 @@ key = "stomp"
 name = "Stomp"
 slot = "active"
 cost = 10
-aspect = "stone"
+aspect = "ground"
 cooldown_ms = 8000
 focus = 25
 move_scale = 0.3
@@ -284,7 +284,7 @@ at_ms = 250
 [ability.step.area_effect]
 shape = { cylinder = { radius = 128, height = 96 } }
 origin = "self_feet"
-damage = { amount = 35, type = "stone", knockback = 200, stagger = 40 }
+damage = { amount = 35, type = "ground", knockback = 200, stagger = 40 }
 effects = [ { status = "slow", duration_ms = 2000, magnitude = 0.3, max_stacks = 1, stacking = "refresh", target = "area" } ]
 falloff = "none"
 max_targets = 8
@@ -296,7 +296,7 @@ key = "fortify"
 name = "Fortify"
 slot = "active"
 cost = 8
-aspect = "stone"
+aspect = "ground"
 cooldown_ms = 15000
 focus = 30
 move_scale = 0.8
@@ -308,7 +308,7 @@ key = "frost_nova"
 name = "Frost nova"
 slot = "active"
 cost = 10
-aspect = "frost"
+aspect = "water"
 cooldown_ms = 8000
 focus = 30
 move_scale = 0.3
@@ -318,7 +318,7 @@ at_ms = 300
 [ability.step.area_effect]
 shape = { sphere = { radius = 160 } }
 origin = "self_feet"
-damage = { amount = 30, type = "frost", knockback = 60, stagger = 10 }
+damage = { amount = 30, type = "water", knockback = 60, stagger = 10 }
 effects = [
   { status = "chill", duration_ms = 4000, magnitude = 0, max_stacks = 3, stacking = "extend", target = "area" },
   { status = "chill", duration_ms = 4000, magnitude = 0, max_stacks = 3, stacking = "extend", target = "area" },
@@ -343,7 +343,7 @@ key = "thunderclap"
 name = "Thunderclap"
 slot = "active"
 cost = 10
-aspect = "storm"
+aspect = "electric"
 cooldown_ms = 7000
 focus = 30
 move_scale = 0.3
@@ -353,7 +353,7 @@ at_ms = 250
 [ability.step.area_effect]
 shape = { sphere = { radius = 140 } }
 origin = "self_feet"
-damage = { amount = 40, type = "storm", knockback = 80, stagger = 20 }
+damage = { amount = 40, type = "electric", knockback = 80, stagger = 20 }
 effects = [ { status = "shock", duration_ms = 16, magnitude = 1, max_stacks = 1, stacking = "refresh", target = "area" } ]
 falloff = "linear"
 max_targets = 8
@@ -365,7 +365,7 @@ key = "vanish"
 name = "Vanish"
 slot = "active"
 cost = 8
-aspect = "shadow"
+aspect = "air"
 cooldown_ms = 14000
 focus = 25
 [[ability.step]]
@@ -376,7 +376,7 @@ key = "poison_cloud"
 name = "Poison cloud"
 slot = "active"
 cost = 8
-aspect = "shadow"
+aspect = "air"
 cooldown_ms = 10000
 focus = 25
 move_scale = 0.6
@@ -398,7 +398,7 @@ key = "fireball"
 name = "Fireball"
 slot = "active"
 cost = 12
-aspect = "flame"
+aspect = "fire"
 cooldown_ms = 5000
 focus = 35
 move_scale = 0.5
@@ -410,14 +410,14 @@ speed = 900
 gravity = 0
 radius = 6
 lifetime_ms = 3000
-damage = { amount = 20, type = "flame", knockback = 40, stagger = 10 }
+damage = { amount = 20, type = "fire", knockback = 40, stagger = 10 }
 spawn = { weapon = [16, 4, -2] }
 spread = 0
 [[ability.step.projectile.on_hit]]
 [ability.step.projectile.on_hit.area]
 shape = { sphere = { radius = 96 } }
 origin = "impact"
-damage = { amount = 30, type = "flame", knockback = 120, stagger = 15 }
+damage = { amount = 30, type = "fire", knockback = 120, stagger = 15 }
 effects = [ { status = "burn", duration_ms = 3000, magnitude = 6, max_stacks = 1, stacking = "refresh", target = "area" } ]
 falloff = "linear"
 max_targets = 8
@@ -513,7 +513,7 @@ name = "Quake"
 slot = "active"
 cost = 0
 creature = true
-aspect = "stone"
+aspect = "ground"
 cooldown_ms = 9000
 move_scale = 0.2
 interrupt = "on_stagger"
@@ -523,7 +523,7 @@ at_ms = 300
 shape = { cylinder = { radius = 150, height = 96 } }
 origin = { aim = 700 }
 delay_ms = 1300
-damage = { amount = 70, type = "stone", knockback = 300, stagger = 60 }
+damage = { amount = 70, type = "ground", knockback = 300, stagger = 60 }
 falloff = "none"
 max_targets = 8
 requires_los = false

@@ -1315,7 +1315,7 @@ mod tests {
         // The archetypes with the content's words, and no way back to an empty list.
         assert!(run.says("ironclad  colossus  plate"), "{:?}", run.said());
         assert!(run.says("A wall of plate with a hammer."));
-        assert!(run.says("stone: hammer, shield bash, shield wall, stomp, fortify"));
+        assert!(run.says("ground: hammer, shield bash, shield wall, stomp, fortify"));
         assert!(
             run.state
                 .find("Back")

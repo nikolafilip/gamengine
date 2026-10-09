@@ -34,13 +34,15 @@ const LIGHT_SCALE: f32 = 2.0;
 const MIN_LIGHT: f32 = 0.35;
 const MAX_LIGHT: f32 = 1.6;
 
-/// Element colours of the aspect ring (MATRIX.md 5 order: flame, shadow, storm, frost, stone).
-pub const ASPECT_COLOURS: [[f32; 3]; 5] = [
+/// Element colours of the aspect ring (MATRIX.md 5 order: fire, water, grass, electric,
+/// ground, air).
+pub const ASPECT_COLOURS: [[f32; 3]; 6] = [
     [1.0, 0.42, 0.10],
-    [0.50, 0.22, 0.80],
+    [0.30, 0.55, 1.0],
+    [0.35, 0.80, 0.30],
     [1.0, 0.90, 0.20],
-    [0.40, 0.85, 1.0],
     [0.62, 0.50, 0.34],
+    [0.85, 0.95, 1.0],
 ];
 
 /// Where models come from when the store does not have them: a blocking source for the
@@ -440,7 +442,7 @@ impl Avatars {
                 crouched: false,
                 frame,
                 armour,
-                aspects: 1 << (i % 5),
+                aspects: 1 << (i % 6),
                 status: 0,
                 model,
                 distance: (origin - camera).length(),
@@ -582,7 +584,7 @@ pub fn stall_boxes(stall: &gm_net::control::StallEntry, boxes: &mut Vec<EntityDr
     };
     let wood = [0.42, 0.28, 0.16];
     // The cloth takes its colour from the stall's id, so neighbours differ.
-    let cloth = ASPECT_COLOURS[(stall.id.unsigned_abs() % 5) as usize].map(|v| 0.35 + 0.55 * v);
+    let cloth = ASPECT_COLOURS[(stall.id.unsigned_abs() % 6) as usize].map(|v| 0.35 + 0.55 * v);
     push(c + f * 36.0, 10.0, 46.0, 1.0, 30.0, wood);
     push(c + f * 36.0, 13.0, 49.0, 30.0, 33.0, [0.55, 0.40, 0.25]);
     for (sf, sr) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {

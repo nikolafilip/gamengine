@@ -1,6 +1,6 @@
 # Character Matrix
 
-Status: v2, 2026-10-06 (v1 was Phase 3). This document is the contract for point-buy
+Status: v3, 2026-10-09 (v2 2026-10-06, v1 Phase 3; the six elements of section 5 are v3, section 14). This document is the contract for point-buy
 characters, the type matrix and the damage pipeline. v2 (section 13): the character's own
 thirty attribute points apart from the kit's budget, wider bands and seven times the health,
 the range as the weapon's, the trainer and the dummy. `gm-core::matrix` and `gm-core::build` mirror it; when they disagree,
@@ -84,35 +84,48 @@ honest middle. The table is the "weapon triangle" half of the matrix.
 
 ## 5. Elements and aspects
 
-Five elements. A build has one or two **aspects** (the first is free, the second costs 10
-points). Aspects are the build's defensive element types **and** gate which elemental
-abilities it may slot (an ability tagged Flame needs the Flame aspect).
+Six elements (v3, 2026-10-09; v1 and v2 had five in a pentagram, section 14). A build has
+**none, one or two aspects** (the first is free, the second costs 10 points). Aspects are
+the build's defensive element types **and** gate which elemental abilities it may slot (an
+ability tagged Fire needs the Fire aspect). **No aspect is neutral**: the body takes 1× from
+every element, and slots nothing elemental.
 
-The matrix is a pentagram: every element beats exactly two and loses to exactly two, and
-resists itself. Order **Flame, Shadow, Storm, Frost, Stone**: element *i* beats *i + 1* and
-*i + 3* (mod 5).
+The matrix is the well-known one (the chart everybody has played against), with **Air** for
+its Flying, cut to the six types below and with its two immunities turned into resists
+(principle 4). It is deliberately lopsided: an element may beat one and be beaten by two,
+and pairs are neutral; what holds is that **every element beats at least one, is beaten by
+at least one, and no element stands more than one step from even** (beats + resists −
+beaten − resisted, over the other five). Attacker by row, defending aspect by column:
 
-| Attack \ Aspect | Flame | Shadow | Storm | Frost | Stone |
+| Attack \ Aspect | Fire | Water | Grass | Electric | Ground | Air |
+|---|---|---|---|---|---|---|
+| Fire | 0.5 | 0.5 | **2** | 1 | 1 | 1 |
+| Water | **2** | 0.5 | 0.5 | 1 | **2** | 1 |
+| Grass | 0.5 | **2** | 0.5 | 1 | **2** | 0.5 |
+| Electric | 1 | **2** | 0.5 | 0.5 | 0.5 | **2** |
+| Ground | **2** | 1 | 0.5 | **2** | 1 | 0.5 |
+| Air | 1 | 1 | **2** | 0.5 | 1 | 1 |
+
+Readings: fire burns grass; water drowns fire and washes the ground away; grass drinks the
+water and splits the ground; lightning strikes the water and whatever flies; the ground
+smothers fire and takes the lightning; the wind tears the grass. The chart's immunities
+(lightning into the ground, the ground into what flies) are 0.5 here.
+
+| | beats | beaten by | resists | resisted by | net |
 |---|---|---|---|---|---|
-| Flame | 0.5 | **2** | 0.5 | **2** | 0.5 |
-| Shadow | 0.5 | 0.5 | **2** | 0.5 | **2** |
-| Storm | **2** | 0.5 | 0.5 | **2** | 0.5 |
-| Frost | 0.5 | **2** | 0.5 | 0.5 | **2** |
-| Stone | **2** | 0.5 | **2** | 0.5 | 0.5 |
+| Fire | 1 | 2 | 1 | 1 | −1 |
+| Water | 2 | 2 | 1 | 1 | 0 |
+| Grass | 2 | 2 | 3 | 2 | +1 |
+| Electric | 2 | 1 | 1 | 2 | 0 |
+| Ground | 2 | 2 | 1 | 2 | −1 |
+| Air | 1 | 1 | 2 | 1 | +1 |
 
-Readings: light burns away shadow and melts ice; darkness swallows the flash and seeps into
-stone; wind snuffs fire and lightning shatters ice; cold stills the dark and splits rock;
-earth smothers fire and grounds the storm.
-
-**Stacking.** Against a dual-aspect defender the two multipliers multiply: Flame into
-Shadow + Frost is **4×**; Flame into Storm + Stone is **0.25×**. In a balanced five-element
-matrix exactly five of the ten pairs can share a predator, so the pairs come in two shapes:
-- **two apart** in the pentagram order (Flame + Storm, Shadow + Frost, Storm + Stone,
-  Frost + Flame, Stone + Shadow): one **4× hole**, two 0.25× walls, two neutral;
-- **adjacent** (Flame + Shadow, Shadow + Storm, Storm + Frost, Frost + Stone, Stone + Flame):
-  no hole, one 0.25× wall, four neutral.
-
-Spiky or safe is the build choice; both cost 10 points, both still eat the physical table.
+**Stacking.** Against a dual-aspect defender the two multipliers multiply. Four of the
+fifteen pairs have a **4× hole** (a predator of both): Fire + Electric (Ground), Fire +
+Ground (Water), Water + Ground (Grass), Water + Air (Electric). Every pair but Water +
+Electric, Electric + Air and Ground + Air has at least one **0.25× wall**; Grass + Air walls
+two (Grass and Ground). Spiky or safe is the build choice; both cost 10 points, both still
+eat the physical table. Neutral is the third choice: no hole, no wall, and no element to cast.
 
 Physical packets ignore this table; elemental packets ignore the armour-class table.
 
@@ -243,7 +256,7 @@ Build {
   frame:        Colossus | Striker | Caster | Infiltrator       free
   attributes:   STR AGI CON INT SPR, each 5..=25                 Σ(attr − 5) ≤ 30, the character's own
   armour:       Cloth | Leather | Mail | Plate                   0 / 4 / 8 / 12
-  aspects:      1..=2 of Flame Shadow Storm Frost Stone          0 / 10
+  aspects:      0..=2 of Fire Water Grass Electric Ground Air    0 / 10 (none: neutral)
   kit:          primary, secondary, guard (optional), up to 4 actives   Σ ability cost
 }
 armour + aspects + kit ≤ 40 (the kit's budget); unspent is allowed.
@@ -253,7 +266,7 @@ Rules enforced by `gm-core::build::validate`:
 - every slot holds a distinct ability of the matching slot type (primary, secondary, guard,
   active); an ability's `aspect` requirement must be in the build's aspects;
 - at most one ability per cooldown group;
-- the attribute floor and cap, the thirty points, the kit's budget, no duplicate aspects.
+- the attribute floor and cap, the thirty points, the kit's budget, at most two aspects.
 
 A rejected build never enters the zone. A stored build the rules no longer take (the v1
 presets had 56–68 attribute points, and a bolt in the secondary slot) is **repaired** by the
@@ -335,10 +348,18 @@ Measured 2026-10-01 (v1 content, three seeds × 60 s, 8 v 8, offline): ironclad 
 plate, Stone is 0.25× into Frost + Shadow, and a hasted caster kites a plate colossus
 indefinitely. Its counter-counter is the third leg, or a teammate with Flame.
 
+v3 (section 14) keeps the cycle with the six elements: Water is 2× into the ironclad's
+Ground and the ironclad's Ground is 0.5× into Water + Air; the blade wears Water, so the
+frostweaver's shards are 0.5× into it as before. The arena gate (`gm-bot/tests/arena.rs`)
+re-run on the v3 content (2026-10-09, three seeds × 60 s, 8 v 8, offline): ironclad : blade
+**34 : 12** (2.8); frostweaver : ironclad **50 : 1** (50); blade : frostweaver **21 : 12**
+(1.8); mirror 34 : 28. The second leg is harder still than in v1: Water is 2× into Ground and
+ignores plate, and the ironclad's stomp into Water + Air is halved.
+
 ## 12. Decisions and review log
 
 **Proposed by Phase 3 (director to confirm or change):** the attribute set and ranges
-(section 2), the pentagram of five elements (section 5), the kind × class table (4.1), the
+(section 2), the pentagram of five elements (section 5; six since v3, section 14), the kind × class table (4.1), the
 formulas of section 6, the exact-100 budget (section 9). Everything here is tuned in
 playtests; the structure (two tables, multiplicative layers, three structural bypasses) is
 what the code depends on.
@@ -407,3 +428,36 @@ Done, as proposed and accepted ("do it all as you proposed"):
 Numbers measured after the change are in PLAN.md 11.10 and section 11 (re-run). The
 director's call still open: the fight length he wants in play (the tempo and these numbers
 are the knobs, GM.md 3).
+
+## 14. v3 (2026-10-09): the elements everybody knows
+
+The director: "take the basic elements from Pokémon and their weaknesses, they are well known
+already"; of the candidate sets, the classic core plus three (Fire, Water, Grass, Electric,
+Ground, Flying), "loose immunity, just 0.5 instead; flying we should call air"; then "maybe
+also have no elements as neutral (normal) with no strengths or weaknesses". The sets were
+searched by machine: every five- and six-type subset of the chart in which each type beats
+one and is beaten by one, ranked by how far the best and worst stood apart; the six chosen
+are the most recognisable of the sets within one step of even. The matchups are the chart's
+numbers unchanged, the names are plain words, and a matchup chart is a game rule.
+
+Done:
+- section 5: six elements, the table and the pair shapes; `Element` is a table, not a
+  formula; `Aspects` 0..=2, none neutral (`validate` no longer refuses an empty set; the
+  character page says so; no ring at a neutral body's feet);
+- the old five re-mapped: Flame → Fire, Frost → Water, Storm → Electric, Stone → Ground,
+  Shadow → Air (the blink, the vanishing, the dart and the cloud are on the wind; the shade,
+  the musketeer and the frostweaver's second aspect). The blade, the captain and the
+  sentinel wear **Water**, not Fire: they have no element to cast, their aspect is a
+  defence, and Fire would have made the frostweaver's shards 2× into them and broken the
+  cycle of section 11. The trainer keeps Fire. The catalysts keep their names
+  (`catalyst/umbra` is Grass now) and `catalyst/zephyr` joins for Air;
+- the damage types are nine (`DamageType`: the three kinds and the six elements), so the
+  edge arrays of ITEMS.md 3 are nine wide: `PLAYER_VERSION` 6 (ITEMS.md 4); the snapshot's
+  `aspects` are six bits: `PROTOCOL_VERSION` 16 (PROTOCOL.md 28);
+- the bot's counter-pick follows the new table (mender counters a Water + Air frostweaver:
+  Electric is its 4× hole).
+
+Open: nobody casts Fire among the presets (the firebolt and the fireball are slotted by
+nobody; that was so before) and nothing at all is Grass yet (the catalyst `umbra` is its
+only content); whether the blade's Water stays or the blade goes neutral is the director's
+to play. The arena gate: see section 11.
