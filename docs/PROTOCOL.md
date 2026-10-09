@@ -1,6 +1,6 @@
 # Wire Protocol
 
-Status: v14 (the crouch seen, section 26; v13 and before as the sections say; v9 after Phase 14: the ability a stance belongs to, section 21; v8 of Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
+Status: v17 (the off hand and the Taunt's source, section 29; v16 the six elements, section 28; v15 the RPG body's facing, section 27; v14 the crouch seen, section 26; v13 and before as the sections say; v9 after Phase 14: the ability a stance belongs to, section 21; v8 of Phase 14: what a body holds, `Look`, and the pack's prop keys, section 20; v7 of Phase 12: two types for the control stream's two directions, parties, lines through the hub and a trade asked for, section 19; v6 of Phase 11: buying at a stall and wearing, section 18; v5 of Phase 9: reports, section 16; v4 of Phase 8: WebTransport as a second carrier, section 15; v3 of Phase 7: companions
 and command, section 14; v2 of Phase 3 with the reliable messages of Phases 4 and 6, sections
 12 and 13). `gm-net` implements exactly this document; the test vectors in section 2
 are unit tests. Decisions from PLAN.md 2.1, 2.3 and 11.3 are binding here. When the code and this
@@ -189,10 +189,11 @@ Own block (never delta-encoded: it is small and the client must adopt it exactly
 | stamina | uvar | whole points |
 | focus | uvar | whole points |
 | status_count | 4 | 0..=8 |
-| per status: status | 4 | `Status` index (MATRIX.md 8) |
+| per status: status | 5 | `Status` index (MATRIX.md 8; 4 bits until v17) |
 | per status: remaining | uvar | frame ticks left, relative to `last_input_tick` |
 | per status: magnitude | svar | `round(magnitude × 16)` |
 | per status: stacks | 3 | |
+| per status: source | uvar | v17: the entity that applied it (0: nobody). A Taunt's is who the body is turned to (MATRIX.md 8) |
 | guns | 1 | v11: 1 for a gun build (MODES.md 3.8), then for the primary and the secondary each `magazine` (uvar) and `reserve` (uvar), and 1 bit: the one in hand is being reloaded |
 | kits | uvar | v12: the kits carried (MODES.md 11.3), then 1 bit: a kit is in use |
 
@@ -211,7 +212,7 @@ Entity record:
 | anim | 8 (+ uvar) | ANIM. When the stance is a script's (windup 3, swing 4, recovery 5, cast 10), the **acting ability** follows as a uvar: the `AbilityId` of the script (the pack's index and one). ANIM is set when either changes (v9, section 21) |
 | health | uvar | HEALTH |
 | flags | 10 | FLAGS. bit 0 alive, 1 on ground, 2 guarding (block held), 3 dashing, 4 jump held, 5 script running, 6 parry window or whiff recovery, 7 commanding (in the command stance; own entity only), 8 crouched (MODES.md 3.5; v14, every body), 9 in the RPG mode (MODES.md 5.1; v15, every body) |
-| status | 16 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras) |
+| status | 24 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras); 16 bits until v17 (`STATUS_BITS`) |
 
 Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infiltrator), `team`
 2 bits (0 none), `aspects` 6 bits (a bit per element, MATRIX.md 5; v16, none is neutral), `armour` 2 bits (cloth,
@@ -866,3 +867,17 @@ in the simulation's snapshots:
   Water, Grass, Electric, Ground, Air). All six clear is a neutral body. Nothing else on the
   wire changes; the elements' indices moved, so a v15 client would read the wrong colours
   and the wrong bit widths, and the version byte keeps it out.
+
+## 29. Changes in v17 (the colossus's arms, 2026-10-09)
+
+`PROTOCOL_VERSION` 17 (MATRIX.md 16, LOOK.md 6.5):
+
+- `Look` gains **`off: u16`**: the prop in the off hand, an index into the pack's `props`
+  like `held` (`NONE` for nothing). The zone chooses it: the prop of the build's **guard**
+  ability (a shield for a shield wall), else nothing; a gun build's is `NONE`.
+- The own block's `status` index is **five** bits (seventeen statuses: `Taunt` is 16) and
+  every status carries its **`source`** (uvar): the entity that applied it, which the
+  mover reads on both sides to turn a taunted body to its taunter. An entity record's
+  `status` mask is **24** bits (`gm_net::snapshot::STATUS_BITS`).
+- Nothing else changes; a v16 client would read the own block's statuses one bit short, and
+  the version byte keeps it out.

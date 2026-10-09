@@ -212,6 +212,10 @@ impl Companion {
                 });
             }
         }
+        // Taunted (MATRIX.md 8): the taunter is the one to fight while it lasts.
+        if let Some(by) = s.taunted_by() {
+            self.target = Some(by);
+        }
         let target = self.target.and_then(|id| s.body(id)).filter(|b| b.alive);
         if let Some(t) = target
             && self.fighter.sees(s, t)

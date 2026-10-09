@@ -124,7 +124,8 @@ Parameters: `status`, `duration`, `magnitude`, `max_stacks`, `stacking` (`Refres
 
 Initial status set: `Slow`, `Haste`, `Root`, `Bleed`, `Burn`, `Chill` (stacks to `Freeze`),
 `Shock` (interrupts), `Silence`, `Stagger`, `Fortify`, `Weaken`, `Expose` (grants `ARMOR`
-bypass to attackers), `Regen`, `Stealth`. Exact semantics, stacking and immunity windows are
+bypass to attackers), `Regen`, `Stealth`; Phase 15d added `Knockdown` and `Launched` (MODES.md 4.5), v5 of
+MATRIX.md `Taunt` (a body turned to the status's source and held there; MATRIX.md 16). Exact semantics, stacking and immunity windows are
 MATRIX.md 8. Statuses act through multipliers on `MoveVars`, resources and damage packets.
 `Stealth` reduces the distance at which the entity is included in snapshots; **nothing ever
 bypasses PVS culling** (PLAN.md 8).

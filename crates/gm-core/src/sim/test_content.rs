@@ -1750,6 +1750,105 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 0,
             ),
         ),
+        // The colossus's greatsword (MATRIX.md 16): a hammer's pace, a blade's sweep.
+        def(
+            "greatsword",
+            Primary,
+            2,
+            None,
+            ability(
+                44,
+                "Greatsword",
+                1100,
+                0,
+                0,
+                0.45,
+                Interrupt::OnStagger,
+                vec![(
+                    0,
+                    match assisted(
+                        melee(
+                            r,
+                            96.0,
+                            120.0,
+                            320,
+                            90,
+                            520,
+                            packet(95, Slash, 240.0, 35),
+                            4,
+                            0.8,
+                        ),
+                        30.0,
+                    ) {
+                        Verb::MeleeArc(m) => Verb::MeleeArc(MeleeArc {
+                            half_height: 44.0,
+                            hit_stop: r.ms_to_ticks(40),
+                            ..m
+                        }),
+                        v => v,
+                    },
+                )],
+                r,
+            ),
+        ),
+        // The colossus's bellow (MATRIX.md 16): Taunt on every enemy within 256 u.
+        def(
+            "bellow",
+            Active,
+            8,
+            None,
+            ability(
+                45,
+                "Bellow",
+                12000,
+                0,
+                20,
+                0.5,
+                Interrupt::OnStagger,
+                vec![
+                    (
+                        200,
+                        Verb::AreaEffect(AreaEffect {
+                            shape: Shape::Cylinder {
+                                radius: 256.0,
+                                height: 128.0,
+                            },
+                            origin: Origin::SelfFeet,
+                            delay: 0,
+                            duration: 0,
+                            interval: 0,
+                            damage: None,
+                            effects: vec![status(
+                                Status::Taunt,
+                                2500,
+                                1.0,
+                                StackRule::Refresh,
+                                1,
+                                StatusTarget::Area,
+                                r,
+                            )],
+                            falloff: Falloff::None,
+                            max_targets: 8,
+                            requires_los: true,
+                            exclude_actor: true,
+                        }),
+                    ),
+                    (
+                        200,
+                        Verb::ApplyStatus(status(
+                            Status::Fortify,
+                            4000,
+                            0.3,
+                            StackRule::Refresh,
+                            1,
+                            StatusTarget::Actor,
+                            r,
+                        )),
+                    ),
+                ],
+                r,
+            ),
+        ),
     ];
     let mut pack = ContentPack {
         abilities,
@@ -1804,10 +1903,10 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 attributes: Attributes::new(15, 5, 20, 5, 10),
                 armour: ArmourClass::Plate,
                 aspects: Aspects::one(Element::Ground),
-                primary: id(&pack, "hammer"),
+                primary: id(&pack, "greatsword"),
                 secondary: id(&pack, "shield_bash"),
                 guard: Some(id(&pack, "shield_wall")),
-                actives: vec![id(&pack, "stomp"), id(&pack, "fortify")],
+                actives: vec![id(&pack, "stomp"), id(&pack, "bellow")],
             },
         },
         NamedBuild {

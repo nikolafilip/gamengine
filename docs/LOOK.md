@@ -365,6 +365,22 @@ last 22% of it. The stranger sees the `RELOAD` stance (13.3). Offline, `--prop K
 the first person is the fitting room of the view model: the prop in the view with the
 stride's bob; `R` held works a reload over and over.
 
+### 6.5 The off hand (2026-10-09)
+
+The director: the colossus wants "an oversized sword ... and also shield, so it looks a bit
+more appropriate" (MATRIX.md 16). A body holds a second prop in its **left hand**: the
+`prop` of its build's **guard** ability (CONTENT.md 3.1; `shield_wall` holds `shield`), else
+nothing; a worn item does not reach the off hand yet (a shield item is a template with
+`held = "left"` for a later phase). On the wire it is **`Look.off`** (protocol v17, section
+29 there), chosen by the zone with `held` and sent in the same `Look`; a gun build's is
+`NONE`. It is drawn as `held` is (6.3), by the wearer's skinning matrix of **`prop_l`** at
+that bone's pivot times **the left grip** (`gm_model::pose::grip_left`, `prop_attach_left`):
+the right grip mirrored through the body's plane, which is not a rotation, so it is the
+right grip turned half round about the business end instead; a shield's face (+Z of its
+model, the back of the fist's side) then stands out of the back of the hand, and the
+guard stance, which already raises the left forearm across the chest, raises the shield in
+front. The fitting room draws it: `gm-tools content look shield --left`.
+
 ## 7. The purse: silver and gold
 
 The director dropped copper (2026-10-03). The ledger's integer is **silver**; **100 silver =

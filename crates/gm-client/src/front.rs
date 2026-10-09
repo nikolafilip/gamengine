@@ -1162,7 +1162,7 @@ mod tests {
     fn content() -> Answer {
         let pack = test_content::pack(TickRate::COMBAT);
         let mut blurbs = vec![String::new(); pack.builds.len()];
-        blurbs[0] = "A wall of plate with a hammer.".into();
+        blurbs[0] = "A wall of plate behind a shield.".into();
         blurbs[2] = "Ice from a distance.".into();
         Ok(PlayerResponse::Content { pack, blurbs })
     }
@@ -1314,8 +1314,8 @@ mod tests {
         assert_eq!(run.front.screen, Screen::NewCharacter);
         // The archetypes with the content's words, and no way back to an empty list.
         assert!(run.says("ironclad  colossus  plate"), "{:?}", run.said());
-        assert!(run.says("A wall of plate with a hammer."));
-        assert!(run.says("ground: hammer, shield bash, shield wall, stomp, fortify"));
+        assert!(run.says("A wall of plate behind a shield."));
+        assert!(run.says("ground: greatsword, shield bash, shield wall, stomp, bellow"));
         assert!(
             run.state
                 .find("Back")

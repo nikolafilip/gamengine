@@ -335,7 +335,7 @@ mod tests {
         ));
         assert!(mender.mends() && !mender.shoots());
         let ironclad = plan("ironclad");
-        assert_eq!(ironclad.reach(), 76.0);
+        assert_eq!(ironclad.reach(), 96.0);
         assert!(matches!(
             ironclad.guard,
             GuardPlan::Block {
@@ -347,7 +347,11 @@ mod tests {
             ironclad.actives[0],
             Some((_, Use::Burst { harmful: true, .. }))
         ));
-        assert!(matches!(ironclad.actives[1], Some((_, Use::Buff))));
+        // The bellow (MATRIX.md 16): a roar at the feet, used with an enemy in reach.
+        assert!(matches!(
+            ironclad.actives[1],
+            Some((_, Use::Burst { harmful: true, .. }))
+        ));
         let shade = plan("shade");
         assert!(shade.stealth);
         assert!(matches!(shade.actives[0], Some((_, Use::Blink { .. }))));

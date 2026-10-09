@@ -21,7 +21,7 @@ use crate::sim::mover::{
 use crate::sim::{
     CONTROL_WINDOW_MS, CREDIT_BURST, DRAIN_DEPTH, HISTORY_TICKS, MAX_FRAMES_PER_TICK,
     MAX_QUEUED_FRAMES, MAX_REWIND_TICKS, PROJECTILE_OWNER_GRACE, RESERVE_FRAMES, RESPAWN_MS,
-    REWIND_ALLOWANCE_TICKS, tick_delta,
+    REWIND_ALLOWANCE_TICKS, TEAM_WILD, tick_delta,
 };
 use crate::tick::{Tick, TickRate};
 use crate::trace::{CollisionWorld, Contents, Hull};
@@ -124,8 +124,8 @@ pub struct Player {
     /// A mind's frame for the next tick.
     next: Option<Input>,
     /// Diminishing returns on controls (MODES.md 4.5), per kind (knockdown, launched,
-    /// root): how many landed in a row, and the server tick of the last.
-    pub controls: [(u8, Tick); 3],
+    /// root, taunt): how many landed in a row, and the server tick of the last.
+    pub controls: [(u8, Tick); 4],
     /// The body the last executed frame aimed at (MODES.md 5.2): its health goes on the
     /// wire to this one.
     pub target: EntityId,
@@ -535,7 +535,7 @@ impl Zone {
             hold: false,
             unhurt: false,
             next: None,
-            controls: [(0, 0); 3],
+            controls: [(0, 0); 4],
             target: 0,
         };
         self.players.insert(id, p);
@@ -1831,6 +1831,17 @@ impl Zone {
 
     /// Put a status on `target` (MATRIX.md 8), scaling the duration by the target's factor.
     pub fn apply_status(&mut self, target: EntityId, source: EntityId, s: &ApplyStatus) {
+        // A taunt is for enemies (MATRIX.md 8): an ally in the roar is not turned by it.
+        if s.status == Status::Taunt {
+            let (Some(src), Some(t)) = (self.players.get(&source), self.players.get(&target))
+            else {
+                return;
+            };
+            let enemy = src.team() != t.team() || (t.team() == TEAM_WILD && src.party != t.party);
+            if !enemy {
+                return;
+            }
+        }
         let Some(t) = self.players.get_mut(&target) else {
             return;
         };
@@ -1850,6 +1861,7 @@ impl Zone {
             let kind = match s.status {
                 Status::Knockdown => 0,
                 Status::Launched => 1,
+                Status::Taunt => 3,
                 _ => 2,
             };
             let window = self.rate.ms_to_ticks(CONTROL_WINDOW_MS);

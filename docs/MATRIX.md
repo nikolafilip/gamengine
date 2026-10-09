@@ -1,6 +1,6 @@
 # Character Matrix
 
-Status: v3, 2026-10-09 (v2 2026-10-06, v1 Phase 3; the six elements of section 5 are v3, section 14). This document is the contract for point-buy
+Status: v5, 2026-10-09 (v4 the same day, section 15; v3 the six elements of section 5, section 14; v2 2026-10-06, v1 Phase 3; the colossus's arms and the Taunt are v5, section 16). This document is the contract for point-buy
 characters, the type matrix and the damage pipeline. v2 (section 13): the character's own
 thirty attribute points apart from the kit's budget, wider bands and seven times the health,
 the range as the weapon's, the trainer and the dummy. `gm-core::matrix` and `gm-core::build` mirror it; when they disagree,
@@ -237,9 +237,10 @@ The initial set of VOCABULARY.md 5.4 with resolved semantics. `m` is the magnitu
 | Stealth | included in snapshots only within `m` units (never past PVS) | Refresh |
 | Knockdown | on the ground (MODES.md 4.5): interrupts; no activation, guard or movement; hits land in full | Refresh |
 | Launched | as Knockdown, with a lift of `m` u/s straight up when it lands | Refresh |
+| Taunt | the body is turned to the slot's source (who applied it) and held there, tick by tick, while the source is on its wire; the view turns with the body on the client; a mind under it fights the source (gm-ai, gm-bot). Lands on enemies only (an ally in the roar is untouched). v5, section 16 | Refresh |
 
 **Diminishing returns on controls** (MODES.md 4.5, `gm_core::sim::CONTROL_WINDOW_MS`):
-Knockdown, Launched and an explicit Root are controls. The second of a kind within ten
+Knockdown, Launched, an explicit Root and Taunt are controls, each its own kind. The second of a kind within ten
 seconds of the last lasts half, the third does nothing; ten seconds after the last, the
 count is forgotten. Freeze's Root (Chill at its stacks) is not under them: Chill has its own
 immunity.
@@ -509,3 +510,40 @@ nobody and swings a staff at mail. The gate of section 11 on its three seeds: ir
 1.3, and the leg sits at noise level: a blade with the dash measured the same). Open: a Fire
 caster for the firebolt and the fireball nobody slots; Grass has no content; a mender
 measured in a mixed team rather than as a duelist.
+
+## 16. v5 (2026-10-09): the colossus's arms and the bellow
+
+The director: "can you make some oversized sword for our colossus class and also shield,
+so it looks a bit more appropriate. Maybe should have a some skill that affects certain
+range and causes all hostile players to focus/target/look at him, some kind of rage aggro
+skill?"
+
+Done:
+- **greatsword** (primary, 2; `props/greatsword.glb`, ours, 1.4 m of blade and a two-hand
+  grip, held in the one fist like the hammer): 95 slash, a 120° arc of 96 u, 320/90/520 ms,
+  1.1 s, four targets. The ironclad holds it; the **hammer** stays an ability and a weapon
+  template any build may slot under the weapon-fit rule, but no preset's. Slash where blunt
+  was: the ironclad now shreds cloth (×1.25) and glances off plate (×0.5) where the hammer
+  did the reverse, and nothing in its kit ignores a magic shield any more;
+- **the shield**: the off hand holds the prop of the build's **guard** ability (LOOK.md
+  6.5, `Look.off`, protocol v17): `shield_wall` carries `prop = "shield"`, a round shield
+  (`props/shield.glb`, ours) on `prop_l` with the left grip, raised in front in the guard
+  stance;
+- **bellow** (active, 8, no aspect, 12 s, 20 focus): a roar; every enemy within 256 u and
+  in sight is **Taunted** for 2.5 s (section 8: its body is turned to the roarer and held
+  there tick by tick, its view with it, and a bot's or a creature's mind fights the roarer),
+  and the roarer takes Fortify 30% for 4 s for the blows it asked for. A control, its own
+  kind under the diminishing returns (MODES.md 4.5). The **fortify** active stays in the
+  content for any Ground build; the ironclad's kit is stomp + bellow (12 + 2 + 2 + 6 + 10 +
+  8 = 40).
+
+Stored ironclads keep the hammer and the fortify they were saved with (both abilities stand
+at their places; a build the rules take is not repaired).
+
+Measured (the gate of section 11, `ironclad_beats_blade_and_frostweaver_beats_ironclad`,
+three seeds × 60 s, 8 v 8): ironclad : blade **31 : 10 (3.10)** (2.3 with the hammer);
+frostweaver : ironclad 46 : 5 (9.20) (51 : 1 before: the blade's slash into cloth gives the
+colossus a few kills the hammer's blunt did not); blade : frostweaver 22 : 16 (1.38),
+unchanged. The gate passes. The duelist brain classes the bellow as a burst at the feet and
+uses it in reach of an enemy; a taunted bot fights the roarer (gm-bot `nearest`, gm-ai
+companion and creature minds).

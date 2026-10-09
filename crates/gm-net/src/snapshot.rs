@@ -111,9 +111,14 @@ pub struct EntityState {
     pub health: Option<u16>,
     /// `flags`: `BITS` bits on the wire.
     pub flags: u16,
-    /// Active statuses, a bit per `gm_core::vocab::Status` index (cosmetic for others).
-    pub status: u16,
+    /// Active statuses, a bit per `gm_core::vocab::Status` index (cosmetic for others);
+    /// `STATUS_BITS` of them on the wire.
+    pub status: u32,
 }
+
+/// The width of an entity's status mask on the wire (PROTOCOL.md 5): room for the
+/// seventeen statuses of MATRIX.md 8 and a few more.
+pub const STATUS_BITS: u32 = 24;
 
 /// One of the own entity's statuses (PROTOCOL.md 5, own block).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +130,9 @@ pub struct StatusWire {
     /// Magnitude at 1/16 resolution.
     pub magnitude: f32,
     pub stacks: u8,
+    /// Who put it there (an entity id; 0 for nobody): a Taunt turns the body to its source
+    /// on both sides of the wire (MATRIX.md 8).
+    pub source: u32,
 }
 
 /// The own entity's resources and statuses, sent in full every snapshot (they are small and
@@ -327,10 +335,11 @@ fn write_own(w: &mut BitWriter, own: &OwnState) {
     let n = own.statuses.len().min(MAX_OWN_STATUSES);
     w.write_bits(n as u64, 4);
     for s in &own.statuses[..n] {
-        w.write_bits(s.status as u64 & 0xf, 4);
+        w.write_bits(s.status as u64 & 0x1f, 5);
         w.write_uvar(s.remaining as u64);
         w.write_svar((s.magnitude * MAGNITUDE_SCALE).round() as i64);
         w.write_bits(s.stacks.min(7) as u64, 3);
+        w.write_uvar(s.source as u64);
     }
     match own.guns {
         None => w.write_bits(0, 1),
@@ -356,15 +365,17 @@ fn read_own(r: &mut BitReader<'_>) -> Result<OwnState, NetError> {
     }
     let mut statuses = Vec::with_capacity(n);
     for _ in 0..n {
-        let status = r.read_bits(4)? as u8;
+        let status = r.read_bits(5)? as u8;
         let remaining = r.read_uvar32()?;
         let magnitude = r.read_svar32()? as f32 / MAGNITUDE_SCALE;
         let stacks = r.read_bits(3)? as u8;
+        let source = r.read_uvar32()?;
         statuses.push(StatusWire {
             status,
             remaining,
             magnitude,
             stacks,
+            source,
         });
     }
     let guns = if r.read_bits(1)? == 1 {
@@ -533,7 +544,7 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
         w.write_bits(e.flags as u64, flags::BITS);
     }
     if m & mask::STATUS != 0 {
-        w.write_bits(e.status as u64, 16);
+        w.write_bits(e.status as u64, STATUS_BITS);
     }
 }
 
@@ -623,7 +634,7 @@ fn read_entity(
         e.flags = r.read_bits(flags::BITS)? as u16;
     }
     if m & mask::STATUS != 0 {
-        e.status = r.read_bits(16)? as u16;
+        e.status = r.read_bits(STATUS_BITS)? as u32;
     }
     Ok(e)
 }
@@ -667,6 +678,7 @@ mod tests {
                 remaining: 300,
                 magnitude: 0.25,
                 stacks: 1,
+                source: 7,
             }],
             guns: Some(GunsWire {
                 magazine: [1, 8],

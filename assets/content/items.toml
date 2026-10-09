@@ -29,6 +29,15 @@ layers = ["shard", "core", "catalyst", "frame", "gem"]
 model = "sword"
 fit = { turn = [90, 0, 0], scale = 0.6 }
 
+# The colossus's greatsword (MATRIX.md 16), ours (`gm-tools content synth greatsword`): in
+# metres already, held like the hammer.
+[[template]]
+id = "greatsword"
+kind = "weapon"
+strikes = "slash"
+layers = ["shard", "core", "catalyst", "frame", "gem"]
+model = "greatsword"
+
 [[template]]
 id = "dagger"
 kind = "weapon"

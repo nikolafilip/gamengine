@@ -142,8 +142,12 @@ way the low-poly packs come) gets a texture made for it: every flat colour becom
 a file with some textured and some flat primitives is refused: it must be one or the
 other). Our own hammer, musket and pistol are made this way (`gm-tools content synth`).
 
-Two-handed holds, sheathing to the back out of a fight, and a left-hand prop are all `held`
-values a later phase can act on; v1 draws every prop in the right hand, always.
+Two-handed holds and sheathing to the back out of a fight are `held` values a later phase
+can act on. **The off hand** (2026-10-09, LOOK.md 6.5): an ability may carry a `prop` whatever
+its slot, and the prop of a build's **guard** ability is drawn in the left hand (`shield_wall`
+holds `shield`, ours: `gm-tools content synth shield`, built in hand space already, its face
+along +Y). `gm-tools content look KEY --left` is the fitting room for it, and offline
+`gm-client --offline --prop KEY --off KEY` holds one in each hand.
 
 ### 3.2 Creatures and official avatars (Phase 15)
 

@@ -288,6 +288,18 @@ impl Looks {
         }
         NONE
     }
+
+    /// What a body holds in its off hand (LOOK.md 6.5): the prop of its guard ability (by
+    /// the ability's place in the pack), else nothing. A shield wall holds a shield.
+    pub fn off(&self, guard: Option<usize>) -> u16 {
+        if let Some(i) = guard
+            && let Some(a) = self.abilities.get(i)
+            && let Some(prop) = &a.prop
+        {
+            return self.prop_index(prop);
+        }
+        NONE
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +361,10 @@ tint = [0.8, 0.8, 0.85]
         assert_eq!(looks.held(Some("cuirass"), Some(0)), 0);
         assert_eq!(looks.held(Some("nothing"), None), NONE);
         assert_eq!(looks.held(None, Some(99)), NONE);
+        // The off hand (LOOK.md 6.5): the guard's prop; a guard without one, or none, is empty.
+        assert_eq!(looks.off(Some(1)), 1);
+        assert_eq!(looks.off(Some(2)), NONE);
+        assert_eq!(looks.off(None), NONE);
         assert_eq!(looks.templates[1].held, "back");
         assert_eq!(looks.templates[0].fit.turn, [0.0, 90.0, 0.0]);
         assert_eq!(looks.materials[0].tint, Some([0.8, 0.8, 0.85]));

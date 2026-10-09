@@ -236,7 +236,8 @@ the gun: a roll through the shot.
 
 Two statuses (MATRIX.md 8, VOCABULARY.md 5.4): `Knockdown(ms)` (the body is on the ground,
 cannot act or guard, takes hits in full, rises when the time is out) and `Launched(ms)`
-(in the air, same, and falls into a `Knockdown` of half the time). **Diminishing
+(in the air, same, and falls into a `Knockdown` of half the time); since MATRIX.md 16 a
+third, `Taunt(ms)` (the body and its view turned to the taunter and held). **Diminishing
 returns**: the second control of the same kind on one body within 10 s lasts half, the
 third does nothing and the body is immune to that kind for 10 s. The party frame shows the
 mark on the target so a gank is timed, not spammed.
