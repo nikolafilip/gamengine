@@ -194,6 +194,11 @@ phone() {
     || { echo "FAIL: the client saw no finger (touch=$(f touch "$done_line"))"; status=1; }
   [[ "$(f ui_scale "$done_line")" == 3 ]] && echo "OK: the UI is drawn at scale 3 on the phone" \
     || { echo "FAIL: the UI is at scale $(f ui_scale "$done_line") on the phone, not 3"; status=1; }
+  # Before any finger (the first report comes before the touch at 6 s): the page's coarse
+  # pointer alone has the client drawing for a finger, so the characters are not tiny
+  # until the first tap (WEB.md 3.5, 2026-10-08 night).
+  [[ "$(f touch "$first")" == 1 && "$(f ui_scale "$first")" == 3 ]] && echo "OK: the UI is a finger's (scale 3) from the first frame" \
+    || { echo "FAIL: before the first tap the UI was touch=$(f touch "$first") at scale $(f ui_scale "$first"), not a finger's at 3"; status=1; }
   [[ -n "$(f yaw "$first")" && "$(f yaw "$first")" != "$(f yaw "$done_line")" ]] && echo "OK: the swipe turned the camera ($(f yaw "$first") to $(f yaw "$done_line"))" \
     || { echo "FAIL: the camera did not turn (yaw $(f yaw "$first") then $(f yaw "$done_line"))"; status=1; }
   [[ -n "$(f pos "$first")" && "$(f pos "$first")" != "$(f pos "$done_line")" ]] && echo "OK: the stick walked the body ($(f pos "$first") to $(f pos "$done_line"))" \

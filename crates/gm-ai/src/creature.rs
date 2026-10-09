@@ -192,6 +192,12 @@ impl Creature {
             };
         }
 
+        // Taunted (MATRIX.md 8): the taunter is the one to fight while it lasts, and it
+        // tops the table after.
+        if let Some(by) = s.taunted_by() {
+            self.add(by, SIGHT_THREAT);
+            self.target = Some(by);
+        }
         let Some(t) = self.target.and_then(|id| s.body(id)).filter(|b| b.alive) else {
             // Nothing to fight: back to the post (a reset puts the body there at once; this
             // is for a creature that merely strayed).

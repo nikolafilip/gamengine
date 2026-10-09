@@ -63,8 +63,8 @@ character wears is MODELS.md's.
   (`ItemSummary.fits` false, the words last in `does`: the inventory, the storage, a stall's
   listing, a trade), so the bag offers no Wear for it and takes no drop of it on the weapon
   slot. Armour, parts and stacks fit everyone. The rule is the build's, not the item's: the
-  item stays unbound, sells to whoever holds one, and the same sword fits a blade and a
-  captain. A respec that leaves a worn weapon behind keeps it on until it is taken off (an
+  item stays unbound, sells to whoever holds one, and the same sword fits every build whose
+  abilities hold a sword. A respec that leaves a worn weapon behind keeps it on until it is taken off (an
   open point; the trainer could take it off at the `Respawned`).
 - A companion (a hired avatar, a recruit) fights in **nothing** in v1 (9).
 
@@ -92,7 +92,7 @@ MATRIX.md 7 ends `damage = max(1, round(base × type × layer × guard × gear))
 gear = (2000 + A.dealt[t]) / (2000 + D.taken[t])
 ```
 
-`t` is the packet's damage type (Slash, Pierce, Blunt, Flame, Shadow, Storm, Frost, Stone);
+`t` is the packet's damage type (Slash, Pierce, Blunt, Fire, Water, Grass, Electric, Ground, Air; nine since MATRIX.md v3);
 `dealt` is the edge of the attacker's worn weapon and `taken` the edge of the defender's worn
 armour on that type, per mille, each at most 250 (an item's whole edge is capped at 250 by
 `gm-content`). **A place counts for half of what its item's edge says** (principle 2): an
@@ -123,7 +123,7 @@ material's edge into the kinds of damage the item is for, and into no other:
 
 | Layer | In a weapon (`dealt`) | In an armour (`taken`) |
 |---|---|---|
-| core | the physical kind the template **strikes** with | what the template **guards** against: `physical` (Slash, Pierce, Blunt) or `elements` (the five) |
+| core | the physical kind the template **strikes** with | what the template **guards** against: `physical` (Slash, Pierce, Blunt) or `elements` (the six) |
 | catalyst | its element | its element |
 | shard, frame, gem | every kind the core and the catalyst reach | the same |
 
@@ -137,7 +137,7 @@ material's edge into the kinds of damage the item is for, and into no other:
 
 (`dagger` is new in Phase 11: the dagger ability had no weapon.) Nothing in the rule names
 an ability or a build. A hammer does nothing for a sword's blows; a staff with an ember
-catalyst sharpens the staff's own blow (blunt) and every flame the wearer casts; a cuirass
+catalyst sharpens the staff's own blow (blunt) and every fire the wearer casts; a cuirass
 turns blows and a robe turns the elements, and choosing between them is a choice.
 
 The best the content allows (boss scale 55, dragonbone 60, a catalyst 30, whalebone 45, two
@@ -145,10 +145,10 @@ opals 60):
 
 | Item | Whole edge | Does |
 |---|---|---|
-| sword, ember catalyst | 250 | slash +11.0%, flame +9.5% |
+| sword, ember catalyst | 250 | slash +11.0%, fire +9.5% |
 | crossbow | 220 | pierce +11.0% |
 | cuirass | 220 | physical −9.9% |
-| robe, rime catalyst | 250 | frost −11.1%, other elements −9.9% |
+| robe, rime catalyst | 250 | water −11.1%, other elements −9.9% |
 | sword of iron and oak ("standard") | 40 | slash +2.0% |
 
 A craft, and an operator's grant, take only parts of layers the template has room for ("a
@@ -156,7 +156,7 @@ cuirass takes no catalyst"); `craft` checked only the counts before. A part an o
 has of a layer its template has no room for counts for nothing.
 
 The hub says an item in words as well as in numbers (`ItemSummary.what`, `.does`:
-`a weapon, 250 of 250`; `slash +11.0%`, `flame +9.5%`), composed by `gm-content` from the
+`a weapon, 250 of 250`; `slash +11.0%`, `fire +9.5%`), composed by `gm-content` from the
 same numbers the zone is given, with the scale of 3.1: a weapon's edge `e` is said as
 `e / 20` per cent more, an armour's as `100 × e / (2000 + e)` per cent less, to a tenth.
 Kinds of one group that share an edge are said together (`physical`, `elements`, or `other
@@ -210,7 +210,8 @@ become, not what they do.
 `HUB_VERSION` is 7 and `PLAYER_VERSION` 2 (11 and 4 since 2026-10-07: `items.quantity`,
 `GearReading.stacks`, `ZoneEconOp::Consume`, `HubNotice::Gear`, `ItemSummary.quantity`
 and `cap`; `StallBuy` answers `Gear`; `PLAYER_VERSION` 5 since 2026-10-08:
-`ItemSummary.fits`, section 2). The hub loads the content's looks beside the pack
+`ItemSummary.fits`, section 2; `PLAYER_VERSION` 6 since 2026-10-09: `ItemSummary.edge` is
+nine wide, MATRIX.md 14). The hub loads the content's looks beside the pack
 (`HubConfig.looks`) for the props the abilities hold. The requests of Phase 11:
 
 | Request | From | Answer | |

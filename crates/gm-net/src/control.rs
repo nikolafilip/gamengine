@@ -29,11 +29,13 @@ pub enum BodyKind {
 /// What a body holds and wears, as indices into the pack's `props` list the zone sent
 /// (LOOK.md 6.2; `NONE` for nothing). The indices are of that session's pack: a client
 /// reads an index past the list as `NONE`. `worn` is the armour overlay of Phase 16 and
-/// always `NONE` until then.
+/// always `NONE` until then. `off` (v17, LOOK.md 6.5) is the off hand: the prop of the
+/// build's guard ability (a shield), drawn in the left hand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Look {
     pub held: u16,
     pub worn: u16,
+    pub off: u16,
 }
 
 impl Look {
@@ -41,6 +43,7 @@ impl Look {
     pub const EMPTY: Look = Look {
         held: Look::NONE,
         worn: Look::NONE,
+        off: Look::NONE,
     };
 }
 
@@ -350,7 +353,9 @@ pub enum FromZone {
         /// (LOOK.md 6.2). The client finds the files; the zone never reads one.
         props: Vec<String>,
     },
-    /// The requested build was accepted (`Ok`) or refused with the reason.
+    /// The requested build was accepted and, under a hub, saved to it (`Ok`: worn now in
+    /// the world, at the next respawn in a team zone; MATRIX.md 9.1), or refused with the
+    /// reason; `worn here, but not saved: ...` when the zone took it and the hub did not.
     RespecResult(Result<(), String>),
     /// The pending build took effect (at the respawn); the client's prediction switches now.
     BuildApplied(Build),
@@ -822,6 +827,7 @@ mod tests {
                     look: Look {
                         held: (i % 7) as u16,
                         worn: Look::NONE,
+                        off: if i % 2 == 0 { 3 } else { Look::NONE },
                     },
                 })
                 .collect(),

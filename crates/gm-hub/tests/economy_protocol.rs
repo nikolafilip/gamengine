@@ -501,7 +501,7 @@ async fn the_economy_over_the_wire() {
         (listing, sword, 650)
     );
     assert_eq!(listings[0].item.place, PLACE_WEAPON);
-    assert_eq!(listings[0].item.edge, [40, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(listings[0].item.edge, [40, 0, 0, 0, 0, 0, 0, 0, 0]);
     // The viewer is an ironclad: the listing says its hands are not for this (ITEMS.md 2).
     assert!(!listings[0].item.fits);
     assert_eq!(

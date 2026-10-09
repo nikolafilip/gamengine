@@ -305,10 +305,11 @@ async fn stalls_snap_to_the_grid_and_sell_exactly_once() {
         econ.stall_open(rival, "stall_town", 4, 7).await,
         Err(EconError::State(_))
     ));
-    // One stall per character.
+    // One stall per character, said before the insert (a keeper asking again after a
+    // restart must not leave a constraint violation in the database log each second).
     assert!(matches!(
         econ.stall_open(seller, "stall_town", 5, 7).await,
-        Err(EconError::State(_))
+        Err(EconError::State(why)) if why == "you already have a stall"
     ));
     let rivals = econ.stall_open(rival, "stall_town", 5, 7).await.unwrap();
 

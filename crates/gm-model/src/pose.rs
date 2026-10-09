@@ -81,11 +81,34 @@ pub fn view_fit(f: &[f32; 7]) -> Mat4 {
     to_model * gltf * to_model.transpose()
 }
 
+/// The grip of the left hand (LOOK.md 6.5): the right one mirrored through the body's
+/// plane, so the business end stands forward and is tipped towards the elbow as it is on
+/// the right and the edge (+Y) follows the knuckles away from the elbow; the prop's face
+/// (+Z) then stands out of the back of the hand, where a shield's boss belongs. (A mirror
+/// is not a rotation: this is the right grip turned half round about the business end, a
+/// proper rotation that lays a blade's flat the other way, which no blade shows.)
+pub fn grip_left() -> Mat4 {
+    let (sin, cos) = GRIP_TILT_DEG.to_radians().sin_cos();
+    Mat4::from_cols(
+        glam::Vec4::new(cos, -sin, 0.0, 0.0),
+        glam::Vec4::new(sin, cos, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
+        glam::Vec4::W,
+    )
+}
+
 /// Where a held prop is drawn: the skinning matrix of `prop_r`, the translation to that
 /// bone's pivot, the grip.
 pub fn prop_attach(pivots: &[Vec3; BONES], skin: &[Mat4; BONES]) -> Mat4 {
     let at = crate::rig::bone::PROP_R;
     skin[at] * Mat4::from_translation(pivots[at]) * grip_right()
+}
+
+/// Where the off hand's prop is drawn (LOOK.md 6.5): as [`prop_attach`], on `prop_l`
+/// with the left grip.
+pub fn prop_attach_left(pivots: &[Vec3; BONES], skin: &[Mat4; BONES]) -> Mat4 {
+    let at = crate::rig::bone::PROP_L;
+    skin[at] * Mat4::from_translation(pivots[at]) * grip_left()
 }
 
 /// The skinning matrix of every bone: `D(bone) = D(parent) · T(pivot) · R · T(−pivot)`, with

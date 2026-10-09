@@ -65,7 +65,16 @@ fn arena_builds(placements: &[(&str, Vec3, f32)]) -> (BoxWorld, Zone, Vec<Entity
     let ids = placements
         .iter()
         .map(|&(name, o, y)| {
-            let build = zone.content.build(name).expect(name).clone();
+            // The ironclad as it was until MATRIX.md 16, for the tests of the hammer's
+            // blow and the fortify it ignores: the same body with the hammer and fortify.
+            let build = if name == "ironclad_hammer" {
+                let mut b = zone.content.build("ironclad").expect(name).clone();
+                b.primary = zone.content.find("hammer").unwrap();
+                b.actives[1] = zone.content.find("fortify").unwrap();
+                b
+            } else {
+                zone.content.build(name).expect(name).clone()
+            };
             zone.add_player_at(build, 0, o, y)
         })
         .collect();
@@ -670,9 +679,9 @@ fn stomp_pulses_once_damages_and_slows_everyone_in_range() {
         20,
     );
     let pb = zone.player(b).unwrap();
-    // 35 stone x 0.8 (INT 5), Stone into Flame is 2x, ward 0.02 * 5 = 0.10:
-    // 35 * 0.8 * 2 * 0.9 = 50.4 -> 50.
-    assert_eq!(pb.max_health() - pb.health, 50);
+    // 35 ground x 0.8 (INT 5), Ground into Water is 1x, ward 0.02 * 5 = 0.10:
+    // 35 * 0.8 * 1 * 0.9 = 25.2 -> 25.
+    assert_eq!(pb.max_health() - pb.health, 25);
     assert!(pb.mover.statuses.has(Status::Slow));
     assert!(
         (pb.mover.statuses.speed_scale() - 0.7).abs() < 1e-6,
@@ -719,7 +728,7 @@ fn frost_nova_chills_twice_and_a_shard_freezes() {
     let pb = zone.player(b).unwrap();
     assert_eq!(pb.mover.statuses.stacks(Status::Chill), 2);
     assert!((pb.mover.statuses.speed_scale() - 0.7).abs() < 1e-6);
-    // Frost into Stone is 2x and ignores plate: 30 * 1.4 (INT 20) * 2 * (1 - 0.2 ward) = 67.2 -> 67.
+    // Water into Ground is 2x and ignores plate: 30 * 1.4 (INT 20) * 2 * (1 - 0.2 ward) = 67.2 -> 67.
     assert_eq!(pb.max_health() - pb.health, 67);
     // The ice shard (the frostweaver's primary) adds the third stack: frozen (rooted),
     // chill cleared, immune after.
@@ -817,7 +826,7 @@ fn hammer_staggers_at_the_threshold_then_immunity_holds() {
     // 40 + 3 * 15 = 85): a blow every 66 ticks, the meter losing 20.6 between blows
     // (STAGGER_DECAY_PER_S 20), is 35, 49.4, 63.8, 78.1, 92.5: five hits.
     let (world, mut zone, ids) = arena_builds(&[
-        ("ironclad", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        ("ironclad_hammer", Vec3::new(0.0, 0.0, REST_Z), 0.0),
         ("blade", Vec3::new(55.0, 0.0, REST_Z), 180.0),
     ]);
     let (a, b) = (ids[0], ids[1]);
@@ -854,8 +863,8 @@ fn hammer_staggers_at_the_threshold_then_immunity_holds() {
 #[test]
 fn fortify_cuts_frost_but_not_the_hammer() {
     let (world, mut zone, ids) = arena_builds(&[
-        ("ironclad", Vec3::new(0.0, 0.0, REST_Z), 0.0),
-        ("ironclad", Vec3::new(55.0, 0.0, REST_Z), 180.0),
+        ("ironclad_hammer", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        ("ironclad_hammer", Vec3::new(55.0, 0.0, REST_Z), 180.0),
         ("frostweaver", Vec3::new(0.0, 200.0, REST_Z), 270.0),
     ]);
     let (a, b, c) = (ids[0], ids[1], ids[2]);
@@ -916,7 +925,7 @@ fn fortify_cuts_frost_but_not_the_hammer() {
         40,
     );
     let pb = zone.player(b).unwrap();
-    // Ice shard 50 x 1.4 (INT 20) x 2 (frost into stone) x 0.8 (ward 0.20) x 0.6 (fortify)
+    // Ice shard 50 x 1.4 (INT 20) x 2 (water into ground) x 0.8 (ward 0.20) x 0.6 (fortify)
     // = 67.2 -> 67.
     assert_eq!(
         before - pb.health,
@@ -968,12 +977,12 @@ fn respec_applies_at_the_next_respawn() {
     assert!(pb.alive);
     assert_eq!(pb.sheet.build.frame, ArchetypeFrame::Caster);
     assert_eq!(pb.sheet.build.armour, ArmourClass::Cloth);
-    assert!(pb.sheet.build.aspects.contains(Element::Frost));
+    assert!(pb.sheet.build.aspects.contains(Element::Water));
     assert_eq!(pb.health, pb.sheet.derived.health);
     assert_eq!(pb.health, 500 + 40 * 5);
     assert_eq!(
         pb.sheet.build.aspects,
-        Aspects::two(Element::Frost, Element::Shadow)
+        Aspects::two(Element::Water, Element::Air)
     );
 }
 
@@ -1255,9 +1264,9 @@ fn a_quake_is_a_telegraph_you_can_walk_out_of() {
         }
         let p = zone.player(victim).unwrap();
         if stays {
-            // 70 stone x 1.16 (INT 14) x 2 (the Warden's might) x 2 (Stone into Flame)
-            // x 0.9 (ward 0.10) = 292.3.
-            assert_eq!(p.max_health() - p.health, 292);
+            // 70 ground x 1.16 (INT 14) x 2 (the Warden's might) x 1 (Ground into Water)
+            // x 0.9 (ward 0.10) = 146.2.
+            assert_eq!(p.max_health() - p.health, 146);
         } else {
             assert_eq!(p.health, p.max_health(), "at {:?}", p.mover.mv.origin);
         }
@@ -1378,8 +1387,8 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
     assert_eq!(swing(sword, cuirass), 60, "a wash");
     // An edge on another type is no edge on this one.
     let mut frost = Gear::NONE;
-    frost.dealt[DamageType::Frost as usize] = 250;
-    frost.taken[DamageType::Frost as usize] = 250;
+    frost.dealt[DamageType::Water as usize] = 250;
+    frost.taken[DamageType::Water as usize] = 250;
     assert_eq!(swing(frost, frost), 60);
     // What a zone is told is kept within the cap.
     let mut wild = Gear::NONE;
@@ -1471,9 +1480,9 @@ fn worn_gear_moves_damage_by_its_own_type_and_at_once() {
         (sum(HitKind::Projectile), sum(HitKind::Dot))
     };
     let mut flame = Gear::NONE;
-    flame.dealt[DamageType::Flame as usize] = 250;
+    flame.dealt[DamageType::Fire as usize] = 250;
     let mut ward = Gear::NONE;
-    ward.taken[DamageType::Flame as usize] = 250;
+    ward.taken[DamageType::Fire as usize] = 250;
     let (bolt_plain, burn_plain) = burn(Gear::NONE, Gear::NONE);
     let (bolt_armed, burn_armed) = burn(flame, Gear::NONE);
     let (bolt_warded, burn_warded) = burn(Gear::NONE, ward);
@@ -1568,17 +1577,17 @@ fn gear_is_taken_when_a_blow_is_made_and_a_fight_is_damage() {
         let pb = zone.player(b).unwrap();
         pb.max_health() - pb.health
     };
-    let stone = DamageType::Stone as usize;
+    let stone = DamageType::Ground as usize;
     let (mut hammer, mut robe) = (Gear::NONE, Gear::NONE);
     hammer.dealt[stone] = 250;
     robe.taken[stone] = 250;
-    // 50.4 unrounded (the stomp test above).
-    assert_eq!(stomp(Gear::NONE, Gear::NONE), 50);
-    assert_eq!(stomp(hammer, Gear::NONE), 57, "50.4 x 1.125");
-    assert_eq!(stomp(Gear::NONE, robe), 45, "50.4 / 1.125");
+    // 25.2 unrounded (the stomp test above).
+    assert_eq!(stomp(Gear::NONE, Gear::NONE), 25);
+    assert_eq!(stomp(hammer, Gear::NONE), 28, "25.2 x 1.125");
+    assert_eq!(stomp(Gear::NONE, robe), 22, "25.2 / 1.125");
     assert_eq!(
         stomp(sword, Gear::NONE),
-        50,
+        25,
         "a sword's edge is not a stomp's"
     );
 
@@ -1677,7 +1686,7 @@ fn gear_is_taken_when_a_blow_is_made_and_a_fight_is_damage() {
             })
             .expect("a pulse")
     };
-    let flame = DamageType::Flame as usize;
+    let flame = DamageType::Fire as usize;
     let (mut staff, mut ward) = (Gear::NONE, Gear::NONE);
     staff.dealt[flame] = 250;
     ward.taken[flame] = 250;
@@ -2977,9 +2986,18 @@ fn at(target: u32, input: Input) -> Input {
     Input { target, ..input }
 }
 
+/// A crossbow build (range 600 by content) for the aimed-bolt tests: the frostweaver's
+/// kit with the bow for the shard, since no preset ships a crossbow (MATRIX.md 15).
+fn crossbow_build(pack: &ContentPack) -> Build {
+    let mut b = pack.build("frostweaver").unwrap().clone();
+    b.primary = pack.find("crossbow").unwrap();
+    b.validate(pack).unwrap();
+    b
+}
+
 #[test]
 fn a_target_action_turns_the_body_and_leads_the_bolt_within_range_and_sight() {
-    // The marksman (crossbow, range 600 by content) faces away from a blade 400 u off
+    // The crossbow (range 600 by content) faces away from a blade 400 u off
     // that walks across its line; with the blade as the target the bolt is aimed by the
     // zone, led to where the blade will be, and lands.
     let pack = test_content::pack(RATE);
@@ -2988,12 +3006,7 @@ fn a_target_action_turns_the_body_and_leads_the_bolt_within_range_and_sight() {
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(400.0, -60.0, REST_Z), 90.0),
     ]);
-    let shooter = zone.add_player_at(
-        pack.build("marksman").unwrap().clone(),
-        1,
-        Vec3::new(0.0, 0.0, REST_Z),
-        180.0,
-    );
+    let shooter = zone.add_player_at(crossbow_build(&pack), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
     let runner = zone.add_player_at(
         pack.build("blade").unwrap().clone(),
         2,
@@ -3074,12 +3087,7 @@ fn a_target_out_of_range_or_out_of_sight_is_not_aimed_at() {
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(900.0, 0.0, REST_Z), 180.0),
     ]);
-    let shooter = zone.add_player_at(
-        pack.build("marksman").unwrap().clone(),
-        1,
-        Vec3::new(0.0, 0.0, REST_Z),
-        180.0,
-    );
+    let shooter = zone.add_player_at(crossbow_build(&pack), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
     let far = zone.add_player_at(
         pack.build("blade").unwrap().clone(),
         2,
@@ -3120,12 +3128,7 @@ fn a_target_out_of_range_or_out_of_sight_is_not_aimed_at() {
         (Vec3::new(0.0, 0.0, REST_Z), 180.0),
         (Vec3::new(300.0, 0.0, REST_Z), 180.0),
     ]);
-    let shooter = zone.add_player_at(
-        pack.build("marksman").unwrap().clone(),
-        1,
-        Vec3::new(0.0, 0.0, REST_Z),
-        180.0,
-    );
+    let shooter = zone.add_player_at(crossbow_build(&pack), 1, Vec3::new(0.0, 0.0, REST_Z), 180.0);
     let hidden = zone.add_player_at(
         pack.build("blade").unwrap().clone(),
         2,
@@ -3390,6 +3393,184 @@ fn a_frostweavers_shard_lands_on_a_walking_target_seen_a_round_trip_ago() {
         hits(&zone, HitKind::Projectile),
         1,
         "the shard lands on the walker"
+    );
+}
+
+/// MATRIX.md 8, 16: a bellow taunts every enemy in earshot and no ally. A taunted body
+/// is turned to the roarer and held there whatever its frames say, until the taunt is
+/// out; the second within ten seconds lasts half (MODES.md 4.5).
+#[test]
+fn a_briar_hurts_everyone_in_it_and_feeds_only_its_own_side() {
+    // MATRIX.md 17, VOCABULARY.md 5.4: the briar's packets are friendly fire like every
+    // packet; its Regen is `target = "allies"`, the shaman's side alone, the shaman too.
+    let world = BoxWorld::floor();
+    let spawns = vec![
+        Spawn {
+            origin: Vec3::new(0.0, 0.0, REST_Z),
+            yaw: 0.0,
+            team: 1,
+        },
+        Spawn {
+            origin: Vec3::new(0.0, 0.0, REST_Z),
+            yaw: 0.0,
+            team: 2,
+        },
+    ];
+    let mut zone = Zone::new(RATE, 1, spawns, test_content::pack(RATE));
+    let shaman = zone.content.build("shaman").unwrap().clone();
+    let blade = zone.content.build("blade").unwrap().clone();
+    let caster = zone.add_player_at(shaman, 1, Vec3::new(0.0, 0.0, REST_Z), 0.0);
+    // The patch lands where the caster looks: pitch 30 down puts it 80 u ahead (the
+    // sanctuary's test above); a circle of 140 u holds all three.
+    let ally = zone.add_player_at(blade.clone(), 1, Vec3::new(80.0, 60.0, REST_Z), 0.0);
+    let enemy = zone.add_player_at(blade, 2, Vec3::new(80.0, -60.0, REST_Z), 0.0);
+    let still = input(0.0, 0.0, 0);
+    // The patch is placed when the cast's step fires (300 ms in), where the caster looks
+    // then: the caster keeps looking down.
+    let down = Input {
+        pitch: 30.0,
+        ..still
+    };
+    let cast = Input { ability: 1, ..down };
+    tick(
+        &mut zone,
+        &world,
+        &[(caster, cast), (ally, still), (enemy, still)],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(caster, down), (ally, still), (enemy, still)],
+        40,
+    );
+    assert_eq!(zone.areas().len(), 1, "the briar stands");
+    assert!(
+        hits(&zone, HitKind::Area) >= 3,
+        "the thorns hurt all three: {} area hits, the patch at {:?}",
+        hits(&zone, HitKind::Area),
+        zone.areas()[0].origin
+    );
+    let has = |id: EntityId| zone.player(id).unwrap().mover.statuses.has(Status::Regen);
+    assert!(has(ally), "the ally in the patch has Regen");
+    assert!(has(caster), "the shaman in its own patch too");
+    assert!(!has(enemy), "the enemy in it has none");
+}
+
+#[test]
+fn a_bellow_turns_enemies_to_the_roarer_and_not_allies() {
+    let world = BoxWorld::floor();
+    let spawns = vec![
+        Spawn {
+            origin: Vec3::new(0.0, 0.0, REST_Z),
+            yaw: 0.0,
+            team: 1,
+        },
+        Spawn {
+            origin: Vec3::new(0.0, 0.0, REST_Z),
+            yaw: 0.0,
+            team: 2,
+        },
+    ];
+    let mut zone = Zone::new(RATE, 1, spawns, test_content::pack(RATE));
+    let mut ironclad = zone.content.build("ironclad").unwrap().clone();
+    ironclad.actives[1] = zone.content.find("bellow").unwrap();
+    let blade = zone.content.build("blade").unwrap().clone();
+    let roarer = zone.add_player_at(ironclad, 1, Vec3::new(0.0, 0.0, REST_Z), 0.0);
+    let ally = zone.add_player_at(blade.clone(), 1, Vec3::new(0.0, 120.0, REST_Z), 0.0);
+    let enemy = zone.add_player_at(blade.clone(), 2, Vec3::new(200.0, 0.0, REST_Z), 0.0);
+    let far = zone.add_player_at(blade, 2, Vec3::new(400.0, 0.0, REST_Z), 0.0);
+    // Everybody looks east (yaw 0); the roarer bellows (active slot 2).
+    let east = input(0.0, 0.0, 0);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (roarer, active(0.0, 0.0, 2)),
+            (ally, east),
+            (enemy, east),
+            (far, east),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(roarer, east), (ally, east), (enemy, east), (far, east)],
+        30,
+    );
+    let e = zone.player(enemy).unwrap();
+    assert!(
+        e.mover.statuses.has(Status::Taunt),
+        "the enemy in earshot is taunted: roarer {:?} {:?} areas {}",
+        zone.player(roarer).unwrap().mover.script,
+        zone.player(roarer)
+            .unwrap()
+            .mover
+            .statuses
+            .active()
+            .collect::<Vec<_>>(),
+        zone.areas().len()
+    );
+    assert_eq!(e.mover.statuses.taunted_by(), Some(roarer));
+    // Its frames say east; its body faces west, to the roarer.
+    assert!(
+        (e.mover.yaw - 180.0).abs() < 1.0,
+        "turned to the roarer: yaw {}",
+        e.mover.yaw
+    );
+    assert!(e.mover.lock_yaw.is_some());
+    assert!(
+        !zone.player(ally).unwrap().mover.statuses.has(Status::Taunt),
+        "an ally is not"
+    );
+    assert!(
+        !zone.player(far).unwrap().mover.statuses.has(Status::Taunt),
+        "nor a body out of earshot"
+    );
+    assert!(
+        zone.player(roarer)
+            .unwrap()
+            .mover
+            .statuses
+            .has(Status::Fortify),
+        "the roarer braces"
+    );
+    // When the taunt is out (2.5 s by the blade's duration factor), the frames' yaw
+    // holds again.
+    let left = tick_delta(
+        e.mover.statuses.get(Status::Taunt).unwrap().until,
+        e.last_input_tick,
+    )
+    .max(0) as usize;
+    run(
+        &mut zone,
+        &world,
+        &[(roarer, east), (ally, east), (enemy, east), (far, east)],
+        left + 3,
+    );
+    let e = zone.player(enemy).unwrap();
+    assert!(!e.mover.statuses.has(Status::Taunt));
+    assert!(e.mover.yaw.abs() < 1.0, "free again: yaw {}", e.mover.yaw);
+    // The second taunt within ten seconds lasts half (MODES.md 4.5).
+    let s = zone.content.abilities[zone.content.find("bellow").unwrap() as usize]
+        .ability
+        .steps[0]
+        .clone();
+    let crate::vocab::Verb::AreaEffect(a) = &s.verb else {
+        panic!("the roar is an area")
+    };
+    let full = a.effects[0].duration;
+    zone.apply_status(enemy, roarer, &a.effects[0]);
+    let e = zone.player(enemy).unwrap();
+    let left = tick_delta(
+        e.mover.statuses.get(Status::Taunt).unwrap().until,
+        e.last_input_tick,
+    );
+    let scaled = (full as f32 * e.sheet.derived.status_duration).round() as i32;
+    assert!(
+        (left - scaled / 2).abs() <= 1,
+        "half: {left} of {scaled} ({full} by the verb)"
     );
 }
 

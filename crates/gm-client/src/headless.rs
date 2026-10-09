@@ -42,6 +42,23 @@ pub fn run(opts: &Options) -> Result<(), Error> {
     let (w, h) = (opts.width.max(1), opts.height.max(1));
     let mut renderer = Renderer::new(&gpu, FORMAT, &mesh, (w, h));
     let mut avatars = Avatars::new(&gpu, &mut renderer.characters, opts, &bsp, None)?;
+    // `--prop KEY` and `--off KEY` (CONTENT.md 9): the crowd armed from the bundle, as the
+    // windowed client arms it, so a screenshot shows a prop in each hand.
+    if opts.prop.is_some() || opts.off.is_some() {
+        let mut content = crate::content::Content::load(&crate::install_root().join(&opts.assets));
+        let mut slot_of = |key: &Option<String>| {
+            let key = key.as_ref()?;
+            let slot = content.prop(key, |model| {
+                Some(renderer.characters.add_model(&gpu, model))
+            });
+            if slot.is_none() {
+                log::warn!("--prop/--off {key}: the bundle has no such prop");
+            }
+            slot
+        };
+        avatars.crowd_prop = slot_of(&opts.prop);
+        avatars.crowd_off = slot_of(&opts.off);
+    }
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
         size: wgpu::Extent3d {

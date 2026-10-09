@@ -124,6 +124,12 @@ pub enum ClientEvent {
     LeftSaved {
         character: CharacterId,
     },
+    /// The save that followed an accepted respec has been answered (MATRIX.md 9.1): the
+    /// build the player chose is the hub's now, or it is not and the player is told why.
+    RespecSaved {
+        id: EntityId,
+        result: Result<(), String>,
+    },
     /// The hub says this character must leave (logout, operator).
     HubKick {
         character: CharacterId,

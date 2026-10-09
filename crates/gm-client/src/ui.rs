@@ -79,6 +79,8 @@ pub type TipLines = Vec<(String, [f32; 4])>;
 
 pub const PLATE: [f32; 4] = [0.06, 0.06, 0.08, 0.88];
 pub const EDGE: [f32; 4] = [0.36, 0.36, 0.46, 1.0];
+/// A drag of this many units across the paperdoll turns the body once around.
+pub const TURN_DOTS: f32 = 240.0;
 pub const WELL: [f32; 4] = [0.02, 0.02, 0.03, 0.90];
 pub const BUTTON: [f32; 4] = [0.17, 0.17, 0.24, 1.0];
 pub const BUTTON_HOT: [f32; 4] = [0.26, 0.26, 0.37, 1.0];
@@ -87,6 +89,9 @@ pub const PICKED: [f32; 4] = [0.22, 0.26, 0.40, 1.0];
 pub const TEXT: [f32; 4] = [0.92, 0.92, 0.88, 1.0];
 pub const FAINT: [f32; 4] = [0.60, 0.60, 0.62, 1.0];
 pub const OFF: [f32; 4] = [0.40, 0.40, 0.42, 1.0];
+/// A row that cannot be taken (`RowMark::Off`): dimmer than a button that is off, so
+/// that it is told from a plain row's faint cells at a glance.
+pub const OFF_DIM: [f32; 4] = [0.33, 0.33, 0.36, 1.0];
 pub const FOCUS: [f32; 4] = [0.90, 0.75, 0.20, 1.0];
 pub const WARN: [f32; 4] = [0.95, 0.55, 0.15, 1.0];
 
@@ -341,6 +346,9 @@ pub struct UiState {
     drag_ended: Option<Drag>,
     /// What is hovered and since when (seconds): the tooltip's clock.
     hover: Option<(String, f32)>,
+    /// A button that is off was pressed (a tap on a phone), and when: it says why it is
+    /// off for a moment after (`button_or`).
+    explained: Option<(String, f32)>,
     /// Bodies the screen wants drawn into it this frame (LOOK.md 5), for the app.
     pub paperdolls: Vec<Paperdoll>,
     /// The paperdoll's turn, by a drag across it, in turns.
@@ -365,6 +373,9 @@ pub struct Paperdoll {
     pub rect: Rect,
     /// Turned this many turns from facing the viewer.
     pub turn: f32,
+    /// Drawn in the open, over whatever is behind the screen (the selector of CLIENT.md
+    /// 4.2): no well under it.
+    pub open: bool,
 }
 
 impl UiState {
@@ -472,6 +483,9 @@ pub enum RowMark {
     Struck,
     /// It is in (one of several that may be): lit like the row picked.
     Picked,
+    /// It cannot be taken as things stand (CLIENT.md 4.6): drawn faint, a click on it
+    /// picks nothing; the cursor still finds it, so a line can say why.
+    Off,
 }
 
 /// A thing in a slot of a grid (LOOK.md 2.4).
@@ -645,8 +659,10 @@ impl<'a, C: Canvas> Ui<'a, C> {
     /// The height of a panel whose inside is `inner` high (see `panel`).
     pub fn panel_height(&self, inner: f32, titled: bool) -> f32 {
         let pad = 8.0 * self.scale;
+        // What `panel` takes over the room inside: its title in the title face, which
+        // is taller than a line of text where the bundle has one.
         let top = if titled {
-            pad + self.line() + 2.0 * self.scale
+            pad * 0.75 + self.title_line() + pad * 0.75
         } else {
             pad
         };
@@ -802,6 +818,46 @@ impl<'a, C: Canvas> Ui<'a, C> {
         )
     }
 
+    /// A gold edge round `r`, over what was drawn there: the tab that is shown, the
+    /// preset a draft is (CLIENT.md 4.3). Drawn after the widget it marks.
+    pub fn mark(&mut self, r: Rect) {
+        self.canvas.layer(LAYER_INK);
+        self.outline(r, FOCUS);
+        let t = self.scale;
+        self.outline(r.inset(t), FOCUS);
+    }
+
+    /// The height of a line in the title face at this scale.
+    pub fn title_line(&self) -> f32 {
+        let (line, _) = self.canvas.metrics(self.title_face);
+        line * self.scale
+    }
+
+    /// A line in the title face, in the middle of `r`'s width (a name over a body,
+    /// CLIENT.md 4.2); cut to the width. Returns the line's height.
+    pub fn heading(&mut self, r: Rect, color: [f32; 4], text: &str) -> f32 {
+        let s = self.scale;
+        let mut shown = String::new();
+        for c in text.chars() {
+            shown.push(c);
+            if self.canvas.width_in(self.title_face, s, &shown) > r.w {
+                shown.pop();
+                break;
+            }
+        }
+        if shown.len() < text.len() {
+            self.clipped.push(text.to_string());
+        }
+        let tw = self.canvas.width_in(self.title_face, s, &shown);
+        let x = (r.x + (r.w - tw) * 0.5).round();
+        self.canvas.layer(LAYER_INK);
+        self.canvas
+            .text_in(self.title_face, x, r.y, s, color, &shown);
+        let h = self.title_line();
+        self.note(SeenKind::Label, text, Rect::new(x, r.y, tw, h));
+        h
+    }
+
     /// A line of text, cut to what fits in `w` pixels when `w` is positive.
     pub fn label(&mut self, x: f32, y: f32, w: f32, color: [f32; 4], text: &str) {
         let shown: String = if w > 0.0 {
@@ -937,8 +993,42 @@ impl<'a, C: Canvas> Ui<'a, C> {
 
     /// A button that can be off: drawn faint, takes no click and no focus.
     pub fn button_if(&mut self, r: Rect, text: &str, enabled: bool) -> bool {
+        self.button_or(r, text, if enabled { None } else { Some("") })
+    }
+
+    /// A button that is off for a reason (`Some(why)`), else on: off, it says why beside
+    /// the pointer while the pointer rests on it (after the tooltip's 150 ms) and for two
+    /// seconds after a press on it (a tap on a phone), so that a click on a grey button
+    /// never looks like a click that did nothing. An empty reason says nothing.
+    pub fn button_or(&mut self, r: Rect, text: &str, off: Option<&str>) -> bool {
         let s = self.scale;
         let id = format!("button:{text}");
+        let enabled = off.is_none();
+        if let Some(why) = off.filter(|why| !why.is_empty()) {
+            let hot = r.contains(self.input.cursor);
+            let time = self.input.time;
+            if hot && self.input.pressed {
+                self.state.explained = Some((id.clone(), time));
+            }
+            let tapped =
+                matches!(&self.state.explained, Some((k, at)) if *k == id && time - at < 2.0);
+            let mut rested = false;
+            if hot {
+                let since = match &self.state.hover {
+                    Some((k, t)) if *k == id => *t,
+                    _ => time,
+                };
+                self.hovered = Some(id.clone());
+                self.state.hover = Some((id.clone(), since));
+                rested = time - since >= 0.15;
+            }
+            if (rested || tapped) && self.tooltip.is_none() {
+                self.tooltip = Some((
+                    Rect::new(self.input.cursor.0, self.input.cursor.1, 0.0, 0.0),
+                    vec![(why.to_string(), TEXT)],
+                ));
+            }
+        }
         let (mut pressed, mut fill, mut ink) = (false, BUTTON, TEXT);
         let mut piece = "button_off";
         let mut focused = false;
@@ -986,6 +1076,9 @@ impl<'a, C: Canvas> Ui<'a, C> {
         );
         if enabled {
             self.note(SeenKind::Button, text, r);
+        } else if let Some(why) = off.filter(|why| !why.is_empty()) {
+            // Off, and the reason it would give: a label, so that no script finds it.
+            self.note(SeenKind::Label, &format!("{text} (off: {why})"), r);
         }
         pressed
     }
@@ -1277,7 +1370,8 @@ impl<'a, C: Canvas> Ui<'a, C> {
             if over {
                 self.row_over = Some((name.to_string(), i));
             }
-            if self.input.pressed && over {
+            let off = marks.get(i) == Some(&RowMark::Off);
+            if self.input.pressed && over && !off {
                 // A double click activates the row both of its presses were on.
                 let here = Some((id.clone(), i));
                 if self.input.double && self.state.last_row == here {
@@ -1289,7 +1383,7 @@ impl<'a, C: Canvas> Ui<'a, C> {
             }
             if i == *selected || marks.get(i) == Some(&RowMark::Picked) {
                 self.canvas.rect(rr.x, rr.y, rr.w, rr.h, PICKED);
-            } else if over {
+            } else if over && !off {
                 self.canvas.rect(rr.x, rr.y, rr.w, rr.h, BUTTON);
             }
             for (c, cell) in row.iter().enumerate() {
@@ -1304,6 +1398,7 @@ impl<'a, C: Canvas> Ui<'a, C> {
                 let ink = match mark {
                     RowMark::Marked => WARN,
                     RowMark::Struck => OFF,
+                    RowMark::Off => OFF_DIM,
                     RowMark::Plain | RowMark::Picked if c == 0 => TEXT,
                     RowMark::Plain | RowMark::Picked => FAINT,
                 };
@@ -2003,22 +2098,38 @@ impl<'a, C: Canvas> Ui<'a, C> {
     /// A rectangle a body is drawn into by the app (LOOK.md 5): a dark well now, the body
     /// over it on layer 1; a drag across it turns the body.
     pub fn paperdoll(&mut self, r: Rect) {
+        self.paperdoll_in(r, true);
+    }
+
+    /// The same body in the open: no well, drawn over what is behind the screen (the
+    /// map behind the selector, CLIENT.md 4.2).
+    pub fn paperdoll_open(&mut self, r: Rect) {
+        self.paperdoll_in(r, false);
+    }
+
+    fn paperdoll_in(&mut self, r: Rect, well: bool) {
         let s = self.scale;
         let id = "paperdoll";
         let (_, held, _) = self.clicked(id, r);
-        if held && self.input.down {
+        // A drag across the body turns it: one full turn per `TURN_DOTS` units dragged.
+        // Not on the frame of the press itself, whose last cursor is wherever the
+        // pointer (or the last finger) was before.
+        if held && self.input.down && !self.input.pressed {
             self.state.paperdoll_turn +=
-                (self.input.cursor.0 - self.input.last_cursor.0) / (120.0 * s);
+                (self.input.cursor.0 - self.input.last_cursor.0) / (TURN_DOTS * s);
         }
-        self.canvas.layer(LAYER_PLATES);
-        if !self.canvas.frame(r.x, r.y, r.w, r.h, "well", s, [1.0; 4]) {
-            self.canvas.rect(r.x, r.y, r.w, r.h, WELL);
-            self.outline(r, EDGE);
+        if well {
+            self.canvas.layer(LAYER_PLATES);
+            if !self.canvas.frame(r.x, r.y, r.w, r.h, "well", s, [1.0; 4]) {
+                self.canvas.rect(r.x, r.y, r.w, r.h, WELL);
+                self.outline(r, EDGE);
+            }
+            self.canvas.layer(LAYER_INK);
         }
-        self.canvas.layer(LAYER_INK);
         self.state.paperdolls.push(Paperdoll {
             rect: r.inset(2.0 * s),
             turn: self.state.paperdoll_turn,
+            open: !well,
         });
         self.note(SeenKind::Label, "paperdoll", r);
     }
@@ -2271,11 +2382,21 @@ pub mod tests {
     /// panel (the first plate drawn) and inside the frame, a button's text fits its
     /// button, and no two things one can click overlap.
     pub fn tidy(canvas: &Recorder, state: &UiState, need: f32) {
+        tidy_in(canvas, state, need, false);
+    }
+
+    /// As `tidy`; `whole` for a screen laid out across the frame (the selector,
+    /// CLIENT.md 4.2): then the frame is its panel and the height rule is the frame's.
+    pub fn tidy_in(canvas: &Recorder, state: &UiState, need: f32, whole: bool) {
         let scale = scale_for(canvas.size, need, 0);
-        let panel = canvas.rects.first().expect("a panel was drawn").0;
         let (w, h) = canvas.size;
+        let panel = if whole {
+            Rect::new(0.0, 0.0, w, h)
+        } else {
+            canvas.rects.first().expect("a panel was drawn").0
+        };
         assert!(
-            panel.h <= PANEL_HIGH * scale + 0.5,
+            whole || panel.h <= PANEL_HIGH * scale + 0.5,
             "{}: a panel of {} units is taller than the scale rule knows of",
             state.screen,
             panel.h / scale
@@ -2432,6 +2553,49 @@ pub mod tests {
             keys: keys.to_vec(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_drag_across_the_paperdoll_turns_it_by_how_far_it_moved() {
+        let mut canvas = Recorder::new(1920.0, 1080.0);
+        let mut st = UiState::default();
+        let r = Rect::new(600.0, 100.0, 700.0, 800.0);
+        let mut input = UiInput {
+            cursor: (900.0, 500.0),
+            last_cursor: (0.0, 0.0),
+            pressed: true,
+            down: true,
+            ..Default::default()
+        };
+        let s = scale_for(canvas.size(), 100.0, 0);
+        let show = |canvas: &mut Recorder, st: &mut UiState, input: &UiInput| {
+            let mut ui = Ui::begin(canvas, st, input, "equip", 100.0);
+            ui.paperdoll(r);
+            ui.end();
+        };
+        show(&mut canvas, &mut st, &input);
+        assert_eq!(st.paperdoll_turn, 0.0, "the press itself turns nothing");
+        input.pressed = false;
+        input.last_cursor = input.cursor;
+        input.cursor = (900.0 + TURN_DOTS * s * 0.5, 500.0);
+        show(&mut canvas, &mut st, &input);
+        assert!(
+            (st.paperdoll_turn - 0.5).abs() < 1e-5,
+            "half a turn: {}",
+            st.paperdoll_turn
+        );
+        // The frame after, with the pointer still: no more turning.
+        input.last_cursor = input.cursor;
+        show(&mut canvas, &mut st, &input);
+        assert!((st.paperdoll_turn - 0.5).abs() < 1e-5);
+        input.down = false;
+        input.released = true;
+        input.cursor = (100.0, 100.0);
+        show(&mut canvas, &mut st, &input);
+        assert!(
+            (st.paperdoll_turn - 0.5).abs() < 1e-5,
+            "let go: the body stays"
+        );
     }
 
     #[test]

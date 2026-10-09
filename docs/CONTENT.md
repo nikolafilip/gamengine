@@ -142,8 +142,12 @@ way the low-poly packs come) gets a texture made for it: every flat colour becom
 a file with some textured and some flat primitives is refused: it must be one or the
 other). Our own hammer, musket and pistol are made this way (`gm-tools content synth`).
 
-Two-handed holds, sheathing to the back out of a fight, and a left-hand prop are all `held`
-values a later phase can act on; v1 draws every prop in the right hand, always.
+Two-handed holds and sheathing to the back out of a fight are `held` values a later phase
+can act on. **The off hand** (2026-10-09, LOOK.md 6.5): an ability may carry a `prop` whatever
+its slot, and the prop of a build's **guard** ability is drawn in the left hand (`shield_wall`
+holds `shield`, ours: `gm-tools content synth shield`, built in hand space already, its face
+along +Y). `gm-tools content look KEY --left` is the fitting room for it, and offline
+`gm-client --offline --prop KEY --off KEY` holds one in each hand.
 
 ### 3.2 Creatures and official avatars (Phase 15)
 
@@ -416,7 +420,9 @@ Five findings on the servers and the pipeline (LOOK.md 11.2 has the client's sev
   mannequin); props 2,240 (hammer) to 15,830 (crossbow) bytes, 48 to 584 triangles.
   With an atlas per density (LOOK.md 11.4, the same evening): **713,302 bytes** in 11
   files, the atlases 49,641 / 123,997 / 200,633 / 282,595 bytes; the build takes about
-  three seconds.
+  three seconds. With the faces' generic character set (LOOK.md 13.12, 2026-10-08; 308
+  characters a face instead of 105): **1,153,054 bytes**, the atlases 82,847 / 207,092 /
+  332,624 / 470,976 bytes.
 - `gm-tools content build`: the sources to the bundle in about a second in release; the
   rebuild in CI compares hash for hash and found no difference between runs.
 - Props drawn: 48 avatars in the town, every one holding the sword, cost **0.006 ms a

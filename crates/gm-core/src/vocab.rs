@@ -21,23 +21,25 @@ pub enum DamageType {
     Slash = 0,
     Pierce = 1,
     Blunt = 2,
-    Flame = 3,
-    Shadow = 4,
-    Storm = 5,
-    Frost = 6,
-    Stone = 7,
+    Fire = 3,
+    Water = 4,
+    Grass = 5,
+    Electric = 6,
+    Ground = 7,
+    Air = 8,
 }
 
 impl DamageType {
-    pub const ALL: [DamageType; 8] = [
+    pub const ALL: [DamageType; 9] = [
         DamageType::Slash,
         DamageType::Pierce,
         DamageType::Blunt,
-        DamageType::Flame,
-        DamageType::Shadow,
-        DamageType::Storm,
-        DamageType::Frost,
-        DamageType::Stone,
+        DamageType::Fire,
+        DamageType::Water,
+        DamageType::Grass,
+        DamageType::Electric,
+        DamageType::Ground,
+        DamageType::Air,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -45,11 +47,12 @@ impl DamageType {
             DamageType::Slash => "slash",
             DamageType::Pierce => "pierce",
             DamageType::Blunt => "blunt",
-            DamageType::Flame => "flame",
-            DamageType::Shadow => "shadow",
-            DamageType::Storm => "storm",
-            DamageType::Frost => "frost",
-            DamageType::Stone => "stone",
+            DamageType::Fire => "fire",
+            DamageType::Water => "water",
+            DamageType::Grass => "grass",
+            DamageType::Electric => "electric",
+            DamageType::Ground => "ground",
+            DamageType::Air => "air",
         }
     }
 }
@@ -77,10 +80,13 @@ pub enum Status {
     Knockdown = 14,
     /// Thrown into the air, then down: a knockdown with a lift at its start.
     Launched = 15,
+    /// Taunted (MATRIX.md 8, 16): the body and its view are turned to the slot's `source`
+    /// and held there while it lasts; a mind under it fights the source. A control.
+    Taunt = 16,
 }
 
 impl Status {
-    pub const ALL: [Status; 16] = [
+    pub const ALL: [Status; 17] = [
         Status::Slow,
         Status::Haste,
         Status::Root,
@@ -97,6 +103,7 @@ impl Status {
         Status::Stealth,
         Status::Knockdown,
         Status::Launched,
+        Status::Taunt,
     ];
 
     pub const fn from_index(i: u8) -> Option<Status> {
@@ -129,6 +136,7 @@ impl Status {
             Status::Stealth => "stealth",
             Status::Knockdown => "knockdown",
             Status::Launched => "launched",
+            Status::Taunt => "taunt",
         }
     }
 
@@ -140,7 +148,10 @@ impl Status {
     /// A control (MODES.md 4.5): the second within ten seconds lasts half, the third does
     /// nothing, and the body is then immune to this kind for ten seconds.
     pub const fn is_control(self) -> bool {
-        matches!(self, Status::Knockdown | Status::Launched | Status::Root)
+        matches!(
+            self,
+            Status::Knockdown | Status::Launched | Status::Root | Status::Taunt
+        )
     }
 
     /// The body is on the ground: it cannot act, guard or move (MODES.md 4.5).
@@ -427,12 +438,16 @@ pub enum StatusTarget {
     Actor,
     Hit,
     Area,
+    /// `Area`, but only those on the caster's side (the caster among them): a boon an area
+    /// gives its own side while its packets hurt everyone (MATRIX.md 17's briar). Damage
+    /// never checks sides (VOCABULARY.md 8); a status may.
+    Allies,
 }
 
 /// Verb 4: put a status on someone. `target` `Hit` means every entity the previous step of
 /// the same ability hit (or the entity a projectile hit when nested in `on_hit`); `Area`
-/// means every entity an enclosing `AreaEffect` pulse touched; `Actor` is the caster
-/// (VOCABULARY.md 5.4).
+/// means every entity an enclosing `AreaEffect` pulse touched, `Allies` those of them on
+/// the caster's side; `Actor` is the caster (VOCABULARY.md 5.4).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "bitcode", derive(bitcode::Encode, bitcode::Decode))]
 pub struct ApplyStatus {
