@@ -70,11 +70,18 @@ impl Statuses {
     }
 
     /// Bitmask over `Status::index` of the active statuses (the wire's cosmetic summary).
-    pub fn mask(&self) -> u16 {
+    pub fn mask(&self) -> u32 {
         self.slots
             .iter()
             .filter_map(|s| s.status)
-            .fold(0, |m, s| m | (1 << s.index()))
+            .fold(0, |m, s| m | (1u32 << s.index()))
+    }
+
+    /// Who taunted this body (MATRIX.md 8): the source of its Taunt, while it lasts.
+    pub fn taunted_by(&self) -> Option<u32> {
+        self.get(Status::Taunt)
+            .map(|s| s.source)
+            .filter(|&id| id != 0)
     }
 
     pub fn active(&self) -> impl Iterator<Item = &StatusSlot> {

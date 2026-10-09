@@ -84,16 +84,17 @@ impl Default for Fit {
 impl Eq for ItemTemplate {}
 
 const PHYSICAL: [DamageType; 3] = [DamageType::Slash, DamageType::Pierce, DamageType::Blunt];
-const ELEMENTS: [DamageType; 5] = [
-    DamageType::Flame,
-    DamageType::Shadow,
-    DamageType::Storm,
-    DamageType::Frost,
-    DamageType::Stone,
+const ELEMENTS: [DamageType; 6] = [
+    DamageType::Fire,
+    DamageType::Water,
+    DamageType::Grass,
+    DamageType::Electric,
+    DamageType::Ground,
+    DamageType::Air,
 ];
-/// The eight kinds of damage as a person reads them, in `DamageType`'s order.
-const KINDS: [&str; 8] = [
-    "slash", "pierce", "blunt", "flame", "shadow", "storm", "frost", "stone",
+/// The nine kinds of damage as a person reads them, in `DamageType`'s order.
+const KINDS: [&str; 9] = [
+    "slash", "pierce", "blunt", "fire", "water", "grass", "electric", "ground", "air",
 ];
 
 /// An item as a person is shown it (ITEMS.md 6): everything a screen says about what it
@@ -103,10 +104,10 @@ pub struct ItemView {
     /// Where it is worn; `None` for a part, and for what this content does not know.
     pub place: Option<Place>,
     /// Its edge per damage type, per mille (zeros for what is not worn).
-    pub edge: [u16; 8],
+    pub edge: [u16; 9],
     /// What it is: `a weapon, 220 of 250`, `a core, for crafting`.
     pub what: String,
-    /// What it does, the strongest first: `slash +11.0%`, `flame +9.5%`.
+    /// What it does, the strongest first: `slash +11.0%`, `fire +9.5%`.
     pub does: Vec<String>,
 }
 
@@ -129,7 +130,7 @@ fn per_cent(place: Place, edge: u16) -> String {
 
 /// The edges in words, the strongest first. Kinds of one group that share an edge are
 /// said together (`physical`, `elements`, or `other elements` beside one that stands out).
-fn words(place: Place, edge: &[u16; 8]) -> Vec<String> {
+fn words(place: Place, edge: &[u16; 9]) -> Vec<String> {
     let mut said: Vec<(u16, String)> = Vec::new();
     for (group, name) in [(&PHYSICAL[..], "physical"), (&ELEMENTS[..], "elements")] {
         let of = |v: u16| group.iter().filter(|k| edge[**k as usize] == v).count();
@@ -201,11 +202,12 @@ fn physical(kind: &str) -> Option<DamageType> {
 
 fn element(name: &str) -> Option<DamageType> {
     match name {
-        "flame" => Some(DamageType::Flame),
-        "shadow" => Some(DamageType::Shadow),
-        "storm" => Some(DamageType::Storm),
-        "frost" => Some(DamageType::Frost),
-        "stone" => Some(DamageType::Stone),
+        "fire" => Some(DamageType::Fire),
+        "water" => Some(DamageType::Water),
+        "grass" => Some(DamageType::Grass),
+        "electric" => Some(DamageType::Electric),
+        "ground" => Some(DamageType::Ground),
+        "air" => Some(DamageType::Air),
         _ => None,
     }
 }
@@ -323,7 +325,7 @@ impl ItemContent {
         &self,
         template: &str,
         materials: impl IntoIterator<Item = &'a str>,
-    ) -> Option<(Place, [u16; 8], u16)> {
+    ) -> Option<(Place, [u16; 9], u16)> {
         let t = self.templates.iter().find(|t| t.id == template)?;
         let place = Place::parse(&t.kind)?;
         let known: Vec<&Material> = materials
@@ -332,7 +334,7 @@ impl ItemContent {
             .filter(|m| t.layers.iter().any(|l| l == m.layer()))
             .collect();
         // What the item is for.
-        let mut made_for = [false; 8];
+        let mut made_for = [false; 9];
         match place {
             Place::Weapon => {
                 if let Some(kind) = t.strikes.as_deref().and_then(physical) {
@@ -357,11 +359,11 @@ impl ItemContent {
                 made_for[e as usize] = true;
             }
         }
-        let mut out = [0u32; 8];
+        let mut out = [0u32; 9];
         let mut whole = 0u32;
         for m in &known {
             whole += m.edge;
-            let mut into = [false; 8];
+            let mut into = [false; 9];
             match m.layer() {
                 "core" => into = core,
                 "catalyst" => {
@@ -451,7 +453,7 @@ impl ItemContent {
                         m.id
                     ));
                 }
-                if !["flame", "shadow", "storm", "frost", "stone"].contains(&e.as_str()) {
+                if element(e).is_none() {
                     return bad(format!("material {:?}: unknown element {e:?}", m.id));
                 }
             }
@@ -584,9 +586,9 @@ mod tests {
         ];
         let (place, sword, whole) = items.edges("sword", best).unwrap();
         assert_eq!((place, whole), (Place::Weapon, 250));
-        let mut expect = [0u16; 8];
+        let mut expect = [0u16; 9];
         expect[at(DamageType::Slash)] = 220;
-        expect[at(DamageType::Flame)] = 190;
+        expect[at(DamageType::Fire)] = 190;
         assert_eq!(sword, expect, "nothing for a kind the sword is not for");
         // The same parts in a hammer sharpen Blunt, not Slash.
         let (_, hammer, _) = items.edges("hammer", best).unwrap();
@@ -605,17 +607,17 @@ mod tests {
         ];
         let (place, cuirass, whole) = items.edges("cuirass", plain).unwrap();
         assert_eq!((place, whole), (Place::Armour, 220));
-        assert_eq!(cuirass, [220, 220, 220, 0, 0, 0, 0, 0]);
+        assert_eq!(cuirass, [220, 220, 220, 0, 0, 0, 0, 0, 0]);
         assert_eq!(items.edges("cuirass", best).unwrap().1, cuirass);
         // A robe guards against the elements, and its catalyst against one the more.
         let (_, robe, whole) = items.edges("robe", best).unwrap();
         assert_eq!(whole, 250);
-        assert_eq!(robe, [0, 0, 0, 250, 220, 220, 220, 220]);
+        assert_eq!(robe, [0, 0, 0, 250, 220, 220, 220, 220, 220]);
         let (_, robe, _) = items
             .edges("robe", ["core/iron", "catalyst/rime", "frame/oak"])
             .unwrap();
-        assert_eq!(robe[at(DamageType::Frost)], 70);
-        assert_eq!(robe[at(DamageType::Flame)], 40);
+        assert_eq!(robe[at(DamageType::Water)], 70);
+        assert_eq!(robe[at(DamageType::Fire)], 40);
         assert_eq!(robe[at(DamageType::Slash)], 0);
         // A component is worn nowhere; nor is what the content does not know. A material it
         // does not know adds nothing.
@@ -664,13 +666,13 @@ mod tests {
         // A place counts for half its item's edge (ITEMS.md 3.1): 220 per mille is 11%.
         let sword = items.view("sword", best.clone());
         assert_eq!(sword.what, "a weapon, 250 of 250");
-        assert_eq!(sword.does, ["slash +11.0%", "flame +9.5%"]);
+        assert_eq!(sword.does, ["slash +11.0%", "fire +9.5%"]);
         // An armour takes off what 2000 / 2220 leaves: 9.9%.
         let cuirass = items.view("cuirass", parts(&["core/dragonbone", "frame/whalebone"]));
         assert_eq!(cuirass.what, "an armour, 105 of 250");
         assert_eq!(cuirass.does, ["physical -5.0%"]);
         let robe = items.view("robe", best.clone());
-        assert_eq!(robe.does, ["flame -11.1%", "other elements -9.9%"]);
+        assert_eq!(robe.does, ["fire -11.1%", "other elements -9.9%"]);
         let robe = items.view("robe", parts(&["core/iron", "frame/oak"]));
         assert_eq!(robe.does, ["elements -2.0%"]);
         // Half a per mille is rounded, not lost: 45 is 2.3%.
@@ -682,7 +684,7 @@ mod tests {
             (part.place, part.what.as_str()),
             (None, "a catalyst, for crafting")
         );
-        assert!(part.does.is_empty() && part.edge == [0; 8]);
+        assert!(part.does.is_empty() && part.edge == [0; 9]);
         assert_eq!(items.view("lute", best).what, "nothing this world knows");
         assert_eq!(items.layers("crossbow").unwrap().len(), 4);
         assert_eq!(items.layers("lute"), None);
@@ -718,7 +720,7 @@ mod tests {
         // A weapon says what it strikes with, and only a weapon does.
         let ok = text.replace("edge = 25", "edge = 20");
         assert!(load_items_str(&ok.replace("strikes = \"slash\"", "")).is_err());
-        assert!(load_items_str(&ok.replace("strikes = \"slash\"", "strikes = \"flame\"")).is_err());
+        assert!(load_items_str(&ok.replace("strikes = \"slash\"", "strikes = \"fire\"")).is_err());
         assert!(load_items_str(&ok.replace("kind = \"weapon\"", "kind = \"armour\"")).is_err());
         // An armour says what it guards against, and only an armour does.
         let armour = ok.replace("kind = \"weapon\"", "kind = \"armour\"");

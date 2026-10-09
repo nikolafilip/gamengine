@@ -315,6 +315,7 @@ fn look_of(
         return Look {
             held: looks.held(None, in_hand),
             worn: Look::NONE,
+            off: Look::NONE,
         };
     }
     let worn = hub_slots
@@ -322,9 +323,12 @@ fn look_of(
         .map(|s| s.worn[0].as_str())
         .filter(|t| !t.is_empty());
     let primary = player.map(|p| p.sheet.build.primary as usize);
+    // The off hand (LOOK.md 6.5): the guard's prop, a shield for a shield wall.
+    let guard = player.and_then(|p| p.sheet.build.guard.map(|g| g as usize));
     Look {
         held: looks.held(worn, primary),
         worn: Look::NONE,
+        off: looks.off(guard),
     }
 }
 
@@ -1450,6 +1454,12 @@ pub async fn run_with_web(
                             .iter()
                             .find_map(|g| g.tile_at(p.mover.mv.origin))
                             .ok_or("stand on a market tile to open a stall")?;
+                        // One stall per character (ECONOMY.md 7): a keeper back after a
+                        // restart finds its stall standing, and is told so here rather
+                        // than by the hub's constraint on every ask.
+                        if stalls.values().any(|s| s.owner == slot.character) {
+                            return Err("you already have a stall");
+                        }
                         if stalls.values().any(|s| (s.tile_x, s.tile_y) == (x, y)) {
                             return Err("that tile is taken");
                         }

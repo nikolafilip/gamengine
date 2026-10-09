@@ -65,11 +65,14 @@ pub enum ContentCmd {
         dir: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        /// In the left hand (LOOK.md 6.5: a shield), with the right one empty.
+        #[arg(long)]
+        left: bool,
     },
     /// Write one of the tool's own flat-coloured props as a .glb (CONTENT.md 7: the
-    /// procedural source): sword, hammer, musket.
+    /// procedural source): sword, greatsword, shield, hammer, musket, pistol.
     Synth {
-        /// `sword`, `hammer` or `musket`.
+        /// `sword`, `greatsword`, `shield`, `hammer`, `musket` or `pistol`.
         what: String,
         #[arg(long)]
         out: PathBuf,
@@ -130,7 +133,12 @@ pub fn run(cmd: ContentCmd) -> Result<()> {
             println!("content: atlas {} x {} -> {}", a.w, a.h, out.display());
             Ok(())
         }
-        ContentCmd::Look { key, dir, out } => {
+        ContentCmd::Look {
+            key,
+            dir,
+            out,
+            left,
+        } => {
             let bundle = build(&dir)?;
             let Some(model) = bundle.props.get(&key) else {
                 bail!(
@@ -138,7 +146,7 @@ pub fn run(cmd: ContentCmd) -> Result<()> {
                     bundle.props.keys().cloned().collect::<Vec<_>>().join(", ")
                 );
             };
-            let (w, h, rgba) = fitting_room(model);
+            let (w, h, rgba) = fitting_room(model, left);
             std::fs::write(&out, gm_ingest::write::png(w, h, &rgba))
                 .with_context(|| format!("writing {}", out.display()))?;
             println!("content: {key} in the hand, {w} x {h} -> {}", out.display());
@@ -147,11 +155,15 @@ pub fn run(cmd: ContentCmd) -> Result<()> {
         ContentCmd::Synth { what, out } => {
             let glb = match what.as_str() {
                 "sword" => gm_ingest::synth::sword_prop(0.85),
+                "greatsword" => gm_ingest::synth::greatsword_prop(),
+                "shield" => gm_ingest::synth::shield_prop(),
                 "hammer" => gm_ingest::synth::hammer_prop(),
                 "musket" => gm_ingest::synth::musket_prop(),
                 "pistol" => gm_ingest::synth::pistol_prop(),
                 other => {
-                    bail!("`{other}` is not a prop the tool makes: sword, hammer, musket, pistol")
+                    bail!(
+                        "`{other}` is not a prop the tool makes: sword, greatsword, shield, hammer, musket, pistol"
+                    )
                 }
             }
             .build();
@@ -905,7 +917,7 @@ const STANCES: [(u8, f32, f32, bool); 11] = [
 
 /// The striker's mannequin holding `prop` in every stance, seen from the front (top row)
 /// and from its right (bottom row): RGBA, its width and height.
-fn fitting_room(prop: &Model) -> (u32, u32, Vec<u8>) {
+fn fitting_room(prop: &Model, left: bool) -> (u32, u32, Vec<u8>) {
     use gm_ingest::raster::{self, Dir, ModelSoup, Soup, Window};
     let frame = gm_core::vocab::ArchetypeFrame::Striker;
     let mesh = mannequin::build(frame, &mannequin::Shape::MANNEQUIN);
@@ -950,7 +962,11 @@ fn fitting_room(prop: &Model) -> (u32, u32, Vec<u8>) {
         let body_normals: Vec<glam::Vec3> = (0..mesh.normals.len())
             .map(|i| skin[mesh.joints[i][0] as usize].transform_vector3(mesh.normals[i]))
             .collect();
-        let attach = gm_model::pose::prop_attach(&mesh.pivots, &skin);
+        let attach = if left {
+            gm_model::pose::prop_attach_left(&mesh.pivots, &skin)
+        } else {
+            gm_model::pose::prop_attach(&mesh.pivots, &skin)
+        };
         let prop_at: Vec<glam::Vec3> = held
             .positions
             .iter()

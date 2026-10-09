@@ -418,6 +418,62 @@ pub fn sword_prop(length_m: f32) -> crate::write::PropGlb {
     k.glb
 }
 
+/// A greatsword (MATRIX.md 16: the colossus's): a blade of 1.3 m along +Z, broad at the
+/// guard and tapering in steps to the point, a spine down the flat, a long cross-guard, a
+/// two-hand grip towards -Z and a heavy pommel; in metres, the leading hand at the origin.
+pub fn greatsword_prop() -> crate::write::PropGlb {
+    let mut k = PropKit::new(&[
+        [0.75, 0.76, 0.80, 1.0], // steel
+        [0.36, 0.36, 0.40, 1.0], // iron guard and pommel
+        [0.30, 0.18, 0.10, 1.0], // leather grip
+        [0.58, 0.60, 0.65, 1.0], // the spine, darker steel
+        [0.55, 0.42, 0.18, 1.0], // brass collar
+    ]);
+    // The blade, in three steps to the point.
+    k.cuboid([-0.055, -0.007, 0.10], [0.055, 0.007, 0.78], 0);
+    k.cuboid([-0.045, -0.006, 0.78], [0.045, 0.006, 1.08], 0);
+    k.cuboid([-0.028, -0.005, 1.08], [0.028, 0.005, 1.30], 0);
+    k.cuboid([-0.010, -0.004, 1.30], [0.010, 0.004, 1.40], 0);
+    // The spine along the flat, both sides, standing a little proud.
+    k.cuboid([-0.012, -0.010, 0.16], [0.012, 0.010, 0.98], 3);
+    // The cross-guard, long and square, turned down at the ends; the collar over the grip.
+    k.cuboid([-0.24, -0.014, 0.06], [0.24, 0.014, 0.10], 1);
+    k.cuboid([-0.24, -0.014, 0.02], [-0.20, 0.014, 0.06], 1);
+    k.cuboid([0.20, -0.014, 0.02], [0.24, 0.014, 0.06], 1);
+    k.cylinder(2, [0.0, 0.0], 0.10, 0.14, 0.026, 8, 4);
+    // The grip, two hands long, and the pommel.
+    k.cylinder(2, [0.0, 0.0], -0.36, 0.06, 0.019, 8, 2);
+    k.cylinder(2, [0.0, 0.0], -0.30, -0.28, 0.022, 8, 4);
+    k.cylinder(2, [0.0, 0.0], -0.43, -0.36, 0.038, 8, 1);
+    k.glb
+}
+
+/// A round shield for the off hand (LOOK.md 6.5): the grip's bar along +Z through the
+/// fist at the origin, the planks behind the hand on its +Y side (the knuckles'), a rim
+/// of iron round them, a painted field and the boss over the fist; in metres.
+pub fn shield_prop() -> crate::write::PropGlb {
+    let mut k = PropKit::new(&[
+        [0.36, 0.36, 0.40, 1.0], // iron rim and boss
+        [0.46, 0.30, 0.16, 1.0], // oak planks
+        [0.30, 0.18, 0.10, 1.0], // leather grip
+        [0.60, 0.14, 0.12, 1.0], // the painted field
+    ]);
+    // The bar across the fist.
+    k.cylinder(2, [0.0, 0.0], -0.11, 0.11, 0.016, 8, 2);
+    // The rim (a disc a little wider than the planks, so it shows as an edge all round),
+    // the planks, the painted field, the boss in two steps.
+    k.cylinder(1, [0.0, 0.0], 0.040, 0.052, 0.36, 24, 0);
+    k.cylinder(1, [0.0, 0.0], 0.052, 0.080, 0.335, 24, 1);
+    k.cylinder(1, [0.0, 0.0], 0.080, 0.086, 0.265, 24, 3);
+    k.cylinder(1, [0.0, 0.0], 0.086, 0.125, 0.105, 16, 0);
+    k.cylinder(1, [0.0, 0.0], 0.125, 0.150, 0.060, 12, 0);
+    // Four rivets where the straps meet the planks.
+    for (x, z) in [(0.18, 0.0), (-0.18, 0.0), (0.0, 0.18), (0.0, -0.18)] {
+        k.cylinder(1, [z, x], 0.080, 0.092, 0.018, 8, 0);
+    }
+    k.glb
+}
+
 /// A war hammer: an iron head across the top of a long haft, the grip at the origin.
 pub fn hammer_prop() -> crate::write::PropGlb {
     let mut k = PropKit::new(&[

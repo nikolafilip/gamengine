@@ -271,6 +271,11 @@ the well); the viewport and the scissor are **set back to the whole frame** befo
 HUD's layers 1–4 close the frame. The pass exists only in frames that have a paperdoll,
 so the game's frame cost does not move. The doll's draws ride in the same block buffer as
 the world's (`Characters::prepare_with_dolls`), after them.
+The selector of CLIENT.md 4.2 draws the same body **in the open** (`Ui::paperdoll_open`,
+`Paperdoll.open`): no well, the map turning behind the screens showing through, and the
+camera further back (`DOLL_OPEN_DISTANCE` = 46 u before the body's origin, at 34 u up, a
+degree down) so the whole body stands in the rectangle; its props are the hub's pack's
+abilities looked up in the manifest (`ability_prop`), since no zone has sent a prop list.
 
 ## 6. Props in hands
 
@@ -372,6 +377,22 @@ hand, worked at it with a bob of nine cycles a reload, eased in and out over the
 last 22% of it. The stranger sees the `RELOAD` stance (13.3). Offline, `--prop KEY` in
 the first person is the fitting room of the view model: the prop in the view with the
 stride's bob; `R` held works a reload over and over.
+
+### 6.5 The off hand (2026-10-09)
+
+The director: the colossus wants "an oversized sword ... and also shield, so it looks a bit
+more appropriate" (MATRIX.md 16). A body holds a second prop in its **left hand**: the
+`prop` of its build's **guard** ability (CONTENT.md 3.1; `shield_wall` holds `shield`), else
+nothing; a worn item does not reach the off hand yet (a shield item is a template with
+`held = "left"` for a later phase). On the wire it is **`Look.off`** (protocol v17, section
+29 there), chosen by the zone with `held` and sent in the same `Look`; a gun build's is
+`NONE`. It is drawn as `held` is (6.3), by the wearer's skinning matrix of **`prop_l`** at
+that bone's pivot times **the left grip** (`gm_model::pose::grip_left`, `prop_attach_left`):
+the right grip mirrored through the body's plane, which is not a rotation, so it is the
+right grip turned half round about the business end instead; a shield's face (+Z of its
+model, the back of the fist's side) then stands out of the back of the hand, and the
+guard stance, which already raises the left forearm across the chest, raises the shield in
+front. The fitting room draws it: `gm-tools content look shield --left`.
 
 ## 7. The purse: silver and gold
 
@@ -774,11 +795,13 @@ Seen on the software GPU at 1920 × 1080 (`strafe.sh` in the session's scratchpa
 held with `xdotool`): A in profile to the left, D to the right, W away, S a backpedal,
 idle on the look.
 
-The RPG mode is the exception (MODES.md 5.1, 10.3; 2026-10-08): its camera orbits a body
-that does not turn with it, so an RPG body (snapshot flag `RPG`, v15) is drawn standing as
-it was left, facing its last travel or the target it last turned to, and runs facing its
-travel whichever way, S included; it turns to its look only for an action, where the zone
-fires.
+The RPG mode was the exception (MODES.md 5.1, 10.3; 2026-10-08): its camera orbits a
+body that does not turn with it, so an RPG body (snapshot flag `RPG`, v15) was drawn
+standing as it was left, facing its last travel or the target it last turned to, and ran
+facing its travel whichever way, S included. Since 2026-10-09 it needs none: the RPG
+frames carry the body's own facing instead of the camera's (MODES.md 10.3), so its `yaw`
+is where it walks or was left, the zone fires there, and the one rule above draws every
+body. The flag is retired.
 
 ### 13.10 The gun in the hand (2026-10-07, the director played the gun mode)
 

@@ -92,11 +92,23 @@ struct Finger {
 pub struct Fingers {
     fingers: Vec<Finger>,
     events: Vec<Event>,
-    /// A finger has touched the screen: the HUD draws its controls from then on.
+    /// A finger has touched the screen, or the page said the pointer is a finger's from
+    /// the start (WEB.md 3.5): the HUD draws its controls and the UI is at the touch
+    /// scale from then on.
     pub seen: bool,
 }
 
 impl Fingers {
+    /// Fingers that have, or have not, been seen before the first touch: the page says
+    /// its pointer is coarse (WEB.md 3.5), so the HUD and the scale are a finger's from
+    /// the first frame.
+    pub fn expecting(seen: bool) -> Fingers {
+        Fingers {
+            seen,
+            ..Fingers::default()
+        }
+    }
+
     /// A finger's event from the window. `zone_of` says what a landing finger is for;
     /// `slop` and `stick` are the tap's room and the stick's reach, in pixels.
     pub fn touch(
