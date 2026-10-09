@@ -315,6 +315,7 @@ fn look_of(
         return Look {
             held: looks.held(None, in_hand),
             worn: Look::NONE,
+            off: Look::NONE,
         };
     }
     let worn = hub_slots
@@ -322,9 +323,12 @@ fn look_of(
         .map(|s| s.worn[0].as_str())
         .filter(|t| !t.is_empty());
     let primary = player.map(|p| p.sheet.build.primary as usize);
+    // The off hand (LOOK.md 6.5): the guard's prop, a shield for a shield wall.
+    let guard = player.and_then(|p| p.sheet.build.guard.map(|g| g as usize));
     Look {
         held: looks.held(worn, primary),
         worn: Look::NONE,
+        off: looks.off(guard),
     }
 }
 

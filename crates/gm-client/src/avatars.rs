@@ -70,7 +70,7 @@ pub struct Body {
     pub armour: u8,
     pub aspects: u8,
     /// Status mask (the aura).
-    pub status: u16,
+    pub status: u32,
     pub model: Option<ModelId>,
     /// Distance from the camera: nearest wearers load first.
     pub distance: f32,
@@ -79,6 +79,8 @@ pub struct Body {
     /// The prop it holds (LOOK.md 6), as a slot of the character renderer, when the
     /// bundle has it on the GPU.
     pub prop: Option<usize>,
+    /// The prop in its off hand (LOOK.md 6.5: a shield), the same way.
+    pub off: Option<usize>,
 }
 
 struct Track {
@@ -110,6 +112,8 @@ pub struct Avatars {
     /// A prop every member of the offline crowd holds (`--crowd-prop`): the armed town
     /// of the look gate (LOOK.md 8).
     pub crowd_prop: Option<usize>,
+    /// And in its left hand (`--off`).
+    pub crowd_off: Option<usize>,
 }
 
 /// The ambient light at a body's feet.
@@ -221,6 +225,7 @@ impl Avatars {
             draws: Vec::new(),
             with_model: 0,
             crowd_prop: None,
+            crowd_off: None,
         })
     }
 
@@ -262,6 +267,9 @@ impl Avatars {
         let has = |s: Status| body.status & (1 << s.index()) != 0;
         if has(Status::Stagger) || has(Status::Root) {
             tint = tint.map(|c| c * 0.5);
+        } else if has(Status::Taunt) {
+            // Seeing red: a taunted body is flushed (LOOK.md 13).
+            tint = [tint[0] * 1.3, tint[1] * 0.6, tint[2] * 0.55];
         } else if has(Status::Haste) {
             tint = tint.map(|c| c * 1.35);
         }
@@ -296,17 +304,28 @@ impl Avatars {
         let light = light_at(bsp, body.origin);
         // What it holds, in its right hand: the prop's own draw, placed by the wearer's
         // skinning matrix of `prop_r` at that bone's pivot (LOOK.md 6.3).
-        if let (Some(prop), Some(info)) = (body.prop, characters.info(slot)) {
+        if let Some(info) = characters.info(slot)
+            && (body.prop.is_some() || body.off.is_some())
+        {
             let skin = gm_model::skin_matrices(&info.pivots, info.mask, &pose);
-            let attach = gm_model::pose::prop_attach(&info.pivots, &skin);
-            self.draws.push(CharacterDraw {
-                slot: prop,
-                world,
-                pose: Pose::default(),
-                tint: [1.0; 3],
-                light,
-                attach: Some(attach),
-            });
+            // And the off hand's (LOOK.md 6.5): a shield on `prop_l` with the left grip.
+            for (held, attach) in [
+                (body.prop, gm_model::pose::prop_attach(&info.pivots, &skin)),
+                (
+                    body.off,
+                    gm_model::pose::prop_attach_left(&info.pivots, &skin),
+                ),
+            ] {
+                let Some(held) = held else { continue };
+                self.draws.push(CharacterDraw {
+                    slot: held,
+                    world,
+                    pose: Pose::default(),
+                    tint: [1.0; 3],
+                    light,
+                    attach: Some(attach),
+                });
+            }
         }
         self.draws.push(CharacterDraw {
             slot,
@@ -448,6 +467,7 @@ impl Avatars {
                 distance: (origin - camera).length(),
                 lit: 0.0,
                 prop: self.crowd_prop,
+                off: self.crowd_off,
             };
             self.push(&body, dt, bsp, characters, boxes);
             // Running on the spot: feed the stride the animator would have seen.
@@ -559,6 +579,7 @@ pub fn stall_keeper(stall: &gm_net::control::StallEntry, camera: Vec3) -> Body {
         distance: (origin - camera).length(),
         lit: 0.0,
         prop: None,
+        off: None,
     }
 }
 

@@ -185,6 +185,7 @@ key = "shield_wall"
 name = "Shield wall"
 slot = "guard"
 cost = 6
+prop = "shield"            # in the off hand (LOOK.md 6.5)
 [[ability.step]]
 guard = { block = { arc = 150, mitigation = 0.8, stamina_per_hit = 12, stops_projectiles = true, move_speed_scale = 0.5 } }
 
@@ -698,3 +699,53 @@ firearm = { magazine = 25, ammo = "carbine_round", reload_ms = 2400, cycle_ms = 
 [[ability.step]]
 at_ms = 0
 projectile = { speed = 20000, gravity = 0.02, radius = 2, lifetime_ms = 400, damage = { amount = 26, type = "pierce", knockback = 30, stagger = 4 }, spawn = { weapon = [20, 4, -2] }, spread = 0, count = 1, on_hit = [ { status = { status = "slow", duration_ms = 1500, magnitude = 0.5, max_stacks = 1, stacking = "refresh", target = "hit" } } ] }
+
+# ---------- the colossus's arms (MATRIX.md 16, 2026-10-09) ----------
+# The director: "some oversized sword for our colossus class and also shield, so it looks a
+# bit more appropriate", and "some skill that affects certain range and causes all hostile
+# players to focus/target/look at him, some kind of rage aggro skill".
+
+# The greatsword: a hammer's pace with a blade's reach and sweep. Slash: it shreds cloth
+# and glances off plate where the hammer crushed it (MATRIX.md 4.1); nothing ignores a
+# magic shield any more.
+[[ability]]
+key = "greatsword"
+name = "Greatsword"
+slot = "primary"
+cost = 2
+prop = "greatsword"
+cooldown_ms = 1100
+move_scale = 0.45
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 0
+melee_arc = { reach = 96, arc = 120, half_height = 44, windup_ms = 320, active_ms = 90, recovery_ms = 520, damage = { amount = 95, type = "slash", knockback = 240, stagger = 35 }, max_targets = 4, cleave_falloff = 0.8, parryable = true, hit_stop_ms = 40, assist = 30 }
+
+# The bellow: a roar that every enemy within 256 u answers. Taunted (MATRIX.md 8) for
+# 2.5 s, their bodies and views are turned to the roarer and held there, and a mind under
+# it fights the roarer; a control, under the diminishing returns of MODES.md 4.5. The
+# roarer braces for the blows it asked for: Fortify 30% for 4 s.
+[[ability]]
+key = "bellow"
+name = "Bellow"
+slot = "active"
+cost = 8
+cooldown_ms = 12000
+focus = 20
+move_scale = 0.5
+interrupt = "on_stagger"
+# The roar is the first step: a mind reads an active by its first verb (gm-ai `KitPlan`,
+# gm-bot `classify`), and this one is a burst at the feet, used with an enemy in reach.
+[[ability.step]]
+at_ms = 200
+[ability.step.area_effect]
+shape = { cylinder = { radius = 256, height = 128 } }
+origin = "self_feet"
+effects = [ { status = "taunt", duration_ms = 2500, magnitude = 1, max_stacks = 1, stacking = "refresh", target = "area" } ]
+falloff = "none"
+max_targets = 8
+requires_los = true
+exclude_actor = true
+[[ability.step]]
+at_ms = 200
+apply_status = { status = "fortify", duration_ms = 4000, magnitude = 0.3, max_stacks = 1, stacking = "refresh", target = "actor" }

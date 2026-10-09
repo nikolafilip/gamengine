@@ -146,7 +146,7 @@ people() {
       or c.id = (select owner_character from stalls s where s.holder_id = h.id) where c.name = 'Keeper'" 2>/dev/null || echo 0)" == 0 ]]; then
     for item in "sword core/iron,frame/oak" "sword core/dragonbone,frame/whalebone,catalyst/ember,gem/opal" \
                 "dagger core/iron,frame/oak" "dagger core/dragonbone,frame/ash,catalyst/umbra,gem/opal" \
-                "hammer core/iron,frame/oak" "hammer core/dragonbone,frame/whalebone,catalyst/basalt,gem/opal" \
+                "greatsword core/iron,frame/oak" "greatsword core/dragonbone,frame/whalebone,catalyst/basalt,gem/opal" \
                 "staff core/iron,frame/ash" "staff core/dragonbone,frame/whalebone,catalyst/rime,gem/opal" \
                 "crossbow core/iron,frame/oak" "crossbow core/dragonbone,frame/whalebone,gem/opal" \
                 "musket core/iron,frame/oak" "musket core/dragonbone,frame/whalebone,gem/opal"; do

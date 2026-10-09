@@ -84,6 +84,9 @@ pub struct Options {
     /// `--prop KEY`: offline, the own body holds this prop of the bundle, and the crowd
     /// too (the fitting room of CONTENT.md 9; the armed town of LOOK.md 8).
     pub prop: Option<String>,
+    /// `--off KEY`: offline, the own body holds this prop of the bundle in its left hand
+    /// (LOOK.md 6.5: a shield), and the crowd too.
+    pub off: Option<String>,
     /// Offline: this many bodies standing in front of the start.
     pub crowd: u32,
     /// Ingested models for the crowd to wear, cycled.
@@ -128,7 +131,7 @@ pub struct Options {
 
 const USAGE: &str = "gm-client [--map PATH] [--palette PATH] [--connect ADDR --cert PATH [--name NAME] [--build NAME] [--team N]] \
 [--third-person] [--bench N] [--no-vsync] [--present fifo|relaxed|mailbox|immediate] [--max-fps N] [--headless] [--software] \
-[--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--prop KEY] [--crowd N [--crowd-dir DIR]] \
+[--size WxH] [--screenshot out.ppm] [--seconds N] [--avatar FILE.gmm] [--prop KEY] [--off KEY] [--crowd N [--crowd-dir DIR]] \
 [--cache-dir DIR] [--cache-mb N] [--vram-mb N] [--start X,Y,Z,YAW] [--script fight|walk] [--report] [--travel-to ZONE [--travel-after SECS]] \
 [--sound-dump FILE.wav]\n\
        gm-client --replay FILE.gmr [--follow NAME] [--from SECS] [--maps-dir DIR] [--third-person] [--headless --screenshot out.ppm]\n\
@@ -167,6 +170,7 @@ impl Default for Options {
             seconds: 0.0,
             avatar: None,
             prop: None,
+            off: None,
             crowd: 0,
             crowd_dir: None,
             cache_dir: None,
@@ -257,6 +261,7 @@ fn parse_args() -> Result<Options, String> {
             }
             "--avatar" => o.avatar = Some(PathBuf::from(value("--avatar")?)),
             "--prop" => o.prop = Some(value("--prop")?.to_string()),
+            "--off" => o.off = Some(value("--off")?.to_string()),
             "--crowd" => {
                 o.crowd = value("--crowd")?
                     .parse()

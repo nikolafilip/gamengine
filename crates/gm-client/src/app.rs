@@ -448,6 +448,8 @@ struct App {
     /// `--prop FILE` or `--prop KEY` offline: the own body holds it (the fitting room of
     /// CONTENT.md 9), once it is on the GPU.
     offline_prop: Option<usize>,
+    /// Offline (`--off KEY`): the prop in the own body's left hand, to look at.
+    offline_off: Option<usize>,
     /// The window, from its creation: the renderer on it (`active`) may come later.
     window: Option<Arc<Window>>,
     bsp: Bsp,
@@ -701,7 +703,26 @@ fn held_prop(
     props: &[String],
     look: Look,
 ) -> Option<usize> {
-    let key = props.get(look.held as usize)?;
+    prop_slot(content, active, props, look.held)
+}
+
+/// The off hand's prop (LOOK.md 6.5), the same way.
+fn off_prop(
+    content: &mut Content,
+    active: Option<&mut Active>,
+    props: &[String],
+    look: Look,
+) -> Option<usize> {
+    prop_slot(content, active, props, look.off)
+}
+
+fn prop_slot(
+    content: &mut Content,
+    active: Option<&mut Active>,
+    props: &[String],
+    index: u16,
+) -> Option<usize> {
+    let key = props.get(index as usize)?;
     let active = active?;
     let (gpu, characters) = (&active.gpu, &mut active.renderer.characters);
     content.prop(key, |model| Some(characters.add_model(gpu, model)))
@@ -791,6 +812,7 @@ fn app(opts: Options, bsp: Bsp, palette: world::Palette, sim: Sim, start: Start)
         view_model: None,
         content: start.content,
         offline_prop: None,
+        offline_off: None,
         front_up: start.front.is_some() && start.online.is_none(),
         title: None,
         hub: start.hub,
@@ -2562,6 +2584,18 @@ impl App {
             }
             self.offline_prop = slot;
             a.avatars.crowd_prop = slot;
+        }
+        if let Some(key) = self.opts.off.clone() {
+            let a = self.active.as_mut().expect("just made");
+            let (gpu, characters) = (&a.gpu, &mut a.renderer.characters);
+            let slot = self
+                .content
+                .prop(&key, |model| Some(characters.add_model(gpu, model)));
+            if slot.is_none() {
+                log::warn!("--off {key}: the bundle has no such prop on the desktop");
+            }
+            self.offline_off = slot;
+            a.avatars.crowd_off = slot;
         }
         // A browser gives the pointer only to a click (WEB.md 3.4): there the first click grabs.
         if cfg!(not(target_arch = "wasm32")) && self.wants_pointer() && self.focused() {
@@ -4394,6 +4428,12 @@ impl App {
                             &o.props,
                             o.looks.get(&e.id).copied().unwrap_or_default(),
                         ),
+                        off: off_prop(
+                            &mut self.content,
+                            self.active.as_mut(),
+                            &o.props,
+                            o.looks.get(&e.id).copied().unwrap_or_default(),
+                        ),
                     });
                 }
                 EntityKind::Projectile => {
@@ -4719,6 +4759,12 @@ impl App {
                     distance: 0.0,
                     lit: self.effects.flash(OWN),
                     prop: held_prop(
+                        &mut self.content,
+                        self.active.as_mut(),
+                        &o.props,
+                        o.looks.get(&c.my_id).copied().unwrap_or_default(),
+                    ),
+                    off: off_prop(
                         &mut self.content,
                         self.active.as_mut(),
                         &o.props,
@@ -5305,6 +5351,14 @@ impl App {
             };
             self.sim.pitch = (self.sim.pitch + self.input.mouse_dy * tilt).clamp(low, high);
         }
+        // Taunted (MATRIX.md 8): the view is turned to the taunter with the body and held
+        // there; the mouse moves nothing until the taunt is out.
+        if let Some(c) = self.online.as_ref().and_then(|o| o.client.as_ref())
+            && c.mover.statuses.has(gm_core::vocab::Status::Taunt)
+            && c.mover.lock_yaw.is_some()
+        {
+            self.sim.yaw = c.mover.yaw;
+        }
         self.sim.yaw = self.sim.yaw.rem_euclid(360.0);
         self.input.mouse_dx = 0.0;
         self.input.mouse_dy = 0.0;
@@ -5461,6 +5515,7 @@ impl App {
                         lit: 0.0,
                         // Offline (`--prop FILE`, CONTENT.md 9): the prop to look at.
                         prop: self.offline_prop,
+                        off: self.offline_off,
                     });
                     (
                         third_person_camera(
@@ -5895,6 +5950,12 @@ impl App {
                         distance: 0.0,
                         lit: 0.0,
                         prop: held_prop(
+                            &mut self.content,
+                            Some(a),
+                            &o.props,
+                            o.looks.get(&c.my_id).copied().unwrap_or_default(),
+                        ),
+                        off: off_prop(
                             &mut self.content,
                             Some(a),
                             &o.props,

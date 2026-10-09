@@ -680,6 +680,7 @@ pub fn own_state(p: &Player) -> OwnState {
                     remaining: s.until.wrapping_sub(now),
                     magnitude: s.magnitude,
                     stacks: s.stacks,
+                    source: s.source,
                 })
             })
             .collect(),

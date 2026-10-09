@@ -80,10 +80,13 @@ pub enum Status {
     Knockdown = 14,
     /// Thrown into the air, then down: a knockdown with a lift at its start.
     Launched = 15,
+    /// Taunted (MATRIX.md 8, 16): the body and its view are turned to the slot's `source`
+    /// and held there while it lasts; a mind under it fights the source. A control.
+    Taunt = 16,
 }
 
 impl Status {
-    pub const ALL: [Status; 16] = [
+    pub const ALL: [Status; 17] = [
         Status::Slow,
         Status::Haste,
         Status::Root,
@@ -100,6 +103,7 @@ impl Status {
         Status::Stealth,
         Status::Knockdown,
         Status::Launched,
+        Status::Taunt,
     ];
 
     pub const fn from_index(i: u8) -> Option<Status> {
@@ -132,6 +136,7 @@ impl Status {
             Status::Stealth => "stealth",
             Status::Knockdown => "knockdown",
             Status::Launched => "launched",
+            Status::Taunt => "taunt",
         }
     }
 
@@ -143,7 +148,10 @@ impl Status {
     /// A control (MODES.md 4.5): the second within ten seconds lasts half, the third does
     /// nothing, and the body is then immune to this kind for ten seconds.
     pub const fn is_control(self) -> bool {
-        matches!(self, Status::Knockdown | Status::Launched | Status::Root)
+        matches!(
+            self,
+            Status::Knockdown | Status::Launched | Status::Root | Status::Taunt
+        )
     }
 
     /// The body is on the ground: it cannot act, guard or move (MODES.md 4.5).

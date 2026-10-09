@@ -11,7 +11,8 @@ when the two drift.
 | Key | Slot | Cost | Aspect | What it does |
 |---|---|---|---|---|
 | sword | primary | 2 | — | 60 slash, 90° arc, 150/60/300 ms, 600 ms |
-| hammer | primary | 2 | — | 90 blunt, ignores magic shields, heavy stagger, 1 s |
+| hammer | primary | 2 | — | 90 blunt, ignores magic shields, heavy stagger, 1 s (no preset's since 2026-10-09) |
+| greatsword | primary | 2 | — | 95 slash, 120° arc of 96 u, 320/90/520 ms, 1.1 s: the colossus's (MATRIX.md 16) |
 | staff | primary | 0 | — | 40 blunt, 600 ms |
 | dagger | primary | 0 | — | 35 slash, 400 ms |
 | crossbow | primary | 2 | — | 80 pierce bolt, 1.8 s |
@@ -35,6 +36,7 @@ when the two drift.
 | overhead | active | 8 | — | 70 slash, 60° arc, slow |
 | stomp | active | 10 | ground | 128 u cylinder at the feet: 35 ground, Slow 30% 2 s, knockback |
 | fortify | active | 8 | ground | Fortify 40% for 5 s (hammers ignore it) |
+| bellow | active | 8 | — | Taunt 2.5 s on every enemy within 256 u (turned to the roarer and held; a control), Fortify 30% 4 s on the roarer |
 | frost_nova | active | 10 | water | 160 u sphere: 30 water + 2 Chill stacks |
 | haste | active | 8 | — | Haste 25% for 5 s |
 | thunderclap | active | 10 | electric | 140 u sphere: 40 electric + Shock |
@@ -48,7 +50,7 @@ when the two drift.
 
 The range is the weapon's (MATRIX.md 10, 2026-10-06): a primary is a blade or the bow; a
 secondary is a short utility. Presets (thirty attribute points each, a kit of at most 40):
-**ironclad** (colossus, plate, ground; hammer, shield bash), **blade** (striker, mail, water;
+**ironclad** (colossus, plate, ground; greatsword, shield bash, a shield in the off hand; stomp, bellow), **blade** (striker, mail, water;
 sword, kick; charge), **frostweaver** (caster, cloth, water + air; ice shard, kick), **shade**
 (infiltrator, leather, air; dagger, knife), **mender** (caster, cloth, electric: the healer;
 staff, mend) and **musketeer** (striker, leather, neutral; musket, pistol: the gun). MATRIX.md

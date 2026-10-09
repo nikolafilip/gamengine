@@ -65,7 +65,16 @@ fn arena_builds(placements: &[(&str, Vec3, f32)]) -> (BoxWorld, Zone, Vec<Entity
     let ids = placements
         .iter()
         .map(|&(name, o, y)| {
-            let build = zone.content.build(name).expect(name).clone();
+            // The ironclad as it was until MATRIX.md 16, for the tests of the hammer's
+            // blow and the fortify it ignores: the same body with the hammer and fortify.
+            let build = if name == "ironclad_hammer" {
+                let mut b = zone.content.build("ironclad").expect(name).clone();
+                b.primary = zone.content.find("hammer").unwrap();
+                b.actives[1] = zone.content.find("fortify").unwrap();
+                b
+            } else {
+                zone.content.build(name).expect(name).clone()
+            };
             zone.add_player_at(build, 0, o, y)
         })
         .collect();
@@ -817,7 +826,7 @@ fn hammer_staggers_at_the_threshold_then_immunity_holds() {
     // 40 + 3 * 15 = 85): a blow every 66 ticks, the meter losing 20.6 between blows
     // (STAGGER_DECAY_PER_S 20), is 35, 49.4, 63.8, 78.1, 92.5: five hits.
     let (world, mut zone, ids) = arena_builds(&[
-        ("ironclad", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        ("ironclad_hammer", Vec3::new(0.0, 0.0, REST_Z), 0.0),
         ("blade", Vec3::new(55.0, 0.0, REST_Z), 180.0),
     ]);
     let (a, b) = (ids[0], ids[1]);
@@ -854,8 +863,8 @@ fn hammer_staggers_at_the_threshold_then_immunity_holds() {
 #[test]
 fn fortify_cuts_frost_but_not_the_hammer() {
     let (world, mut zone, ids) = arena_builds(&[
-        ("ironclad", Vec3::new(0.0, 0.0, REST_Z), 0.0),
-        ("ironclad", Vec3::new(55.0, 0.0, REST_Z), 180.0),
+        ("ironclad_hammer", Vec3::new(0.0, 0.0, REST_Z), 0.0),
+        ("ironclad_hammer", Vec3::new(55.0, 0.0, REST_Z), 180.0),
         ("frostweaver", Vec3::new(0.0, 200.0, REST_Z), 270.0),
     ]);
     let (a, b, c) = (ids[0], ids[1], ids[2]);
@@ -3371,5 +3380,125 @@ fn a_frostweavers_shard_lands_on_a_walking_target_seen_a_round_trip_ago() {
         hits(&zone, HitKind::Projectile),
         1,
         "the shard lands on the walker"
+    );
+}
+
+/// MATRIX.md 8, 16: a bellow taunts every enemy in earshot and no ally. A taunted body
+/// is turned to the roarer and held there whatever its frames say, until the taunt is
+/// out; the second within ten seconds lasts half (MODES.md 4.5).
+#[test]
+fn a_bellow_turns_enemies_to_the_roarer_and_not_allies() {
+    let world = BoxWorld::floor();
+    let spawns = vec![
+        Spawn {
+            origin: Vec3::new(0.0, 0.0, REST_Z),
+            yaw: 0.0,
+            team: 1,
+        },
+        Spawn {
+            origin: Vec3::new(0.0, 0.0, REST_Z),
+            yaw: 0.0,
+            team: 2,
+        },
+    ];
+    let mut zone = Zone::new(RATE, 1, spawns, test_content::pack(RATE));
+    let mut ironclad = zone.content.build("ironclad").unwrap().clone();
+    ironclad.actives[1] = zone.content.find("bellow").unwrap();
+    let blade = zone.content.build("blade").unwrap().clone();
+    let roarer = zone.add_player_at(ironclad, 1, Vec3::new(0.0, 0.0, REST_Z), 0.0);
+    let ally = zone.add_player_at(blade.clone(), 1, Vec3::new(0.0, 120.0, REST_Z), 0.0);
+    let enemy = zone.add_player_at(blade.clone(), 2, Vec3::new(200.0, 0.0, REST_Z), 0.0);
+    let far = zone.add_player_at(blade, 2, Vec3::new(400.0, 0.0, REST_Z), 0.0);
+    // Everybody looks east (yaw 0); the roarer bellows (active slot 2).
+    let east = input(0.0, 0.0, 0);
+    tick(
+        &mut zone,
+        &world,
+        &[
+            (roarer, active(0.0, 0.0, 2)),
+            (ally, east),
+            (enemy, east),
+            (far, east),
+        ],
+        0,
+    );
+    run(
+        &mut zone,
+        &world,
+        &[(roarer, east), (ally, east), (enemy, east), (far, east)],
+        30,
+    );
+    let e = zone.player(enemy).unwrap();
+    assert!(
+        e.mover.statuses.has(Status::Taunt),
+        "the enemy in earshot is taunted: roarer {:?} {:?} areas {}",
+        zone.player(roarer).unwrap().mover.script,
+        zone.player(roarer)
+            .unwrap()
+            .mover
+            .statuses
+            .active()
+            .collect::<Vec<_>>(),
+        zone.areas().len()
+    );
+    assert_eq!(e.mover.statuses.taunted_by(), Some(roarer));
+    // Its frames say east; its body faces west, to the roarer.
+    assert!(
+        (e.mover.yaw - 180.0).abs() < 1.0,
+        "turned to the roarer: yaw {}",
+        e.mover.yaw
+    );
+    assert!(e.mover.lock_yaw.is_some());
+    assert!(
+        !zone.player(ally).unwrap().mover.statuses.has(Status::Taunt),
+        "an ally is not"
+    );
+    assert!(
+        !zone.player(far).unwrap().mover.statuses.has(Status::Taunt),
+        "nor a body out of earshot"
+    );
+    assert!(
+        zone.player(roarer)
+            .unwrap()
+            .mover
+            .statuses
+            .has(Status::Fortify),
+        "the roarer braces"
+    );
+    // When the taunt is out (2.5 s by the blade's duration factor), the frames' yaw
+    // holds again.
+    let left = tick_delta(
+        e.mover.statuses.get(Status::Taunt).unwrap().until,
+        e.last_input_tick,
+    )
+    .max(0) as usize;
+    run(
+        &mut zone,
+        &world,
+        &[(roarer, east), (ally, east), (enemy, east), (far, east)],
+        left + 3,
+    );
+    let e = zone.player(enemy).unwrap();
+    assert!(!e.mover.statuses.has(Status::Taunt));
+    assert!(e.mover.yaw.abs() < 1.0, "free again: yaw {}", e.mover.yaw);
+    // The second taunt within ten seconds lasts half (MODES.md 4.5).
+    let s = zone.content.abilities[zone.content.find("bellow").unwrap() as usize]
+        .ability
+        .steps[0]
+        .clone();
+    let crate::vocab::Verb::AreaEffect(a) = &s.verb else {
+        panic!("the roar is an area")
+    };
+    let full = a.effects[0].duration;
+    zone.apply_status(enemy, roarer, &a.effects[0]);
+    let e = zone.player(enemy).unwrap();
+    let left = tick_delta(
+        e.mover.statuses.get(Status::Taunt).unwrap().until,
+        e.last_input_tick,
+    );
+    let scaled = (full as f32 * e.sheet.derived.status_duration).round() as i32;
+    assert!(
+        (left - scaled / 2).abs() <= 1,
+        "half: {left} of {scaled} ({full} by the verb)"
     );
 }

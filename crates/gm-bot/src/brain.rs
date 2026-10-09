@@ -243,7 +243,16 @@ impl Brain {
             }
             return self.input(buttons, forward, side, ability);
         }
-        let nearest = self.nearest(me, v.team, v.others);
+        // Taunted (MATRIX.md 8): the taunter is the one to fight while it lasts.
+        let nearest = match v.me.statuses.taunted_by() {
+            Some(by) => v
+                .others
+                .iter()
+                .find(|e| e.id == by && e.kind == EntityKind::Player && e.alive())
+                .map(|e| (e, (e.pos - me).length()))
+                .or_else(|| self.nearest(me, v.team, v.others)),
+            None => self.nearest(me, v.team, v.others),
+        };
         let (reach, swing) =
             swing_of(v.kit).map_or((70.0, buttons::PRIMARY), |(m, b)| (m.reach, b));
         let shot = shot_of(v.kit);
