@@ -72,6 +72,8 @@ enum ActiveUse {
     Shot,
     Swing(f32),
     Closer,
+    /// A charge at this speed (u/s) for this many ticks.
+    Charge(f32, u32),
     Blink,
 }
 
@@ -96,6 +98,11 @@ fn classify(kit: &Kit, slot: u8) -> Option<ActiveUse> {
         Verb::MeleeArc(m) => ActiveUse::Swing(m.reach),
         Verb::MoveSelf(m) => match m.kind {
             MoveKind::Blink { .. } => ActiveUse::Blink,
+            // A charge covers speed x duration and stops on the hit: used from where it
+            // lands on the target, not from the dash's window.
+            MoveKind::Charge {
+                speed, duration, ..
+            } => ActiveUse::Charge(speed, duration),
             _ => ActiveUse::Closer,
         },
         Verb::Guard(_) => return None,
@@ -327,10 +334,14 @@ impl Brain {
             }
             Behaviour::Duelist | Behaviour::Spar => {
                 let spar = self.behaviour == Behaviour::Spar;
-                let ranged = matches!(
-                    v.frame,
-                    ArchetypeFrame::Caster | ArchetypeFrame::Infiltrator
-                );
+                // Ranged is the weapon's, not the frame's (MATRIX.md 10): a caster with a
+                // staff closes in, a striker with a crossbow or a musket keeps away.
+                let ranged = v.kit.primary.is_some_and(|i| {
+                    matches!(
+                        v.kit.abilities[i as usize].steps.first().map(|s| &s.verb),
+                        Some(Verb::Projectile(_))
+                    )
+                });
                 let home = if spar && v.alive {
                     Some(*self.home.get_or_insert(me))
                 } else {
@@ -441,6 +452,10 @@ impl Brain {
                                 } else {
                                     (200.0..600.0).contains(&d)
                                 }
+                            }
+                            Some(ActiveUse::Charge(speed, ticks)) => {
+                                let cover = speed * ticks as f32 / self.hz.max(1) as f32;
+                                !ranged && d > reach && d < cover + reach * 0.5
                             }
                             Some(ActiveUse::Blink) => {
                                 if ranged {
@@ -566,12 +581,12 @@ mod tests {
     fn counter_pick_follows_the_matrix() {
         let pack = test_content::pack(TickRate::COMBAT);
         // Against ironclads (Ground): frostweaver (Water beats Ground; Ground into
-        // Water + Air is 0.5x).
+        // Water + Air is 0.5x), from a blade (Water alone: 2x in, 1x taken) as well.
         assert_eq!(
             counter_pick(&pack, "blade", Aspects::one(Element::Ground)).as_deref(),
             Some("frostweaver")
         );
-        // Against frostweavers (Water + Air): mender (Electric is 4x into both).
+        // Against a Water + Air team: mender (Electric is 4x into both).
         assert_eq!(
             counter_pick(
                 &pack,

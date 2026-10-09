@@ -49,10 +49,9 @@ when the two drift.
 The range is the weapon's (MATRIX.md 10, 2026-10-06): a primary is a blade or the bow; a
 secondary is a short utility. Presets (thirty attribute points each, a kit of at most 40):
 **ironclad** (colossus, plate, ground; hammer, shield bash), **blade** (striker, mail, water;
-sword, kick), **frostweaver** (caster, cloth, water + air; ice shard, kick),
-**shade** (infiltrator, leather, air; dagger, knife), **mender** (caster, cloth, electric:
-the healer; staff, mend), **captain** (striker, mail, water; sword, kick, `war_standard`:
-the leader of five) and **marksman** (striker, leather, electric; crossbow, knife). MATRIX.md
+sword, kick; charge), **frostweaver** (caster, cloth, water + air; ice shard, kick), **shade**
+(infiltrator, leather, air; dagger, knife), **mender** (caster, cloth, electric: the healer;
+staff, mend) and **musketeer** (striker, leather, neutral; musket, pistol: the gun). MATRIX.md
 11 records how the first four fare against each other; a bot that counter-picks takes the
 first preset listed among those that score the same.
 

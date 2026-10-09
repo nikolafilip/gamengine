@@ -1,4 +1,4 @@
-# Preset builds (MATRIX.md 9 and 11). `mode` is the game the archetype plays (MODES.md 2:
+# Preset builds (MATRIX.md 9, 11 and 15: six, one frame-and-element face each). `mode` is the game the archetype plays (MODES.md 2:
 # gun, action, rpg); a gun build's primary is a firearm and it has no guard. Attributes are the character's own thirty points
 # (each point above 5; a preset spends all thirty). The kit costs at most 40: armour
 # (cloth 0 / leather 4 / mail 8 / plate 12), a second aspect (10) and the slotted abilities.
@@ -22,28 +22,28 @@ actives = ["stomp", "fortify"]                                       # 10 + 8  =
 [[build]]
 name = "blade"
 mode = "action"
-blurb = "A sword and a parry. Fast on the feet and strong in a duel, but has to get close and stay close."
+blurb = "A sword and a parry. Charges in and is strong in a duel, but has to get close and stay close."
 frame = "striker"
 attributes = { str = 17, agi = 13, con = 15, int = 5, spr = 5 }    # 30
 armour = "mail"                                                      # 8
-aspects = ["water"]
+aspects = ["water"]                                                  # a defence: halves the frostweaver
 primary = "sword"                                                    # 2
 secondary = "kick"                                                   # 2
 guard = "parry"                                                      # 4
-actives = ["dash", "overhead"]                                       # 6 + 8  = 30
+actives = ["charge", "overhead"]                                     # 6 + 8  = 30
 
 [[build]]
 name = "frostweaver"
 mode = "rpg"
-blurb = "Ice from a distance. Slows and freezes what comes near, then steps away. Wears cloth: one clean hit hurts."
+blurb = "Ice from a distance. Slows and freezes what comes near, then walks away from it. Wears cloth: one clean hit hurts."
 frame = "caster"
 attributes = { str = 5, agi = 10, con = 5, int = 20, spr = 15 }    # 30
 armour = "cloth"                                                     # 0
-aspects = ["water", "air"]                                           # 10
+aspects = ["water", "air"]                                           # 10: Ground is 0.5x in
 primary = "ice_shard"                                                # 2
 secondary = "kick"                                                   # 2
 guard = "brace"                                                      # 2
-actives = ["frost_nova", "blink"]                                    # 10 + 10  = 36
+actives = ["frost_nova"]                                             # 10  = 26
 
 [[build]]
 name = "shade"
@@ -58,7 +58,7 @@ secondary = "throwing_knife"                                         # 3
 guard = "parry"                                                      # 4
 actives = ["blink", "vanish", "poison_cloud"]                        # 10 + 8 + 8  = 37
 
-# Phase 7 (COMPANIONS.md 12): the healer the tutorial needs and a leadership build.
+# Phase 7 (COMPANIONS.md 12): the healer the tutorial needs.
 
 [[build]]
 name = "mender"
@@ -73,36 +73,10 @@ secondary = "mend"                                                   # 4
 guard = "brace"                                                      # 2
 actives = ["sanctuary", "haste", "thunderclap"]                      # 10 + 8 + 10  = 34
 
-[[build]]
-name = "captain"
-mode = "action"
-blurb = "Leads from the front: a sword, a kick and a standard that lets five companions follow instead of three."
-frame = "striker"
-attributes = { str = 15, agi = 10, con = 15, int = 5, spr = 10 }   # 30
-armour = "mail"                                                      # 8
-aspects = ["water"]
-primary = "sword"                                                    # 2
-secondary = "kick"                                                   # 2
-guard = "parry"                                                      # 4
-actives = ["war_standard", "dash"]                                   # 10 (five companions) + 6  = 32
 
-# 2026-10-06: the ranged fighter without an element, now that the crossbow is a primary.
-
-[[build]]
-name = "marksman"
-mode = "rpg"
-blurb = "A crossbow and the legs to keep the distance. One heavy bolt at a time; helpless with a sword at the throat."
-frame = "striker"
-attributes = { str = 10, agi = 20, con = 10, int = 5, spr = 10 }   # 30
-armour = "leather"                                                   # 4
-aspects = ["electric"]
-primary = "crossbow"                                                 # 2
-secondary = "throwing_knife"                                         # 3
-guard = "brace"                                                      # 2
-actives = ["dash", "leap", "haste"]                                  # 6 + 6 + 8  = 31
 
 # The gun (MODES.md 3): first person, a musket and a pistol, the knife that every gun
-# build has, a dodge and a vanish for the way out.
+# build has, the legs for the way out. No element: the gun is the neutral build.
 
 [[build]]
 name = "musketeer"
@@ -111,7 +85,7 @@ blurb = "A musket, a pistol and a knife. One shot that has to land, then the rel
 frame = "striker"
 attributes = { str = 10, agi = 17, con = 13, int = 5, spr = 10 }   # 30
 armour = "leather"                                                   # 4
-aspects = ["air"]
+aspects = []                                                         # neutral (MATRIX.md 15)
 primary = "musket"                                                   # 2
 secondary = "pistol"                                                 # 3
-actives = ["dash", "vanish"]                                         # 6 + 8  = 23
+actives = ["dash", "leap"]                                           # 6 + 6  = 21

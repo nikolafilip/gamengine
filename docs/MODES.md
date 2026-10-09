@@ -56,7 +56,7 @@ from it; the zone reads it from the same build for the rules of sections 3 and 5
 | Movement | WASD, crouch, jump; walk is quiet | WASD, dodge | WASD about the camera, or a click on the ground |
 | Attack | hold or tap the mouse; reload | combos and cancels on the hotbar | a target, then actions that wait for range |
 | HUD | crosshair that opens, ammo, health | hotbar with cooldowns, combo counter | target frame, hotbar, the ground marker |
-| Presets | musketeer (new) | blade, ironclad, shade, captain | frostweaver, mender |
+| Presets | musketeer (new) | blade, ironclad, shade | frostweaver, mender |
 
 The presets' modes are a proposal; an archetype in `action` could as well be `rpg`. The
 tavern's list and the people page say the mode with the frame (`blade: striker in mail,

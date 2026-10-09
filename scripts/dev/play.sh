@@ -190,10 +190,10 @@ people() {
 # Sparring partners in the town: they stand where they arrive, face whoever comes at them
 # and fight back with the whole kit, so a windup, a cast or a parry can be watched and
 # tuned on a body that answers. `spar [N] [BUILDS]`: N of them (default 3), one build each
-# from the list (default a sword, a crossbow, a caster with Ice shard).
+# from the list (default a sword, a dagger, a caster with Ice shard).
 spar() {
   need; cd "$R"; hub_up || { echo "start the stack first"; exit 1; }
-  local n=${1:-3} builds=${2:-blade,marksman,frostweaver}
+  local n=${1:-3} builds=${2:-blade,shade,frostweaver}
   spawn spar --bots "$n" --user 'spar-{i}@bots.test' --register --character 'Spar{i}' \
     --builds "$builds" --zone town --secs $BOT_SECS --behaviour spar
   echo "$n sparring partners on their way to the town (log: $D/log/spar.log)"

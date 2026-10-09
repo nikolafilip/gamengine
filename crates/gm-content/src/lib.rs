@@ -1331,7 +1331,9 @@ mod tests {
         ));
         // The leadership ability is what takes a squad from three to five.
         assert_eq!(pack.build("blade").unwrap().squad_capacity(&pack), 3);
-        assert_eq!(pack.build("captain").unwrap().squad_capacity(&pack), 5);
+        let mut leader = pack.build("blade").unwrap().clone();
+        leader.actives[0] = pack.find("war_standard").unwrap();
+        assert_eq!(leader.squad_capacity(&pack), 5);
         // A creature that drops what no item file defines is refused.
         let bad = std::fs::read_to_string(Path::new(DIR).join("creatures.toml"))
             .unwrap()
