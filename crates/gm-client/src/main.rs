@@ -30,6 +30,7 @@ mod render;
 mod rpg;
 mod script;
 mod settings;
+mod showcase;
 mod sound;
 mod stats;
 mod touch;

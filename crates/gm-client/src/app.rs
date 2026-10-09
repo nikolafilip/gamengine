@@ -65,6 +65,8 @@ use gm_net::control::TRAINER_REACH;
 const MAX_STEPS_PER_FRAME: u32 = 8;
 /// Behind a screen with no zone being played, the camera turns this fast (CLIENT.md 2).
 const BACKDROP_DEG_PER_S: f32 = 4.0;
+/// How far the selector's camera stands from the body it shows whole (CLIENT.md 4.2).
+const DOLL_OPEN_DISTANCE: f32 = 46.0;
 /// While a zone is played the hub is asked something this often, so that the session is
 /// still there when the zone is left (it ends after a day of silence).
 const SESSION_TOUCH_SECS: u64 = 600;
@@ -714,6 +716,29 @@ fn off_prop(
     look: Look,
 ) -> Option<usize> {
     prop_slot(content, active, props, look.off)
+}
+
+/// The prop of an ability of the hub's pack (the selector's body, CLIENT.md 4.2: no zone
+/// has sent a prop list yet): the manifest's prop for the ability's key, as a slot of the
+/// character renderer, when the bundle has it.
+fn ability_prop(
+    content: &mut Content,
+    active: Option<&mut Active>,
+    pack: Option<&ContentPack>,
+    ability: Option<u16>,
+) -> Option<usize> {
+    let key = &pack?.abilities.get(ability? as usize)?.key;
+    let prop = content
+        .manifest
+        .as_ref()?
+        .abilities
+        .iter()
+        .find(|a| &a.key == key)?
+        .prop
+        .clone()?;
+    let active = active?;
+    let (gpu, characters) = (&active.gpu, &mut active.renderer.characters);
+    content.prop(&prop, |model| Some(characters.add_model(gpu, model)))
 }
 
 fn prop_slot(
@@ -5932,6 +5957,37 @@ impl App {
         // turned by the drag across it, with what it holds, drawn into the panel's
         // rectangle by a camera of its own.
         let doll_draws: Vec<CharacterDraw> = match (self.ui.paperdolls.first(), &self.online) {
+            // The selector's body (CLIENT.md 4.2): the character or the archetype shown,
+            // in the open, with the props of its weapon and its guard.
+            (Some(doll), _) if self.front_up && doll.rect.w > 1.0 && doll.rect.h > 1.0 => {
+                match self.front.as_ref().and_then(|f| f.shown()) {
+                    Some((pack, build, model)) => {
+                        let prop =
+                            ability_prop(&mut self.content, Some(a), pack, Some(build.primary));
+                        let off = ability_prop(&mut self.content, Some(a), pack, build.guard);
+                        let body = Body {
+                            key: DOLL,
+                            origin: Vec3::new(0.0, 0.0, 24.0),
+                            yaw: 180.0 + doll.turn * 360.0,
+                            pitch: 0.0,
+                            anim: gm_core::sim::anim::IDLE,
+                            crouched: false,
+                            frame: gm_model::rig::frame_index(build.frame),
+                            armour: build.armour as u8,
+                            aspects: build.aspects.0,
+                            status: 0,
+                            model,
+                            distance: 0.0,
+                            lit: 0.0,
+                            prop,
+                            off,
+                        };
+                        a.avatars
+                            .doll(&body, frame_dt, &self.bsp, &a.renderer.characters)
+                    }
+                    None => Vec::new(),
+                }
+            }
             (Some(doll), Some(o)) if doll.rect.w > 1.0 && doll.rect.h > 1.0 => match &o.client {
                 Some(c) => {
                     let build = &c.sheet.build;
@@ -5971,8 +6027,18 @@ impl App {
         };
         let doll = self.ui.paperdolls.first().map(|d| {
             let aspect = d.rect.w / d.rect.h.max(1.0);
-            // In front of the body, at its chest, looking back at it.
-            let vp = view_proj(Vec3::new(82.0, 0.0, 31.0), 180.0, -3.0, aspect);
+            let vp = if d.open {
+                // The whole body, head to feet, from a little further back.
+                view_proj(
+                    Vec3::new(DOLL_OPEN_DISTANCE, 0.0, 34.0),
+                    180.0,
+                    -1.0,
+                    aspect,
+                )
+            } else {
+                // In front of the body, at its chest, looking back at it.
+                view_proj(Vec3::new(82.0, 0.0, 31.0), 180.0, -3.0, aspect)
+            };
             (d.rect, vp, doll_draws.as_slice())
         });
         a.renderer
