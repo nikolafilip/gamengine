@@ -206,6 +206,9 @@ pub(crate) struct Online {
     /// from the zone's `Welcome` on the zone's (once that map is here).
     map_hash: u64,
     respec_note: String,
+    /// Why the last press of `F` used no kit, and when (MODES.md 11.3): the HUD says it in
+    /// yellow for `KIT_NOTE_SECS` where the kits are counted.
+    kit_note: Option<(Instant, &'static str)>,
     /// A travel ticket to act on: reconnect to another zone, reloading its map.
     pending_travel: Option<(String, ZoneAddr, Vec<u8>)>,
     zone_name: String,
@@ -310,10 +313,16 @@ impl Input {
         gun: bool,
         rpg: Option<crate::rpg::RpgFrame>,
     ) -> SimInput {
+        // `F` uses a kit in every mode (MODES.md 11.3): read before the modes part.
+        let kit = if self.just_pressed.contains(&KeyCode::KeyF) {
+            buttons::USE
+        } else {
+            0
+        };
         // The RPG mode (MODES.md 5.5): `1` the primary, `2` the secondary, `3`–`6` the
         // actives, Shift guards, Space jumps; the axes are the walk's when none is held.
         if let Some(r) = rpg {
-            let mut b = r.buttons;
+            let mut b = r.buttons | kit;
             if self.down(KeyCode::Space) {
                 b |= buttons::JUMP;
             }
@@ -333,16 +342,13 @@ impl Input {
             };
         }
         let (mut forward, mut side) = self.axes();
-        let mut b = 0u16;
+        let mut b = kit;
         let dodged = dodge.is_some() && self.just_pressed.contains(&KeyCode::Space);
         if self.down(KeyCode::Space) && dodge.is_none() {
             b |= buttons::JUMP;
         }
         if self.just_pressed.contains(&KeyCode::KeyR) {
             b |= buttons::RELOAD;
-        }
-        if self.just_pressed.contains(&KeyCode::KeyF) {
-            b |= buttons::USE;
         }
         if self.mouse.contains(&MouseButton::Left) {
             b |= buttons::PRIMARY;
@@ -679,6 +685,7 @@ fn online(opts: &Options, sim: &Sim, map_hash: u64, entry: Entry) -> Result<Onli
         heals: Vec::new(),
         map_hash,
         respec_note: String::new(),
+        kit_note: None,
         pending_travel: None,
         zone_name: entry.zone_name,
         backlog: VecDeque::new(),
@@ -1694,6 +1701,44 @@ pub(crate) fn dodge_slot(
     })
 }
 
+/// How long the HUD says why a press of `F` used no kit (MODES.md 11.3).
+const KIT_NOTE_SECS: f32 = 1.0;
+/// The zone's own refusal of a kit (MODES.md 11.3), in the HUD's words.
+const KIT_FULL: &str = "at full health";
+
+/// The kit as the HUD shows it (MODES.md 11.3) and `--report` says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KitState {
+    /// A use under way: "using a kit".
+    Using,
+    /// The last press was refused, within `KIT_NOTE_SECS`: its words.
+    Refused(&'static str),
+    /// Kits carried: "kits N  F".
+    Ready,
+    /// None carried: the same, dim.
+    None,
+}
+
+fn kit_state(o: &Online, c: &ClientState) -> KitState {
+    kit_state_of(c.mover.using_kit(c.tick), c.mover.kits, o.kit_note)
+}
+
+/// A use under way outranks a refusal's words (a press at full health begins one the
+/// zone clears: the words stay); a refusal is told for `KIT_NOTE_SECS` from the press.
+fn kit_state_of(using: bool, kits: u16, note: Option<(Instant, &'static str)>) -> KitState {
+    if let Some((at, why)) = note
+        && at.elapsed().as_secs_f32() < KIT_NOTE_SECS
+    {
+        KitState::Refused(why)
+    } else if using {
+        KitState::Using
+    } else if kits > 0 {
+        KitState::Ready
+    } else {
+        KitState::None
+    }
+}
+
 /// The hotbar's cells for the own body: what each key does and its state now.
 pub(crate) fn hotbar(o: &Online) -> Vec<HotbarCell> {
     let (Some(c), Some(pack)) = (&o.client, &o.pack) else {
@@ -2125,17 +2170,11 @@ pub(crate) fn build_hud(hud: &mut Hud, online: Option<&Online>, vp: glam::Mat4, 
             } else {
                 line
             };
-        let text = if c.mover.using_kit(c.tick) {
-            "using a kit".to_string()
-        } else {
-            format!("kits {}  F", c.mover.kits)
-        };
-        let ink = if c.mover.using_kit(c.tick) {
-            hud::YELLOW
-        } else if c.mover.kits == 0 {
-            hud::SHADE
-        } else {
-            hud::WHITE
+        let (text, ink) = match kit_state(o, c) {
+            KitState::Using => ("using a kit".to_string(), hud::YELLOW),
+            KitState::Refused(why) => (why.to_string(), hud::YELLOW),
+            KitState::Ready => (format!("kits {}  F", c.mover.kits), hud::WHITE),
+            KitState::None => ("kits 0  F".to_string(), hud::SHADE),
         };
         let tw = hud.width(s, &text);
         hud.label(w - 16.0 - tw, base, s, ink, &text);
@@ -2904,6 +2943,11 @@ impl App {
             Key::Use => self.open_stall(),
             Key::Gm => self.open_gm(),
             Key::Character => self.open_character(),
+            // A script's `F` (CLIENT.md 9): the kit, as a person's key is (MODES.md 11.3);
+            // a frame's press, let go the same frame.
+            Key::Kit if self.online.is_some() => {
+                self.input.just_pressed.insert(KeyCode::KeyF);
+            }
             _ => {}
         }
     }
@@ -4164,6 +4208,20 @@ impl App {
             } else {
                 self.input.sim_input(yaw, pitch, dodge, gun, rpg_frame)
             };
+            // A press of `F` that begins no kit is said why (MODES.md 11.3): what the
+            // predicted body knows (no kit, the air, the hands, a stagger), else the
+            // health, which the zone refuses the same tick.
+            if input.buttons & buttons::USE != 0 {
+                let m = &c.mover;
+                let staggered = m.statuses.staggered() || m.statuses.downed();
+                let why = gm_core::sim::kit_refusal(m, c.tick, staggered)
+                    .map(gm_core::sim::KitRefusal::word)
+                    .or_else(|| (c.own_health >= c.sheet.derived.health).then_some(KIT_FULL));
+                if let Some(why) = why {
+                    log::info!("kit: {why}");
+                    o.kit_note = Some((Instant::now(), why));
+                }
+            }
             let before = c.mover.mv.origin;
             let datagram = c.local_tick(bsp, input);
             own_actions.extend(c.actions.iter().copied());
@@ -5246,6 +5304,17 @@ impl App {
                 .collect();
             if !cells.is_empty() {
                 line.push_str(&format!(" hotbar={}", cells.join(",")));
+            }
+            // The kits and their state (MODES.md 11.3): `ready`, `none`, `using`, or the
+            // refusal's words with dashes for spaces.
+            if let Some(c) = &o.client {
+                let state = match kit_state(o, c) {
+                    KitState::Using => "using".to_string(),
+                    KitState::Ready => "ready".to_string(),
+                    KitState::None => "none".to_string(),
+                    KitState::Refused(why) => why.replace(' ', "-"),
+                };
+                line.push_str(&format!(" kit={}:{state}", c.mover.kits));
             }
             let held: Vec<String> = o
                 .looks
@@ -6553,5 +6622,69 @@ mod tests {
         // With nothing to hit, the eye ray converges on the far point: nearly parallel.
         let (yaw, _) = re_aim(&world, &[], cam, 0.0, 0.0, eye);
         assert!(!(1.0..=359.0).contains(&yaw), "yaw {yaw}");
+    }
+}
+
+#[cfg(test)]
+mod kit_tests {
+    use super::*;
+    use gm_core::sim::buttons;
+
+    /// MODES.md 11.3: `F` uses a kit in every mode. The press is sampled per tick from
+    /// the keys pressed since the last one; the RPG mode builds its frame another way and
+    /// must still read it.
+    #[test]
+    fn f_is_the_kit_in_every_mode() {
+        let modes: [(&str, bool, Option<crate::rpg::RpgFrame>); 3] = [
+            ("action", false, None),
+            ("gun", true, None),
+            ("rpg", false, Some(crate::rpg::RpgFrame::default())),
+        ];
+        for (mode, gun, rpg) in modes {
+            let mut input = Input::default();
+            input.keys.insert(KeyCode::KeyF);
+            input.just_pressed.insert(KeyCode::KeyF);
+            let first = input.sim_input(0.0, 0.0, None, gun, rpg);
+            assert!(
+                first.buttons & buttons::USE != 0,
+                "{mode}: F just pressed is USE"
+            );
+            // Held on, it is pressed once: the next tick carries it no more.
+            let second = input.sim_input(0.0, 0.0, None, gun, rpg);
+            assert!(
+                second.buttons & buttons::USE == 0,
+                "{mode}: F held is not pressed again"
+            );
+        }
+    }
+
+    /// MODES.md 11.3: the HUD counts the kits, says "using a kit" while the hands are at
+    /// it, and for a second why a press used none; dim at none.
+    #[test]
+    fn the_hud_says_why_a_kit_was_refused_for_a_second() {
+        let now = Instant::now();
+        let ago = now - std::time::Duration::from_secs_f32(KIT_NOTE_SECS + 0.1);
+        assert_eq!(kit_state_of(false, 3, None), KitState::Ready);
+        assert_eq!(kit_state_of(false, 0, None), KitState::None);
+        assert_eq!(kit_state_of(true, 3, None), KitState::Using);
+        for why in [
+            KIT_FULL,
+            gm_core::sim::KitRefusal::InTheAir.word(),
+            gm_core::sim::KitRefusal::HandsBusy.word(),
+            gm_core::sim::KitRefusal::NoKit.word(),
+        ] {
+            assert_eq!(
+                kit_state_of(false, 3, Some((now, why))),
+                KitState::Refused(why)
+            );
+            // A press at full health begins a use the zone clears: the words win.
+            assert_eq!(
+                kit_state_of(true, 3, Some((now, why))),
+                KitState::Refused(why)
+            );
+            assert_eq!(kit_state_of(false, 3, Some((ago, why))), KitState::Ready);
+            assert_eq!(kit_state_of(false, 0, Some((ago, why))), KitState::None);
+        }
+        assert_eq!(KIT_FULL, "at full health");
     }
 }

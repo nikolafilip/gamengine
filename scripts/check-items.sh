@@ -13,13 +13,17 @@
 #                                      zone's hits before and after)
 #   scripts/check-items.sh --desktop   also the desktop client on a display of its own (Xvfb,
 #                                      the software GPU): a bot keeps a stall, an operator
-#                                      hands it swords, gives a new character coin and stands
-#                                      it at the counter; by UI script the character looks at
-#                                      the stall, buys a sword, wears it, and finds it worn
-#                                      through the menu too. Then the same two keys from a
-#                                      real keyboard (xdotool).
+#                                      hands it swords and kits, gives a new character coin and
+#                                      stands it at the counter; by UI script the character
+#                                      looks at the stall, buys a sword and a stack of kits,
+#                                      wears the sword, finds it worn through the menu too, and
+#                                      presses F at full health (MODES.md 11.3: the HUD says
+#                                      why no kit was used). Then the same keys from a real
+#                                      keyboard (xdotool), F among them.
 #   scripts/check-items.sh --browser   the same purchase in both browser builds in headless
-#                                      Chromium (--software: on Chromium's software GPU)
+#                                      Chromium (--software: on Chromium's software GPU); the
+#                                      WebGL2 buyer is a frostweaver (the RPG mode), who buys
+#                                      the kits alone and presses F
 # --desktop and --browser need GM_TEST_DATABASE_URL (a Postgres this run wipes).
 # Environment: SKIP_BUILD=1, SKIP_TESTS=1, CHROME (default chromium), KEEP=DIR (keep logs
 # and screenshots there).
@@ -131,7 +135,8 @@ started $town_pid "the town" "$tmp/town.log"
 [[ "$running" == 1 ]] || { show "$tmp/town.log"; echo "FAIL: the town did not come up"; exit 1; }
 # The keeper walks to the first tile of the market, opens its stall there, says where it
 # stands, and puts up for sale whatever comes to its hands, at one gold and twenty silver.
-PRICE=120; PURSE=150
+# A buyer is given two listings' worth and thirty silver over.
+PRICE=120; PURSE=270
 target/release/gm-bot "${link[@]}" --user keeper@bots.test --password keeper-password --register --character Keeper \
   --zone town --bots 1 --stalls 1 --sell-at $PRICE --secs 900 --behaviour stroll --maps-dir assets/maps/built \
   > "$tmp/keeper.log" 2>&1 &
@@ -156,13 +161,22 @@ elif plain "$tmp/grant.log" | /usr/bin/grep -aq "a cuirass takes no catalyst"; t
 else
   show "$tmp/grant.log"; fail "the grant of a cuirass with a catalyst failed for another reason"
 fi
-listed=0
-for _ in $(seq 1 100); do
-  listed="$(plain "$tmp/keeper.log" | /usr/bin/grep -ac " listed " || true)"
-  [[ "$listed" -ge 3 ]] && break
-  sleep 0.1
+listings() { # n: wait until the keeper has listed n things
+  local n=0
+  for _ in $(seq 1 150); do
+    n="$(plain "$tmp/keeper.log" | /usr/bin/grep -ac " listed " || true)"
+    [[ "$n" -ge "$1" ]] && break
+    sleep 0.1
+  done
+  echo "$n"
+}
+atleast "$(listings 3)" 3 "swords the keeper put up for sale"
+# And three stacks of three kits (MODES.md 11.1): a stack never splits and two stacks of a
+# kind merge in a holder, so each is listed (moved to the stall) before the next is granted.
+for i in 1 2 3; do
+  "${hub[@]}" --grant-item Keeper kit 3 > "$tmp/grant.log" 2>&1 || { show "$tmp/grant.log"; fail "kits for the keeper"; }
+  atleast "$(listings $((3 + i)))" $((3 + i)) "listings with stack $i of kits"
 done
-atleast "$listed" 3 "swords the keeper put up for sale"
 # What the operator does for a buyer made by a client: coin, and a place at the counter.
 provide() { # character
   local out="" placed=0
@@ -176,20 +190,26 @@ provide() { # character
   [[ "$placed" == 1 ]] || { echo "$out" | tail -3; fail "$1 was not placed at the counter"; return 1; }
   "${hub[@]}" --grant-coin "$1" $PURSE > "$tmp/grant.log" 2>&1 || { show "$tmp/grant.log"; fail "coin for $1"; return 1; }
 }
-# What a buyer does once it stands in the game: looks, buys, wears, and finds the sword worn
-# through the menu as well. One line a step: each waits for what it needs.
+# What a buyer does once it stands in the game: looks, buys a sword and the kits, wears the
+# sword, and finds it worn through the menu as well; then presses F at full health, which
+# uses no kit and says so (MODES.md 11.3). One line a step: each waits for what it needs.
+KIT_ROW="kit ×3  heals 300, used with F"
 purchase() {
-  cat <<'EOS'
+  cat <<EOS
 wait screen game
 expect "Keeper's stall  E look"
 say at the stall
 key E
 wait screen stall
 expect "Keeper's stall"
-expect "1 g 50 s"
+expect "2 g 70 s"
 expect "a weapon, 40 of 250"
 expect "you wear nothing in its place"
 click "sword  slash +2.0%"
+click Buy
+expect "bought: it is in the inventory"
+expect "1 g 50 s"
+click "$KIT_ROW"
 click Buy
 expect "bought: it is in the inventory"
 expect "30 s"
@@ -198,6 +218,7 @@ wait screen game
 key I
 wait screen inventory
 expect "30 s"
+expect "$KIT_ROW"
 click "sword  slash +2.0%"
 click Wear
 expect "sword  slash +2.0%  worn"
@@ -216,7 +237,42 @@ click Back
 wait screen inventory
 key Escape
 wait screen game
+key F
+say pressed F
+sleep 1
 EOS
+}
+# A buyer of the RPG mode (MODES.md 5), whose build wears no sword: the kits alone, and F.
+purchase_kits() {
+  cat <<EOS
+wait screen game
+expect "Keeper's stall  E look"
+say at the stall
+key E
+wait screen stall
+expect "Keeper's stall"
+expect "2 g 70 s"
+click "$KIT_ROW"
+click Buy
+expect "bought: it is in the inventory"
+expect "1 g 50 s"
+key Escape
+wait screen game
+key I
+wait screen inventory
+expect "$KIT_ROW"
+key Escape
+wait screen game
+key F
+say pressed F
+sleep 1
+EOS
+}
+# The press of F at full health (MODES.md 11.3): the client says why no kit was used; the
+# kits are kept.
+refused() { # log, label
+  if /usr/bin/grep -aq "kit: at full health" "$1"; then ok "$2: F at full health used no kit and the HUD said so"
+  else fail "$2: no word of the kit refused at full health"; fi
 }
 # What the client itself called an error: a browser shows it in its console and plays on
 # (the WebGL build drew no town for two phases, and said so there).
@@ -224,16 +280,17 @@ quiet() { # log, label
   local first; first="$(/usr/bin/grep -a -m1 '^\[ERROR\]\|^EXCEPTION' "$1" || true)"
   if [[ -z "$first" ]]; then ok "$2: the client logged no error"; else fail "$2: the client logged an error: ${first:0:200}"; fi
 }
-# What the hub and the zone hold after `n` purchases.
-books() { # n
+# What the hub and the zone hold after `swords` swords and `kits` stacks of kits were bought.
+books() { # swords, kits
   local line; line="$("${hub[@]}" --audit 2>/dev/null | /usr/bin/grep -a "^audit:" || true)"
   [[ -n "$line" ]] || { fail "the hub's audit said nothing"; return; }
   echo "$line"
   equal "$(echo "$line" | sed -n 's/.* unsound=\([0-9-]*\).*/\1/p')" 0 "balances that disagree with the ledger, worn items astray"
   equal "$(echo "$line" | sed -n 's/.* worn=\([0-9]*\).*/\1/p')" "$1" "items worn"
-  equal "$(echo "$line" | sed -n 's/.* stall_sale=\([0-9]*\).*/\1/p')" "$(($1 * PRICE))" "coin the keeper was paid"
+  equal "$(echo "$line" | sed -n 's/.* stall_sale=\([0-9]*\).*/\1/p')" "$((($1 + $2) * PRICE))" "coin the keeper was paid"
   local told; told="$(plain "$tmp/town.log" | /usr/bin/grep -a " gear " | /usr/bin/grep -ac 'dealt=\[40, 0, 0, 0, 0, 0, 0, 0\]' || true)"
   atleast "$told" "$1" "times the zone applied a sword's edge on its own kind (40 per mille of slash)"
+  equal "$(plain "$tmp/town.log" | /usr/bin/grep -ac 'kit used' || true)" 0 "kits used (every press was at full health)"
 }
 
 desktop() {
@@ -291,21 +348,22 @@ EOS
   t_stall="$(stamp "$tmp/buy.log" "ui-script: at the stall" $pid)" || t_stall=""
   t_worn="$(stamp "$tmp/buy.log" "ui-script: worn" $pid)" || t_worn=""
   if wait $pid && /usr/bin/grep -aq '^ui-script: ok' "$tmp/buy.log"; then
-    ok "by script: the stall at the counter, a sword bought at the price shown, the purse 1 g 20 s lighter, the sword worn, the same through the menu, the storage empty"
+    ok "by script: the stall at the counter, a sword and three kits bought at the prices shown, the purse 2 g 40 s lighter, the sword worn, the same through the menu, the storage empty"
   else
     show "$tmp/buy.log"; fail "the purchase by script did not reach its end"; return
   fi
   quiet "$tmp/buy.log" "the desktop client, at the stall and in the inventory"
+  refused "$tmp/buy.log" "the desktop client, by script"
   if [[ -n "$t_stall" && -n "$t_worn" ]]; then
     atmost "$(since "$t_stall" "$t_worn")" "$(budget items max_secs_stall_to_worn)" "seconds from E at the stall to the sword being worn (software GPU, by script)"
   else
     fail "the purchase was not timed"
   fi
-  books 1
+  books 1 1
 
-  # 5. The two keys from a real keyboard: what the window system delivers, not what a
-  #    script hands in. The script only says when the screen is ready.
-  { echo "$login"; cat <<'EOS'
+  # 5. The keys from a real keyboard: what the window system delivers, not what a script
+  #    hands in. The script only says when the screen is ready.
+  { echo "$login"; cat <<EOS
 wait screen game
 expect "Keeper's stall  E look"
 say press e
@@ -316,6 +374,11 @@ wait screen game
 say press i
 wait screen inventory
 expect "sword  slash +2.0%  worn"
+expect "$KIT_ROW"
+say press escape again
+wait screen game
+say press f
+sleep 1
 quit
 EOS
   } > "$tmp/keys.ui"
@@ -333,13 +396,18 @@ EOS
     "${x[@]}" key Escape
     told "press i" || return 1
     "${x[@]}" key i
+    told "press escape again" || return 1
+    "${x[@]}" key Escape
+    told "press f" || return 1
+    "${x[@]}" key f
   }
   if keys && wait $pid && /usr/bin/grep -aq '^ui-script: ok' "$tmp/keys.log"; then
-    ok "by a real keyboard: E opens the stall the body stands at, Escape closes it, I opens the inventory"
+    ok "by a real keyboard: E opens the stall the body stands at, Escape closes it, I opens the inventory, F asks for a kit"
   else
     kill $pid 2>/dev/null || true
     show "$tmp/keys.log"; fail "the run by real keys did not reach its end"
   fi
+  refused "$tmp/keys.log" "the desktop client, by a real keyboard"
 }
 
 browser() {
@@ -355,22 +423,24 @@ browser() {
   (cd "$tmp/web" && exec python3 -m http.server "$http" --bind 127.0.0.1 >/dev/null 2>&1) &
   pids+=("$!")
   local soft=(); [[ "$SOFTWARE" == 1 ]] && soft=(--software)
-  local build name script query extra bought=0
+  local build name preset script query extra swords=0 kits=0
   # (The desktop's purchase, when it ran and went through, is in the books too.)
-  [[ "$DESKTOP" == 1 ]] && /usr/bin/grep -aq '^ui-script: ok' "$tmp/buy.log" 2>/dev/null && bought=1
+  [[ "$DESKTOP" == 1 ]] && /usr/bin/grep -aq '^ui-script: ok' "$tmp/buy.log" 2>/dev/null && { swords=1; kits=1; }
   page() { # log, script, more arguments of web-run
     local log="$1"; query="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$2")"; shift 2
     timeout 240 node scripts/web-run.mjs --url "http://127.0.0.1:$http/?ui-script=$query$extra" --seconds 120 \
       --login "$build@gm.test" --password "a long password" "$@" ${CHROME:+--chrome "$CHROME"} "${soft[@]}" > "$log" 2>&1 || true
     /usr/bin/grep -aq '^GM-DONE ui-script: ok' "$log"
   }
+  # The WebGPU buyer is a blade (the action mode), the WebGL2 buyer a frostweaver (the RPG
+  # mode, whose keys are read another way: MODES.md 5.5), who wears no sword.
   for build in webgpu webgl; do
     name="Buyer$build"
-    extra=""; [[ "$build" == webgl ]] && extra="&gl=1"
+    extra=""; preset=blade; [[ "$build" == webgl ]] && { extra="&gl=1"; preset=frostweaver; }
     # The form is the page's (filled by the browser's own input events); the character is
     # made on the canvas, then the operator's hand, then the purchase.
-    script="$(printf '%s\n' 'wait screen new character' 'field name' "type $name" 'click blade' 'click Create' \
-      'wait screen characters' "expect \"$name  blade  new\"" 'quit')"
+    script="$(printf '%s\n' 'wait screen new character' 'field name' "type $name" "click $preset" 'click Create' \
+      'wait screen characters' "expect \"$name  $preset  new\"" 'quit')"
     if page "$tmp/browser-$build-new.log" "$script" --register; then
       ok "$build: a new account by the page's form and a character called $name"
     else
@@ -378,17 +448,27 @@ browser() {
     fi
     quiet "$tmp/browser-$build-new.log" "$build, making its buyer"
     provide "$name" || continue
-    script="$(printf '%s\n' 'wait screen characters' 'click Play'; purchase; echo quit)"
+    if [[ "$preset" == blade ]]; then
+      script="$(printf '%s\n' 'wait screen characters' 'click Play'; purchase; echo quit)"
+    else
+      script="$(printf '%s\n' 'wait screen characters' 'click Play'; purchase_kits; echo quit)"
+    fi
     if page "$tmp/browser-$build.log" "$script" --screenshot "$tmp/browser-$build.png"; then
-      ok "$build: the stall at the counter, a sword bought and worn, the same through the menu"
+      if [[ "$preset" == blade ]]; then
+        ok "$build: the stall at the counter, a sword and the kits bought, the sword worn, the same through the menu"
+      else
+        ok "$build: a $preset at the counter, the kits bought and in the inventory"
+      fi
     else
       show "$tmp/browser-$build.log"; fail "the $build build did not reach the end of its purchase"; continue
     fi
     if /usr/bin/grep -aq "^GM-BUILD $build" "$tmp/browser-$build.log"; then ok "$build: that build ran"; else fail "$build: another build ran"; fi
     quiet "$tmp/browser-$build.log" "$build, in the town"
-    bought=$((bought + 1))
+    refused "$tmp/browser-$build.log" "$build, a $preset"
+    [[ "$preset" == blade ]] && swords=$((swords + 1))
+    kits=$((kits + 1))
   done
-  books "$bought"
+  books "$swords" "$kits"
 }
 
 [[ "$DESKTOP" == 1 ]] && desktop

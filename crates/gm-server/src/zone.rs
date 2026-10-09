@@ -2875,6 +2875,21 @@ pub async fn run_with_web(
                     }
                 }
                 ZoneEvent::KitUsed(id) => {
+                    // Said in the log (MODES.md 11.3): a reload is not, a kit is rarer
+                    // and what a player asks about.
+                    let kits = hub_slots.get(&id).map_or(0, |s| {
+                        s.stacks
+                            .iter()
+                            .filter(|s| s.heals.is_some())
+                            .map(|s| s.quantity)
+                            .sum::<u32>()
+                    });
+                    info!(
+                        body = id,
+                        character = hub_slots.get(&id).map(|s| s.character),
+                        left = kits.saturating_sub(1),
+                        "kit used"
+                    );
                     consume_stack(
                         &cfg,
                         &mut hub_slots,
