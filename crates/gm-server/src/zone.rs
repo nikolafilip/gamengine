@@ -1450,6 +1450,12 @@ pub async fn run_with_web(
                             .iter()
                             .find_map(|g| g.tile_at(p.mover.mv.origin))
                             .ok_or("stand on a market tile to open a stall")?;
+                        // One stall per character (ECONOMY.md 7): a keeper back after a
+                        // restart finds its stall standing, and is told so here rather
+                        // than by the hub's constraint on every ask.
+                        if stalls.values().any(|s| s.owner == slot.character) {
+                            return Err("you already have a stall");
+                        }
                         if stalls.values().any(|s| (s.tile_x, s.tile_y) == (x, y)) {
                             return Err("that tile is taken");
                         }

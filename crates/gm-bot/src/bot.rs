@@ -540,6 +540,12 @@ pub async fn run_bot_on_link(
                             report.stall_opened = true;
                             info!(name = %cfg.name, "stall opened");
                         }
+                        Err(why) if why.contains("already have a stall") => {
+                            // The stall from before the restart stands: the bot keeps it
+                            // rather than asking the zone every second.
+                            report.stall_opened = true;
+                            info!(name = %cfg.name, "stall stands from before");
+                        }
                         Err(why) => {
                             // Somebody was faster: the next tile.
                             debug!(name = %cfg.name, "stall refused: {why}");
