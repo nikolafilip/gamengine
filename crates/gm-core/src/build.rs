@@ -137,7 +137,6 @@ pub enum BuildError {
     AttributePoints {
         spent: u32,
     },
-    NoAspect,
     TooManyAspects,
     UnknownAbility(u16),
     WrongSlot {
@@ -174,7 +173,6 @@ impl core::fmt::Display for BuildError {
                 Attributes::MIN,
                 Attributes::MAX
             ),
-            BuildError::NoAspect => write!(f, "a build needs at least one aspect"),
             BuildError::TooManyAspects => write!(f, "at most two aspects"),
             BuildError::UnknownAbility(i) => write!(f, "unknown ability {i}"),
             BuildError::WrongSlot { index, expected } => {
@@ -345,13 +343,12 @@ impl Build {
 
     /// Aspects, slot types, duplicates, aspect gating, cooldown groups.
     fn check_kit(&self, pack: &ContentPack, creature: bool) -> Result<(), BuildError> {
-        if self.aspects.0 & !0x1f != 0 {
+        if self.aspects.0 & !Element::MASK != 0 {
             return Err(BuildError::TooManyAspects);
         }
-        match self.aspects.count() {
-            0 => return Err(BuildError::NoAspect),
-            1 | 2 => {}
-            _ => return Err(BuildError::TooManyAspects),
+        // None is neutral (MATRIX.md 5): 1x on every element, and nothing elemental slots.
+        if self.aspects.count() > 2 {
+            return Err(BuildError::TooManyAspects);
         }
         if self.actives.len() > MAX_ACTIVES {
             return Err(BuildError::TooManyActives);
@@ -825,9 +822,17 @@ mod tests {
             b.validate(&pack),
             Err(BuildError::AttributePoints { .. })
         ));
+        // No aspect is neutral (MATRIX.md 5): a blade without one is fine, and slots
+        // nothing elemental.
         let mut b = base.clone();
         b.aspects = Aspects::NONE;
-        assert_eq!(b.validate(&pack), Err(BuildError::NoAspect));
+        assert_eq!(b.validate(&pack), Ok(()));
+        b.primary = pack.find("ice_shard").unwrap();
+        // (the ice shard is Water, which the blade had a moment ago)
+        assert!(matches!(
+            b.validate(&pack),
+            Err(BuildError::MissingAspect { .. })
+        ));
         let mut b = base.clone();
         b.primary = 999;
         assert_eq!(b.validate(&pack), Err(BuildError::UnknownAbility(999)));
@@ -862,9 +867,9 @@ mod tests {
             "{:?}",
             b.validate(&pack)
         );
-        // Frost content needs the Frost aspect (the ice shard is a primary).
+        // Fire content needs the Fire aspect (the firebolt is a primary; the blade is Water).
         let mut b = base.clone();
-        b.primary = pack.find("ice_shard").unwrap();
+        b.primary = pack.find("firebolt").unwrap();
         assert!(matches!(
             b.validate(&pack),
             Err(BuildError::MissingAspect { .. })

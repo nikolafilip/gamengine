@@ -1,6 +1,6 @@
 //! A content pack built in code for tests, benchmarks and bots that run without the asset
 //! files. The shipped content lives in `assets/content` (loaded by `gm-content`); this pack
-//! mirrors its v1 abilities and the four preset builds of MATRIX.md 11 closely enough that
+//! mirrors its v1 abilities and the preset builds of MATRIX.md 11 closely enough that
 //! simulation tests mean something, but it is a fixture, not the source of truth.
 
 use crate::build::{AbilityDef, Build, ContentPack, CreatureDef, Loot, NamedBuild, Sheet, Slot};
@@ -388,7 +388,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "firebolt",
             Primary,
             2,
-            Some(Element::Flame),
+            Some(Element::Fire),
             ability(
                 11,
                 "Firebolt",
@@ -404,7 +404,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         1400.0,
                         0.1,
                         4.0,
-                        packet(55, Flame, 60.0, 10),
+                        packet(55, Fire, 60.0, 10),
                         vec![Trigger::Status(status(
                             Status::Burn,
                             3000,
@@ -423,7 +423,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "ice_shard",
             Primary,
             2,
-            Some(Element::Frost),
+            Some(Element::Water),
             ability(
                 12,
                 "Ice shard",
@@ -439,7 +439,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         1500.0,
                         0.15,
                         4.0,
-                        packet(50, Frost, 60.0, 10),
+                        packet(50, Water, 60.0, 10),
                         vec![Trigger::Status(status(
                             Status::Chill,
                             3000,
@@ -458,7 +458,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "stone_throw",
             Primary,
             2,
-            Some(Element::Stone),
+            Some(Element::Ground),
             ability(
                 13,
                 "Stone throw",
@@ -469,7 +469,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 Interrupt::OnDamage,
                 vec![(
                     250,
-                    projectile(r, 1100.0, 0.6, 6.0, packet(75, Stone, 250.0, 30), vec![]),
+                    projectile(r, 1100.0, 0.6, 6.0, packet(75, Ground, 250.0, 30), vec![]),
                 )],
                 r,
             ),
@@ -478,7 +478,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "shadow_dart",
             Primary,
             2,
-            Some(Element::Shadow),
+            Some(Element::Air),
             ability(
                 14,
                 "Shadow dart",
@@ -496,7 +496,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         2.0,
                         DamagePacket {
                             bypass: Bypass::EVASION,
-                            ..packet(40, Shadow, 40.0, 5)
+                            ..packet(40, Air, 40.0, 5)
                         },
                         vec![],
                     ),
@@ -508,7 +508,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "spark",
             Primary,
             2,
-            Some(Element::Storm),
+            Some(Element::Electric),
             ability(
                 15,
                 "Spark",
@@ -524,7 +524,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         2400.0,
                         0.0,
                         3.0,
-                        packet(50, Storm, 40.0, 10),
+                        packet(50, Electric, 40.0, 10),
                         vec![Trigger::Status(status(
                             Status::Shock,
                             16,
@@ -737,7 +737,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "blink",
             Active,
             10,
-            Some(Element::Shadow),
+            Some(Element::Air),
             ability(
                 33,
                 "Blink",
@@ -793,7 +793,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "stomp",
             Active,
             10,
-            Some(Element::Stone),
+            Some(Element::Ground),
             ability(
                 35,
                 "Stomp",
@@ -813,7 +813,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         delay: 0,
                         duration: 0,
                         interval: 0,
-                        damage: Some(packet(35, Stone, 200.0, 40)),
+                        damage: Some(packet(35, Ground, 200.0, 40)),
                         effects: vec![status(
                             Status::Slow,
                             2000,
@@ -836,7 +836,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "fortify",
             Active,
             8,
-            Some(Element::Stone),
+            Some(Element::Ground),
             ability(
                 36,
                 "Fortify",
@@ -864,7 +864,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "frost_nova",
             Active,
             10,
-            Some(Element::Frost),
+            Some(Element::Water),
             ability(
                 37,
                 "Frost nova",
@@ -881,7 +881,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         delay: 0,
                         duration: 0,
                         interval: 0,
-                        damage: Some(packet(30, Frost, 60.0, 10)),
+                        damage: Some(packet(30, Water, 60.0, 10)),
                         effects: vec![
                             status(
                                 Status::Chill,
@@ -943,7 +943,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "thunderclap",
             Active,
             10,
-            Some(Element::Storm),
+            Some(Element::Electric),
             ability(
                 39,
                 "Thunderclap",
@@ -960,7 +960,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         delay: 0,
                         duration: 0,
                         interval: 0,
-                        damage: Some(packet(40, Storm, 80.0, 20)),
+                        damage: Some(packet(40, Electric, 80.0, 20)),
                         effects: vec![status(
                             Status::Shock,
                             16,
@@ -983,7 +983,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "vanish",
             Active,
             8,
-            Some(Element::Shadow),
+            Some(Element::Air),
             ability(
                 40,
                 "Vanish",
@@ -1011,7 +1011,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "poison_cloud",
             Active,
             8,
-            Some(Element::Shadow),
+            Some(Element::Air),
             ability(
                 41,
                 "Poison cloud",
@@ -1056,7 +1056,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
             "fireball",
             Active,
             12,
-            Some(Element::Flame),
+            Some(Element::Fire),
             ability(
                 42,
                 "Fireball",
@@ -1072,7 +1072,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                         gravity_scale: 0.0,
                         radius: 6.0,
                         lifetime: r.ms_to_ticks(3000),
-                        damage: packet(20, Flame, 40.0, 10),
+                        damage: packet(20, Fire, 40.0, 10),
                         pierce: 0,
                         bounce: Bounce::default(),
                         drag: 0.0,
@@ -1088,7 +1088,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                             delay: 0,
                             duration: 0,
                             interval: 0,
-                            damage: Some(packet(30, Flame, 120.0, 15)),
+                            damage: Some(packet(30, Fire, 120.0, 15)),
                             effects: vec![status(
                                 Status::Burn,
                                 3000,
@@ -1293,7 +1293,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 "quake",
                 Active,
                 0,
-                Some(Element::Stone),
+                Some(Element::Ground),
                 ability(
                     47,
                     "Quake",
@@ -1313,7 +1313,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                             delay: r.ms_to_ticks(1300),
                             duration: 0,
                             interval: 0,
-                            damage: Some(packet(70, Stone, 300.0, 60)),
+                            damage: Some(packet(70, Ground, 300.0, 60)),
                             effects: vec![],
                             falloff: Falloff::None,
                             max_targets: 8,
@@ -1750,6 +1750,227 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 0,
             ),
         ),
+        // The colossus's greatsword (MATRIX.md 16): a hammer's pace, a blade's sweep.
+        def(
+            "greatsword",
+            Primary,
+            2,
+            None,
+            ability(
+                44,
+                "Greatsword",
+                1100,
+                0,
+                0,
+                0.45,
+                Interrupt::OnStagger,
+                vec![(
+                    0,
+                    match assisted(
+                        melee(
+                            r,
+                            96.0,
+                            120.0,
+                            320,
+                            90,
+                            520,
+                            packet(95, Slash, 240.0, 35),
+                            4,
+                            0.8,
+                        ),
+                        30.0,
+                    ) {
+                        Verb::MeleeArc(m) => Verb::MeleeArc(MeleeArc {
+                            half_height: 44.0,
+                            hit_stop: r.ms_to_ticks(40),
+                            ..m
+                        }),
+                        v => v,
+                    },
+                )],
+                r,
+            ),
+        ),
+        // The colossus's bellow (MATRIX.md 16): Taunt on every enemy within 256 u.
+        def(
+            "bellow",
+            Active,
+            8,
+            None,
+            ability(
+                45,
+                "Bellow",
+                12000,
+                0,
+                20,
+                0.5,
+                Interrupt::OnStagger,
+                vec![
+                    (
+                        200,
+                        Verb::AreaEffect(AreaEffect {
+                            shape: Shape::Cylinder {
+                                radius: 256.0,
+                                height: 128.0,
+                            },
+                            origin: Origin::SelfFeet,
+                            delay: 0,
+                            duration: 0,
+                            interval: 0,
+                            damage: None,
+                            effects: vec![status(
+                                Status::Taunt,
+                                2500,
+                                1.0,
+                                StackRule::Refresh,
+                                1,
+                                StatusTarget::Area,
+                                r,
+                            )],
+                            falloff: Falloff::None,
+                            max_targets: 8,
+                            requires_los: true,
+                            exclude_actor: true,
+                        }),
+                    ),
+                    (
+                        200,
+                        Verb::ApplyStatus(status(
+                            Status::Fortify,
+                            4000,
+                            0.3,
+                            StackRule::Refresh,
+                            1,
+                            StatusTarget::Actor,
+                            r,
+                        )),
+                    ),
+                ],
+                r,
+            ),
+        ),
+        // The shaman's (MATRIX.md 17): the slam, the briar, the entangle.
+        def(
+            "slam",
+            Secondary,
+            4,
+            None,
+            ability(
+                52,
+                "Slam",
+                4000,
+                0,
+                0,
+                0.4,
+                Interrupt::OnStagger,
+                vec![(
+                    250,
+                    Verb::AreaEffect(AreaEffect {
+                        shape: Shape::Cylinder {
+                            radius: 96.0,
+                            height: 64.0,
+                        },
+                        origin: Origin::SelfFeet,
+                        delay: 0,
+                        duration: 0,
+                        interval: 0,
+                        damage: Some(packet(30, Blunt, 300.0, 40)),
+                        effects: vec![],
+                        falloff: Falloff::None,
+                        max_targets: 6,
+                        requires_los: true,
+                        exclude_actor: true,
+                    }),
+                )],
+                r,
+            ),
+        ),
+        def(
+            "briar",
+            Active,
+            10,
+            Some(Element::Grass),
+            ability(
+                53,
+                "Briar",
+                14000,
+                0,
+                35,
+                0.5,
+                Interrupt::OnDamage,
+                vec![(
+                    300,
+                    Verb::AreaEffect(AreaEffect {
+                        shape: Shape::Cylinder {
+                            radius: 140.0,
+                            height: 96.0,
+                        },
+                        origin: Origin::Aim { range: 500.0 },
+                        delay: 0,
+                        duration: r.ms_to_ticks(6000),
+                        interval: r.ms_to_ticks(1000),
+                        damage: Some(packet(8, Grass, 0.0, 0)),
+                        effects: vec![status(
+                            Status::Regen,
+                            1500,
+                            30.0,
+                            StackRule::Refresh,
+                            1,
+                            StatusTarget::Allies,
+                            r,
+                        )],
+                        falloff: Falloff::None,
+                        max_targets: 8,
+                        requires_los: false,
+                        exclude_actor: false,
+                    }),
+                )],
+                r,
+            ),
+        ),
+        def(
+            "entangle",
+            Active,
+            10,
+            Some(Element::Grass),
+            ability(
+                54,
+                "Entangle",
+                14000,
+                0,
+                25,
+                0.3,
+                Interrupt::OnDamage,
+                vec![(
+                    300,
+                    Verb::AreaEffect(AreaEffect {
+                        shape: Shape::Cylinder {
+                            radius: 112.0,
+                            height: 96.0,
+                        },
+                        origin: Origin::Aim { range: 500.0 },
+                        delay: 0,
+                        duration: 0,
+                        interval: 0,
+                        damage: Some(packet(15, Grass, 0.0, 10)),
+                        effects: vec![status(
+                            Status::Root,
+                            1500,
+                            0.0,
+                            StackRule::Refresh,
+                            1,
+                            StatusTarget::Area,
+                            r,
+                        )],
+                        falloff: Falloff::None,
+                        max_targets: 8,
+                        requires_los: true,
+                        exclude_actor: true,
+                    }),
+                )],
+                r,
+            ),
+        ),
     ];
     let mut pack = ContentPack {
         abilities,
@@ -1803,11 +2024,11 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Colossus,
                 attributes: Attributes::new(15, 5, 20, 5, 10),
                 armour: ArmourClass::Plate,
-                aspects: Aspects::one(Element::Stone),
-                primary: id(&pack, "hammer"),
+                aspects: Aspects::one(Element::Ground),
+                primary: id(&pack, "greatsword"),
                 secondary: id(&pack, "shield_bash"),
                 guard: Some(id(&pack, "shield_wall")),
-                actives: vec![id(&pack, "stomp"), id(&pack, "fortify")],
+                actives: vec![id(&pack, "stomp"), id(&pack, "bellow")],
             },
         },
         NamedBuild {
@@ -1817,11 +2038,11 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::new(17, 13, 15, 5, 5),
                 armour: ArmourClass::Mail,
-                aspects: Aspects::one(Element::Flame),
+                aspects: Aspects::one(Element::Water),
                 primary: id(&pack, "sword"),
                 secondary: id(&pack, "kick"),
                 guard: Some(id(&pack, "parry")),
-                actives: vec![id(&pack, "dash"), id(&pack, "overhead")],
+                actives: vec![id(&pack, "charge"), id(&pack, "overhead")],
             },
         },
         NamedBuild {
@@ -1831,11 +2052,11 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Caster,
                 attributes: Attributes::new(5, 10, 5, 20, 15),
                 armour: ArmourClass::Cloth,
-                aspects: Aspects::two(Element::Frost, Element::Shadow),
+                aspects: Aspects::two(Element::Water, Element::Air),
                 primary: id(&pack, "ice_shard"),
                 secondary: id(&pack, "kick"),
                 guard: Some(id(&pack, "brace")),
-                actives: vec![id(&pack, "frost_nova"), id(&pack, "blink")],
+                actives: vec![id(&pack, "frost_nova")],
             },
         },
         NamedBuild {
@@ -1845,7 +2066,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Infiltrator,
                 attributes: Attributes::new(15, 20, 10, 5, 5),
                 armour: ArmourClass::Leather,
-                aspects: Aspects::one(Element::Shadow),
+                aspects: Aspects::one(Element::Air),
                 primary: id(&pack, "dagger"),
                 secondary: id(&pack, "throwing_knife"),
                 guard: Some(id(&pack, "parry")),
@@ -1863,7 +2084,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Caster,
                 attributes: Attributes::new(5, 5, 10, 15, 20),
                 armour: ArmourClass::Cloth,
-                aspects: Aspects::one(Element::Storm),
+                aspects: Aspects::one(Element::Electric),
                 primary: id(&pack, "staff"),
                 secondary: id(&pack, "mend"),
                 guard: Some(id(&pack, "brace")),
@@ -1874,35 +2095,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 ],
             },
         },
-        NamedBuild {
-            name: "captain".into(),
-            build: Build {
-                mode: Mode::Action,
-                frame: ArchetypeFrame::Striker,
-                attributes: Attributes::new(15, 10, 15, 5, 10),
-                armour: ArmourClass::Mail,
-                aspects: Aspects::one(Element::Flame),
-                primary: id(&pack, "sword"),
-                secondary: id(&pack, "kick"),
-                guard: Some(id(&pack, "parry")),
-                actives: vec![id(&pack, "war_standard"), id(&pack, "dash")],
-            },
-        },
-        NamedBuild {
-            name: "marksman".into(),
-            build: Build {
-                mode: Mode::Rpg,
-                frame: ArchetypeFrame::Striker,
-                attributes: Attributes::new(10, 20, 10, 5, 10),
-                armour: ArmourClass::Leather,
-                aspects: Aspects::one(Element::Storm),
-                primary: id(&pack, "crossbow"),
-                secondary: id(&pack, "throwing_knife"),
-                guard: Some(id(&pack, "brace")),
-                actives: vec![id(&pack, "dash"), id(&pack, "leap"), id(&pack, "haste")],
-            },
-        },
-        // The gun (MODES.md 3): a musket, a pistol, the knife, a dodge and a vanish.
+        // The gun (MODES.md 3): a musket, a pistol, the knife, the legs; the neutral build.
         NamedBuild {
             name: "musketeer".into(),
             build: Build {
@@ -1910,11 +2103,26 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::new(10, 17, 13, 5, 10),
                 armour: ArmourClass::Leather,
-                aspects: Aspects::one(Element::Shadow),
+                aspects: Aspects::default(),
                 primary: id(&pack, "musket"),
                 secondary: id(&pack, "pistol"),
                 guard: None,
-                actives: vec![id(&pack, "dash"), id(&pack, "vanish")],
+                actives: vec![id(&pack, "dash"), id(&pack, "leap")],
+            },
+        },
+        // The shaman (MATRIX.md 17): the hammer's build, Grass, half a healer.
+        NamedBuild {
+            name: "shaman".into(),
+            build: Build {
+                mode: Mode::Rpg,
+                frame: ArchetypeFrame::Caster,
+                attributes: Attributes::new(13, 8, 14, 15, 5),
+                armour: ArmourClass::Leather,
+                aspects: Aspects::one(Element::Grass),
+                primary: id(&pack, "hammer"),
+                secondary: id(&pack, "slam"),
+                guard: Some(id(&pack, "brace")),
+                actives: vec![id(&pack, "briar"), id(&pack, "entangle")],
             },
         },
     ];
@@ -1928,7 +2136,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::new(16, 14, 16, 8, 10),
                 armour: ArmourClass::Mail,
-                aspects: Aspects::one(Element::Flame),
+                aspects: Aspects::one(Element::Water),
                 primary: id(&pack, "sword"),
                 secondary: id(&pack, "crossbow"),
                 guard: Some(id(&pack, "parry")),
@@ -1953,7 +2161,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Colossus,
                 attributes: Attributes::new(20, 8, 20, 14, 14),
                 armour: ArmourClass::Plate,
-                aspects: Aspects::one(Element::Stone),
+                aspects: Aspects::one(Element::Ground),
                 primary: id(&pack, "maul"),
                 secondary: id(&pack, "stone_throw"),
                 guard: None,
@@ -1992,7 +2200,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Colossus,
                 attributes: Attributes::flat(5),
                 armour: ArmourClass::Leather,
-                aspects: Aspects::one(Element::Stone),
+                aspects: Aspects::one(Element::Ground),
                 primary: id(&pack, "staff"),
                 secondary: id(&pack, "kick"),
                 guard: None,
@@ -2017,7 +2225,7 @@ pub fn pack(rate: TickRate) -> ContentPack {
                 frame: ArchetypeFrame::Striker,
                 attributes: Attributes::flat(5),
                 armour: ArmourClass::Cloth,
-                aspects: Aspects::one(Element::Flame),
+                aspects: Aspects::one(Element::Fire),
                 primary: id(&pack, "staff"),
                 secondary: id(&pack, "kick"),
                 guard: None,
@@ -2094,7 +2302,7 @@ pub fn phase2_build(pack: &ContentPack) -> Build {
         frame: ArchetypeFrame::Striker,
         attributes: Attributes::flat(10),
         armour: ArmourClass::Cloth,
-        aspects: Aspects::one(Element::Flame),
+        aspects: Aspects::one(Element::Water),
         primary: pack.find("sword").expect("sword"),
         secondary: pack.find("crossbow").expect("crossbow"),
         guard: None,

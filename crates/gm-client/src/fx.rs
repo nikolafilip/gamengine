@@ -809,9 +809,13 @@ fn bolt(mesh: &mut FxMesh, pos: Vec3, vel: Vec3, radius: f32, ink: Rgba, eye: Ve
 }
 
 /// The ring at a body's feet in the colours of its aspects (MODELS.md 9: whatever a body
-/// wears, its elements are read at a glance): one aspect the whole ring, two a half each.
+/// wears, its elements are read at a glance): one aspect the whole ring, two a half each,
+/// none (neutral, MATRIX.md 5) no ring.
 pub fn aspect_ring(mesh: &mut FxMesh, feet: Vec3, yaw: f32, aspects: u8) {
-    let which: Vec<usize> = (0..5).filter(|i| aspects & (1 << i) != 0).take(2).collect();
+    let which: Vec<usize> = (0..crate::avatars::ASPECT_COLOURS.len())
+        .filter(|i| aspects & (1 << i) != 0)
+        .take(2)
+        .collect();
     let at = feet + Vec3::Z * 0.5;
     for (k, a) in which.iter().enumerate() {
         let c = crate::avatars::ASPECT_COLOURS[*a];

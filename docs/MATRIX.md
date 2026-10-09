@@ -1,6 +1,6 @@
 # Character Matrix
 
-Status: v2, 2026-10-06 (v1 was Phase 3). This document is the contract for point-buy
+Status: v6, 2026-10-09 (v5 the same day, section 16; v4 section 15; v3 the six elements of section 5, section 14; v2 2026-10-06, v1 Phase 3; the shaman, the seventh preset and the first of Grass, is v6, section 17). This document is the contract for point-buy
 characters, the type matrix and the damage pipeline. v2 (section 13): the character's own
 thirty attribute points apart from the kit's budget, wider bands and seven times the health,
 the range as the weapon's, the trainer and the dummy. `gm-core::matrix` and `gm-core::build` mirror it; when they disagree,
@@ -84,35 +84,48 @@ honest middle. The table is the "weapon triangle" half of the matrix.
 
 ## 5. Elements and aspects
 
-Five elements. A build has one or two **aspects** (the first is free, the second costs 10
-points). Aspects are the build's defensive element types **and** gate which elemental
-abilities it may slot (an ability tagged Flame needs the Flame aspect).
+Six elements (v3, 2026-10-09; v1 and v2 had five in a pentagram, section 14). A build has
+**none, one or two aspects** (the first is free, the second costs 10 points). Aspects are
+the build's defensive element types **and** gate which elemental abilities it may slot (an
+ability tagged Fire needs the Fire aspect). **No aspect is neutral**: the body takes 1× from
+every element, and slots nothing elemental.
 
-The matrix is a pentagram: every element beats exactly two and loses to exactly two, and
-resists itself. Order **Flame, Shadow, Storm, Frost, Stone**: element *i* beats *i + 1* and
-*i + 3* (mod 5).
+The matrix is the well-known one (the chart everybody has played against), with **Air** for
+its Flying, cut to the six types below and with its two immunities turned into resists
+(principle 4). It is deliberately lopsided: an element may beat one and be beaten by two,
+and pairs are neutral; what holds is that **every element beats at least one, is beaten by
+at least one, and no element stands more than one step from even** (beats + resists −
+beaten − resisted, over the other five). Attacker by row, defending aspect by column:
 
-| Attack \ Aspect | Flame | Shadow | Storm | Frost | Stone |
+| Attack \ Aspect | Fire | Water | Grass | Electric | Ground | Air |
+|---|---|---|---|---|---|---|
+| Fire | 0.5 | 0.5 | **2** | 1 | 1 | 1 |
+| Water | **2** | 0.5 | 0.5 | 1 | **2** | 1 |
+| Grass | 0.5 | **2** | 0.5 | 1 | **2** | 0.5 |
+| Electric | 1 | **2** | 0.5 | 0.5 | 0.5 | **2** |
+| Ground | **2** | 1 | 0.5 | **2** | 1 | 0.5 |
+| Air | 1 | 1 | **2** | 0.5 | 1 | 1 |
+
+Readings: fire burns grass; water drowns fire and washes the ground away; grass drinks the
+water and splits the ground; lightning strikes the water and whatever flies; the ground
+smothers fire and takes the lightning; the wind tears the grass. The chart's immunities
+(lightning into the ground, the ground into what flies) are 0.5 here.
+
+| | beats | beaten by | resists | resisted by | net |
 |---|---|---|---|---|---|
-| Flame | 0.5 | **2** | 0.5 | **2** | 0.5 |
-| Shadow | 0.5 | 0.5 | **2** | 0.5 | **2** |
-| Storm | **2** | 0.5 | 0.5 | **2** | 0.5 |
-| Frost | 0.5 | **2** | 0.5 | 0.5 | **2** |
-| Stone | **2** | 0.5 | **2** | 0.5 | 0.5 |
+| Fire | 1 | 2 | 1 | 1 | −1 |
+| Water | 2 | 2 | 1 | 1 | 0 |
+| Grass | 2 | 2 | 3 | 2 | +1 |
+| Electric | 2 | 1 | 1 | 2 | 0 |
+| Ground | 2 | 2 | 1 | 2 | −1 |
+| Air | 1 | 1 | 2 | 1 | +1 |
 
-Readings: light burns away shadow and melts ice; darkness swallows the flash and seeps into
-stone; wind snuffs fire and lightning shatters ice; cold stills the dark and splits rock;
-earth smothers fire and grounds the storm.
-
-**Stacking.** Against a dual-aspect defender the two multipliers multiply: Flame into
-Shadow + Frost is **4×**; Flame into Storm + Stone is **0.25×**. In a balanced five-element
-matrix exactly five of the ten pairs can share a predator, so the pairs come in two shapes:
-- **two apart** in the pentagram order (Flame + Storm, Shadow + Frost, Storm + Stone,
-  Frost + Flame, Stone + Shadow): one **4× hole**, two 0.25× walls, two neutral;
-- **adjacent** (Flame + Shadow, Shadow + Storm, Storm + Frost, Frost + Stone, Stone + Flame):
-  no hole, one 0.25× wall, four neutral.
-
-Spiky or safe is the build choice; both cost 10 points, both still eat the physical table.
+**Stacking.** Against a dual-aspect defender the two multipliers multiply. Four of the
+fifteen pairs have a **4× hole** (a predator of both): Fire + Electric (Ground), Fire +
+Ground (Water), Water + Ground (Grass), Water + Air (Electric). Every pair but Water +
+Electric, Electric + Air and Ground + Air has at least one **0.25× wall**; Grass + Air walls
+two (Grass and Ground). Spiky or safe is the build choice; both cost 10 points, both still
+eat the physical table. Neutral is the third choice: no hole, no wall, and no element to cast.
 
 Physical packets ignore this table; elemental packets ignore the armour-class table.
 
@@ -224,9 +237,10 @@ The initial set of VOCABULARY.md 5.4 with resolved semantics. `m` is the magnitu
 | Stealth | included in snapshots only within `m` units (never past PVS) | Refresh |
 | Knockdown | on the ground (MODES.md 4.5): interrupts; no activation, guard or movement; hits land in full | Refresh |
 | Launched | as Knockdown, with a lift of `m` u/s straight up when it lands | Refresh |
+| Taunt | the body is turned to the slot's source (who applied it) and held there, tick by tick, while the source is on its wire; the view turns with the body on the client; a mind under it fights the source (gm-ai, gm-bot). Lands on enemies only (an ally in the roar is untouched). v5, section 16 | Refresh |
 
 **Diminishing returns on controls** (MODES.md 4.5, `gm_core::sim::CONTROL_WINDOW_MS`):
-Knockdown, Launched and an explicit Root are controls. The second of a kind within ten
+Knockdown, Launched, an explicit Root and Taunt are controls, each its own kind. The second of a kind within ten
 seconds of the last lasts half, the third does nothing; ten seconds after the last, the
 count is forgotten. Freeze's Root (Chill at its stacks) is not under them: Chill has its own
 immunity.
@@ -243,7 +257,7 @@ Build {
   frame:        Colossus | Striker | Caster | Infiltrator       free
   attributes:   STR AGI CON INT SPR, each 5..=25                 Σ(attr − 5) ≤ 30, the character's own
   armour:       Cloth | Leather | Mail | Plate                   0 / 4 / 8 / 12
-  aspects:      1..=2 of Flame Shadow Storm Frost Stone          0 / 10
+  aspects:      0..=2 of Fire Water Grass Electric Ground Air    0 / 10 (none: neutral)
   kit:          primary, secondary, guard (optional), up to 4 actives   Σ ability cost
 }
 armour + aspects + kit ≤ 40 (the kit's budget); unspent is allowed.
@@ -253,7 +267,7 @@ Rules enforced by `gm-core::build::validate`:
 - every slot holds a distinct ability of the matching slot type (primary, secondary, guard,
   active); an ability's `aspect` requirement must be in the build's aspects;
 - at most one ability per cooldown group;
-- the attribute floor and cap, the thirty points, the kit's budget, no duplicate aspects.
+- the attribute floor and cap, the thirty points, the kit's budget, at most two aspects.
 
 A rejected build never enters the zone. A stored build the rules no longer take (the v1
 presets had 56–68 attribute points, and a bolt in the secondary slot) is **repaired** by the
@@ -310,9 +324,9 @@ is the whole of its damage at range. (v1 gave every build a bolt in the secondar
 melee had free range and range had no edge; section 13.) A creature may hold a second
 primary in its secondary slot (the sentinel's crossbow, the Warden's stone). The content
 ships the abilities and seven presets (`ironclad`, `blade`, `frostweaver`, `shade`, `mender`,
-`captain`, `marksman`); `assets/content/README.md` has the table. Phase 7 adds `mend`
+`musketeer`, section 15; `shaman`, section 17); `assets/content/README.md` has the table. Phase 7 adds `mend`
 (secondary, 4), `sanctuary` (active, 10) and `war_standard` (active, 10; two more squad
-slots), the presets `mender` and `captain`, and two more files: `creatures.toml` (creatures
+slots), the presets `mender` and `captain` (cut 2026-10-09, section 15), and two more files: `creatures.toml` (creatures
 are builds without a budget, with abilities marked `creature = true` that no player build may
 slot) and `trials.toml` (COMPANIONS.md 8, 11). An ability may carry `squad = N`: companions
 it adds to the squad of whoever has it in the build.
@@ -348,10 +362,18 @@ Measured 2026-10-01 (v1 content, three seeds × 60 s, 8 v 8, offline): ironclad 
 plate, Stone is 0.25× into Frost + Shadow, and a hasted caster kites a plate colossus
 indefinitely. Its counter-counter is the third leg, or a teammate with Flame.
 
+v3 (section 14) keeps the cycle with the six elements: Water is 2× into the ironclad's
+Ground and the ironclad's Ground is 0.5× into Water + Air; the blade wears Water, so the
+frostweaver's shards are 0.5× into it as before. The arena gate (`gm-bot/tests/arena.rs`)
+re-run on the v3 content (2026-10-09, three seeds × 60 s, 8 v 8, offline): ironclad : blade
+**34 : 12** (2.8); frostweaver : ironclad **50 : 1** (50); blade : frostweaver **21 : 12**
+(1.8); mirror 34 : 28. The second leg is harder still than in v1: Water is 2× into Ground and
+ignores plate, and the ironclad's stomp into Water + Air is halved.
+
 ## 12. Decisions and review log
 
 **Proposed by Phase 3 (director to confirm or change):** the attribute set and ranges
-(section 2), the pentagram of five elements (section 5), the kind × class table (4.1), the
+(section 2), the pentagram of five elements (section 5; six since v3, section 14), the kind × class table (4.1), the
 formulas of section 6, the exact-100 budget (section 9). Everything here is tuned in
 playtests; the structure (two tables, multiplicative layers, three structural bypasses) is
 what the code depends on.
@@ -420,3 +442,181 @@ Done, as proposed and accepted ("do it all as you proposed"):
 Numbers measured after the change are in PLAN.md 11.10 and section 11 (re-run). The
 director's call still open: the fight length he wants in play (the tempo and these numbers
 are the knobs, GM.md 3).
+
+## 14. v3 (2026-10-09): the elements everybody knows
+
+The director: "take the basic elements from Pokémon and their weaknesses, they are well known
+already"; of the candidate sets, the classic core plus three (Fire, Water, Grass, Electric,
+Ground, Flying), "loose immunity, just 0.5 instead; flying we should call air"; then "maybe
+also have no elements as neutral (normal) with no strengths or weaknesses". The sets were
+searched by machine: every five- and six-type subset of the chart in which each type beats
+one and is beaten by one, ranked by how far the best and worst stood apart; the six chosen
+are the most recognisable of the sets within one step of even. The matchups are the chart's
+numbers unchanged, the names are plain words, and a matchup chart is a game rule.
+
+Done:
+- section 5: six elements, the table and the pair shapes; `Element` is a table, not a
+  formula; `Aspects` 0..=2, none neutral (`validate` no longer refuses an empty set; the
+  character page says so; no ring at a neutral body's feet);
+- the old five re-mapped: Flame → Fire, Frost → Water, Storm → Electric, Stone → Ground,
+  Shadow → Air (the blink, the vanishing, the dart and the cloud are on the wind; the shade,
+  the musketeer and the frostweaver's second aspect). The blade, the captain and the
+  sentinel wear **Water**, not Fire: they have no element to cast, their aspect is a
+  defence, and Fire would have made the frostweaver's shards 2× into them and broken the
+  cycle of section 11. The trainer keeps Fire. The catalysts keep their names
+  (`catalyst/umbra` is Grass now) and `catalyst/zephyr` joins for Air;
+- the damage types are nine (`DamageType`: the three kinds and the six elements), so the
+  edge arrays of ITEMS.md 3 are nine wide: `PLAYER_VERSION` 6 (ITEMS.md 4); the snapshot's
+  `aspects` are six bits: `PROTOCOL_VERSION` 16 (PROTOCOL.md 28);
+- the bot's counter-pick follows the new table (mender counters a Water + Air frostweaver:
+  Electric is its 4× hole).
+
+Open: nobody casts Fire among the presets (the firebolt and the fireball are slotted by
+nobody; that was so before) and nothing at all is Grass yet (the catalyst `umbra` is its
+only content); whether the blade's Water stays or the blade goes neutral is the director's
+to play. The arena gate: see section 11.
+
+---
+## 15. v4 (2026-10-09): six presets, each with its own face
+
+The director: "there seems to be too many of them, we need to simplify somehow and make them a
+bit more unique"; then "cut to six, distinct ones, but I'd leave gun (FPS) neutral". The
+eight presets had been measured first: every preset against every other, eight against eight,
+both sides, six seeds of 60 s (`round_robin` in `gm-bot/tests/arena.rs`, ignored by default:
+`ARENA_SEEDS=6 cargo test -p gm-bot --release --test arena round_robin -- --ignored
+--nocapture`). The blade and the captain were 49 : 51, the same build; four of eight were
+strikers, dash sat in four kits, Water and Air in three each, Fire and Grass in none.
+
+Done:
+- **captain** and **marksman** cut. The war standard stays an active any build may slot (a
+  party leader is a choice, not a class: `squad_capacity`); the crossbow stays a weapon a
+  build may hold under the weapon-fit rule (ITEMS.md 3). The sim tests that shot a crossbow
+  build one from the frostweaver's kit;
+- **blade**: `charge` for the dash, so its gap-closer is nobody else's. It keeps **Water**: a
+  neutral blade (measured: 9 : 33 against the frostweaver) breaks the cycle of section 11,
+  since nothing among the six but Water resists Water; the gun is the neutral build instead;
+- **frostweaver**: Water + Air still (the Air is what makes it the ironclad's counter, Ground
+  0.5x in, and the counter-pick's elemental score needs it: Water alone tied the blade and
+  nobody re-specced), but the blink is gone (the blink and the vanish are the shade's) and so
+  is the haste (the mender's): `frost_nova` alone. Measured against the blade on the gate's
+  three seeds: nova alone 22 : 16 (1.38); nova + haste 17 : 14 (1.21); nova + leap 8 : 13;
+- **musketeer**: **neutral** (`aspects = []`), `dash`, `leap`; the vanish is the shade's;
+- the duelist brain (gm-bot): melee or ranged is the primary weapon's verb, not the frame's
+  (a shade with a dagger closes in, a caster with a staff swings it); a charge is used from
+  the distance it covers; the offline arena issues every firearm its rounds through
+  `set_stacks` (the musketeer had one shot a life before: 3 kills in 48 fights).
+
+Measured (six seeds × 60 s, 8 v 8, both sides; the row's share of the kills):
+
+| | blade | frostweaver | ironclad | mender | musketeer | shade |
+|---|---|---|---|---|---|---|
+| blade | - | 58% | 27% | 100% | 52% | 61% |
+| frostweaver | 42% | - | 94% | 79% | 64% | 58% |
+| ironclad | 73% | 6% | - | 100% | 51% | 79% |
+| mender | 0% | 21% | 0% | - | 0% | 9% |
+| musketeer | 48% | 36% | 49% | 100% | - | 65% |
+| shade | 39% | 42% | 21% | 91% | 35% | - |
+
+The mender's row is the brain's, not the build's: a healer measured as a duelist heals
+nobody and swings a staff at mail. The gate of section 11 on its three seeds: ironclad : blade
+32 : 14 (2.3), frostweaver : ironclad 51 : 1, blade : frostweaver 22 : 16 (1.38; the bar is
+1.3, and the leg sits at noise level: a blade with the dash measured the same). Open: a Fire
+caster for the firebolt and the fireball nobody slots; Grass has no content; a mender
+measured in a mixed team rather than as a duelist.
+
+## 16. v5 (2026-10-09): the colossus's arms and the bellow
+
+The director: "can you make some oversized sword for our colossus class and also shield,
+so it looks a bit more appropriate. Maybe should have a some skill that affects certain
+range and causes all hostile players to focus/target/look at him, some kind of rage aggro
+skill?"
+
+Done:
+- **greatsword** (primary, 2; `props/greatsword.glb`, ours, 1.4 m of blade and a two-hand
+  grip, held in the one fist like the hammer): 95 slash, a 120° arc of 96 u, 320/90/520 ms,
+  1.1 s, four targets. The ironclad holds it; the **hammer** stays an ability and a weapon
+  template any build may slot under the weapon-fit rule, but no preset's. Slash where blunt
+  was: the ironclad now shreds cloth (×1.25) and glances off plate (×0.5) where the hammer
+  did the reverse, and nothing in its kit ignores a magic shield any more;
+- **the shield**: the off hand holds the prop of the build's **guard** ability (LOOK.md
+  6.5, `Look.off`, protocol v17): `shield_wall` carries `prop = "shield"`, a round shield
+  (`props/shield.glb`, ours) on `prop_l` with the left grip, raised in front in the guard
+  stance;
+- **bellow** (active, 8, no aspect, 12 s, 20 focus): a roar; every enemy within 256 u and
+  in sight is **Taunted** for 2.5 s (section 8: its body is turned to the roarer and held
+  there tick by tick, its view with it, and a bot's or a creature's mind fights the roarer),
+  and the roarer takes Fortify 30% for 4 s for the blows it asked for. A control, its own
+  kind under the diminishing returns (MODES.md 4.5). The **fortify** active stays in the
+  content for any Ground build; the ironclad's kit is stomp + bellow (12 + 2 + 2 + 6 + 10 +
+  8 = 40).
+
+Stored ironclads keep the hammer and the fortify they were saved with (both abilities stand
+at their places; a build the rules take is not repaired).
+
+Measured (the gate of section 11, `ironclad_beats_blade_and_frostweaver_beats_ironclad`,
+three seeds × 60 s, 8 v 8): ironclad : blade **31 : 10 (3.10)** (2.3 with the hammer);
+frostweaver : ironclad 46 : 5 (9.20) (51 : 1 before: the blade's slash into cloth gives the
+colossus a few kills the hammer's blunt did not); blade : frostweaver 22 : 16 (1.38),
+unchanged. The gate passes. The duelist brain classes the bellow as a burst at the feet and
+uses it in reach of an enemy; a taunted bot fights the roarer (gm-bot `nearest`, gm-ai
+companion and creature minds).
+
+## 17. v6 (2026-10-09): the shaman, the seventh preset and the first of Grass
+
+The director, after the hammer left the ironclad (section 16): "it may be good if we
+introduce some shaman wielding hammer, class that could attack, mostly AoE and heal"; then
+"seventh preset could be grass that's currently missing"; then "it doesn't need mend, since
+it's hybrid between atk and heal ... leather, secondary is hammer hit ground -> AoE kick
+skill and sanctuary becomes some area grass that regens allies and bleeds enemies"; "grass
+alone".
+
+Done:
+- **shaman** (caster, leather, Grass; STR 13 AGI 8 CON 14 INT 15 SPR 5; mode rpg): the
+  **hammer** (its build again, no preset's since section 16), the **slam** as secondary
+  (4: the hammer brought down, a 96 u circle at the feet, 30 blunt, knockback 300, stagger
+  40, 4 s), brace, the **briar** (10, Grass: a patch of 140 u where it aims within 500 u,
+  for 6 s; 8 grass a second on everyone in it, Regen 30/s on its own side in it; 35 focus,
+  14 s) and the **entangle** (10, Grass: a circle of 112 u where it aims; 15 grass and Root
+  1.5 s; 25 focus, 14 s). Kit 32 of 40. Its face: walls every caster in the roster (Water,
+  Ground and Electric are 0.5x into Grass; the shade's Air alone is 2x) and is cut by steel
+  (leather: slash 1.0, pierce 1.0);
+- **`target = "allies"`** on a status (VOCABULARY.md 5.4; `StatusTarget::Allies`): the
+  briar's Regen lands on the caster's side only, the caster among them, where its packets
+  are friendly fire like every packet (VOCABULARY.md 8). The director asked for a patch that
+  "regens allies and bleeds enemies"; Bleed is physical and would ignore the Grass of the
+  matrix, so the patch ticks grass damage instead, and the only side a status may check is
+  the one the Taunt already checks (section 8);
+- the Keeper stocks the hammer where it stocked the crossbow (no preset's since section
+  15); the bot's counter-pick: against Water the shaman now (Grass 2x in, Water 0.5x back)
+  over the frostweaver, and a frostweaver re-specs to it; against Grass the shade.
+
+**Measured** (`round_robin`, six seeds x 60 s, 8 v 8, both sides; the row's share of the
+kills). The first cut, as the director wrote it with Regen 60/s and 15 grass a pulse, won
+everything but the gun: 71% of the blade, 79% of the frostweaver, 65% of the ironclad, 63%
+of the shade, 41% of the musketeer, a mean of 70%. One lever at a time, each against the
+same seeds: cloth 66%, Regen 40 66%, STR 8 69%, the briar's and the entangle's damage
+halved 67%, the root a slow 69%, the root on three 67%, no entangle 66%, a staff for the
+hammer 57%, Regen 20 58%, **no briar 51%** (the blade 57%, the frostweaver 54%). The patch
+is the build, and eight shamans keep a whole team under one Regen for the whole fight:
+Regen is `refresh`, so eight patches heal like one, but one is always standing. Regen 30
+with the softer damage:
+
+| | blade | frostweaver | ironclad | mender | musketeer | shade | shaman |
+|---|---|---|---|---|---|---|---|
+| blade | - | 58% | 21% | 100% | 52% | 61% | 46% |
+| frostweaver | 42% | - | 90% | 79% | 64% | 58% | 30% |
+| ironclad | 79% | 10% | - | 100% | 70% | 82% | 52% |
+| mender | 0% | 21% | 0% | - | 0% | 9% | 1% |
+| musketeer | 48% | 36% | 30% | 100% | - | 65% | 72% |
+| shade | 39% | 42% | 18% | 91% | 35% | - | 42% |
+| shaman | 54% | 70% | 48% | 99% | 28% | 58% | - |
+
+The shaman is even with the blade and the ironclad, walls the frostweaver (70 : 30), and
+the gun cuts it (28 : 72); its mean is 59% with the mender's row, 52% without. Cloth moved
+the blade's share by three points (49%) and was not taken: the director said leather. The
+gate of section 11 is unchanged (ironclad : blade 37 : 11 (3.36), frostweaver : ironclad
+51 : 3, blade : frostweaver 22 : 16 (1.38), mirror 26 : 26); the shaman is in no leg of it.
+
+Open: the 8 v 8 mirror overstates an area heal (eight casters, one patch always up) as it
+understates a healer (the mender's row is the brain's, section 15); a mixed team is the
+measure of both. Fire still has no build.

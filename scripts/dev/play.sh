@@ -135,8 +135,9 @@ people() {
   bot owners --bots 3 --user 'owner-{i}@bots.test' --register --character 'Avatar{i}' \
     --builds ironclad,mender,frostweaver --zone town --list-for-hire 150 --secs 0
   # A stall keeper: walks to the first market tile, opens its stall, and lists whatever an
-  # operator hands it at 1 s 20 c: every weapon of items.toml, one plain and one fine of
-  # each, twelve for the stall's twelve slots. Handed once: a keeper that still carries
+  # operator hands it at 1 s 20 c: the six weapons the presets hold (the crossbow is
+  # nobody's since MATRIX.md 15; the hammer is the shaman's again, MATRIX.md 17), one plain
+  # and one fine of each, twelve for the stall's twelve slots. Handed once: a keeper that still carries
   # anything (its stall is open, or the stall closed and its stock came back) is not handed
   # more (--fresh forgets everything).
   spawn keeper --bots 1 --user keeper@bots.test --register --character Keeper --builds ironclad --zone town \
@@ -146,9 +147,9 @@ people() {
       or c.id = (select owner_character from stalls s where s.holder_id = h.id) where c.name = 'Keeper'" 2>/dev/null || echo 0)" == 0 ]]; then
     for item in "sword core/iron,frame/oak" "sword core/dragonbone,frame/whalebone,catalyst/ember,gem/opal" \
                 "dagger core/iron,frame/oak" "dagger core/dragonbone,frame/ash,catalyst/umbra,gem/opal" \
-                "hammer core/iron,frame/oak" "hammer core/dragonbone,frame/whalebone,catalyst/basalt,gem/opal" \
+                "greatsword core/iron,frame/oak" "greatsword core/dragonbone,frame/whalebone,catalyst/basalt,gem/opal" \
                 "staff core/iron,frame/ash" "staff core/dragonbone,frame/whalebone,catalyst/rime,gem/opal" \
-                "crossbow core/iron,frame/oak" "crossbow core/dragonbone,frame/whalebone,gem/opal" \
+                "hammer core/iron,frame/oak" "hammer core/dragonbone,frame/whalebone,catalyst/umbra,gem/opal" \
                 "musket core/iron,frame/oak" "musket core/dragonbone,frame/whalebone,gem/opal"; do
       # shellcheck disable=SC2086
       hubctl --grant-item Keeper $item >>"$D/log/grants.log" 2>&1
@@ -190,10 +191,10 @@ people() {
 # Sparring partners in the town: they stand where they arrive, face whoever comes at them
 # and fight back with the whole kit, so a windup, a cast or a parry can be watched and
 # tuned on a body that answers. `spar [N] [BUILDS]`: N of them (default 3), one build each
-# from the list (default a sword, a crossbow, a caster with Ice shard).
+# from the list (default a sword, a dagger, a caster with Ice shard).
 spar() {
   need; cd "$R"; hub_up || { echo "start the stack first"; exit 1; }
-  local n=${1:-3} builds=${2:-blade,marksman,frostweaver}
+  local n=${1:-3} builds=${2:-blade,shade,frostweaver}
   spawn spar --bots "$n" --user 'spar-{i}@bots.test' --register --character 'Spar{i}' \
     --builds "$builds" --zone town --secs $BOT_SECS --behaviour spar
   echo "$n sparring partners on their way to the town (log: $D/log/spar.log)"

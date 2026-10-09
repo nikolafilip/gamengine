@@ -1,4 +1,4 @@
-# Content v2 (2026-10-06; v1 was Phase 3)
+# Content v3 (2026-10-09, content version 6: the six elements of MATRIX.md 5; v2 2026-10-06; v1 Phase 3)
 
 `abilities.toml`, `builds.toml`, `creatures.toml` and `trials.toml` are the shipped content
 (MATRIX.md 10, COMPANIONS.md 8 and 11). `gm-content` compiles them against the zone tick rate
@@ -11,15 +11,16 @@ when the two drift.
 | Key | Slot | Cost | Aspect | What it does |
 |---|---|---|---|---|
 | sword | primary | 2 | — | 60 slash, 90° arc, 150/60/300 ms, 600 ms |
-| hammer | primary | 2 | — | 90 blunt, ignores magic shields, heavy stagger, 1 s |
+| hammer | primary | 2 | — | 90 blunt, ignores magic shields, heavy stagger, 1 s: the shaman's (MATRIX.md 17) |
+| greatsword | primary | 2 | — | 95 slash, 120° arc of 96 u, 320/90/520 ms, 1.1 s: the colossus's (MATRIX.md 16) |
 | staff | primary | 0 | — | 40 blunt, 600 ms |
 | dagger | primary | 0 | — | 35 slash, 400 ms |
 | crossbow | primary | 2 | — | 80 pierce bolt, 1.8 s |
-| firebolt | primary | 2 | flame | 55 flame bolt + Burn 12/s for 3 s, 1.2 s |
-| ice_shard | primary | 2 | frost | 50 frost shard + 1 Chill stack (3 freeze), 1 s |
-| stone_throw | primary | 2 | stone | 75 stone, heavy knockback and stagger, 1.8 s |
-| shadow_dart | primary | 2 | shadow | 40 shadow, fast, ignores evasion, 0.8 s |
-| spark | primary | 2 | storm | 50 storm + Shock (interrupt), 1.2 s |
+| firebolt | primary | 2 | fire | 55 fire bolt + Burn 12/s for 3 s, 1.2 s |
+| ice_shard | primary | 2 | water | 50 water shard + 1 Chill stack (3 freeze), 1 s |
+| stone_throw | primary | 2 | ground | 75 ground, heavy knockback and stagger, 1.8 s |
+| shadow_dart | primary | 2 | air | 40 air, fast, ignores evasion, 0.8 s |
+| spark | primary | 2 | electric | 50 electric + Shock (interrupt), 1.2 s |
 | musket | primary | 2 | — | 110 pierce, flat and loud, 3 s |
 | kick | secondary | 2 | — | 25 blunt, heavy knockback and stagger 40, 1.5 s |
 | shield_bash | secondary | 2 | — | 35 blunt, stagger 70, cannot be parried, 4 s |
@@ -31,28 +32,32 @@ when the two drift.
 | dash | active | 6 | — | 900 u/s for 150 ms, 30 stamina |
 | leap | active | 6 | — | 400 forward, 320 up |
 | charge | active | 6 | — | 700 u/s for 400 ms, stops on hit |
-| blink | active | 10 | shadow | 256 u along the facing, 30 focus |
+| blink | active | 10 | air | 256 u along the facing, 30 focus |
 | overhead | active | 8 | — | 70 slash, 60° arc, slow |
-| stomp | active | 10 | stone | 128 u cylinder at the feet: 35 stone, Slow 30% 2 s, knockback |
-| fortify | active | 8 | stone | Fortify 40% for 5 s (hammers ignore it) |
-| frost_nova | active | 10 | frost | 160 u sphere: 30 frost + 2 Chill stacks |
+| stomp | active | 10 | ground | 128 u cylinder at the feet: 35 ground, Slow 30% 2 s, knockback |
+| fortify | active | 8 | ground | Fortify 40% for 5 s (hammers ignore it) |
+| bellow | active | 8 | — | Taunt 2.5 s on every enemy within 256 u (turned to the roarer and held; a control), Fortify 30% 4 s on the roarer |
+| frost_nova | active | 10 | water | 160 u sphere: 30 water + 2 Chill stacks |
 | haste | active | 8 | — | Haste 25% for 5 s |
-| thunderclap | active | 10 | storm | 140 u sphere: 40 storm + Shock |
-| vanish | active | 8 | shadow | Stealth 256 u for 6 s |
-| poison_cloud | active | 8 | shadow | 96 u cloud ahead for 5 s: Bleed 6/s |
-| fireball | active | 12 | flame | 20 flame bolt, 96 u splash 30 flame + Burn |
+| thunderclap | active | 10 | electric | 140 u sphere: 40 electric + Shock |
+| vanish | active | 8 | air | Stealth 256 u for 6 s |
+| poison_cloud | active | 8 | air | 96 u cloud ahead for 5 s: Bleed 6/s |
+| fireball | active | 12 | fire | 20 fire bolt, 96 u splash 30 fire + Burn |
 | sanctuary | active | 10 | — | a circle of 140 u where the caster aims (within 500 u) for 6 s: Regen 60/s on every body in it; 35 focus, 14 s |
 | war_standard | active | 10 | — | two more squad slots (five companions); used: Fortify 15% for 8 s on every body within 256 u, enemies included |
 | maul | primary | creature | — | 55 blunt through magic shields, 120° arc, 96 u reach, 550 ms windup, heavy knockback, one every 2 s |
-| quake | active | creature | stone | a circle of 150 u under whatever is aimed at within 700 u; breaks 1.3 s later for 70 stone |
+| quake | active | creature | ground | a circle of 150 u under whatever is aimed at within 700 u; breaks 1.3 s later for 70 ground |
+| slam | secondary | 4 | — | the hammer on the ground: 96 u circle at the feet, 30 blunt, knockback 300, stagger 40, 4 s |
+| briar | active | 10 | grass | a patch of 140 u where the shaman aims (within 500 u) for 6 s: 8 grass a second on everyone in it, Regen 30/s on the shaman's own side in it; 35 focus, 14 s |
+| entangle | active | 10 | grass | a circle of 112 u where the shaman aims (within 500 u): 15 grass + Root 1.5 s; 25 focus, 14 s |
 
 The range is the weapon's (MATRIX.md 10, 2026-10-06): a primary is a blade or the bow; a
 secondary is a short utility. Presets (thirty attribute points each, a kit of at most 40):
-**ironclad** (colossus, plate, stone; hammer, shield bash), **blade** (striker, mail, flame;
-sword, kick), **frostweaver** (caster, cloth, frost + shadow; ice shard, kick),
-**shade** (infiltrator, leather, shadow; dagger, knife), **mender** (caster, cloth, storm:
-the healer; staff, mend), **captain** (striker, mail, flame; sword, kick, `war_standard`:
-the leader of five) and **marksman** (striker, leather, storm; crossbow, knife). MATRIX.md
+**ironclad** (colossus, plate, ground; greatsword, shield bash, a shield in the off hand; stomp, bellow), **blade** (striker, mail, water;
+sword, kick; charge), **frostweaver** (caster, cloth, water + air; ice shard, kick), **shade**
+(infiltrator, leather, air; dagger, knife), **mender** (caster, cloth, electric: the healer;
+staff, mend), **musketeer** (striker, leather, neutral; musket, pistol: the gun) and **shaman**
+(caster, leather, grass; hammer, slam; briar, entangle: MATRIX.md 17). MATRIX.md
 11 records how the first four fare against each other; a bot that counter-picks takes the
 first preset listed among those that score the same.
 
@@ -65,10 +70,10 @@ with `gm_creature` entities.
 
 | Key | Body | Health | Kit | Sight / leash | Back after | Drops |
 |---|---|---|---|---|---|---|
-| sentinel | striker, mail, flame | 1,200 | sword, crossbow, parry; overhead, dash | 700 / 900 | 600 s | nothing |
-| warden (boss) | colossus, plate, stone | 15,000 (stagger 400) | maul, stone_throw; quake, stomp | 900 / 1,100 | 120 s | 3 components (standard: core/iron, frame/ash, catalyst/basalt; top: core/dragonbone, shard/boss_scale, catalyst/basalt), 30 silver |
-| dummy (`still`) | colossus, leather, stone | 5,000 (never staggers) | nothing it uses | — | 5 s | nothing |
-| trainer (`still`, `npc`) | striker, cloth, flame | cannot be hurt | nothing it uses | — | — | the build redone beside it (MATRIX.md 9.1) |
+| sentinel | striker, mail, water | 1,200 | sword, crossbow, parry; overhead, dash | 700 / 900 | 600 s | nothing |
+| warden (boss) | colossus, plate, ground | 15,000 (stagger 400) | maul, stone_throw; quake, stomp | 900 / 1,100 | 120 s | 3 components (standard: core/iron, frame/ash, catalyst/basalt; top: core/dragonbone, shard/boss_scale, catalyst/basalt), 30 silver |
+| dummy (`still`) | colossus, leather, ground | 5,000 (never staggers) | nothing it uses | — | 5 s | nothing |
+| trainer (`still`, `npc`) | striker, cloth, fire | cannot be hurt | nothing it uses | — | — | the build redone beside it (MATRIX.md 9.1) |
 
 `trials.toml` (COMPANIONS.md 11): an encounter of a map judged through a lens. The four of
 the tutorial are on the Warden, 300 s, one human: `warden_leader` (500‰ of the party's damage

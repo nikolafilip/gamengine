@@ -77,7 +77,9 @@ focus, the scroll positions, the carets and the widget the button went down on.
   it is face 0 of the bundle's atlases and the client's fallback; the screens' words and
   the HUD's are in the text face (Fira Sans Medium, a line of 12 dots) and the titles in
   the title face (MedievalSharp, 19) when the bundle has loaded, measured per glyph, else
-  in this one.
+  in this one. Those two faces hold a generic set of 308 characters (LOOK.md 2.3: ASCII,
+  the Latin-1 Supplement's letters and signs, Latin Extended-A, the typographic marks),
+  so a stack's `kit ×3 of 5` and a name in any Latin tongue read as written there.
 - **Scale.** One whole-number scale for HUD and screens: 1 below 600 pixels of height, 2
   below 1300, 3 below 1900, 4 from there (a line of text is then 2 to 3 hundredths of the
   frame's height; until the director played at 1080 lines it was 3 from 1000, and the
@@ -158,32 +160,63 @@ no copy. No screen in a browser has a Quit button: the tab is closed by the brow
 
 ### 4.2 Characters
 
-The account's characters in the hub's order, the one played last picked: name, build (the
-preset's name, or "custom"), where it is (the zone it was last in, "new" if it never
-entered one), time played. Buttons: **Play** (also Enter and a double click), **New
-character** (off when the account has its ten), **Log out**, **Quit**. An account with no
-characters goes to 4.3 at once.
+The **selector** (since 2026-10-09; `showcase.rs`): one character across the whole frame,
+over the map turning behind the screens. In the middle its body as the zone would draw
+it, idle, with the prop of its weapon and the prop of its guard (a shield for a shield
+wall), in the open with no well under it (the paperdoll of LOOK.md 5, `paperdoll_open`),
+turned by a drag across it; its name over it in the title face, under the name a
+line that reads the build (`striker in mail  |  water  |  action mode`), and under that
+what it is: the preset's name or "custom", where the character is (`in town`, or `not
+yet in the world`) and how long it was played. Left, a panel of the **attributes**: the
+five with what each buys (`STR  17  blows x1.28`) and what else the body comes to
+(stamina and focus with their regen, armour, evasion; health, speed and ward are in the
+buys). No points or budgets: they are the character's page's (4.5). Right, a panel of
+the **abilities**: the kit's rows (`Sword  weapon`, `Kick  secondary`, the actives, the
+guard) and under them the words of the row picked, from its script
+(`character::words_of`), the numbers faint on a line of their own and what it does under
+them; the weapon's to begin with. Each panel is as tall as what it holds. Arrows on both
+sides of the body, and the Left/Right (also Up/Down) keys, go to the previous and the
+next character, round the ends; `3 of 10` says which.
+
+The strip at the bottom holds the buttons: **Play** (also Enter; half as wide again as
+the others, `showcase::lead_buttons`), **New character** (off when the account has its
+ten), **Log out**, **Quit**, and a line under them for the notice. The one played last is shown first. An account with no characters goes to 4.3
+at once. Before the hub's content has come the panels say so and the body stands
+without its props (the names of its abilities are the content's).
 
 Play asks the hub to enter with no zone named (7): where the character was if that zone is
 open to it, otherwise the start zone. A refusal (the zone is full, a trial is asked for,
-banned meanwhile) is said under the list. A character that a zone has not finished putting
+banned meanwhile) is said in the strip. A character that a zone has not finished putting
 away is refused as busy: the entry is asked for again every second, twenty times, and the
 screen says what it waits for.
 
 After a zone, the list is asked for again every second until no character is listed as
-being in one (the zone's last save), behind the screen: buttons stay on meanwhile, the row
-that was picked stays picked, and a click on Play is made as soon as the list has come.
+being in one (the zone's last save), behind the screen: buttons stay on meanwhile, the one
+that was shown stays shown, and a click on Play is made as soon as the list has come.
 
 ### 4.3 New character
 
-A name (7) and the **archetypes**: the hub's preset builds, one row each (name, frame,
-armour), and for the one picked its `blurb` (one or two lines of plain words from the
-content) and its facts: aspects, and its abilities by name. No numbers to spend here: the
-point-buy (MATRIX.md 9) is a later screen, and a character's build can be changed later
-anyway (PLAN.md 3.1). **Create** makes the character and picks it in 4.2; the hub's rule
-for names is said before it is asked. The archetypes are asked for again every second
-while they are missing (a request can be lost), and an account with no character yet has
-**Log out** where the others have Back.
+The same selector over the hub's preset builds (the **archetypes**): the **blurb** (one
+or two lines of plain words from the content, at most 160 characters) under the ribbon,
+a row of their names under it with the one shown edged in gold (`Ui::mark`; the
+editor's "start from" row marks its preset the same way), and the arrows and keys cycle
+them; the body stands with the archetype's weapon and guard. The strip
+at the bottom holds the **name** field (7) with **Create**, **Back** and **Quit** beside
+it; an account with no character yet has **Log out** where the others have Back. No
+numbers to spend here: the point-buy (MATRIX.md 9) is the character's page in the game,
+and a build can be changed later anyway (PLAN.md 3.1). **Create** (also Enter) makes the
+character and shows it in 4.2; the hub's rule for names is said before it is asked. The
+archetypes are asked for again every second while they are missing (a request can be
+lost).
+
+On a phone (780 x 360 units at touch scale) the panels keep their width, the kit's list
+scrolls and the body is what is left in the middle: nothing is cut.
+
+Why one at a time (the director, 2026-10-09: "having full character show up (equipped)
+in the whole center of the screen with stats on left and skills on right ... arrows left
+and right to switch"): a class is chosen by what it looks like and what it does, which
+a row of six names and a line of facts never showed; and the screen is the same on a
+phone, where a list of six with a paragraph under it did not fit.
 
 ### 4.4 Entering
 
@@ -231,10 +264,19 @@ The HUD as before, and:
   budget in gold over the actives; the actives in the build lit like a picked row
   (`RowMark::Picked`), not `[x]`. Under both, a line or two that read the ability under
   the cursor from its script (`character::words_of`: points, stamina or focus, cooldown,
-  the aspect it needs, and what it does: `140 u around you: 40 storm, staggers, shock for
+  the aspect it needs, and what it does: `140 u around you: 40 electric, staggers, shock for
   0.1 s`); the bottom row holds the buttons and, beside them, what is wrong with the draft,
   else the zone's word, else `to wear it, stand by the trainer at the town board`. The
   same editor is the game master's Build tab (GM.md 4), with Close in its tab row.
+  **A row that cannot be taken as the draft stands is off** (since 2026-10-09:
+  `character::why_not`, `RowMark::Off`, drawn in the colour of a button that is off; a
+  click on it picks nothing): an ability that needs an aspect the build lacks, a firearm
+  in an action or RPG build, any weapon but a firearm and any guard in a gun build, one
+  that is in the kit already or shares a cooldown group with one that is, a fifth active,
+  and one that would take the kit over its forty points. Pointing at it reads why before
+  its words, in the warning's colour (`Musket: a firearm: only a gun build holds one. 2
+  pts, ...`). What is wrong with the draft is said with the abilities' names, not their
+  numbers (`Stomp needs the ground aspect`).
 - **P** opens the people (PARTY.md 8): the party, who asks something, who else is here;
   from it the trade window (which also comes up by itself when the zone opens a trade)
   and the tavern. Under the squad the HUD shows the party's other members, with the
@@ -660,3 +702,25 @@ what the earlier reviews missed. 2 findings.
    not fit ends the paste.
 
 Its verdict on the earlier reviews: sound overall.
+
+### 12.x The selector (2026-10-09): Gemini's review of the 1080p captures
+
+Two reviews (`gemini-3.8-flash --search` and `gemini-3.1-pro-preview`) of the captures
+of 4.2, 4.3 and the editor with their source, findings only. Accepted: the blurb moved
+from under the body to under the name (both asked); brackets round the tab shown
+replaced by a gold edge (both); the derived stats pruned of what the buys already say
+(health, speed, ward) and the points and kit tallies dropped from the selector (flash 4,
+pro 1 in part); Create and Play wider than the other buttons (flash 5); off rows dimmer
+than faint cells (flash 7; pro 4 asked the opposite, lighter: the dimmer wins, an off row
+must read as off before it is read); the ability's numbers on their own line, what it
+does under them (pro 10); the 360-unit frame no longer cuts the derived rows or the
+blurb (flash 8: the blurb left the body's column, the attributes panel is sized to its
+rows). Rejected: "the action game" as engine jargon (flash 1: the modes are the game's
+own words, MODES.md; it reads `action mode` now); dropping `u` and `u/s` and the
+multipliers for "Movement 240" (flash 3: the game is measured in units everywhere and
+the character's page says the same); the lock reason on a line of its own and in a
+panel of its own (flash 6, pro 5: it is on the one line there is, in the warning's
+colour, before the words); hiding the arrows when the tabs are there (flash 10: the
+director asked for arrows); hiding the attributes under 800 units (pro 6: they fit); the
+editor's columns, aspects grid, dynamic aspect cost and a larger face for its headers
+(flash 9, pro 7–9: the editor is another change).

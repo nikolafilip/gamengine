@@ -29,11 +29,13 @@ pub enum BodyKind {
 /// What a body holds and wears, as indices into the pack's `props` list the zone sent
 /// (LOOK.md 6.2; `NONE` for nothing). The indices are of that session's pack: a client
 /// reads an index past the list as `NONE`. `worn` is the armour overlay of Phase 16 and
-/// always `NONE` until then.
+/// always `NONE` until then. `off` (v17, LOOK.md 6.5) is the off hand: the prop of the
+/// build's guard ability (a shield), drawn in the left hand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Look {
     pub held: u16,
     pub worn: u16,
+    pub off: u16,
 }
 
 impl Look {
@@ -41,6 +43,7 @@ impl Look {
     pub const EMPTY: Look = Look {
         held: Look::NONE,
         worn: Look::NONE,
+        off: Look::NONE,
     };
 }
 
@@ -824,6 +827,7 @@ mod tests {
                     look: Look {
                         held: (i % 7) as u16,
                         worn: Look::NONE,
+                        off: if i % 2 == 0 { 3 } else { Look::NONE },
                     },
                 })
                 .collect(),
