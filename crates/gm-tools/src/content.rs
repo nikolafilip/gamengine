@@ -402,12 +402,20 @@ pub const PIECES: &[&str] = &[
 /// The faces (LOOK.md 2.3): their ids in the atlas.
 pub const FACES: &[(&str, u8)] = &[("text", 1), ("title", 2)];
 
-/// The characters a face is rasterised for: printable ASCII and the ten letters of
-/// CLIENT.md 3.
+/// The characters a face is rasterised for (LOOK.md 2.3): printable ASCII; of the Latin-1
+/// Supplement the signs `¡ § « ° ± · » ¿` and everything from `À` to `ÿ` (the accented
+/// letters of the western tongues, `×` and `÷` among them); Latin Extended-A whole, `Ā`
+/// to `ž` (Gaj's letters, and the Polish, Czech, Slovak, Hungarian, Romanian, Turkish and
+/// the rest); and the typographic marks the game and its players write (`– — ‘ ’ “ ” … ‹
+/// › • − → €`). A character the font has no glyph for is left out of that face rather
+/// than baked as its `.notdef` box (`rasterise`), and the client draws it as `?`.
 fn charset() -> Vec<char> {
     (0x20u8..=0x7e)
         .map(char::from)
-        .chain("čćđšžČĆĐŠŽ".chars())
+        .chain("¡§«°±·»¿".chars())
+        .chain('\u{c0}'..='\u{ff}')
+        .chain('\u{100}'..='\u{17f}')
+        .chain("–—‘’“”…‹›•−→€".chars())
         .collect()
 }
 
@@ -1067,8 +1075,8 @@ fn mannequin_model(frame: gm_core::vocab::ArchetypeFrame, tint: [f32; 3]) -> Mod
 }
 
 /// Rasterise a face at `size` dots per em for an atlas of `density` texels a dot: the line
-/// height and the ascent in dots, and every glyph of the charset as a picture with its
-/// bearing in texels and its advance in quarter dots (LOOK.md 2.3).
+/// height and the ascent in dots, and every glyph of the charset the font has as a picture
+/// with its bearing in texels and its advance in quarter dots (LOOK.md 2.3).
 ///
 /// The metrics are the same at every density, so a layout is: the ascent is the height of
 /// the face's capitals (the baseline lies that far under the line's top; an accent stands
@@ -1093,6 +1101,11 @@ fn rasterise(bytes: &[u8], size: f32, density: u8) -> Result<(u8, u8, Vec<Raster
     let mut glyphs = Vec::new();
     for c in charset() {
         let id = font.glyph_id(c);
+        if id.0 == 0 {
+            // The font maps it to nothing: left out of the face, not baked as the
+            // `.notdef` box; the client draws what is not in a face as `?`.
+            continue;
+        }
         let advance = (dots.h_advance(id) * atlas::ADVANCE_PARTS)
             .round()
             .clamp(0.0, 255.0) as u8;
@@ -1580,6 +1593,52 @@ mod tests {
                 .expect("an atlas for every scale");
             assert_eq!(e.density, scale.min(4));
             assert_eq!(e.sha256, sha(&bundle.files[&e.file]));
+        }
+    }
+
+    /// LOOK.md 2.3: both faces hold what the game writes beyond ASCII (the `×` of a stack,
+    /// "kit ×3 of 5"; the dashes, quotes and ellipsis; the accented letters of other
+    /// tongues than Gaj's), each a picture and not a blank; and a character the font has
+    /// no glyph for is not in the face at all, so nothing is drawn as the `.notdef` box.
+    #[test]
+    fn the_faces_hold_the_signs_the_game_writes_and_nothing_the_font_lacks() {
+        let bundle = build(&sources()).expect("the content builds");
+        let skin: SkinToml = toml::from_str(
+            &std::fs::read_to_string(sources().join("ui/skin.toml")).expect("skin.toml"),
+        )
+        .expect("skin.toml parses");
+        let wanted: Vec<char> = charset();
+        for (name, id) in FACES {
+            let bytes = std::fs::read(sources().join("ui").join(&skin.font[*name].file))
+                .expect("the font file");
+            let font = ab_glyph::FontRef::try_from_slice(&bytes).expect("a font");
+            for a in &bundle.atlases {
+                let face = &a.faces[id];
+                for c in "×÷°±–—…‘’“”«»éñüßčđłşő".chars() {
+                    let g = face.glyphs.get(&c).unwrap_or_else(|| {
+                        panic!("face {name}: no {c:?} at density {}", a.density)
+                    });
+                    assert!(
+                        g.cell.w > 0 && g.cell.h > 0 && g.advance > 0,
+                        "face {name}: {c:?} is blank at density {}",
+                        a.density
+                    );
+                }
+                for c in face.glyphs.keys() {
+                    assert!(
+                        wanted.contains(c),
+                        "face {name}: {c:?} is not in the charset"
+                    );
+                    assert_ne!(font.glyph_id(*c).0, 0, "face {name}: the font has no {c:?}");
+                }
+                for c in &wanted {
+                    assert_eq!(
+                        face.glyphs.contains_key(c),
+                        font.glyph_id(*c).0 != 0,
+                        "face {name}: {c:?} is in the face iff the font has it"
+                    );
+                }
+            }
         }
     }
 
