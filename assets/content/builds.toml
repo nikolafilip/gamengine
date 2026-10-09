@@ -1,4 +1,4 @@
-# Preset builds (MATRIX.md 9, 11 and 15: six, one frame-and-element face each). `mode` is the game the archetype plays (MODES.md 2:
+# Preset builds (MATRIX.md 9, 11, 15 and 17: seven, one frame-and-element face each). `mode` is the game the archetype plays (MODES.md 2:
 # gun, action, rpg); a gun build's primary is a firearm and it has no guard. Attributes are the character's own thirty points
 # (each point above 5; a preset spends all thirty). The kit costs at most 40: armour
 # (cloth 0 / leather 4 / mail 8 / plate 12), a second aspect (10) and the slotted abilities.
@@ -89,3 +89,20 @@ aspects = []                                                         # neutral (
 primary = "musket"                                                   # 2
 secondary = "pistol"                                                 # 3
 actives = ["dash", "leap"]                                           # 6 + 6  = 21
+
+# The shaman (MATRIX.md 17): the hammer's build, Grass, half a healer. Walls every caster in
+# the roster (Water, Ground and Electric are 0.5x into Grass) and is cut down by steel
+# (leather: slash 1.0 in).
+
+[[build]]
+name = "shaman"
+mode = "rpg"
+blurb = "A hammer, thorns and vines. Shrugs off ice and stone, grows briars that feed its own side and tear at the rest. Steel cuts it."
+frame = "caster"
+attributes = { str = 13, agi = 8, con = 14, int = 15, spr = 5 }    # 30
+armour = "leather"                                                   # 4
+aspects = ["grass"]
+primary = "hammer"                                                   # 2
+secondary = "slam"                                                   # 4
+guard = "brace"                                                      # 2
+actives = ["briar", "entangle"]                                      # 10 + 10  = 32

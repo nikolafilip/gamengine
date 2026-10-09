@@ -1,6 +1,6 @@
 # Character Matrix
 
-Status: v5, 2026-10-09 (v4 the same day, section 15; v3 the six elements of section 5, section 14; v2 2026-10-06, v1 Phase 3; the colossus's arms and the Taunt are v5, section 16). This document is the contract for point-buy
+Status: v6, 2026-10-09 (v5 the same day, section 16; v4 section 15; v3 the six elements of section 5, section 14; v2 2026-10-06, v1 Phase 3; the shaman, the seventh preset and the first of Grass, is v6, section 17). This document is the contract for point-buy
 characters, the type matrix and the damage pipeline. v2 (section 13): the character's own
 thirty attribute points apart from the kit's budget, wider bands and seven times the health,
 the range as the weapon's, the trainer and the dummy. `gm-core::matrix` and `gm-core::build` mirror it; when they disagree,
@@ -310,8 +310,8 @@ the five elemental bolts); a secondary is a short utility (kick, shield bash, a 
 is the whole of its damage at range. (v1 gave every build a bolt in the secondary slot:
 melee had free range and range had no edge; section 13.) A creature may hold a second
 primary in its secondary slot (the sentinel's crossbow, the Warden's stone). The content
-ships the abilities and six presets (`ironclad`, `blade`, `frostweaver`, `shade`, `mender`,
-`musketeer`; section 15); `assets/content/README.md` has the table. Phase 7 adds `mend`
+ships the abilities and seven presets (`ironclad`, `blade`, `frostweaver`, `shade`, `mender`,
+`musketeer`, section 15; `shaman`, section 17); `assets/content/README.md` has the table. Phase 7 adds `mend`
 (secondary, 4), `sanctuary` (active, 10) and `war_standard` (active, 10; two more squad
 slots), the presets `mender` and `captain` (cut 2026-10-09, section 15), and two more files: `creatures.toml` (creatures
 are builds without a budget, with abilities marked `creature = true` that no player build may
@@ -547,3 +547,63 @@ colossus a few kills the hammer's blunt did not); blade : frostweaver 22 : 16 (1
 unchanged. The gate passes. The duelist brain classes the bellow as a burst at the feet and
 uses it in reach of an enemy; a taunted bot fights the roarer (gm-bot `nearest`, gm-ai
 companion and creature minds).
+
+## 17. v6 (2026-10-09): the shaman, the seventh preset and the first of Grass
+
+The director, after the hammer left the ironclad (section 16): "it may be good if we
+introduce some shaman wielding hammer, class that could attack, mostly AoE and heal"; then
+"seventh preset could be grass that's currently missing"; then "it doesn't need mend, since
+it's hybrid between atk and heal ... leather, secondary is hammer hit ground -> AoE kick
+skill and sanctuary becomes some area grass that regens allies and bleeds enemies"; "grass
+alone".
+
+Done:
+- **shaman** (caster, leather, Grass; STR 13 AGI 8 CON 14 INT 15 SPR 5; mode rpg): the
+  **hammer** (its build again, no preset's since section 16), the **slam** as secondary
+  (4: the hammer brought down, a 96 u circle at the feet, 30 blunt, knockback 300, stagger
+  40, 4 s), brace, the **briar** (10, Grass: a patch of 140 u where it aims within 500 u,
+  for 6 s; 8 grass a second on everyone in it, Regen 30/s on its own side in it; 35 focus,
+  14 s) and the **entangle** (10, Grass: a circle of 112 u where it aims; 15 grass and Root
+  1.5 s; 25 focus, 14 s). Kit 32 of 40. Its face: walls every caster in the roster (Water,
+  Ground and Electric are 0.5x into Grass; the shade's Air alone is 2x) and is cut by steel
+  (leather: slash 1.0, pierce 1.0);
+- **`target = "allies"`** on a status (VOCABULARY.md 5.4; `StatusTarget::Allies`): the
+  briar's Regen lands on the caster's side only, the caster among them, where its packets
+  are friendly fire like every packet (VOCABULARY.md 8). The director asked for a patch that
+  "regens allies and bleeds enemies"; Bleed is physical and would ignore the Grass of the
+  matrix, so the patch ticks grass damage instead, and the only side a status may check is
+  the one the Taunt already checks (section 8);
+- the Keeper stocks the hammer where it stocked the crossbow (no preset's since section
+  15); the bot's counter-pick: against Water the shaman now (Grass 2x in, Water 0.5x back)
+  over the frostweaver, and a frostweaver re-specs to it; against Grass the shade.
+
+**Measured** (`round_robin`, six seeds x 60 s, 8 v 8, both sides; the row's share of the
+kills). The first cut, as the director wrote it with Regen 60/s and 15 grass a pulse, won
+everything but the gun: 71% of the blade, 79% of the frostweaver, 65% of the ironclad, 63%
+of the shade, 41% of the musketeer, a mean of 70%. One lever at a time, each against the
+same seeds: cloth 66%, Regen 40 66%, STR 8 69%, the briar's and the entangle's damage
+halved 67%, the root a slow 69%, the root on three 67%, no entangle 66%, a staff for the
+hammer 57%, Regen 20 58%, **no briar 51%** (the blade 57%, the frostweaver 54%). The patch
+is the build, and eight shamans keep a whole team under one Regen for the whole fight:
+Regen is `refresh`, so eight patches heal like one, but one is always standing. Regen 30
+with the softer damage:
+
+| | blade | frostweaver | ironclad | mender | musketeer | shade | shaman |
+|---|---|---|---|---|---|---|---|
+| blade | - | 58% | 21% | 100% | 52% | 61% | 46% |
+| frostweaver | 42% | - | 90% | 79% | 64% | 58% | 30% |
+| ironclad | 79% | 10% | - | 100% | 70% | 82% | 52% |
+| mender | 0% | 21% | 0% | - | 0% | 9% | 1% |
+| musketeer | 48% | 36% | 30% | 100% | - | 65% | 72% |
+| shade | 39% | 42% | 18% | 91% | 35% | - | 42% |
+| shaman | 54% | 70% | 48% | 99% | 28% | 58% | - |
+
+The shaman is even with the blade and the ironclad, walls the frostweaver (70 : 30), and
+the gun cuts it (28 : 72); its mean is 59% with the mender's row, 52% without. Cloth moved
+the blade's share by three points (49%) and was not taken: the director said leather. The
+gate of section 11 is unchanged (ironclad : blade 37 : 11 (3.36), frostweaver : ironclad
+51 : 3, blade : frostweaver 22 : 16 (1.38), mirror 26 : 26); the shaman is in no leg of it.
+
+Open: the 8 v 8 mirror overstates an area heal (eight casters, one patch always up) as it
+understates a healer (the mender's row is the brain's, section 15); a mixed team is the
+measure of both. Fire still has no build.

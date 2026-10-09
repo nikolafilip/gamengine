@@ -605,16 +605,23 @@ mod tests {
             .as_deref(),
             Some("mender")
         );
-        // Against blades (Water): the frostweaver (its Air is 1x in, Water is 0.5x back)
-        // and the mender (Electric 2x in, 1x back) score the same; the first listed wins,
-        // and a frostweaver keeps its build.
+        // Against blades (Water): the shaman (Grass 2x in, Water 0.5x back; MATRIX.md 17),
+        // over the frostweaver (its Air is 1x in, Water is 0.5x back) and the mender
+        // (Electric 2x in, 1x back), and a frostweaver re-specs to it.
         assert_eq!(
             counter_pick(&pack, "ironclad", Aspects::one(Element::Water)).as_deref(),
-            Some("frostweaver")
+            Some("shaman")
         );
         assert_eq!(
-            counter_pick(&pack, "frostweaver", Aspects::one(Element::Water)),
-            None
+            counter_pick(&pack, "frostweaver", Aspects::one(Element::Water)).as_deref(),
+            Some("shaman")
+        );
+        // Against a Grass team: nothing in the roster is its predator but the shade's Air
+        // (Fire has no build); the shade scores 2x in, 0.5x back, and a frostweaver (its
+        // Water 0.5x in, Air 1x back) goes to it.
+        assert_eq!(
+            counter_pick(&pack, "frostweaver", Aspects::one(Element::Grass)).as_deref(),
+            Some("shade")
         );
         // Already the counter: nothing to change.
         assert_eq!(

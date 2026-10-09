@@ -749,3 +749,80 @@ exclude_actor = true
 [[ability.step]]
 at_ms = 200
 apply_status = { status = "fortify", duration_ms = 4000, magnitude = 0.3, max_stacks = 1, stacking = "refresh", target = "actor" }
+
+# ---------- the shaman (MATRIX.md 17) ----------
+
+# The slam: the hammer brought down on the ground, a kick in every direction. A physical
+# area at the feet (blunt, so friendly fire as VOCABULARY.md 8 has it): the secondary of a
+# build that holds a hammer and fights in a crowd.
+[[ability]]
+key = "slam"
+name = "Slam"
+slot = "secondary"
+cost = 4
+cooldown_ms = 4000
+move_scale = 0.4
+interrupt = "on_stagger"
+[[ability.step]]
+at_ms = 250
+[ability.step.area_effect]
+shape = { cylinder = { radius = 96, height = 64 } }
+origin = "self_feet"
+damage = { amount = 30, type = "blunt", knockback = 300, stagger = 40 }
+falloff = "none"
+max_targets = 6
+requires_los = true
+exclude_actor = true
+
+# The briar: a patch of thorns where the shaman aims, for 6 s. Everyone in it takes grass
+# every second (friendly fire, as every packet), and the shaman's own side in it has Regen
+# 30/s besides (`target = "allies"`, VOCABULARY.md 5.4): the thorns hurt everyone a little
+# and feed their own side more. Measured down from 60/s and 15 a pulse (MATRIX.md 17): eight
+# shamans keep a whole team under one Regen the whole fight, and the patch is the build.
+[[ability]]
+key = "briar"
+name = "Briar"
+slot = "active"
+cost = 10
+aspect = "grass"
+cooldown_ms = 14000
+focus = 35
+move_scale = 0.5
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 300
+[ability.step.area_effect]
+shape = { cylinder = { radius = 140, height = 96 } }
+origin = { aim = 500 }
+duration_ms = 6000
+interval_ms = 1000
+damage = { amount = 8, type = "grass", knockback = 0, stagger = 0 }
+effects = [ { status = "regen", duration_ms = 1500, magnitude = 30, max_stacks = 1, stacking = "refresh", target = "allies" } ]
+falloff = "none"
+max_targets = 8
+requires_los = false
+exclude_actor = false
+
+# Entangle: vines out of the ground where the shaman aims. One pulse: grass damage and
+# Root for 1.5 s on everyone caught (the shaman is not).
+[[ability]]
+key = "entangle"
+name = "Entangle"
+slot = "active"
+cost = 10
+aspect = "grass"
+cooldown_ms = 14000
+focus = 25
+move_scale = 0.3
+interrupt = "on_damage"
+[[ability.step]]
+at_ms = 300
+[ability.step.area_effect]
+shape = { cylinder = { radius = 112, height = 96 } }
+origin = { aim = 500 }
+damage = { amount = 15, type = "grass", knockback = 0, stagger = 10 }
+effects = [ { status = "root", duration_ms = 1500, magnitude = 0, max_stacks = 1, stacking = "refresh", target = "area" } ]
+falloff = "none"
+max_targets = 8
+requires_los = true
+exclude_actor = true

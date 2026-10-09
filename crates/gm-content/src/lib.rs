@@ -742,6 +742,7 @@ impl Ctx {
                 "actor" => StatusTarget::Actor,
                 "hit" => StatusTarget::Hit,
                 "area" => StatusTarget::Area,
+                "allies" => StatusTarget::Allies,
                 other => return self.err(format!("unknown status target {other:?}")),
             },
             dispellable: s.dispellable,
