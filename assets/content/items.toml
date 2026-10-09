@@ -159,27 +159,32 @@ note = "stamina; boss frame"
 [[material]]
 id = "catalyst/ember"
 edge = 30
-element = "flame"
+element = "fire"
 
 [[material]]
 id = "catalyst/rime"
 edge = 30
-element = "frost"
+element = "water"
 
 [[material]]
 id = "catalyst/thunderstone"
 edge = 30
-element = "storm"
+element = "electric"
 
 [[material]]
 id = "catalyst/umbra"
 edge = 30
-element = "shadow"
+element = "grass"
 
 [[material]]
 id = "catalyst/basalt"
 edge = 30
-element = "stone"
+element = "ground"
+
+[[material]]
+id = "catalyst/zephyr"
+edge = 30
+element = "air"
 
 # Shards: a passive trait; boss drops only.
 [[material]]

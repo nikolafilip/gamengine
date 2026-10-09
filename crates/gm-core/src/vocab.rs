@@ -21,23 +21,25 @@ pub enum DamageType {
     Slash = 0,
     Pierce = 1,
     Blunt = 2,
-    Flame = 3,
-    Shadow = 4,
-    Storm = 5,
-    Frost = 6,
-    Stone = 7,
+    Fire = 3,
+    Water = 4,
+    Grass = 5,
+    Electric = 6,
+    Ground = 7,
+    Air = 8,
 }
 
 impl DamageType {
-    pub const ALL: [DamageType; 8] = [
+    pub const ALL: [DamageType; 9] = [
         DamageType::Slash,
         DamageType::Pierce,
         DamageType::Blunt,
-        DamageType::Flame,
-        DamageType::Shadow,
-        DamageType::Storm,
-        DamageType::Frost,
-        DamageType::Stone,
+        DamageType::Fire,
+        DamageType::Water,
+        DamageType::Grass,
+        DamageType::Electric,
+        DamageType::Ground,
+        DamageType::Air,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -45,11 +47,12 @@ impl DamageType {
             DamageType::Slash => "slash",
             DamageType::Pierce => "pierce",
             DamageType::Blunt => "blunt",
-            DamageType::Flame => "flame",
-            DamageType::Shadow => "shadow",
-            DamageType::Storm => "storm",
-            DamageType::Frost => "frost",
-            DamageType::Stone => "stone",
+            DamageType::Fire => "fire",
+            DamageType::Water => "water",
+            DamageType::Grass => "grass",
+            DamageType::Electric => "electric",
+            DamageType::Ground => "ground",
+            DamageType::Air => "air",
         }
     }
 }

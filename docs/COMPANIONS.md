@@ -453,21 +453,21 @@ with four pillars and a dais (2,677 nav nodes; the walk from the entry to the Wa
 3,928 u; the entry hall does not see the Warden's hall). Run as a wild zone at 64 Hz with
 `--squads --recruits ironclad,mender,frostweaver --arrive-at-entry`.
 
-- **The gate** (encounter `gate`): two `sentinel`s (striker, mail, Flame; sword, crossbow,
+- **The gate** (encounter `gate`): two `sentinel`s (striker, mail, Water; sword, crossbow,
   parry; 420 health). No loot. They teach that orders matter: with the tank ordered onto one
   sentinel and the rest onto the other, the reference squad takes the gate at the first
   attempt in 23 of 24 offline runs (mean 14 s); with everybody on one target, in 15 of 24.
-  (Frost is weak into their Flame: the frostweaver that melts the Warden scratches them.)
+  (Water is weak into their Water: the frostweaver that melts the Warden scratches them.)
   They respawn after 600 s, so a party's first attempts at the Warden are not taken in the
   back by them.
-- **The Warden** (encounter `warden`, boss): colossus, plate, Stone; 7,500 health, stagger
-  threshold 400. Slash is halved by its plate and Flame by its stone; Blunt, Frost and Shadow
-  are what a party should bring, which is the matrix lesson of the tutorial.
+- **The Warden** (encounter `warden`, boss): colossus, plate, Ground; 7,500 health, stagger
+  threshold 400. Slash is halved by its plate and Electric by its ground; Blunt, Water and
+  Grass are what a party should bring, which is the matrix lesson of the tutorial.
   - `maul` (creature): a 120° frontal arc, 96 u reach, 550 ms windup, 55 blunt through magic
     shields, heavy knockback, one every 2 s; cleaves everything in front. Stand behind it,
     or block it.
   - `quake` (creature): after a 300 ms cast, a circle of 150 u appears under whatever it aims
-    at within 700 u and breaks 1,300 ms later for 70 stone; the circle is an area entity, so
+    at within 700 u and breaks 1,300 ms later for 70 ground; the circle is an area entity, so
     everyone sees it. Walk out.
   - `stone_throw` and `stomp` from the player content, for whoever stands far or crowds it.
   - Loot: 3 components; `standard` core/iron, frame/ash, catalyst/basalt; `top`
@@ -480,8 +480,8 @@ one for the leader (MATRIX.md 10 bands):
   hits, friend or foe. No homing: a healer aims.
 - `sanctuary` (active, 10): a circle of 140 u placed where the caster aims (within 500 u)
   for 6 s: Regen 12/s on every body in it.
-- `mender` preset: caster, cloth, Storm; staff, mend, brace; sanctuary, haste, thunderclap.
-- `captain` preset: striker, mail, Flame; sword, crossbow, parry; war_standard, dash.
+- `mender` preset: caster, cloth, Electric; staff, mend, brace; sanctuary, haste, thunderclap.
+- `captain` preset: striker, mail, Water; sword, crossbow, parry; war_standard, dash.
 
 Two vocabulary rules make them possible (VOCABULARY.md 4, MATRIX.md 7):
 

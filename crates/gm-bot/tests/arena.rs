@@ -140,7 +140,7 @@ fn ironclad_beats_blade_and_frostweaver_beats_ironclad() {
     let mut b_total = [0u32; 3];
     let mut c_total = [0u32; 3];
     for &seed in &seeds {
-        // The cycle closes: the blade's Flame is 4x into the frostweaver's Frost + Shadow.
+        // The cycle closes: the frostweaver's Water is halved by the blade's Water (MATRIX.md 5).
         let c = play(&bsp, "blade", "frostweaver", seed, secs);
         println!(
             "seed {seed}: blade {} : {} frostweaver (deaths {:?}) ratio {:.2}",

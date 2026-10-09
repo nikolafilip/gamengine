@@ -565,29 +565,36 @@ mod tests {
     #[test]
     fn counter_pick_follows_the_matrix() {
         let pack = test_content::pack(TickRate::COMBAT);
-        // Against ironclads (Stone): frostweaver (Frost beats Stone; Stone into Frost+Shadow is 0.25x).
+        // Against ironclads (Ground): frostweaver (Water beats Ground; Ground into
+        // Water + Air is 0.5x).
         assert_eq!(
-            counter_pick(&pack, "blade", Aspects::one(Element::Stone)).as_deref(),
+            counter_pick(&pack, "blade", Aspects::one(Element::Ground)).as_deref(),
             Some("frostweaver")
         );
-        // Against frostweavers (Frost + Shadow): blade (Flame is 4x into both).
+        // Against frostweavers (Water + Air): mender (Electric is 4x into both).
         assert_eq!(
             counter_pick(
                 &pack,
                 "ironclad",
-                Aspects::two(Element::Frost, Element::Shadow)
+                Aspects::two(Element::Water, Element::Air)
             )
             .as_deref(),
-            Some("blade")
+            Some("mender")
         );
-        // Against blades (Flame): ironclad (Stone beats Flame, Flame into Stone is 0.5).
+        // Against blades (Water): the frostweaver (its Air is 1x in, Water is 0.5x back)
+        // and the mender (Electric 2x in, 1x back) score the same; the first listed wins,
+        // and a frostweaver keeps its build.
         assert_eq!(
-            counter_pick(&pack, "frostweaver", Aspects::one(Element::Flame)).as_deref(),
-            Some("ironclad")
+            counter_pick(&pack, "ironclad", Aspects::one(Element::Water)).as_deref(),
+            Some("frostweaver")
+        );
+        assert_eq!(
+            counter_pick(&pack, "frostweaver", Aspects::one(Element::Water)),
+            None
         );
         // Already the counter: nothing to change.
         assert_eq!(
-            counter_pick(&pack, "frostweaver", Aspects::one(Element::Stone)),
+            counter_pick(&pack, "frostweaver", Aspects::one(Element::Ground)),
             None
         );
         assert_eq!(counter_pick(&pack, "blade", Aspects::NONE), None);

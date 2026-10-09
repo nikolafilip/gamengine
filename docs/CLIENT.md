@@ -219,7 +219,7 @@ The HUD as before, and:
   budget in gold over the actives; the actives in the build lit like a picked row
   (`RowMark::Picked`), not `[x]`. Under both, a line or two that read the ability under
   the cursor from its script (`character::words_of`: points, stamina or focus, cooldown,
-  the aspect it needs, and what it does: `140 u around you: 40 storm, staggers, shock for
+  the aspect it needs, and what it does: `140 u around you: 40 electric, staggers, shock for
   0.1 s`); the bottom row holds the buttons and, beside them, what is wrong with the draft,
   else the zone's word, else `to wear it, stand by the trainer at the town board`. The
   same editor is the game master's Build tab (GM.md 4), with Close in its tab row.

@@ -214,7 +214,7 @@ Entity record:
 | status | 16 | STATUS. A bit per `Status` index: the cosmetic summary for other entities (auras) |
 
 Spawn info: player → `frame` 2 bits (0 colossus, 1 striker, 2 caster, 3 infiltrator), `team`
-2 bits (0 none), `aspects` 5 bits (a bit per element, MATRIX.md 5), `armour` 2 bits (cloth,
+2 bits (0 none), `aspects` 6 bits (a bit per element, MATRIX.md 5; v16, none is neutral), `armour` 2 bits (cloth,
 leather, mail, plate): everything that makes a build readable at a glance. Projectile → `owner`
 uvar, `def` uvar (ability index in the owner's kit), `input_tick` uvar (the owner's client tick
 that fired it, for matching the owner's predicted copy). Area → `owner` uvar, `def` uvar (0 when
@@ -857,3 +857,12 @@ in the simulation's snapshots:
   turning to its `yaw` only for an action, and standing otherwise as it was left
   (`app::facing`). Nothing else reads the bit; the zone's aim, hitboxes and ledger are as
   before.
+
+## 28. Changes in v16 (six elements, 2026-10-09)
+
+`PROTOCOL_VERSION` 16 (MATRIX.md 5, 14). One bit in the snapshot's player spawn info:
+
+- `aspects` is **six** bits, not five: a bit per element in MATRIX.md 5's order (Fire,
+  Water, Grass, Electric, Ground, Air). All six clear is a neutral body. Nothing else on the
+  wire changes; the elements' indices moved, so a v15 client would read the wrong colours
+  and the wrong bit widths, and the version byte keeps it out.

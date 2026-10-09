@@ -1584,18 +1584,9 @@ pub(crate) fn swing_of(ability: &gm_core::vocab::Ability, dt: f32) -> Option<cra
 /// The colour of what deals a damage: its element's (the aspects' colours), or steel's
 /// for a blow.
 pub(crate) fn damage_ink(damage: &gm_core::vocab::DamagePacket) -> [f32; 4] {
-    use gm_core::vocab::DamageType;
-    let element = match damage.dtype {
-        DamageType::Flame => Some(0),
-        DamageType::Shadow => Some(1),
-        DamageType::Storm => Some(2),
-        DamageType::Frost => Some(3),
-        DamageType::Stone => Some(4),
-        _ => None,
-    };
-    match element {
-        Some(i) => {
-            let c = crate::avatars::ASPECT_COLOURS[i];
+    match damage.dtype.element() {
+        Some(e) => {
+            let c = crate::avatars::ASPECT_COLOURS[e as usize];
             [c[0], c[1], c[2], 1.0]
         }
         None => [0.92, 0.94, 1.0, 1.0],

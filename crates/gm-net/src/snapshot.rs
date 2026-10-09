@@ -483,7 +483,7 @@ fn write_entity(w: &mut BitWriter, e: &EntityState, base: Option<&EntityState>) 
             } => {
                 w.write_bits(frame as u64, 2);
                 w.write_bits(team as u64, 2);
-                w.write_bits(aspects as u64 & 0x1f, 5);
+                w.write_bits(aspects as u64 & 0x3f, 6);
                 w.write_bits(armour as u64, 2);
             }
             SpawnInfo::Projectile {
@@ -548,7 +548,7 @@ fn read_entity(
             0 => SpawnInfo::Player {
                 frame: r.read_bits(2)? as u8,
                 team: r.read_bits(2)? as u8,
-                aspects: r.read_bits(5)? as u8,
+                aspects: r.read_bits(6)? as u8,
                 armour: r.read_bits(2)? as u8,
             },
             1 => SpawnInfo::Projectile {

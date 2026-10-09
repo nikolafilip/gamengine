@@ -813,7 +813,7 @@ pub struct ItemSummary {
     /// Where it is worn: `PLACE_WEAPON`, `PLACE_ARMOUR`, or `PLACE_NONE`.
     pub place: u8,
     /// Its edge there, per mille per damage type in `DamageType`'s order (ITEMS.md 3.2).
-    pub edge: [u16; 8],
+    pub edge: [u16; 9],
     /// Its holder wears it now.
     pub worn: bool,
     /// What it is, in words: `a weapon, 220 of 250`; `a core, for crafting`.
