@@ -353,7 +353,9 @@ pub enum FromZone {
         /// (LOOK.md 6.2). The client finds the files; the zone never reads one.
         props: Vec<String>,
     },
-    /// The requested build was accepted (`Ok`) or refused with the reason.
+    /// The requested build was accepted and, under a hub, saved to it (`Ok`: worn now in
+    /// the world, at the next respawn in a team zone; MATRIX.md 9.1), or refused with the
+    /// reason; `worn here, but not saved: ...` when the zone took it and the hub did not.
     RespecResult(Result<(), String>),
     /// The pending build took effect (at the respawn); the client's prediction switches now.
     BuildApplied(Build),

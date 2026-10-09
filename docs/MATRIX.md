@@ -285,8 +285,21 @@ their own proportion, and a kit the pack refuses becomes the preset's with the s
 - in a **team zone** (the arena, the practice ground) it is worn at the next respawn, as in
   v1, so a match can be re-specced mid-way (section 11).
 
-The client's page (`K`, CLIENT.md 4.6) edits the points and the kit anywhere and offers
+The client's page (`K`, CLIENT.md 4.5) edits the points and the kit anywhere and offers
 "Wear it" by the trainer; a game master wears any build at once, anywhere (GM.md 2).
+
+**The build chosen is the character's** (2026-10-08). Under a hub the zone, having taken
+a respec, saves the character at once (`Save`, HUB.md 3.2) and answers `RespecResult`
+only when the hub has: `Ok` means worn (now in the world, at the next respawn in a team
+zone) *and* the hub's, so it is what the character wears when it next enters anywhere,
+after a logout or a travel. In a team zone the build saved is the one chosen, whether or
+not the respawn that wears it came before the character left. A save the hub refuses is
+answered `Err("worn here, but not saved: ...")`: the zone wore it, the next claim would
+not have. Before this a build worn at the trainer reached the hub only with the next
+periodic save (up to 30 s later) or the leaving one, and one chosen in a team zone was
+lost when the character left before its respawn; the client never called the hub's
+`SetBuild`, which is for a character that is offline (HUB.md 2), and never will from a
+zone: while a character plays, its zone is the only writer of it.
 
 Three **training dummies** (`dummy`: a creature marked `still`, 5,000 health, back after
 5 s) stand in a triangle in the gated south street behind the trainer (2026-10-06; the one

@@ -343,6 +343,9 @@ pub struct UiState {
     drag_ended: Option<Drag>,
     /// What is hovered and since when (seconds): the tooltip's clock.
     hover: Option<(String, f32)>,
+    /// A button that is off was pressed (a tap on a phone), and when: it says why it is
+    /// off for a moment after (`button_or`).
+    explained: Option<(String, f32)>,
     /// Bodies the screen wants drawn into it this frame (LOOK.md 5), for the app.
     pub paperdolls: Vec<Paperdoll>,
     /// The paperdoll's turn, by a drag across it, in turns.
@@ -987,8 +990,42 @@ impl<'a, C: Canvas> Ui<'a, C> {
 
     /// A button that can be off: drawn faint, takes no click and no focus.
     pub fn button_if(&mut self, r: Rect, text: &str, enabled: bool) -> bool {
+        self.button_or(r, text, if enabled { None } else { Some("") })
+    }
+
+    /// A button that is off for a reason (`Some(why)`), else on: off, it says why beside
+    /// the pointer while the pointer rests on it (after the tooltip's 150 ms) and for two
+    /// seconds after a press on it (a tap on a phone), so that a click on a grey button
+    /// never looks like a click that did nothing. An empty reason says nothing.
+    pub fn button_or(&mut self, r: Rect, text: &str, off: Option<&str>) -> bool {
         let s = self.scale;
         let id = format!("button:{text}");
+        let enabled = off.is_none();
+        if let Some(why) = off.filter(|why| !why.is_empty()) {
+            let hot = r.contains(self.input.cursor);
+            let time = self.input.time;
+            if hot && self.input.pressed {
+                self.state.explained = Some((id.clone(), time));
+            }
+            let tapped =
+                matches!(&self.state.explained, Some((k, at)) if *k == id && time - at < 2.0);
+            let mut rested = false;
+            if hot {
+                let since = match &self.state.hover {
+                    Some((k, t)) if *k == id => *t,
+                    _ => time,
+                };
+                self.hovered = Some(id.clone());
+                self.state.hover = Some((id.clone(), since));
+                rested = time - since >= 0.15;
+            }
+            if (rested || tapped) && self.tooltip.is_none() {
+                self.tooltip = Some((
+                    Rect::new(self.input.cursor.0, self.input.cursor.1, 0.0, 0.0),
+                    vec![(why.to_string(), TEXT)],
+                ));
+            }
+        }
         let (mut pressed, mut fill, mut ink) = (false, BUTTON, TEXT);
         let mut piece = "button_off";
         let mut focused = false;
@@ -1036,6 +1073,9 @@ impl<'a, C: Canvas> Ui<'a, C> {
         );
         if enabled {
             self.note(SeenKind::Button, text, r);
+        } else if let Some(why) = off.filter(|why| !why.is_empty()) {
+            // Off, and the reason it would give: a label, so that no script finds it.
+            self.note(SeenKind::Label, &format!("{text} (off: {why})"), r);
         }
         pressed
     }

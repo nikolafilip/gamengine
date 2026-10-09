@@ -169,6 +169,26 @@ impl HubLink {
         }
     }
 
+    /// A save whose failure is told in words, for the player to read: the one that follows
+    /// an accepted respec (MATRIX.md 9.1). `Ok`: as `save`'s.
+    pub async fn save_told(
+        &self,
+        character: CharacterId,
+        state: CharacterState,
+    ) -> Result<u64, String> {
+        let req = HubRequest::Save {
+            character,
+            state,
+            leaving: false,
+        };
+        match self.client.request(&req).await {
+            Ok(HubResponse::Saved { party }) => Ok(party),
+            Ok(_) => Ok(0),
+            Err(HubClientError::Refused(e)) => Err(e.to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     /// The zone has no body for a character it claimed: the hub takes it back, offline
     /// as it came (HUB.md 3.8).
     pub async fn release(&self, character: CharacterId) {

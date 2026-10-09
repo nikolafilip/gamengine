@@ -507,8 +507,14 @@ fn character_state(
     slot: &HubSlot,
 ) -> Option<CharacterState> {
     let p = zone.player(id)?;
+    // The build the character chose (MATRIX.md 9.1): in a team zone one it asked for is
+    // worn at the next respawn, and is what it wears when it next enters anywhere.
+    let build = p
+        .pending_build
+        .clone()
+        .unwrap_or_else(|| p.sheet.build.clone());
     Some(CharacterState {
-        build: p.sheet.build.clone(),
+        build,
         zone: Some(link.zone.clone()),
         position: p.mover.mv.origin.into(),
         yaw: p.mover.yaw,
@@ -1155,8 +1161,48 @@ pub async fn run_with_web(
                         }
                         zone.respec_now(id, b).map_err(|e| e.to_string())
                     });
-                    if let Some(s) = sessions.get(&id) {
+                    // Under a hub the build it chose is saved at once, and the answer is
+                    // the save's: a build worn here that the hub does not hold would be
+                    // the old one again at the next claim. (The periodic save carries it
+                    // too, as it carries a pending one.)
+                    let saving = result.is_ok()
+                        && cfg
+                            .hub
+                            .as_ref()
+                            .zip(hub_slots.get_mut(&id))
+                            .and_then(|(link, slot)| {
+                                let state = character_state(&zone, link, id, slot)?;
+                                slot.last_save = Instant::now();
+                                let (link, tx, character) =
+                                    (link.clone(), event_tx.clone(), slot.character);
+                                tokio::spawn(async move {
+                                    let saved = link.save_told(character, state).await;
+                                    let result = match saved {
+                                        Ok(seq) => {
+                                            let _ = tx
+                                                .send(ClientEvent::PartySeq { character, seq })
+                                                .await;
+                                            Ok(())
+                                        }
+                                        Err(why) => Err(why),
+                                    };
+                                    let _ = tx.send(ClientEvent::RespecSaved { id, result }).await;
+                                });
+                                Some(())
+                            })
+                            .is_some();
+                    if !saving && let Some(s) = sessions.get(&id) {
                         s.send_control(FromZone::RespecResult(result));
+                    }
+                }
+                ClientEvent::RespecSaved { id, result } => {
+                    if let Err(why) = &result {
+                        warn!(entity = id, "a respec was worn but not saved: {why}");
+                    }
+                    if let Some(s) = sessions.get(&id) {
+                        s.send_control(FromZone::RespecResult(
+                            result.map_err(|why| format!("worn here, but not saved: {why}")),
+                        ));
                     }
                 }
                 ClientEvent::Gm { id, op } => {
